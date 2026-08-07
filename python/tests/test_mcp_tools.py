@@ -15,6 +15,11 @@ class FakeConn:
         self.sent.append(payload)
 
 
+@pytest.fixture(autouse=True)
+def _opaque_off(monkeypatch):
+    monkeypatch.delenv("AGENT_PRESENCE_OPAQUE", raising=False)
+
+
 @pytest.fixture
 def setup():
     relay = Relay(VirtualClock(1000.0))
@@ -79,6 +84,39 @@ def test_proceed_is_always_granted_and_flagged_as_an_override(setup):
     result = tools.respond("src/db.py", "query", "PROCEED", reason="unrelated")
     assert result["granted"]
     assert result["override"]
+
+
+def test_the_invented_move_is_named_in_the_error(setup):
+    _, tools = setup
+    with pytest.raises(ValueError, match="ARGUE"):
+        tools.respond("src/db.py", "query", "ARGUE")
+
+
+def test_opaque_mode_keys_tool_claims_the_way_hook_events_are_keyed(setup, monkeypatch):
+    monkeypatch.setenv("AGENT_PRESENCE_OPAQUE", "1")
+    from agent_presence.redact import opaque_region
+    from agent_presence.types import Region
+
+    relay, tools = setup
+    scope = opaque_region(Region(path="src/db.py", symbol="query", lines=None))
+    relay.registry.acquire("r1", "sara", "a1", scope, "rewriting query")
+    # Same file, so the tool channel must land on the same lease the hook
+    # channel took, hashed or not.
+    result = tools.claim_work("src/db.py", "query", "add index")
+    assert not result["granted"]
+    assert result["held_by"] == "a1"
+
+
+def test_opaque_mode_releases_the_hashed_scope(setup, monkeypatch):
+    monkeypatch.setenv("AGENT_PRESENCE_OPAQUE", "1")
+    from agent_presence.redact import opaque_region
+    from agent_presence.types import Region
+
+    relay, tools = setup
+    tools.claim_work("src/db.py", "query", "add index")
+    tools.release("src/db.py", "query")
+    scope = opaque_region(Region(path="src/db.py", symbol="query", lines=None))
+    assert relay.registry.holder_of("r1", scope) is None
 
 
 def test_exactly_four_tools_are_exposed():

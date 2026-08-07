@@ -1,8 +1,15 @@
 from __future__ import annotations
 
 from .negotiation import Negotiator
+from .redact import opaque_region_if_enabled
 from .relay import Relay
 from .types import Region
+
+
+def _scope(path: str, symbol: str | None) -> Region:
+    """Regions from the tool channel have to key the same way regions from the
+    hook channel do, or opaque mode would split the lease table in two."""
+    return opaque_region_if_enabled(Region(path=path, symbol=symbol, lines=None))
 
 
 class Tools:
@@ -31,7 +38,7 @@ class Tools:
         ]
 
     def claim_work(self, path: str, symbol: str | None, intent: str) -> dict:
-        region = Region(path=path, symbol=symbol, lines=None)
+        region = _scope(path, symbol)
         result = self._relay.registry.acquire(
             self._room, self._human, self._agent, region, intent
         )
@@ -46,21 +53,29 @@ class Tools:
         }
 
     def release(self, path: str, symbol: str | None) -> dict:
-        self._relay.registry.release(
-            self._agent, Region(path=path, symbol=symbol, lines=None)
-        )
+        self._relay.registry.release(self._room, self._agent, _scope(path, symbol))
         return {"released": True}
 
     def respond(
         self, path: str, symbol: str | None, move: str, reason: str = ""
     ) -> dict:
-        region = Region(path=path, symbol=symbol, lines=None)
+        region = _scope(path, symbol)
         outcome = self._negotiator.apply(self._room, self._agent, region, move, reason)
-        return {
+        error = getattr(outcome, "error", None)
+        if outcome.action == "invalid_move":
+            # The negotiator reports this instead of raising so its other
+            # callers can decide. At the tool boundary an invented move is a
+            # caller bug, and a model learns faster from an error than from a
+            # {"granted": false} it can misread as a refusal.
+            raise ValueError(error or f"unknown negotiation move: {move!r}")
+        result = {
             "granted": outcome.granted,
             "action": outcome.action,
             "override": outcome.logged_override,
         }
+        if error:
+            result["error"] = error
+        return result
 
 
 def tool_descriptors() -> list[dict]:

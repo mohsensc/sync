@@ -6,6 +6,7 @@ import logging
 
 import websockets
 
+from .redact import opaque_outbound
 from .relay import Relay
 
 log = logging.getLogger("agent_presence.serve")
@@ -28,7 +29,7 @@ class WsConn:
 
     async def _safe_send(self, payload: dict) -> None:
         try:
-            await self._ws.send(json.dumps(payload))
+            await self._ws.send(json.dumps(opaque_outbound(payload)))
         except Exception:
             log.debug("dropped send to closed connection", exc_info=True)
 
@@ -70,7 +71,7 @@ async def _session(ws, relay: Relay) -> None:
                 continue
 
             if reply is not None:
-                await ws.send(json.dumps(reply))
+                await ws.send(json.dumps(opaque_outbound(reply)))
     except websockets.exceptions.ConnectionClosed:
         pass
     finally:
