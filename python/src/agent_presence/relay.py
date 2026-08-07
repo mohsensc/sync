@@ -51,23 +51,66 @@ class Relay:
         self._members: dict[str, list[Conn]] = {}
         self._activity: dict[str, list[tuple[float, Activity]]] = {}
         self._last_ts: dict[str, float] = {}
+        # Identity as first declared, per connection. Keyed on the object, so
+        # it dies with the connection.
+        self._identity: dict[Conn, tuple[str, str]] = {}
 
     # -- membership ---------------------------------------------------------
 
-    def join(self, room: str, conn: Conn) -> None:
+    def join(self, room: str, conn: Conn) -> bool:
+        """Put a connection in a room. False means the join was refused.
+
+        Identity is latched here and never changes for the life of the
+        connection. `handle` already refuses to read identity off a message
+        body — a second join frame is that same client-supplied field wearing a
+        different hat, and honouring it would let one socket re-declare itself
+        as a teammate and then claim, renew or release that teammate's leases.
+        It also strands leases: `leave` releases by the connection's *current*
+        agent, so anything taken under the old name has nobody left to drop it.
+
+        A connection with no agent id is refused outright. Two of those would
+        share the identity "", which means either could release the other's
+        leases and either one hanging up would take both sets down.
+        """
+        if not conn.agent:
+            log.debug("join with no agent id; refused")
+            return False
+
+        declared = (conn.agent, conn.human)
+        latched = self._identity.get(conn)
+        if latched is None:
+            self._identity[conn] = declared
+        elif declared != latched:
+            # Put the real identity back before returning: the caller has
+            # already written the claimed one onto the connection.
+            conn.agent, conn.human = latched
+            log.warning(
+                "refused identity change on a live connection: %s -> %s",
+                latched[0], declared[0],
+            )
+            return False
+
+        # One connection, one room membership. Without the sweep a connection
+        # that moves rooms keeps receiving the old room's traffic forever,
+        # because `leave` only ever cleans up conn.room.
+        for members in self._members.values():
+            while conn in members:
+                members.remove(conn)
+
         conn.room = room
         self._members.setdefault(room, []).append(conn)
+        return True
 
     def leave(self, conn: Conn) -> None:
-        room = conn.room
-        if room is None:
-            return
-        members = self._members.get(room, [])
-        if conn in members:
-            members.remove(conn)
+        for members in self._members.values():
+            while conn in members:
+                members.remove(conn)
         # A dropped connection must not hold protection. Leases would expire
-        # anyway; releasing now just makes recovery immediate.
-        self.registry.release_all(conn.agent)
+        # anyway; releasing now just makes recovery immediate. Identity was
+        # latched at join, so this is guaranteed to name whoever took them.
+        identity = self._identity.pop(conn, None)
+        if identity is not None:
+            self.registry.release_all(identity[0])
         conn.room = None
 
     def broadcast(

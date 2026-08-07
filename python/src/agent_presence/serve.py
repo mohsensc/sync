@@ -70,7 +70,12 @@ async def _session(ws, relay: Relay) -> None:
                     human = msg.get("human")
                     conn.agent = agent if isinstance(agent, str) else ""
                     conn.human = human if isinstance(human, str) else ""
-                    relay.join(room, conn)
+                    # The relay owns identity. It latches the first declaration
+                    # and refuses a later one, and it puts the real identity
+                    # back on the connection when it does, so a rename attempt
+                    # leaves nothing behind on this side either.
+                    if not relay.join(room, conn):
+                        log.debug("join refused for room %s; frame dropped", room)
                     continue
 
                 reply = relay.handle(conn, msg)
