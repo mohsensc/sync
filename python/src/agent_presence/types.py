@@ -42,12 +42,32 @@ class Claim:
     scope: Region
     intent: str
     state: LeaseState
-    # Relay-assigned. Wound-wait ordering derives from this.
+    # Relay-assigned. Wait-die ordering derives from this.
     acquired_at: float
     expires_at: float
 
 
 def same_region(a: Region, b: Region) -> bool:
-    """Path and symbol determine identity. Line ranges do not narrow it —
-    the symbol is the unit of contention."""
-    return a.path == b.path and a.symbol == b.symbol
+    """True when two regions contend for the same code.
+
+    The rules, in order:
+
+    1. Different paths never contend.
+    2. ``symbol=None`` means *the whole file*, so it contends with every
+       symbol in that path, including another whole-file region. A claim on
+       the file has to block a claim on a function inside it, otherwise
+       "I am rewriting this file" would silently coexist with "I am editing
+       this method".
+    3. Two symbol-level regions contend only when the symbols are equal.
+
+    Line ranges never narrow this. The symbol is the unit of contention.
+
+    Note this is a conflict predicate, not an equivalence relation: whole-file
+    contends with ``sign_in`` and with ``sign_out``, which do not contend with
+    each other. That asymmetry is intended; do not "fix" it into equality.
+    """
+    if a.path != b.path:
+        return False
+    if a.symbol is None or b.symbol is None:
+        return True
+    return a.symbol == b.symbol

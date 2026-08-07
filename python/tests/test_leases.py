@@ -37,7 +37,7 @@ def test_heartbeat_extends_the_lease(reg):
     clock, registry = reg
     registry.acquire("r1", "sara", "a1", R, "refactor")
     clock.advance(LEASE_TTL_S - 1)
-    assert registry.heartbeat("a1", R)
+    assert registry.heartbeat("r1", "a1", R)
     clock.advance(LEASE_TTL_S - 1)
     assert registry.holder_of("r1", R).agent == "a1"
 
@@ -55,3 +55,92 @@ def test_release_all_drops_every_lease_for_one_agent(reg):
     registry.acquire("r1", "sara", "a1", other, "y")
     registry.release_all("a1")
     assert registry.active_claims("r1") == []
+
+
+# -- room scoping ------------------------------------------------------------
+
+
+def test_release_cannot_reach_across_rooms(reg):
+    _, registry = reg
+    registry.acquire("r1", "sara", "a1", R, "refactor")
+    registry.release("r2", "a1", R)
+    assert registry.holder_of("r1", R) is not None
+
+
+def test_heartbeat_cannot_reach_across_rooms(reg):
+    _, registry = reg
+    registry.acquire("r1", "sara", "a1", R, "refactor")
+    assert not registry.heartbeat("r2", "a1", R)
+
+
+def test_release_still_works_in_the_right_room(reg):
+    _, registry = reg
+    registry.acquire("r1", "sara", "a1", R, "refactor")
+    registry.release("r1", "a1", R)
+    assert registry.holder_of("r1", R) is None
+
+
+# -- wait-die on refusal -----------------------------------------------------
+
+
+def test_a_refused_claim_carries_a_wait_die_decision(reg):
+    _, registry = reg
+    registry.acquire("r1", "sara", "a1", R, "refactor")
+    result = registry.acquire("r1", "dev", "a2", R, "rename")
+    assert not result.ok
+    assert result.decision in ("wait", "abort")
+
+
+def test_a_brand_new_requester_is_younger_and_therefore_dies(reg):
+    clock, registry = reg
+    registry.acquire("r1", "sara", "a1", R, "refactor")
+    clock.advance(5)
+    assert registry.acquire("r1", "dev", "a2", R, "rename").decision == "abort"
+
+
+def test_a_requester_holding_an_older_lease_waits_instead(reg):
+    clock, registry = reg
+    other = Region(path="src/db.py", symbol="query", lines=None)
+    registry.acquire("r1", "dev", "a2", other, "old work")   # a2 is old
+    clock.advance(5)
+    registry.acquire("r1", "sara", "a1", R, "refactor")      # a1 is young
+    assert registry.acquire("r1", "dev", "a2", R, "rename").decision == "wait"
+
+
+def test_age_is_the_oldest_live_claim_not_the_newest(reg):
+    clock, registry = reg
+    other = Region(path="src/db.py", symbol="query", lines=None)
+    registry.acquire("r1", "sara", "a1", R, "first")
+    clock.advance(10)
+    registry.acquire("r1", "sara", "a1", other, "second")
+    assert registry.age_of("a1") == 0.0
+
+
+def test_age_of_an_agent_holding_nothing_is_now(reg):
+    clock, registry = reg
+    clock.advance(7)
+    assert registry.age_of("nobody") == 7.0
+
+
+def test_a_granted_claim_carries_no_decision(reg):
+    _, registry = reg
+    assert registry.acquire("r1", "sara", "a1", R, "refactor").decision is None
+
+
+# -- file-level scope --------------------------------------------------------
+
+
+def test_a_whole_file_claim_blocks_a_symbol_claim_in_that_file(reg):
+    _, registry = reg
+    whole = Region(path="src/auth.py", symbol=None, lines=None)
+    registry.acquire("r1", "sara", "a1", whole, "rewriting the file")
+    result = registry.acquire("r1", "dev", "a2", R, "rename")
+    assert not result.ok
+    assert result.held_by.agent == "a1"
+
+
+def test_a_symbol_claim_blocks_a_whole_file_claim(reg):
+    _, registry = reg
+    whole = Region(path="src/auth.py", symbol=None, lines=None)
+    registry.acquire("r1", "sara", "a1", R, "refactor")
+    assert not registry.acquire("r1", "dev", "a2", whole, "rewrite").ok

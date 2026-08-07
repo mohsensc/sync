@@ -155,7 +155,7 @@ Rungs 0–2 never block anything. Rung 2 carries most of the practical value at 
 
 One round trip, hard timeout, default to `DEFER` for the later claimant. Free-form negotiation between two agents is untestable and they will agree on wrong things at length; four enumerable moves are testable and their failure modes are finite.
 
-**Deadlock** is resolved by **wound-wait** on relay-assigned lease timestamps: the older claim always wins, the younger aborts and retries with backoff. Provably deadlock-free without cycle detection, and it has the right social property — whoever started first is not punished. Combined with 90s expiry, no team state is permanently stuck.
+**Deadlock** is resolved by **wait-die** on relay-assigned lease timestamps: an older requester waits, a younger one aborts, drops its leases and retries with backoff. Provably deadlock-free without cycle detection, and it never takes a lease away from an agent that is mid-edit — wound-wait would, and preemption there means destroying work in progress. Combined with 90s expiry, no team state is permanently stuck.
 
 **Rung 4** requires declared intent plus embedding similarity at the relay. Build the hook now, keep semantic matching behind a flag until there is real traffic to tune against. A noisy rung 4 would poison trust in rungs 0–3.
 
@@ -249,7 +249,7 @@ Almost none of this requires real agents.
 
 - **Deterministic simulation** is the backbone: virtual clock, N simulated agents, seeded random schedules. Forty agents colliding runs in milliseconds and a failing seed reproduces exactly.
 - **Property tests** over random claim/release schedules asserting the two invariants that matter: no deadlock is reachable, and every lease eventually expires.
-- **Table-driven unit tests** for pure functions: room-key normalization (ssh/https/`.git`/case matrix), region overlap, rung classification, wound-wait ordering.
+- **Table-driven unit tests** for pure functions: room-key normalization (ssh/https/`.git`/case matrix), region overlap, rung classification, wait-die ordering.
 - **Chaos tests**: kill the daemon mid-lease, partition the relay, skew clocks — asserting the fail-open table above.
 - **Latency regression test** in CI asserting hook p99 under 5ms.
 - **One end-to-end integration test** with two real Claude Code sessions and a scripted task, asserting the second agent's injected context contains the first's intent and that no double-edit occurs. Exactly one — it proves the product works but is too slow and flaky to base a suite on.

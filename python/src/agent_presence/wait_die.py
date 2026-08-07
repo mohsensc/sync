@@ -7,11 +7,20 @@ from .types import Claim
 Decision = Literal["wait", "abort"]
 
 
-def resolve(requester_agent: str, requester_acquired_at: float, holder: Claim) -> Decision:
-    """Wound-wait. The older transaction always wins.
+def resolve(
+    requester_agent: str, requester_acquired_at: float, holder: Claim
+) -> Decision:
+    """Wait-die. The older transaction waits, the younger one dies.
 
     - Requester older than holder  -> ``wait``  (it is entitled to the resource)
     - Requester younger            -> ``abort`` (release everything, retry with backoff)
+
+    This is wait-die, not wound-wait, and that is deliberate. Wound-wait would
+    have the older requester preempt the holder. Preemption here means taking a
+    lease away from an agent that is already mid-edit, which destroys work in
+    progress and breaks the fail-open principle the rest of the system is built
+    on. Wait-die buys the same guarantee for free: it is equally deadlock-free
+    and it never removes a lease from someone actively using it.
 
     Exact ties break on agent id so the relation is never symmetric. Symmetry is
     exactly what would permit a wait-cycle, so this makes deadlock unreachable

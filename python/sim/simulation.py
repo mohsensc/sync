@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from agent_presence.clock import VirtualClock
 from agent_presence.leases import LEASE_TTL_S, LeaseRegistry
 from agent_presence.types import Region
-from agent_presence.wound_wait import resolve
+from agent_presence.wait_die import resolve
 
 
 @dataclass(frozen=True)
@@ -32,7 +32,7 @@ class Simulation:
             Region(path=f"src/f{i}.py", symbol=f"sym{i}", lines=None)
             for i in range(regions)
         ]
-        # Oldest live claim time per agent, which is what wound-wait orders on.
+        # Oldest live claim time per agent, which is what wait-die orders on.
         self._age: dict[str, float] = {}
 
     def run(self, steps: int) -> SimResult:
@@ -61,7 +61,7 @@ class Simulation:
                     else:
                         waits += 1
             elif roll < 0.85:
-                self._registry.release(agent, region)
+                self._registry.release("r1", agent, region)
                 if all(c.agent != agent for c in self._registry.active_claims("r1")):
                     self._age.pop(agent, None)
             else:
