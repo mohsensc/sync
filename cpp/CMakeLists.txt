@@ -48,5 +48,8 @@ target_sources(ap_tests PRIVATE tests/test_repo.cpp)
 target_sources(ap_daemon_lib PRIVATE daemon/outbound.cpp)
 target_sources(ap_tests PRIVATE tests/test_outbound.cpp)
 
+# Compiles daemon/main.cpp a second time with main() off, to test its extractor.
+target_sources(ap_tests PRIVATE tests/test_daemon_field.cpp)
+
 add_executable(presenced daemon/main.cpp)
 target_link_libraries(presenced PRIVATE ap_daemon_lib)
