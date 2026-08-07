@@ -3,6 +3,10 @@ project(agent_presence CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Before any add_test() below, and before FetchContent pulls Catch2 in — a
+# subproject that calls enable_testing() of its own does not enable it here.
+enable_testing()
+
 add_library(ap_hook_lib hook/hook.cpp)
 target_include_directories(ap_hook_lib PUBLIC .)
 
@@ -65,3 +69,13 @@ target_sources(ap_tests PRIVATE tests/test_relay_client.cpp)
 # wire with, and the responder that answers a decision request.
 target_sources(ap_daemon_lib PRIVATE daemon/json.cpp daemon/decide.cpp)
 target_sources(ap_tests PRIVATE tests/test_decide.cpp tests/test_decision_path.cpp)
+
+# One test, running the whole binary, because `ctest --test-dir cpp/build` used
+# to fail with "No test configuration file found" and everyone had to know to
+# run ./build/ap_tests instead.
+#
+# Deliberately not catch_discover_tests: several cases here are latency guards
+# that measure a p99 against a live socket, and ctest -j would have them
+# competing for the same CPU and failing on the machine rather than on the code.
+# One serial invocation is what those numbers mean.
+add_test(NAME ap_tests COMMAND ap_tests)
