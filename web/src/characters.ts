@@ -2,7 +2,7 @@ import { hairFor } from './palette.js'
 import { ZONES, zoneFor, type ZoneName } from './zones.js'
 
 export const PRESENCE_TTL_MS = 30_000
-const WALK_SPEED = 4 // world units per second
+export const WALK_SPEED = 4 // world units per second
 
 export interface CharacterState {
   agent: string
