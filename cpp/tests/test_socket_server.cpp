@@ -30,6 +30,30 @@ int raw_connect(const std::string& path) {
     return fd;
 }
 
+/// Leave behind exactly what a SIGKILLed daemon leaves: a socket file on disk
+/// with nothing listening on it. bind() creates the inode and close() does not
+/// remove it, so this is the real stale state, not a simulation of one.
+bool leak_stale_socket(const std::string& path) {
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+
+    int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) return false;
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    std::snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", path.c_str());
+    if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+        ::close(fd);
+        return false;
+    }
+    if (::listen(fd, 8) != 0) {
+        ::close(fd);
+        return false;
+    }
+    ::close(fd);  // process gone, file still there
+    return true;
+}
+
 /// poll_once on a helper thread with a hard deadline. A daemon that parks in
 /// read() never comes back, so without this the suite would hang instead of
 /// reporting a failure. On timeout the thread and its promise are leaked on
@@ -143,9 +167,27 @@ TEST_CASE("several pending connections are all drained in one poll_once") {
 }
 
 TEST_CASE("starting twice on the same path succeeds by reclaiming a stale socket") {
-    auto path = (std::filesystem::temp_directory_path() / "ap_stale.sock").string();
-    { ap::SocketServer a(path); REQUIRE(a.start()); }
+    const auto path = (std::filesystem::temp_directory_path() / "ap_stale.sock").string();
+
+    // A clean shutdown unlinks the path, so a second SocketServer would find
+    // nothing in its way and prove nothing. The daemon that matters here is the
+    // one that died mid-flight and left its socket file behind.
+    REQUIRE(leak_stale_socket(path));
+    REQUIRE(std::filesystem::exists(path));
+    REQUIRE(raw_connect(path) < 0);  // the file is there; nobody is home
+
     ap::SocketServer b(path);
+    std::vector<std::string> got;
+    b.on_line([&](std::string l) { got.push_back(std::move(l)); });
     REQUIRE(b.start());
+
+    // start() returning true is not enough. The point of reclaiming is that
+    // hooks reach the new daemon, so make one and check it lands.
+    REQUIRE(ap::write_line(path, R"({"verb":"edit"})", 50));
+    b.poll_once(200);
+    REQUIRE(got.size() == 1);
+    REQUIRE(got[0] == R"({"verb":"edit"})");
+
     b.stop();
+    REQUIRE_FALSE(std::filesystem::exists(path));
 }

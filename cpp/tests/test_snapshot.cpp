@@ -8,11 +8,13 @@
 #endif
 
 #include <catch2/catch_test_macros.hpp>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -76,11 +78,65 @@ TEST_CASE("an empty peer list still writes a readable snapshot") {
 }
 
 TEST_CASE("writes leave no partial file behind") {
-    auto p = (std::filesystem::temp_directory_path() / "ap_atomic.json").string();
-    for (int i = 0; i < 200; ++i) {
-        ap::write_snapshot(p, {{"sara", "edit", "a.py"}});
-        REQUIRE(read_all(p).back() == '}');
-    }
+    const auto p = (std::filesystem::temp_directory_path() / "ap_atomic.json").string();
+    std::filesystem::remove(p);
+
+    // Big enough that a non-atomic write takes several buffer flushes to land.
+    // A one-peer snapshot fits in a single flush, so the torn window would be
+    // narrow enough to miss and the test would prove nothing.
+    auto peers_of = [](const std::string& human, int n) {
+        std::vector<ap::Peer> v;
+        v.reserve(static_cast<size_t>(n));
+        for (int i = 0; i < n; ++i) {
+            v.push_back(ap::Peer{human, "edit",
+                                 "src/deeply/nested/module/tree/segment_" + std::to_string(i) +
+                                     "/handler.py"});
+        }
+        return v;
+    };
+    const auto a = peers_of("sara", 400);
+    const auto b = peers_of("devon", 400);
+
+    // The statusline reads this path once a second. These two documents are the
+    // only bytes it is ever allowed to see; anything else is a torn write.
+    ap::write_snapshot(p, a);
+    const std::string doc_a = read_all(p);
+    ap::write_snapshot(p, b);
+    const std::string doc_b = read_all(p);
+    REQUIRE(doc_a.size() > 16384);
+    REQUIRE(doc_a != doc_b);
+
+    std::atomic<bool> stop{false};
+    std::atomic<long long> reads{0};
+    std::atomic<long long> torn{0};
+    std::mutex sample_mu;
+    std::string sample;
+
+    // Catch2's macros are not thread safe, so the reader only records what it
+    // saw. The assertions all happen back on the main thread after the join.
+    std::thread reader([&] {
+        while (!stop.load(std::memory_order_relaxed)) {
+            const std::string s = read_all(p);
+            reads.fetch_add(1, std::memory_order_relaxed);
+            if (s == doc_a || s == doc_b) continue;
+            if (torn.fetch_add(1, std::memory_order_relaxed) == 0) {
+                std::lock_guard<std::mutex> g(sample_mu);
+                sample = "len=" + std::to_string(s.size()) + " head=[" + s.substr(0, 60) +
+                         "] tail=[" + (s.size() > 60 ? s.substr(s.size() - 60) : s) + "]";
+            }
+        }
+    });
+
+    for (int i = 0; i < 400; ++i) ap::write_snapshot(p, (i % 2) ? a : b);
+    stop.store(true, std::memory_order_relaxed);
+    reader.join();
+
+    // Without this the test could "pass" because the reader never got a turn.
+    REQUIRE(reads.load() > 100);
+
+    std::lock_guard<std::mutex> g(sample_mu);
+    INFO("reads=" << reads.load() << " torn=" << torn.load() << " first torn read: " << sample);
+    REQUIRE(torn.load() == 0);
 }
 
 TEST_CASE("presence table reflects each agent's latest activity") {

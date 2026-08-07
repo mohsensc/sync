@@ -1,26 +1,136 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <filesystem>
 #include <string>
+#include <thread>
+#include <utility>
 #include <vector>
 
+#include "daemon/socket_server.hpp"
 #include "hook/hook.hpp"
 
-TEST_CASE("hook p99 stays under the 5ms budget with no daemon listening") {
-    const std::string payload =
-        R"({"tool_name":"Edit","tool_input":{"file_path":"/repo/src/a.py"},"session_id":"s1"})";
+namespace {
 
+const std::string kPayload =
+    R"({"tool_name":"Edit","tool_input":{"file_path":"/repo/src/a.py"},"session_id":"s1"})";
+
+double p99(std::vector<double> samples) {
+    std::sort(samples.begin(), samples.end());
+    return samples[static_cast<size_t>(samples.size() * 0.99)];
+}
+
+/// Busy-wait, because sleep_for's granularity here is coarser than the gap we
+/// want and we are pacing, not idling.
+void spin_us(long us) {
+    const auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(us);
+    while (std::chrono::steady_clock::now() < until) {
+    }
+}
+
+/// The daemon's own accept-and-drain loop on a thread of its own. This is the
+/// same SocketServer presenced runs; the only thing faked is the process
+/// boundary. Without it a "latency" test only ever measures connect() bouncing
+/// off an empty path, which is not what a tool call does when someone is home.
+class LiveDaemon {
+public:
+    explicit LiveDaemon(std::string path) : path_(std::move(path)), server_(path_) {}
+
+    ~LiveDaemon() {
+        stop_.store(true, std::memory_order_relaxed);
+        if (loop_.joinable()) loop_.join();
+        server_.stop();
+        std::error_code ec;
+        std::filesystem::remove(path_, ec);
+    }
+
+    bool start() {
+        server_.on_line([this](std::string) { lines_.fetch_add(1, std::memory_order_relaxed); });
+        if (!server_.start()) return false;
+        loop_ = std::thread([this] {
+            while (!stop_.load(std::memory_order_relaxed)) server_.poll_once(20);
+        });
+        return true;
+    }
+
+    long long lines() const { return lines_.load(std::memory_order_relaxed); }
+
+private:
+    std::string path_;
+    ap::SocketServer server_;
+    std::atomic<long long> lines_{0};
+    std::atomic<bool> stop_{false};
+    std::thread loop_;
+};
+
+}  // namespace
+
+TEST_CASE("hook p99 stays under the 5ms budget with no daemon listening") {
     std::vector<double> samples;
     samples.reserve(1000);
     for (int i = 0; i < 1000; ++i) {
         auto t0 = std::chrono::steady_clock::now();
-        ap::write_line("/nonexistent/p.sock", ap::build_event(payload), 5);
+        ap::write_line("/nonexistent/p.sock", ap::build_event(kPayload), 5);
         auto t1 = std::chrono::steady_clock::now();
-        samples.push_back(
-            std::chrono::duration<double, std::milli>(t1 - t0).count());
+        samples.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
     }
 
-    std::sort(samples.begin(), samples.end());
-    REQUIRE(samples[static_cast<size_t>(samples.size() * 0.99)] < 5.0);
+    REQUIRE(p99(std::move(samples)) < 5.0);
+}
+
+// The case above only covers the fast-fail path. The path that runs on every
+// tool call of a normal session is this one: a daemon is up, the connect
+// succeeds, and the hook has to get in and out inside the same 5ms.
+TEST_CASE("hook p99 stays under the 5ms budget with a live daemon listening") {
+    const auto sock = (std::filesystem::temp_directory_path() / "ap_latency.sock").string();
+    std::filesystem::remove(sock);
+
+    LiveDaemon daemon(sock);
+    REQUIRE(daemon.start());
+
+    const std::string event = ap::build_event(kPayload);
+
+    // First connect pays for the daemon thread's first trip through poll().
+    // That is startup, not per-call cost.
+    for (int i = 0; i < 20; ++i) {
+        ap::write_line(sock, event, 5);
+        spin_us(200);
+    }
+
+    // A gap between calls, kept outside the timed window. Firing 1000 connects
+    // back to back overruns the 64-deep listen backlog and starts measuring
+    // ECONNREFUSED instead of the live path; an agent doing real work is nowhere
+    // near that rate.
+    constexpr long kGapUs = 200;
+    constexpr int kCalls = 1000;
+
+    std::vector<double> samples;
+    samples.reserve(kCalls);
+    long long delivered = 0;
+    for (int i = 0; i < kCalls; ++i) {
+        auto t0 = std::chrono::steady_clock::now();
+        const bool ok = ap::write_line(sock, event, 5);
+        auto t1 = std::chrono::steady_clock::now();
+        samples.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
+        if (ok) ++delivered;
+        spin_us(kGapUs);
+    }
+
+    // A run where every connect bounced would be fast and meaningless, so the
+    // timing only counts if the writes actually went somewhere.
+    INFO("delivered " << delivered << "/" << kCalls);
+    REQUIRE(delivered == kCalls);
+
+    INFO("p99 was " << p99(samples) << "ms over " << samples.size() << " calls");
+    REQUIRE(p99(std::move(samples)) < 5.0);
+
+    // And the daemon really was reading them, not just accepting and dropping.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (daemon.lines() < delivered && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    INFO("daemon saw " << daemon.lines() << " lines, hook sent " << delivered);
+    REQUIRE(daemon.lines() >= delivered);
 }
