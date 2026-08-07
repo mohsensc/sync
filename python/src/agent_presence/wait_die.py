@@ -25,6 +25,14 @@ def resolve(
     Exact ties break on agent id so the relation is never symmetric. Symmetry is
     exactly what would permit a wait-cycle, so this makes deadlock unreachable
     rather than merely unlikely — no cycle detection is needed anywhere.
+
+    That argument only holds while both sides are ordered on the same quantity.
+    ``requester_acquired_at`` is the requester agent's age and ``holder`` is
+    ordered on ``holder.acquired_at``, so ``holder.acquired_at`` has to be the
+    *holder agent's* age too, not the wall clock of that one lease. See the
+    note in ``LeaseRegistry.acquire``, which is what keeps the two comparable.
+    Order the two sides differently and this function will happily return
+    "wait" in both directions.
     """
     if requester_acquired_at < holder.acquired_at:
         return "wait"

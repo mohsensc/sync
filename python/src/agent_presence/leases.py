@@ -55,6 +55,11 @@ class LeaseRegistry:
         it lose to every existing holder. Age is deliberately not room-scoped:
         it stands in for the agent's whole session, and a wait-for cycle can
         run through leases in more than one room.
+
+        Every live claim an agent holds carries this same value — see the note
+        in ``acquire`` — so ``age_of(x)`` and ``claim.acquired_at`` for any of
+        x's claims are the same number, which is what lets ``resolve`` compare
+        the two sides at all.
         """
         held = [c.acquired_at for c in self._live() if c.agent == agent]
         return min(held) if held else self._clock.now()
@@ -84,6 +89,20 @@ class LeaseRegistry:
             held.expires_at = now + LEASE_TTL_S
             return AcquireResult(ok=True, claim=held)
 
+        # acquired_at is the agent's wait-die timestamp, not this lease's wall
+        # clock. A second lease inherits the age of the first, so all of an
+        # agent's claims are stamped alike.
+        #
+        # This matters because resolve() orders the requester by age_of (oldest
+        # live claim) and the holder by the acquired_at of the one contested
+        # claim. Stamp each lease with its own wall clock and those are two
+        # different quantities: an agent holding an old lease and a young one
+        # reads as old when it asks and young when it is asked, so two agents
+        # can each be told to wait for the other and neither ever dies. Sharing
+        # one timestamp per agent makes the relation a total order over agents
+        # (ties broken on agent id), and a total order has no cycles.
+        #
+        # Expiry still runs on the real clock; only the ordering key is shared.
         claim = Claim(
             room=room,
             human=human,
@@ -91,7 +110,7 @@ class LeaseRegistry:
             scope=scope,
             intent=intent,
             state="held",
-            acquired_at=now,
+            acquired_at=self.age_of(agent),
             expires_at=now + LEASE_TTL_S,
         )
         self._claims.append(claim)
