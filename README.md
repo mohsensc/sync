@@ -40,10 +40,7 @@ cmake --build cpp/build && ctest --test-dir cpp/build`; `cd web && npx vitest ru
 
 ## What's broken
 
-The relay only tells the agent that claimed a lease about it, so the daemon's
-cache stays empty and nothing blocks in practice. The hook asks, the daemon
-answers, and the answer is always rung 0 — push a lease frame by hand and the
-deny is real. That broadcast is the next thing to build. The MCP server also
-keeps its own in-process registry instead of claiming over the wire. Ladder
+The MCP server keeps its own in-process registry instead of claiming over the
+wire, so a claim made through the tool never reaches another machine. Ladder
 tuning is guesswork, rung 4 isn't built, and the chain has only ever been driven
 by scripted clients, never two real sessions.
