@@ -271,6 +271,22 @@ private:
     /// agent when the frame carries it under a different key than "agent",
     /// which is what claim_result does with "held_by".
     bool upsert_lease(std::string_view entry, const std::string& holder_override);
+
+    /// Drop `held_[key]`, but only when `agent` is the one holding it.
+    ///
+    /// A region key alone is not enough to identify what an expiry is talking
+    /// about. On a handover the relay publishes the new holder and the old
+    /// holder's expiry as two frames about the same region, and erasing on the
+    /// key would let the second delete what the first just granted — the region
+    /// then reads as free until the new holder's next heartbeat, which is
+    /// exactly the silent loss of protection this daemon exists to prevent.
+    ///
+    /// An unattributed frame matches nothing and erases nothing: the entry then
+    /// dies on its own TTL, which costs at worst a prompt about a holder who has
+    /// left. Wrong in that direction is recoverable; wrong in the other is not.
+    ///
+    /// Returns whether the table changed.
+    bool erase_lease(const std::string& key, const std::string& agent);
     void apply_leases();
 
     RelayConfig cfg_;
