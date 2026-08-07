@@ -232,3 +232,61 @@ def test_a_lowercase_move_over_the_wire_still_works(relay):
                              "split_region": other})
     assert reply["granted"] is True
     assert reply["action"] == "split"
+
+
+# -- (G) a sweep in one room never reaches another ---------------------------
+#
+# presenced defaults its relay identity to presenced@<hostname>, so two
+# checkouts on one laptop are two rooms and one agent id. Both of the relay's
+# release paths used to sweep every room.
+
+ONLY_IN_A = {"path": "src/only-in-repo-a.py", "symbol": None, "lines": None}
+
+
+def _two_room_standoff(relay):
+    """a1 holds a lease in repo-a. rival already holds the contested region in
+    repo-b, and holds it first, so a1's claim there loses wait-die."""
+    in_a = FakeConn("presenced@laptop", "sara")
+    in_b = FakeConn("presenced@laptop", "sara")
+    rival = FakeConn("rival-agent", "dev")
+
+    relay.join("repo-b", rival)
+    _claim(relay, rival, intent="older holder")
+    relay._clock.advance(5)
+    relay.join("repo-a", in_a)
+    _claim(relay, in_a, region=ONLY_IN_A, intent="the innocent lease")
+    relay.join("repo-b", in_b)
+    return in_a, in_b, rival
+
+
+def test_a_wait_die_abort_in_one_room_leaves_another_rooms_leases_alone(relay):
+    in_a, in_b, _ = _two_room_standoff(relay)
+
+    reply = _claim(relay, in_b, intent="loser")
+    assert reply["granted"] is False
+    assert reply["decision"] == "abort", "the setup has to actually abort"
+
+    held = relay.registry.active_claims("repo-a")
+    assert [c.scope.path for c in held] == ["src/only-in-repo-a.py"], (
+        "an abort in repo-b released the same agent id's repo-a lease"
+    )
+
+
+def test_a_disconnect_in_one_room_leaves_another_rooms_leases_alone(relay):
+    in_a, in_b, _ = _two_room_standoff(relay)
+
+    relay.leave(in_b)
+
+    held = relay.registry.active_claims("repo-a")
+    assert [c.scope.path for c in held] == ["src/only-in-repo-a.py"], (
+        "closing the repo-b connection released the repo-a lease"
+    )
+
+
+def test_a_disconnect_still_releases_that_rooms_leases(relay):
+    # The scoping must not turn into "releases nothing".
+    a = FakeConn("a1", "sara")
+    relay.join("r1", a)
+    _claim(relay, a)
+    relay.leave(a)
+    assert relay.registry.active_claims("r1") == []

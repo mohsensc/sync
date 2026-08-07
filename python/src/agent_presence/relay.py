@@ -267,6 +267,7 @@ class Relay:
                    "leases": [_lease_entry(c, now) for c in held]})
 
     def leave(self, conn: Conn) -> None:
+        room = conn.room
         for members in self._members.values():
             while conn in members:
                 members.remove(conn)
@@ -277,9 +278,14 @@ class Relay:
         # The connection is off every member list before the release, so the
         # release frames go to everyone still there and not to the socket that
         # just died.
+        #
+        # Only this connection's room. The same agent id can be live in another
+        # room on another socket — two checkouts on one laptop share the default
+        # presenced@<hostname> — and that room's leases have nothing to do with
+        # this socket hanging up.
         identity = self._identity.pop(conn, None)
-        if identity is not None:
-            self.registry.release_all(identity[0])
+        if identity is not None and room is not None:
+            self.registry.release_all(room, identity[0])
         conn.room = None
 
     def broadcast(
@@ -430,10 +436,11 @@ class Relay:
 
         # Refusal alone is not enough: without an instruction two agents can
         # both sit and retry forever. Wait-die says exactly one of them backs
-        # off and the other dies, and the loser's leases have to actually go,
-        # or the wait-for graph keeps its cycle.
+        # off and the other dies, and the loser's leases in *this* room have to
+        # actually go so it is not holding anything while it retries. Leases the
+        # same agent id holds in another room are not part of this contest.
         if result.decision == "abort":
-            self.registry.release_all(conn.agent)
+            self.registry.release_all(room, conn.agent)
 
         held = result.held_by
         return {

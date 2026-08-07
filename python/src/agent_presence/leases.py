@@ -131,7 +131,24 @@ class LeaseRegistry:
             )
         ]
 
-    def release_all(self, agent: str) -> None:
-        """Drop every lease an agent holds, in every room. Used on session end
-        and on a wait-die abort, where partial release would leave a cycle."""
-        self._claims = [c for c in self._live() if c.agent != agent]
+    def release_all(self, room: str, agent: str) -> None:
+        """Drop every lease an agent holds *in one room*. Used on session end
+        and on a wait-die abort.
+
+        Room-scoped, like every other per-lease operation here. It used to sweep
+        every room, and an agent id is not unique to a room: presenced names
+        itself ``presenced@<hostname>``, so two checkouts on one laptop are two
+        rooms sharing one id. A refused claim or a closed socket in one of them
+        dropped the other's leases, and the agent still editing in that other
+        room lost its protection without being told.
+
+        Deadlock freedom does not depend on the sweep being global. Wait-die
+        orders agents by ``age_of``, which is global, and an agent only ever
+        waits on an older one — the wait-for graph is acyclic by construction,
+        whatever a release touches. The sweep is here so a dying claimer is not
+        still holding things while it retries, and the room it was refused in is
+        the only room that has anything to do with that.
+        """
+        self._claims = [
+            c for c in self._live() if not (c.room == room and c.agent == agent)
+        ]

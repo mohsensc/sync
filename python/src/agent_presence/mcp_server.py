@@ -79,7 +79,7 @@ class Tools:
         # survives. Two channels ordering claims differently would be a cycle
         # the relay cannot see.
         if result.decision == "abort":
-            self._relay.registry.release_all(self._agent)
+            self._relay.registry.release_all(self._room, self._agent)
 
         return {
             "granted": False,
