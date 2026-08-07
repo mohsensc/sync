@@ -39,6 +39,11 @@ def normalize_remote(url: str) -> str:
         s = _PROTO.sub("", s)
         s = _USERINFO.sub("", s)
 
+    # Trailing slashes come off first: a remote copied out of a browser can
+    # carry both, and ".git/" used to survive the suffix check and split one
+    # repo into two rooms. Only one ".git" goes, so a repo actually named
+    # "gitgit" or "api.github" keeps its name.
+    s = s.rstrip("/")
     if s.endswith(".git"):
         s = s[: -len(".git")]
     return s.rstrip("/")
