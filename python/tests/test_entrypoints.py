@@ -111,7 +111,11 @@ async def _round_trip(url: str) -> dict:
             "type": "event", "verb": "edit", "source": "hook",
             "region": {"path": "src/auth.py", "symbol": "sign_in", "lines": None},
         }))
-        return json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+        # The join is answered with a lease snapshot before the event's ack.
+        while True:
+            frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+            if frame.get("type") != "leases":
+                return frame
 
 
 # -- the relay runs ---------------------------------------------------------

@@ -17,8 +17,18 @@ class FakeConn:
 
 
 class ExplodingConn(FakeConn):
+    """Dies on send, once armed.
+
+    Armed after the join so the join's lease snapshot lands normally and what
+    the test measures is the broadcast, which is the thing it is about.
+    """
+
+    armed = False
+
     def send(self, payload):
-        raise RuntimeError("subscriber died mid-broadcast")
+        if self.armed:
+            raise RuntimeError("subscriber died mid-broadcast")
+        self.sent.append(payload)
 
 
 def test_a_crashed_agent_never_wedges_a_teammate():
@@ -47,6 +57,7 @@ def test_one_dead_subscriber_does_not_stop_delivery_to_others():
     sender, dead, alive = FakeConn("a0", "x"), ExplodingConn("a1", "y"), FakeConn("a2", "z")
     for c in (sender, dead, alive):
         relay.join("r1", c)
+    dead.armed = True
 
     with pytest.raises(RuntimeError):
         relay.broadcast("r1", {"type": "presence"}, exclude=sender)

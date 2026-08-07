@@ -245,21 +245,24 @@ class Relay:
         return True
 
     def _send_lease_snapshot(self, conn: Conn, room: str) -> None:
-        """Hand a joiner the leases it missed.
+        """Tell a joiner what this relay holds. Always, even when it is nothing.
 
         Incremental frames only ever reach whoever was already in the room, so
         without this a daemon that connects after a claim never learns about it
-        and its hook waves the edit through. The daemon replaces its whole
-        table from this frame.
+        and its hook waves the edit through. The daemon replaces its whole table
+        from this frame — `relay_client.cpp` clears `held_` and refills it — so
+        this is a reconciliation against the authority, not a top-up.
 
-        Nothing is sent for an empty room. A daemon reconnecting into one still
-        has its old entries, but those age out on the TTL they were issued
-        with, which is the same bound that already covers a relay restart.
+        The empty case is the one that matters most. The relay is stateless
+        across restarts by design, so a restarted one comes back holding
+        nothing; the daemons do not, and they go on enforcing what they cached.
+        Staying quiet used to leave them blocking edits on a lease nobody holds
+        until their own copy aged out, up to the full 90 second TTL. An empty
+        `leases` array says "the authority holds none", which is a fact, and it
+        clears the cache in the time a reconnect takes.
         """
-        held = self.registry.active_claims(room)
-        if not held:
-            return
         now = self._clock.now()
+        held = self.registry.active_claims(room)
         conn.send({"type": "leases",
                    "leases": [_lease_entry(c, now) for c in held]})
 

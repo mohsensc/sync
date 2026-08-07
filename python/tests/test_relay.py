@@ -14,6 +14,15 @@ class FakeConn:
     def send(self, payload):
         self.sent.append(payload)
 
+    @property
+    def fanout(self):
+        """Everything the room sent this connection.
+
+        Minus the lease snapshot, which is a reconciliation answer to this
+        connection's own join and not traffic from anyone.
+        """
+        return [f for f in self.sent if f.get("type") != "leases"]
+
 
 SECRET = "hunter2"
 
@@ -46,8 +55,8 @@ def test_events_fan_out_to_other_members_but_not_the_sender(relay):
     relay.join("r1", a)
     relay.join("r1", b)
     relay.handle(a, touch("a1"))
-    assert len(b.sent) == 1
-    assert a.sent == []
+    assert len(b.fanout) == 1
+    assert a.fanout == []
 
 
 def test_rooms_are_isolated(relay):
@@ -55,7 +64,7 @@ def test_rooms_are_isolated(relay):
     relay.join("r1", a)
     relay.join("r2", b)
     relay.handle(a, touch("a1"))
-    assert b.sent == []
+    assert b.fanout == []
 
 
 def test_leaving_releases_every_lease_that_connection_held(relay):
@@ -81,8 +90,8 @@ def test_forbidden_fields_never_reach_the_wire_or_the_store(relay):
     evt["region"]["note"] = SECRET          # smuggled inside a permitted key
     relay.handle(a, evt)
 
-    assert len(b.sent) == 1
-    payload = b.sent[0]
+    assert len(b.fanout) == 1
+    payload = b.fanout[0]
     assert SECRET not in repr(payload)
     assert set(payload["region"]) == {"path", "symbol", "lines"}
     assert SECRET not in repr(relay.presence("r1"))
