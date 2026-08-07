@@ -83,6 +83,8 @@ Consequence: anyone who clones the repo joins the correct room with zero configu
 
 One human may have many concurrent agents; the world must cluster them visually by human.
 
+**Identity is taken from the authenticated connection, never from a client-supplied field.** A connection declares who it is once, when it joins; after that the relay reads `human` and `agent` off the connection and ignores whatever the message body says. Trusting the body would let any room member release, renew or steal a teammate's lease just by naming them. Identity fields in a payload are treated as decoration — fine for logging, never used for a lease decision.
+
 ## Event and claim model
 
 ### Event
@@ -116,7 +118,7 @@ One human may have many concurrent agents; the world must cluster them visually 
 
 `presenced` heartbeats renewals every 30s. **Nothing is permanent.** If an agent crashes, a laptop sleeps, or a process is killed, every lease it holds evaporates within 90 seconds. This is the deliberate inverse of a lock file: the failure mode is *losing protection*, never *wedging a teammate*. Presence events carry a shorter 30s TTL, which is what makes a character wander off when its agent moves on.
 
-**All timestamps are assigned by the relay on receipt, never by clients.** Deadlock resolution compares lease ages; client-assigned timestamps plus clock skew would let two agents each believe they are older.
+**All timestamps are assigned by the relay on receipt, never by clients.** Deadlock resolution compares lease ages; client-assigned timestamps plus clock skew would let two agents each believe they are older. Same rule for identity: the relay uses the identity of the connection the message arrived on, not the `agent`/`human` fields in the message.
 
 ### Privacy
 
@@ -127,6 +129,8 @@ One human may have many concurrent agents; the world must cluster them visually 
 | Declared intent strings (MCP, opt-in) | Env vars, secrets, command output |
 
 **Opaque mode** (org-level toggle): paths are hashed client-side before leaving the machine. The relay still detects collisions and arbitrates leases, because collision detection is equality on region keys and works identically on hashed input. The dashboard renders anonymized shapes. Readability is lost; function is not.
+
+The toggle is a real flag, not a spare function nobody calls: set `AGENT_PRESENCE_OPAQUE=1` (`true`, `yes`, `on` also count) and every path and symbol is hashed on the way out — the redaction pass, the MCP claim tools, and the last hop before the wire. It's read per call, so flipping it doesn't need a restart. Both channels have to hash the same way or the lease table splits in two, so MCP claims run through the same helper the hook path does. A region that's already hashed carries a marker and isn't hashed twice.
 
 **Retention:** rooms are ephemeral. Events TTL out; nothing is written to durable storage in v1.
 
@@ -155,7 +159,9 @@ Rungs 0–2 never block anything. Rung 2 carries most of the practical value at 
 
 One round trip, hard timeout, default to `DEFER` for the later claimant. Free-form negotiation between two agents is untestable and they will agree on wrong things at length; four enumerable moves are testable and their failure modes are finite.
 
-**Deadlock** is resolved by **wait-die** on relay-assigned lease timestamps: an older requester waits, a younger one aborts, drops its leases and retries with backoff. Provably deadlock-free without cycle detection, and it never takes a lease away from an agent that is mid-edit — wound-wait would, and preemption there means destroying work in progress. Combined with 90s expiry, no team state is permanently stuck.
+**Deadlock** is resolved by **wait-die** on relay-assigned lease timestamps: an older requester waits, a younger one aborts, drops its leases and retries with backoff. The relation is asymmetric by construction — of any two agents exactly one can be the waiter, with ties broken on agent id — so a wait cycle is unreachable and no cycle detection is needed anywhere.
+
+Note which way round it goes: the requester is the one that waits or dies. A lease already held is never taken away, so no agent is preempted mid-edit and no in-progress work is destroyed. Wound-wait would give the opposite behaviour — the older requester preempts the holder — and that's the trade we're not making. Combined with 90s expiry, no team state is permanently stuck.
 
 **Rung 4** requires declared intent plus embedding similarity at the relay. Build the hook now, keep semantic matching behind a flag until there is real traffic to tune against. A noisy rung 4 would poison trust in rungs 0–3.
 
@@ -236,12 +242,15 @@ The system sits on the critical path of every tool call and therefore **must fai
 |---|---|
 | Relay unreachable | Daemon buffers locally, hooks stop consulting leases, all agents degrade to solo mode, silently |
 | Daemon dead | Hook finds no socket, exits 0 in under 1ms; statusline segment blank |
+| Daemon alive but wedged — bound, listening, accepting, processing nothing | Prevented, not tolerated. The accept loop is non-blocking end to end: the listen fd is `O_NONBLOCK`, every accepted connection is `O_NONBLOCK`, and each one gets a few milliseconds of read budget before it's closed. A client that connects, writes half a line and stops is dropped along with its partial line |
 | Agent crashes holding leases | 90s TTL expiry; no manual cleanup |
 | Event flood (e.g. grep over 10k files) | Daemon coalesces by region and samples; relay never sees the storm |
 | Network partition | Relay is sole authority; on reconnect the daemon discards optimistic local state and re-syncs |
 | False collision | Override available to both agent and human, and logged |
 
 **Hook latency budget: 5ms hard cap.** If a socket write would block, the event is dropped rather than queued. A dropped event costs one frame of animation; a blocked hook costs the user's patience on every tool call.
+
+**The wedged daemon is the failure the rest of the table doesn't catch.** A dead daemon is fine: there's no socket, the hook exits, everyone degrades to solo mode. A wedged one is worse, because from the outside it looks healthy. The socket file is there, `connect()` succeeds, hooks keep writing — and nothing is ever read, so presence freezes at whatever it happened to be and the lease cache goes stale while still looking live. The daemon is single threaded, so one client that connects and then stops talking is enough to cause it: a blocking read on that connection parks the loop forever. Hence the rule: no blocking read anywhere in the accept path, and a per-connection budget after which the connection is closed and whatever it never terminated with a newline is thrown away. A half-line is never carried into the next connection either; replaying it would corrupt the next client's event.
 
 ## Testing
 
@@ -250,7 +259,7 @@ Almost none of this requires real agents.
 - **Deterministic simulation** is the backbone: virtual clock, N simulated agents, seeded random schedules. Forty agents colliding runs in milliseconds and a failing seed reproduces exactly.
 - **Property tests** over random claim/release schedules asserting the two invariants that matter: no deadlock is reachable, and every lease eventually expires.
 - **Table-driven unit tests** for pure functions: room-key normalization (ssh/https/`.git`/case matrix), region overlap, rung classification, wait-die ordering.
-- **Chaos tests**: kill the daemon mid-lease, partition the relay, skew clocks — asserting the fail-open table above.
+- **Chaos tests**: kill the daemon mid-lease, partition the relay, skew clocks, stall a client mid-line against the daemon socket — asserting the fail-open table above, wedge row included. The wedge test runs `poll_once` on a helper thread with a hard deadline, because a wedged daemon never returns and the suite has to report a failure rather than hang.
 - **Latency regression test** in CI asserting hook p99 under 5ms.
 - **One end-to-end integration test** with two real Claude Code sessions and a scripted task, asserting the second agent's injected context contains the first's intent and that no double-edit occurs. Exactly one — it proves the product works but is too slow and flaky to base a suite on.
 

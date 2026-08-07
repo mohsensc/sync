@@ -4,7 +4,7 @@
 
 **Goal:** Build a system where multiple people's coding agents in a shared repo are mutually aware — rendered as an ambient animated world for humans, and as claims and negotiation for agents — preventing redundant work and conflicting edits.
 
-**Architecture:** A C++ hook binary observes every tool call and writes events to a unix socket. A C++ daemon (`presenced`) coalesces, redacts, and forwards them over one WebSocket per machine to a Python relay. The relay is the sole authority on leases and arbitrates collisions via a five-rung ladder with wound-wait deadlock resolution. A Python MCP server carries deliberate intent. A TypeScript/Three.js dashboard and a statusline segment subscribe read-only.
+**Architecture:** A C++ hook binary observes every tool call and writes events to a unix socket. A C++ daemon (`presenced`) coalesces, redacts, and forwards them over one WebSocket per machine to a Python relay. The relay is the sole authority on leases and arbitrates collisions via a five-rung ladder with wait-die deadlock resolution. A Python MCP server carries deliberate intent. A TypeScript/Three.js dashboard and a statusline segment subscribe read-only.
 
 **Tech Stack:** C++20 (hook + daemon; CMake, Catch2, `libwebsockets`), Python 3.12 (core domain, relay, MCP server; `pytest`, `hypothesis`, `websockets`, `mcp`), TypeScript + Three.js (dashboard; `vite`, `vitest`).
 
@@ -12,8 +12,11 @@
 
 - **Fail open, always.** Every failure path resolves to "the agent behaves exactly as if nothing were installed." No failure may block, delay, or error an agent's tool call.
 - **Hook latency budget: 5ms p99, hard cap.** If a socket write would block, drop the event rather than queue it.
-- **Protocol logic lives only in Python.** The C++ daemon performs cache lookups and transport. It must never implement ladder classification, wound-wait, or lease arbitration. Any PR adding protocol reasoning to C++ is wrong by construction.
+- **Protocol logic lives only in Python.** The C++ daemon performs cache lookups and transport. It must never implement ladder classification, wait-die, or lease arbitration. Any PR adding protocol reasoning to C++ is wrong by construction.
 - **All timestamps used in ordering decisions are assigned by the relay on receipt.** Clients never assign them.
+- **Identity comes from the authenticated connection, never from a client-supplied field.** A connection says who it is once, on join. After that the relay reads `agent`/`human` off the connection and ignores those keys in the message body. Trusting the body lets any room member release, renew or steal a teammate's lease by naming them.
+- **No blocking read anywhere in the daemon's accept path.** The daemon is single threaded: one client that connects and stops talking must not be able to stop it serving everyone else. Non-blocking listen fd, non-blocking accepted fds, a per-connection read budget, and a total budget for each `poll_once`. A daemon that stops reading is worse than one that dies, because it still looks alive from the outside.
+- **Opaque mode is a flag, not a helper.** `AGENT_PRESENCE_OPAQUE=1` (also `true`/`yes`/`on`) hashes paths and symbols on ingest, on the MCP path, and on the way out to the wire. All three call sites or none — a half-wired flag splits the lease table.
 - **Lease TTL 90s, heartbeat 30s. Presence TTL 30s.** Nothing is permanent; no manual cleanup path exists.
 - **Never transmit:** file contents, diffs, prompts, agent reasoning, model output, env vars, command output.
 - **May transmit:** file paths, symbol names, line ranges, verbs, timestamps, identity, MCP-declared intent.
@@ -43,7 +46,7 @@ agent-presence/
 │   │   ├── clock.py            # Clock protocol, RealClock, VirtualClock
 │   │   ├── room_key.py         # git remote normalization → room id
 │   │   ├── leases.py           # LeaseRegistry, TTL expiry
-│   │   ├── wound_wait.py       # deadlock resolution
+│   │   ├── wait_die.py         # deadlock resolution
 │   │   ├── ladder.py           # rung classification
 │   │   ├── negotiation.py      # four-move protocol state machine
 │   │   ├── redact.py           # privacy redaction + opaque mode
@@ -193,7 +196,7 @@ class Claim:
     scope: Region
     intent: str
     state: LeaseState
-    # Relay-assigned. Wound-wait ordering derives from this.
+    # Relay-assigned. Wait-die ordering derives from this.
     acquired_at: float
     expires_at: float
 
@@ -609,13 +612,15 @@ git commit -m "feat(core): lease registry with lazy TTL expiry"
 
 ---
 
-### Task 5: Wound-wait deadlock resolution
+### Task 5: Wait-die deadlock resolution
 
-Resolves the case where A holds `auth.py` and wants `db.py` while B holds `db.py` and wants `auth.py`. Older claim wins; younger aborts and retries.
+Resolves the case where A holds `auth.py` and wants `db.py` while B holds `db.py` and wants `auth.py`. The *requester* is the one that yields: an older requester waits, a younger one dies — releases everything and retries with backoff. A lease that is already held is never taken away, so nobody is preempted mid-edit.
+
+This is wait-die, not wound-wait. Under wound-wait the older requester would preempt the holder, and preemption here means yanking a lease out from under an agent that is part-way through an edit. Wait-die is equally deadlock-free and costs nothing to get that property.
 
 **Files:**
-- Create: `python/src/agent_presence/wound_wait.py`
-- Test: `python/tests/test_wound_wait.py`
+- Create: `python/src/agent_presence/wait_die.py`
+- Test: `python/tests/test_wait_die.py`
 
 **Interfaces:**
 - Consumes: `Claim` (Task 1).
@@ -623,13 +628,13 @@ Resolves the case where A holds `auth.py` and wants `db.py` while B holds `db.py
 
 - [ ] **Step 1: Write the failing test**
 
-`python/tests/test_wound_wait.py`:
+`python/tests/test_wait_die.py`:
 ```python
 import pytest
 from hypothesis import given, strategies as st
 
 from agent_presence.types import Claim, Region
-from agent_presence.wound_wait import resolve
+from agent_presence.wait_die import resolve
 
 R = Region(path="a.py", symbol=None, lines=None)
 
@@ -665,12 +670,12 @@ def test_relation_is_never_symmetric_which_is_what_forbids_wait_cycles(x, y):
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd python && python -m pytest tests/test_wound_wait.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'agent_presence.wound_wait'`
+Run: `cd python && python -m pytest tests/test_wait_die.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'agent_presence.wait_die'`
 
 - [ ] **Step 3: Write the implementation**
 
-`python/src/agent_presence/wound_wait.py`:
+`python/src/agent_presence/wait_die.py`:
 ```python
 from __future__ import annotations
 
@@ -682,10 +687,17 @@ Decision = Literal["wait", "abort"]
 
 
 def resolve(requester_agent: str, requester_acquired_at: float, holder: Claim) -> Decision:
-    """Wound-wait. The older transaction always wins.
+    """Wait-die. The older transaction waits, the younger one dies.
 
     - Requester older than holder  -> ``wait``  (it is entitled to the resource)
     - Requester younger            -> ``abort`` (release everything, retry with backoff)
+
+    This is wait-die, not wound-wait, and that is deliberate. Wound-wait would
+    have the older requester preempt the holder. Preemption here means taking a
+    lease away from an agent that is already mid-edit, which destroys work in
+    progress and breaks the fail-open principle the rest of the system is built
+    on. Wait-die buys the same guarantee for free: it is equally deadlock-free
+    and it never removes a lease from someone actively using it.
 
     Exact ties break on agent id so the relation is never symmetric. Symmetry is
     exactly what would permit a wait-cycle, so this makes deadlock unreachable
@@ -700,14 +712,14 @@ def resolve(requester_agent: str, requester_acquired_at: float, holder: Claim) -
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd python && python -m pytest tests/test_wound_wait.py -v`
+Run: `cd python && python -m pytest tests/test_wait_die.py -v`
 Expected: PASS, 4 tests (the last one runs 100 generated cases)
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add python/src/agent_presence/wound_wait.py python/tests/test_wound_wait.py
-git commit -m "feat(core): wound-wait deadlock resolution"
+git add python/src/agent_presence/wait_die.py python/tests/test_wait_die.py
+git commit -m "feat(core): wait-die deadlock resolution"
 ```
 
 ---
@@ -1072,9 +1084,20 @@ git commit -m "feat(core): bounded four-move negotiation protocol"
 - Create: `python/src/agent_presence/redact.py`
 - Test: `python/tests/test_redact.py`
 
+Opaque mode is a flag, not a spare function. `opaque_region` on its own is dead code: something has to call it on every path that leaves the machine, or an org turns the toggle on and nothing changes.
+
 **Interfaces:**
 - Consumes: `AgentEvent`, `Region` (Task 1).
 - Produces: `FORBIDDEN_FIELDS: frozenset[str]`; `redact(event_dict: dict) -> dict`; `opaque_region(region: Region) -> Region`.
+- Produces the flag wiring: `OPAQUE_ENV = "AGENT_PRESENCE_OPAQUE"`, `opaque_enabled() -> bool`, `opaque_region_if_enabled(region) -> Region`, `apply_opaque(payload)`, `opaque_outbound(payload: dict) -> dict`.
+
+**The flag.** `AGENT_PRESENCE_OPAQUE=1` turns opaque mode on; `true`, `yes` and `on` also count, anything else is off. It's read per call rather than cached, so flipping it doesn't need a relay restart and the cost is one dict lookup on a path that already does JSON. Three call sites, and all three are required:
+
+- `redact()` — the hook path, on ingest.
+- `mcp_server` claim/release helpers — the MCP path. Both channels must hash identically or the lease table splits in two and two agents editing one function never see each other.
+- `opaque_outbound()` in `serve.py` — the last stop before the wire, so anything the relay composed itself is covered too.
+
+Hashed regions carry an `opaque: true` marker so a second pass doesn't hash them again and desync them from every other client's copy.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1082,7 +1105,12 @@ git commit -m "feat(core): bounded four-move negotiation protocol"
 ```python
 import pytest
 
-from agent_presence.redact import FORBIDDEN_FIELDS, opaque_region, redact
+from agent_presence.redact import (
+    FORBIDDEN_FIELDS,
+    opaque_outbound,
+    opaque_region,
+    redact,
+)
 from agent_presence.types import Region
 
 
@@ -1133,7 +1161,34 @@ def test_opaque_mode_keeps_distinct_regions_distinct():
     a = Region(path="src/auth.py", symbol="sign_in", lines=None)
     b = Region(path="src/db.py", symbol="sign_in", lines=None)
     assert opaque_region(a).path != opaque_region(b).path
+
+
+def test_paths_are_readable_while_the_flag_is_off(monkeypatch):
+    monkeypatch.delenv("AGENT_PRESENCE_OPAQUE", raising=False)
+    assert redact(raw())["region"]["path"] == "src/auth.py"
+
+
+def test_the_flag_actually_hashes_the_wire_payload(monkeypatch):
+    monkeypatch.setenv("AGENT_PRESENCE_OPAQUE", "1")
+    out = redact(raw())
+    assert out["region"]["path"] != "src/auth.py"
+    assert "auth" not in out["region"]["path"]
+
+
+def test_outbound_is_hashed_too(monkeypatch):
+    monkeypatch.setenv("AGENT_PRESENCE_OPAQUE", "1")
+    sent = opaque_outbound({"type": "presence", "path": "src/auth.py", "symbol": "sign_in"})
+    assert "auth" not in sent["path"]
+    assert sent["opaque"] is True
+
+
+def test_an_already_opaque_payload_is_not_hashed_twice(monkeypatch):
+    monkeypatch.setenv("AGENT_PRESENCE_OPAQUE", "1")
+    once = opaque_outbound({"path": "src/auth.py", "symbol": "sign_in"})
+    assert opaque_outbound(once) == once
 ```
+
+Every test in this file that doesn't set the flag must clear it first (`monkeypatch.delenv("AGENT_PRESENCE_OPAQUE", raising=False)` in a fixture), or a stray env var in a shell turns the suite green for the wrong reason.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -1147,6 +1202,7 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'agent_presence.redact'
 from __future__ import annotations
 
 import hashlib
+import os
 
 from .types import Region
 
@@ -1166,6 +1222,20 @@ PERMITTED_TOP_LEVEL: frozenset[str] = frozenset(
     {"room", "human", "agent", "kind", "source", "verb", "region", "ts", "intent"}
 )
 
+# Set AGENT_PRESENCE_OPAQUE=1 to turn on org-level opaque mode.
+OPAQUE_ENV = "AGENT_PRESENCE_OPAQUE"
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+# Marks a region that has already been hashed, so a second pass on the way out
+# doesn't hash it again and desync it from every other client's copy.
+OPAQUE_MARK = "opaque"
+
+
+def opaque_enabled() -> bool:
+    """Read the toggle per call. Flipping it shouldn't need a restart, and the
+    cost is one dict lookup on a path that already does JSON."""
+    return os.environ.get(OPAQUE_ENV, "").strip().lower() in _TRUTHY
+
 
 def redact(event_dict: dict) -> dict:
     """Strip everything not explicitly permitted, then strip forbidden keys
@@ -1178,6 +1248,9 @@ def redact(event_dict: dict) -> dict:
             k: v for k, v in region.items()
             if k in {"path", "symbol", "lines"} and k not in FORBIDDEN_FIELDS
         }
+
+    if opaque_enabled():
+        out = apply_opaque(out)
     return out
 
 
@@ -1197,12 +1270,48 @@ def opaque_region(region: Region) -> Region:
         symbol=_h(region.symbol) if region.symbol is not None else None,
         lines=None,  # line ranges would narrow a hash back toward the original
     )
+
+
+def opaque_region_if_enabled(region: Region) -> Region:
+    return opaque_region(region) if opaque_enabled() else region
+
+
+def apply_opaque(payload):
+    """Walk a payload and hash every region-shaped dict in it.
+
+    Region-shaped means 'has a string path'. That catches the nested
+    `{"region": {...}}` form and the flattened path/symbol form the MCP tools
+    return, without either side having to declare which is which.
+    """
+    if isinstance(payload, list):
+        return [apply_opaque(v) for v in payload]
+    if not isinstance(payload, dict):
+        return payload
+
+    out = {k: apply_opaque(v) for k, v in payload.items()}
+    if not isinstance(out.get("path"), str) or out.get(OPAQUE_MARK) is True:
+        return out
+
+    out["path"] = _h(out["path"])
+    if isinstance(out.get("symbol"), str):
+        out["symbol"] = _h(out["symbol"])
+    if "lines" in out:
+        out["lines"] = None
+    out[OPAQUE_MARK] = True
+    return out
+
+
+def opaque_outbound(payload: dict) -> dict:
+    """Last stop before the wire. No-op unless opaque mode is on."""
+    return apply_opaque(payload) if opaque_enabled() else payload
 ```
+
+Task 11 (`serve.py`) sends through `opaque_outbound`, and Task 20 (`mcp_server.py`) builds its regions through `opaque_region_if_enabled`. Neither is optional — miss one and the flag is half-on, which is worse than off.
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `cd python && python -m pytest tests/test_redact.py -v`
-Expected: PASS, 17 tests (12 parametrized + 5)
+Expected: PASS, 21 tests (12 parametrized + 9)
 
 - [ ] **Step 5: Commit**
 
@@ -1275,7 +1384,7 @@ from dataclasses import dataclass
 from agent_presence.clock import VirtualClock
 from agent_presence.leases import LEASE_TTL_S, LeaseRegistry
 from agent_presence.types import Region
-from agent_presence.wound_wait import resolve
+from agent_presence.wait_die import resolve
 
 
 @dataclass(frozen=True)
@@ -1301,7 +1410,7 @@ class Simulation:
             Region(path=f"src/f{i}.py", symbol=f"sym{i}", lines=None)
             for i in range(regions)
         ]
-        # Oldest live claim time per agent, which is what wound-wait orders on.
+        # Oldest live claim time per agent, which is what wait-die orders on.
         self._age: dict[str, float] = {}
 
     def run(self, steps: int) -> SimResult:
@@ -1404,7 +1513,9 @@ def touch(agent="a1", path="src/auth.py", symbol="sign_in", verb="edit"):
         "type": "event", "agent": agent, "human": agent, "kind": "touch",
         "source": "hook", "verb": verb,
         "region": {"path": path, "symbol": symbol, "lines": None},
-        "ts": 99999.0,  # client-supplied, must be discarded
+        # Both client-supplied and both ignored: the relay stamps its own time
+        # and reads identity off the connection.
+        "ts": 99999.0,
     }
 
 
@@ -1442,6 +1553,19 @@ def test_leaving_releases_every_lease_that_connection_held(relay):
                      "intent": "work"})
     relay.leave(a)
     assert relay.registry.active_claims("r1") == []
+
+
+def test_a_client_cannot_touch_a_lease_by_naming_someone_else(relay):
+    a, b = FakeConn("a1"), FakeConn("a2")
+    relay.join("r1", a)
+    relay.join("r1", b)
+    region = {"path": "p.py", "symbol": "f", "lines": None}
+    relay.handle(a, {"type": "claim", "region": region, "intent": "work"})
+
+    # b claims to be a1. The relay reads identity off the connection, not the
+    # payload, so this releases nothing.
+    relay.handle(b, {"type": "release", "agent": "a1", "region": region})
+    assert relay.registry.active_claims("r1")[0].agent == "a1"
 
 
 def test_forbidden_fields_never_reach_presence(relay):
@@ -1546,21 +1670,25 @@ class Relay:
         if room is None:
             return None
 
+        # conn.agent is the authenticated identity. message["agent"] is
+        # whatever the client typed, so it is never trusted for anything that
+        # touches a lease — otherwise any room member could drop, renew or
+        # steal a teammate's claim by naming them.
         kind = message.get("type")
         if kind == "event":
             return self._on_event(room, conn, message)
         if kind == "claim":
             return self._on_claim(room, conn, message)
         if kind == "release":
-            self.registry.release(message["agent"], _region(message["region"]))
+            self.registry.release(conn.agent, _region(message["region"]))
             return None
         if kind == "heartbeat":
-            self.registry.heartbeat(message["agent"], _region(message["region"]))
+            self.registry.heartbeat(conn.agent, _region(message["region"]))
             return None
         if kind == "move":
             outcome = self._negotiator.apply(
-                room, message["agent"], _region(message["region"]),
-                message["move"], message.get("reason", ""),
+                room, conn.agent, _region(message["region"]),
+                message.get("move", ""), message.get("reason", ""),
             )
             return {"type": "move_result", "granted": outcome.granted,
                     "action": outcome.action}
@@ -1605,7 +1733,7 @@ class Relay:
 
     def _on_claim(self, room: str, conn: Conn, message: dict) -> dict:
         result = self.registry.acquire(
-            room, message.get("human", conn.human), message["agent"],
+            room, conn.human, conn.agent,
             _region(message["region"]), message.get("intent", ""),
         )
         if result.ok:
@@ -1619,7 +1747,7 @@ class Relay:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `cd python && python -m pytest tests/test_relay.py -v`
-Expected: PASS, 5 tests
+Expected: PASS, 6 tests
 
 - [ ] **Step 5: Commit**
 
@@ -1710,6 +1838,7 @@ import logging
 
 import websockets
 
+from .redact import opaque_outbound
 from .relay import Relay
 
 log = logging.getLogger("agent_presence.serve")
@@ -1729,7 +1858,7 @@ class WsConn:
 
     async def _safe_send(self, payload: dict) -> None:
         try:
-            await self._ws.send(json.dumps(payload))
+            await self._ws.send(json.dumps(opaque_outbound(payload)))
         except Exception:
             log.debug("dropped send to closed connection", exc_info=True)
 
@@ -1745,6 +1874,9 @@ async def _session(ws, relay: Relay) -> None:
                 continue
 
             if msg.get("type") == "join":
+                # The one and only place identity is taken from a message. It
+                # is bound to the connection here and every later frame is
+                # attributed to it, whatever that frame claims about itself.
                 conn.agent = msg.get("agent", "")
                 conn.human = msg.get("human", "")
                 relay.join(msg["room"], conn)
@@ -1757,7 +1889,7 @@ async def _session(ws, relay: Relay) -> None:
                 continue
 
             if reply is not None:
-                await ws.send(json.dumps(reply))
+                await ws.send(json.dumps(opaque_outbound(reply)))
     finally:
         relay.leave(conn)
 
@@ -2088,19 +2220,90 @@ The daemon performs **no protocol reasoning**. It transports, coalesces, redacts
 - Modify: `cpp/CMakeLists.txt`
 - Test: `cpp/tests/test_socket_server.cpp`
 
+**The wedge this task exists to avoid.** The daemon is single threaded. A blocking, unbounded `read()` on an accepted connection means one client that connects, writes half a line and then stops — a SIGSTOPped `ap-hook`, a laptop suspended at the wrong moment — parks the accept loop forever. Nothing crashes. The socket file stays on disk, `connect()` keeps succeeding, hooks keep writing, and nothing is ever read again. That is the "daemon alive, bound, accepting, processing nothing, forever" row of the spec's fail-open table, and it is the one failure the hook side cannot detect. So: non-blocking listen fd, non-blocking accepted fds, a per-connection read budget, and a total budget for `poll_once` that holds whatever the clients do.
+
 **Interfaces:**
-- Produces: `class SocketServer` with `SocketServer(std::string path)`, `bool start()`, `void stop()`, `void on_line(std::function<void(std::string)>)`, `void poll_once(int timeout_ms)`.
+- Produces: `class SocketServer` with `SocketServer(std::string path)`, `bool start()`, `void stop()`, `void on_line(std::function<void(std::string)>)`, `void poll_once(int timeout_ms)`, `void set_conn_timeout_ms(int ms)`.
 
 - [ ] **Step 1: Write the failing test**
 
 `cpp/tests/test_socket_server.cpp`:
 ```cpp
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+
 #include <catch2/catch_test_macros.hpp>
+#include <chrono>
+#include <cstdio>
 #include <filesystem>
+#include <future>
 #include <string>
+#include <thread>
 #include <vector>
 #include "daemon/socket_server.hpp"
 #include "hook/hook.hpp"
+
+namespace {
+
+/// Connect and hand back the raw fd. The caller decides when (or whether) to
+/// close it, which is the whole point of the wedge test.
+int raw_connect(const std::string& path) {
+    int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    std::snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", path.c_str());
+    if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+        ::close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+/// Leave behind exactly what a SIGKILLed daemon leaves: a socket file on disk
+/// with nothing listening on it. bind() creates the inode and close() does not
+/// remove it, so this is the real stale state, not a simulation of one.
+bool leak_stale_socket(const std::string& path) {
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+
+    int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) return false;
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    std::snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", path.c_str());
+    if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+        ::close(fd);
+        return false;
+    }
+    if (::listen(fd, 8) != 0) {
+        ::close(fd);
+        return false;
+    }
+    ::close(fd);  // process gone, file still there
+    return true;
+}
+
+/// poll_once on a helper thread with a hard deadline. A daemon that parks in
+/// read() never comes back, so without this the suite would hang instead of
+/// reporting a failure. On timeout the thread and its promise are leaked on
+/// purpose: the wedged thread still owns them.
+bool poll_bounded(ap::SocketServer* s, int timeout_ms, int budget_ms) {
+    auto* signal = new std::promise<void>();
+    auto done = signal->get_future();
+    std::thread([s, signal, timeout_ms] {
+        s->poll_once(timeout_ms);
+        signal->set_value();
+    }).detach();
+    if (done.wait_for(std::chrono::milliseconds(budget_ms)) != std::future_status::ready) {
+        return false;
+    }
+    delete signal;
+    return true;
+}
+
+}  // namespace
 
 TEST_CASE("daemon receives a line written by the hook") {
     auto path = (std::filesystem::temp_directory_path() / "ap_test.sock").string();
@@ -2119,12 +2322,105 @@ TEST_CASE("daemon receives a line written by the hook") {
     server.stop();
 }
 
+// The server and its buffer are heap-allocated and leaked when poll_once does
+// not come back: a wedged thread never lets go, and tearing the objects out
+// from under it would turn a clean FAIL into a crash.
+TEST_CASE("a client that stalls mid-line cannot wedge the daemon") {
+    auto path = (std::filesystem::temp_directory_path() / "ap_wedge.sock").string();
+    std::filesystem::remove(path);
+
+    auto* server = new ap::SocketServer(path);
+    auto* got = new std::vector<std::string>();
+    server->on_line([got](std::string l) { got->push_back(std::move(l)); });
+    REQUIRE(server->start());
+
+    // Writes bytes with no newline and never closes. This is an ap-hook that
+    // got SIGSTOPped between connect() and close().
+    const int stuck = raw_connect(path);
+    REQUIRE(stuck >= 0);
+    REQUIRE(::write(stuck, "{\"verb\":\"edi", 12) == 12);
+
+    // A well-behaved client queued behind it must still be served.
+    REQUIRE(ap::write_line(path, R"({"verb":"read"})", 5));
+
+    REQUIRE(poll_bounded(server, 200, 2000));
+    REQUIRE(got->size() == 1);
+    REQUIRE((*got)[0] == R"({"verb":"read"})");
+
+    ::close(stuck);
+    server->stop();
+    delete server;
+    delete got;
+}
+
+TEST_CASE("a half-written line is dropped, not replayed into the next connection") {
+    auto path = (std::filesystem::temp_directory_path() / "ap_partial.sock").string();
+    std::filesystem::remove(path);
+
+    auto* server = new ap::SocketServer(path);
+    auto* got = new std::vector<std::string>();
+    server->on_line([got](std::string l) { got->push_back(std::move(l)); });
+    REQUIRE(server->start());
+
+    const int stuck = raw_connect(path);
+    REQUIRE(stuck >= 0);
+    REQUIRE(::write(stuck, "{\"verb\":\"edi", 12) == 12);
+    REQUIRE(poll_bounded(server, 50, 2000));
+
+    REQUIRE(ap::write_line(path, R"({"verb":"read"})", 5));
+    REQUIRE(poll_bounded(server, 200, 2000));
+
+    REQUIRE(got->size() == 1);
+    REQUIRE((*got)[0] == R"({"verb":"read"})");
+
+    ::close(stuck);
+    server->stop();
+    delete server;
+    delete got;
+}
+
+TEST_CASE("several pending connections are all drained in one poll_once") {
+    auto path = (std::filesystem::temp_directory_path() / "ap_drain.sock").string();
+    std::filesystem::remove(path);
+
+    ap::SocketServer server(path);
+    std::vector<std::string> got;
+    server.on_line([&](std::string l) { got.push_back(std::move(l)); });
+    REQUIRE(server.start());
+
+    for (int i = 0; i < 8; ++i) {
+        REQUIRE(ap::write_line(path, "{\"n\":\"" + std::to_string(i) + "\"}", 5));
+    }
+    server.poll_once(200);
+
+    REQUIRE(got.size() == 8);
+    server.stop();
+}
+
 TEST_CASE("starting twice on the same path succeeds by reclaiming a stale socket") {
-    auto path = (std::filesystem::temp_directory_path() / "ap_stale.sock").string();
-    { ap::SocketServer a(path); REQUIRE(a.start()); }
+    const auto path = (std::filesystem::temp_directory_path() / "ap_stale.sock").string();
+
+    // A clean shutdown unlinks the path, so a second SocketServer would find
+    // nothing in its way and prove nothing. The daemon that matters here is the
+    // one that died mid-flight and left its socket file behind.
+    REQUIRE(leak_stale_socket(path));
+    REQUIRE(std::filesystem::exists(path));
+    REQUIRE(raw_connect(path) < 0);  // the file is there; nobody is home
+
     ap::SocketServer b(path);
+    std::vector<std::string> got;
+    b.on_line([&](std::string l) { got.push_back(std::move(l)); });
     REQUIRE(b.start());
+
+    // start() returning true is not enough. The point of reclaiming is that
+    // hooks reach the new daemon, so make one and check it lands.
+    REQUIRE(ap::write_line(path, R"({"verb":"edit"})", 50));
+    b.poll_once(200);
+    REQUIRE(got.size() == 1);
+    REQUIRE(got[0] == R"({"verb":"edit"})");
+
     b.stop();
+    REQUIRE_FALSE(std::filesystem::exists(path));
 }
 ```
 
@@ -2163,12 +2459,27 @@ public:
     bool start();
     void stop();
     void on_line(std::function<void(std::string)> cb);
-    /// Accept and drain any pending connections. Returns after timeout_ms.
+
+    /// Accept and drain every pending connection, then return. Blocks at most
+    /// timeout_ms in total, whatever the clients do.
+    ///
+    /// The daemon is single threaded, so one client that connects and then
+    /// stops talking must not be able to hold the loop. Each connection gets a
+    /// few milliseconds of its own and is then dropped, along with any bytes it
+    /// never terminated with a newline.
     void poll_once(int timeout_ms);
 
+    /// Per-connection read budget in milliseconds. Only worth changing in tests.
+    void set_conn_timeout_ms(int ms) { conn_timeout_ms_ = ms; }
+
 private:
+    /// Read whole lines off an accepted fd until EOF or the deadline, then close
+    /// it. Never blocks past `budget_ms`.
+    void drain_conn(int conn, int budget_ms);
+
     std::string path_;
     int fd_ = -1;
+    int conn_timeout_ms_ = 5;
     std::function<void(std::string)> cb_;
 };
 
@@ -2179,16 +2490,40 @@ private:
 ```cpp
 #include "daemon/socket_server.hpp"
 
+#include <fcntl.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
 
+#include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
+#include <string>
 #include <utility>
 
 namespace ap {
+namespace {
+
+bool set_nonblocking(int fd) {
+    const int flags = ::fcntl(fd, F_GETFL, 0);
+    if (flags < 0) return false;
+    return ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
+}
+
+long long now_ms() {
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
+/// Milliseconds left until `deadline`, floored at zero.
+int left_ms(long long deadline) {
+    const long long left = deadline - now_ms();
+    return left > 0 ? static_cast<int>(left) : 0;
+}
+
+}  // namespace
 
 SocketServer::SocketServer(std::string path) : path_(std::move(path)) {}
 SocketServer::~SocketServer() { stop(); }
@@ -2202,6 +2537,15 @@ bool SocketServer::start() {
 
     fd_ = ::socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd_ < 0) return false;
+
+    // Non-blocking listen fd: accept() must never park the loop, not even on
+    // the race where poll() reports a connection that is gone by the time we
+    // get to it.
+    if (!set_nonblocking(fd_)) {
+        ::close(fd_);
+        fd_ = -1;
+        return false;
+    }
 
     sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
@@ -2229,31 +2573,95 @@ void SocketServer::stop() {
     }
 }
 
-void SocketServer::poll_once(int timeout_ms) {
-    if (fd_ < 0) return;
-    pollfd p{fd_, POLLIN, 0};
-    if (::poll(&p, 1, timeout_ms) <= 0) return;
+void SocketServer::drain_conn(int conn, int budget_ms) {
+    if (!set_nonblocking(conn)) {
+        ::close(conn);
+        return;
+    }
 
-    int conn = ::accept(fd_, nullptr, nullptr);
-    if (conn < 0) return;
-
+    const long long deadline = now_ms() + (budget_ms > 0 ? budget_ms : 0);
     std::string buf;
     char chunk[4096];
-    ssize_t n;
-    while ((n = ::read(conn, chunk, sizeof(chunk))) > 0) buf.append(chunk, n);
-    ::close(conn);
 
-    size_t start = 0;
-    while (true) {
-        size_t nl = buf.find('\n', start);
-        if (nl == std::string::npos) break;
-        if (cb_) cb_(buf.substr(start, nl - start));
-        start = nl + 1;
+    for (;;) {
+        const ssize_t n = ::read(conn, chunk, sizeof(chunk));
+        if (n > 0) {
+            buf.append(chunk, static_cast<size_t>(n));
+            // Emit as we go so a long-lived connection is not held hostage by
+            // its own tail.
+            size_t start = 0;
+            for (;;) {
+                const size_t nl = buf.find('\n', start);
+                if (nl == std::string::npos) break;
+                if (cb_) cb_(buf.substr(start, nl - start));
+                start = nl + 1;
+            }
+            if (start) buf.erase(0, start);
+            continue;
+        }
+        if (n == 0) break;  // clean EOF: the client said everything it had
+        if (errno == EINTR) continue;
+        if (errno != EAGAIN && errno != EWOULDBLOCK) break;
+
+        const int left = left_ms(deadline);
+        if (left == 0) break;  // out of budget; whatever is unterminated is dropped
+        pollfd pfd{conn, POLLIN, 0};
+        if (::poll(&pfd, 1, left) != 1) break;
+        if ((pfd.revents & (POLLERR | POLLNVAL)) != 0) break;
+    }
+
+    // Anything left in buf has no newline. It is a partial line and there is no
+    // second chance for it: holding it would mean holding the connection.
+    ::close(conn);
+}
+
+void SocketServer::poll_once(int timeout_ms) {
+    if (fd_ < 0) return;
+
+    const long long deadline = now_ms() + (timeout_ms > 0 ? timeout_ms : 0);
+
+    // Wait for the first connection, then take everything else that is already
+    // queued without waiting again. The wait reserves the per-connection budget
+    // so the total stays inside timeout_ms.
+    bool served_one = false;
+
+    for (;;) {
+        int wait_ms = 0;
+        if (!served_one) {
+            wait_ms = left_ms(deadline) - conn_timeout_ms_;
+            if (wait_ms < 0) wait_ms = 0;
+        }
+
+        pollfd p{fd_, POLLIN, 0};
+        const int r = ::poll(&p, 1, wait_ms);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            return;
+        }
+        if (r == 0) return;  // nothing pending
+        if ((p.revents & POLLIN) == 0) return;
+
+        const int conn = ::accept(fd_, nullptr, nullptr);
+        if (conn < 0) {
+            if (errno == EINTR) continue;
+            return;  // EAGAIN: the backlog is empty after all
+        }
+        served_one = true;
+
+        int budget = left_ms(deadline);
+        if (budget > conn_timeout_ms_) budget = conn_timeout_ms_;
+        drain_conn(conn, budget);
+
+        // Out of time. The rest of the backlog waits for the next tick, which
+        // is what a backlog is for.
+        if (left_ms(deadline) == 0) return;
     }
 }
 
 }  // namespace ap
 ```
+
+The rule this encodes: **no blocking read anywhere in the accept path.** A daemon that stops reading is worse than a daemon that dies, because the socket stays connectable and every hook keeps thinking it's being heard.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -2667,7 +3075,7 @@ struct CachedLease {
 /// A read-only snapshot of relay-held leases, refreshed by push.
 ///
 /// This class deliberately contains no protocol logic: no ladder, no
-/// wound-wait, no arbitration. It answers exactly one question — "is there a
+/// wait-die, no arbitration. It answers exactly one question — "is there a
 /// live lease on this region held by somebody else?" — so the C++ side can
 /// never drift from the Python authority.
 class LeaseCache {
@@ -3185,8 +3593,15 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'agent_presence.mcp_ser
 from __future__ import annotations
 
 from .negotiation import Negotiator
+from .redact import opaque_region_if_enabled
 from .relay import Relay
 from .types import Region
+
+
+def _region(path: str, symbol: str | None) -> Region:
+    """Every MCP region goes through here. The MCP path must hash exactly what
+    the hook channel does, or opaque mode would split the lease table in two."""
+    return opaque_region_if_enabled(Region(path=path, symbol=symbol, lines=None))
 
 
 class Tools:
@@ -3215,7 +3630,7 @@ class Tools:
         ]
 
     def claim_work(self, path: str, symbol: str | None, intent: str) -> dict:
-        region = Region(path=path, symbol=symbol, lines=None)
+        region = _region(path, symbol)
         result = self._relay.registry.acquire(
             self._room, self._human, self._agent, region, intent
         )
@@ -3230,11 +3645,11 @@ class Tools:
         }
 
     def release(self, path: str, symbol: str | None) -> dict:
-        self._relay.registry.release(self._agent, Region(path=path, symbol=symbol, lines=None))
+        self._relay.registry.release(self._agent, _region(path, symbol))
         return {"released": True}
 
     def respond(self, path: str, symbol: str | None, move: str, reason: str = "") -> dict:
-        region = Region(path=path, symbol=symbol, lines=None)
+        region = _region(path, symbol)
         outcome = self._negotiator.apply(self._room, self._agent, region, move, reason)
         return {
             "granted": outcome.granted,
@@ -3316,7 +3731,7 @@ git commit -m "feat(mcp): four intent tools over the relay"
 
 ### Task 21: Chaos tests
 
-Asserts every row of the fail-open table in the spec.
+Asserts every row of the fail-open table in the spec that lives on the Python side. The daemon-side rows are asserted where the daemon is: the "alive but wedged" row is Task 14's stalled-client test, and the "daemon dead" row is Task 12's hook test against a socket path that isn't there.
 
 **Files:**
 - Create: `python/tests/test_chaos.py`
@@ -4348,19 +4763,20 @@ git commit -m "feat: install script and hook wiring"
 |---|---|
 | Room keying | 2, 16 (both implementations, cross-checked) |
 | Identity (human/session/label) | 1, 20, 23 |
+| Identity from the connection, never the payload | 10, 11 |
 | Event and claim model | 1, 4, 10 |
 | Relay-assigned timestamps | 10, 21 |
-| Privacy + opaque mode | 8 |
+| Privacy + opaque mode (flag wired at all three call sites) | 8, 11, 20 |
 | Collision ladder rungs 0–3 | 6, 10 |
 | Rung 4 behind a flag | 6 (documented as deliberately undecided) |
 | Four-move negotiation | 7, 20 |
-| Wound-wait | 5, 9 |
+| Wait-die | 5, 9 |
 | Lease TTL / heartbeat | 4, 21 |
 | Escape hatch + override logging | 7, 20 |
 | `presenced` rationale (3 constraints) | 12, 14, 18, 19 |
 | Hook 5ms budget | 12, 13 |
 | MCP intent channel | 20 |
-| Fail-open table | 21 |
+| Fail-open table | 12 (daemon dead), 14 (daemon wedged), 21 (the rest) |
 | Testing strategy | 9, 13, 21, 22 |
 | Office floor + zone vocabulary | 23 |
 | Hair as identity | 23, 24 |
