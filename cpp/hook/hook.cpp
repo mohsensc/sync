@@ -6,8 +6,10 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
+#include <cstddef>
 #include <cstdio>
 #include <string>
 #include <string_view>
@@ -221,6 +223,52 @@ bool write_line(const std::string& sock_path, const std::string& line, int timeo
 
     ::close(fd);
     return sent == payload.size();
+}
+
+std::string read_bounded(int fd, std::size_t max_buffer, int timeout_ms) {
+    const auto start = std::chrono::steady_clock::now();
+
+    std::string out;
+    char buf[65536];
+
+    // poll() before every read so a blocking stdin never parks us. Setting
+    // O_NONBLOCK is avoided on purpose: fd 0's flags live on a file description
+    // the parent may still share, and a hook has no business mutating it.
+    for (;;) {
+        const int left = remaining_ms(start, timeout_ms);
+        if (left == 0) break;
+
+        pollfd pfd{fd, POLLIN, 0};
+        const int r = ::poll(&pfd, 1, left);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (r == 0) break;  // out of budget
+
+        // POLLNVAL is treated as fatal even though it costs us one exotic case:
+        // on macOS poll() reports it for a character device (stdin redirected
+        // from /dev/zero, say) that read() would happily serve, so the payload
+        // is dropped. Reading anyway would mean a blocking read on an fd poll
+        // just said it cannot vouch for, and the deadline is only enforceable
+        // because every read here is one poll() already cleared. Claude Code
+        // hands a hook a pipe, and pipes and regular files both report POLLIN
+        // correctly; losing an event on a device beats risking a stuck one.
+        if ((pfd.revents & (POLLERR | POLLNVAL)) != 0) break;
+
+        const ssize_t n = ::read(fd, buf, sizeof(buf));
+        if (n > 0) {
+            if (out.size() < max_buffer) {
+                out.append(buf, std::min(static_cast<std::size_t>(n), max_buffer - out.size()));
+            }
+            continue;  // past the cap the bytes are dropped, not the read
+        }
+        if (n == 0) break;  // EOF: the parent said everything it had
+        if (errno == EINTR) continue;
+        break;
+    }
+
+    return out;
 }
 
 }  // namespace ap

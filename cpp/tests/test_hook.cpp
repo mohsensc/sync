@@ -1,9 +1,100 @@
+#include <unistd.h>
+
 #include <catch2/catch_test_macros.hpp>
 #include <cctype>
 #include <chrono>
 #include <filesystem>
 #include <string>
+#include <thread>
 #include "hook/hook.hpp"
+
+namespace {
+
+/// Milliseconds a callable takes. The stdin tests are all about wall clock, so
+/// this is the assertion in every one of them.
+template <typename F>
+long long elapsed_ms(F&& f) {
+    const auto t0 = std::chrono::steady_clock::now();
+    f();
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now() - t0)
+        .count();
+}
+
+}  // namespace
+
+// Reading stdin was the one step in the hook with no budget on it. A parent that
+// wrote a partial payload and then stalled held the tool call for as long as it
+// felt like, which is the exact failure this binary exists to avoid.
+TEST_CASE("a writer that never closes stdin cannot hold the hook open") {
+    int fds[2];
+    REQUIRE(::pipe(fds) == 0);
+    REQUIRE(::write(fds[1], R"({"tool_name":"Read",)", 20) == 20);
+    // fds[1] is deliberately left open: nothing is coming, and nothing says so.
+
+    std::string got;
+    const long long ms =
+        elapsed_ms([&] { got = ap::read_bounded(fds[0], 1u << 20, 50); });
+
+    REQUIRE(ms < 1000);
+    REQUIRE(got == R"({"tool_name":"Read",)");  // what arrived still counts
+
+    ::close(fds[0]);
+    ::close(fds[1]);
+}
+
+TEST_CASE("a payload larger than the cap is drained, not buffered") {
+    int fds[2];
+    REQUIRE(::pipe(fds) == 0);
+
+    constexpr std::size_t kCap = 4096;
+    const std::string head = R"({"tool_name":"Write","file_path":"/repo/a.py","content":")";
+    const std::string body(2 * 1024 * 1024, 'x');
+
+    // A pipe buffer is tens of KB, so a 2MB write blocks until it is consumed.
+    // That is the point: the reader has to keep draining past its cap or the
+    // parent is left wedged on a write nobody is finishing.
+    std::thread writer([&] {
+        ::write(fds[1], head.data(), head.size());
+        ::write(fds[1], body.data(), body.size());
+        ::close(fds[1]);
+    });
+
+    std::string got;
+    const long long ms =
+        elapsed_ms([&] { got = ap::read_bounded(fds[0], kCap, 1000); });
+    writer.join();
+
+    REQUIRE(got.size() == kCap);                 // memory stayed capped
+    REQUIRE(got.compare(0, head.size(), head) == 0);
+    REQUIRE(ms < 1000);                          // and it reached EOF, not the deadline
+
+    // The fields the hook actually wants sit in the head, so capping costs
+    // nothing that ends up on the wire.
+    const std::string ev = ap::build_event(got);
+    REQUIRE(ev.find("/repo/a.py") != std::string::npos);
+    REQUIRE(ev.find("xxxx") == std::string::npos);
+
+    ::close(fds[0]);
+}
+
+TEST_CASE("an ordinary payload is read whole and costs nothing") {
+    int fds[2];
+    REQUIRE(::pipe(fds) == 0);
+    const std::string payload =
+        R"({"tool_name":"Edit","tool_input":{"file_path":"/repo/src/a.py"},"session_id":"s1"})";
+    REQUIRE(::write(fds[1], payload.data(), payload.size()) ==
+            static_cast<ssize_t>(payload.size()));
+    ::close(fds[1]);
+
+    std::string got;
+    const long long ms =
+        elapsed_ms([&] { got = ap::read_bounded(fds[0], 1u << 20, 1000); });
+
+    REQUIRE(got == payload);
+    REQUIRE(ms < 50);
+    ::close(fds[0]);
+}
 
 TEST_CASE("write_line returns false when no socket exists, and never throws") {
     REQUIRE_FALSE(ap::write_line("/nonexistent/path.sock", "{}", 5));
