@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .negotiation import Negotiator
+from .negotiation import MOVES, Negotiator
 from .redact import opaque_region_if_enabled
 from .relay import Relay
 from .types import Region
@@ -44,11 +44,21 @@ class Tools:
         )
         if result.ok:
             return {"granted": True}
+
+        # Same wait-die handling the wire path does, for the same reason: a
+        # refusal with no instruction leaves both agents retrying at each other,
+        # and the loser's leases have to actually go or the wait-for cycle
+        # survives. Two channels ordering claims differently would be a cycle
+        # the relay cannot see.
+        if result.decision == "abort":
+            self._relay.registry.release_all(self._agent)
+
         return {
             "granted": False,
             "held_by": result.held_by.agent,
             "held_by_human": result.held_by.human,
             "intent": result.held_by.intent,
+            "decision": result.decision,
             "moves": ["DEFER", "SPLIT", "HANDOFF", "PROCEED"],
         }
 
@@ -63,11 +73,15 @@ class Tools:
         outcome = self._negotiator.apply(self._room, self._agent, region, move, reason)
         error = getattr(outcome, "error", None)
         if outcome.action == "invalid_move":
-            # The negotiator reports this instead of raising so its other
-            # callers can decide. At the tool boundary an invented move is a
-            # caller bug, and a model learns faster from an error than from a
-            # {"granted": false} it can misread as a refusal.
-            raise ValueError(error or f"unknown negotiation move: {move!r}")
+            # Hand the valid options back in the result. That is more
+            # actionable than an exception string, and it keeps the MCP
+            # surface total: respond never throws. Same fail-open principle
+            # the rest of this system runs on.
+            return {
+                "granted": False,
+                "error": f"unknown move: {move}",
+                "valid_moves": list(MOVES),
+            }
         result = {
             "granted": outcome.granted,
             "action": outcome.action,
@@ -132,7 +146,8 @@ def tool_descriptors() -> list[dict]:
 
 def dispatch(tools: Tools, name: str, arguments: dict) -> dict | list:
     """Route a tool call to the matching method. Raises KeyError on an
-    unknown name and ValueError on an invented negotiation move."""
+    unknown tool name. Tool calls themselves never raise: an invented
+    negotiation move comes back as a refusal carrying the valid moves."""
     if name == "who_else_is_here":
         return tools.who_else_is_here()
     if name == "claim_work":

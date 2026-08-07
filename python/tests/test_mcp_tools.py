@@ -70,10 +70,11 @@ def test_release_frees_the_region_for_others(setup):
     ).Region(path="src/db.py", symbol="query", lines=None)) is None
 
 
-def test_respond_rejects_an_invented_move(setup):
+def test_respond_refuses_an_invented_move_without_raising(setup):
     _, tools = setup
-    with pytest.raises(ValueError):
-        tools.respond("src/db.py", "query", "ARGUE")
+    result = tools.respond("src/db.py", "query", "ARGUE")
+    assert result["granted"] is False
+    assert result["valid_moves"] == ["DEFER", "SPLIT", "HANDOFF", "PROCEED"]
 
 
 def test_proceed_is_always_granted_and_flagged_as_an_override(setup):
@@ -88,8 +89,37 @@ def test_proceed_is_always_granted_and_flagged_as_an_override(setup):
 
 def test_the_invented_move_is_named_in_the_error(setup):
     _, tools = setup
-    with pytest.raises(ValueError, match="ARGUE"):
-        tools.respond("src/db.py", "query", "ARGUE")
+    assert tools.respond("src/db.py", "query", "ARGUE")["error"] == (
+        "unknown move: ARGUE"
+    )
+
+
+def test_respond_accepts_moves_case_insensitively(setup):
+    relay, tools = setup
+    from agent_presence.types import Region
+    relay.registry.acquire("r1", "sara", "a1",
+                           Region(path="src/db.py", symbol="query", lines=None), "x")
+    result = tools.respond("src/db.py", "query", "  proceed  ", reason="unrelated")
+    assert result["granted"]
+    assert result["action"] == "proceed"
+    assert "error" not in result
+
+
+def test_respond_keeps_the_tool_surface_total_for_every_junk_move(setup):
+    _, tools = setup
+    for junk in ["", "   ", "ARGUE", "defer!", "PROCEE"]:
+        result = tools.respond("src/db.py", "query", junk)
+        assert result["granted"] is False
+        assert result["valid_moves"] == ["DEFER", "SPLIT", "HANDOFF", "PROCEED"]
+
+
+def test_dispatch_returns_the_refusal_instead_of_raising_on_a_bad_move(setup):
+    _, tools = setup
+    result = dispatch(tools, "respond", {
+        "path": "src/db.py", "symbol": "query", "move": "ARGUE",
+    })
+    assert result["granted"] is False
+    assert result["valid_moves"] == ["DEFER", "SPLIT", "HANDOFF", "PROCEED"]
 
 
 def test_opaque_mode_keys_tool_claims_the_way_hook_events_are_keyed(setup, monkeypatch):
