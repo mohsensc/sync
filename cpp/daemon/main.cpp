@@ -11,6 +11,12 @@
 
 namespace {
 
+// How long an agent stays on the statusline after its last event, and how often
+// the snapshot is rewritten even when nothing changed. The periodic rewrite is
+// what turns a fresh mtime into proof the daemon is alive.
+constexpr long long kPresenceTtlMs = 30000;
+constexpr long long kSnapshotTickMs = 1000;
+
 long long now_ms() {
     using namespace std::chrono;
     return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
@@ -45,10 +51,27 @@ int main() {
     ap::SocketServer server(sock);
     ap::Coalescer coalescer(1000, 200);
     ap::Outbound outbound(1000);
+    ap::PresenceTable presence(kPresenceTtlMs);
+
+    bool dirty = false;
 
     server.on_line([&](std::string line) {
+        const std::string verb = field(line, "verb");
+        const std::string path = field(line, "path");
+        const std::string agent = field(line, "agent");
+        if (agent.empty()) return;
+
+        // The hook has no name for the person driving; fall back to the session
+        // id so the statusline still counts a body in the room.
+        std::string human = field(line, "human");
+        if (human.empty()) human = agent;
+
+        // Presence is local and cheap, so it tracks every event. Only the relay
+        // traffic is worth coalescing.
+        if (presence.touch(agent, human, verb, path, now_ms())) dirty = true;
+
         // The daemon makes no protocol decisions. It coalesces and forwards.
-        ap::Ev e{field(line, "verb"), field(line, "path"), field(line, "agent")};
+        ap::Ev e{verb, path, agent};
         if (!coalescer.admit(e, now_ms())) return;
         outbound.push(std::move(line));
     });
@@ -57,11 +80,21 @@ int main() {
 
     // Write once up front so the statusline reads a valid file from the first
     // tick instead of treating a missing file as an error.
-    ap::write_snapshot(snap, {});
+    ap::write_snapshot(snap, presence.peers());
+    long long last_write = now_ms();
+
     for (;;) {
         server.poll_once(200);
         // Relay transport is attached here; on disconnect, outbound buffers
         // and the lease cache is left stale-but-harmless (expired entries
         // never block, see LeaseCache::conflict_for).
+
+        const long long t = now_ms();
+        if (presence.expire(t)) dirty = true;
+        if (dirty || t - last_write >= kSnapshotTickMs) {
+            ap::write_snapshot(snap, presence.peers());
+            last_write = t;
+            dirty = false;
+        }
     }
 }
