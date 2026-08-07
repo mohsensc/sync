@@ -2,7 +2,9 @@
 name = "agent-presence"
 version = "0.0.0"
 requires-python = ">=3.12"
-dependencies = ["websockets>=13.0", "mcp>=1.2.0"]
+# mcp 2.0 replaced the decorator server API with on_* callbacks. mcp_server.py
+# targets the callback form, so 1.x won't work.
+dependencies = ["websockets>=13.0", "mcp>=2.0.0"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "hypothesis>=6.100", "pytest-asyncio>=0.24"]
