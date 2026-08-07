@@ -115,6 +115,27 @@ def redact(event_dict: dict) -> dict:
     return out
 
 
+def clean_region_dict(value: object) -> dict | None:
+    """A region off the wire, stripped to path/symbol/lines and hashed when
+    opaque mode is on. Returns None when there's no usable path.
+
+    `redact()` only ever guarded the event frame. Claims, releases, heartbeats
+    and moves carry regions too, and they went into the lease table raw — which
+    both skipped the allowlist and, in opaque mode, left cleartext paths in a
+    table the MCP channel was filling with hashes.
+    """
+    region = _clean_region(value)
+    if region is None:
+        return None
+    return apply_opaque(region) if opaque_enabled() else region
+
+
+def clean_intent(value: object) -> str:
+    """Intent and reason are free text an agent opted into publishing. A
+    container under one of those keys is not text, it's an envelope."""
+    return value if _is_str(value) else ""
+
+
 def _h(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()[:16]
 
@@ -150,7 +171,14 @@ def apply_opaque(payload):
         return payload
 
     out = {k: apply_opaque(v) for k, v in payload.items()}
-    if not _is_str(out.get("path")) or out.get(OPAQUE_MARK) is True:
+    if "path" not in out or out.get(OPAQUE_MARK) is True:
+        return out
+    if not _is_str(out["path"]):
+        # A list or dict under `path` is not a path the hasher can consume.
+        # Letting it through untouched is how a region-shaped envelope gets a
+        # free ride past opaque mode, so the region fields go whole.
+        for key in ("path", "symbol", "lines"):
+            out.pop(key, None)
         return out
 
     out["path"] = _h(out["path"])

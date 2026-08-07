@@ -1,5 +1,6 @@
 import pytest
 
+from agent_presence import redact as redact_module
 from agent_presence.redact import (
     FORBIDDEN_FIELDS,
     PERMITTED_TOP_LEVEL,
@@ -30,8 +31,34 @@ def raw():
 
 @pytest.mark.parametrize("field", sorted(FORBIDDEN_FIELDS))
 def test_every_forbidden_field_is_stripped(field):
-    out = redact(raw())
+    # The payload has to actually carry the field, otherwise 14 of these 18
+    # cases assert that a key nobody sent didn't arrive.
+    payload = raw()
+    payload[field] = f"SECRET_KEY = '{SECRET}'"
+    out = redact(payload)
     assert field not in out
+    assert SECRET not in repr(out)
+
+
+@pytest.mark.parametrize("field", sorted(FORBIDDEN_FIELDS))
+def test_a_forbidden_field_stays_stripped_even_if_the_allowlist_lets_it_in(
+    field, monkeypatch
+):
+    # Defence in depth, and the only thing that makes the FORBIDDEN_FIELDS
+    # check in redact() load-bearing: the two name allowlists are widened to
+    # admit the field, exactly what a careless edit to either set would do.
+    # The denylist is what's left standing.
+    monkeypatch.setattr(
+        redact_module, "PERMITTED_TOP_LEVEL", PERMITTED_TOP_LEVEL | {field}
+    )
+    monkeypatch.setattr(
+        redact_module, "_STRING_FIELDS", redact_module._STRING_FIELDS | {field}
+    )
+    payload = raw()
+    payload[field] = f"SECRET_KEY = '{SECRET}'"
+    out = redact(payload)
+    assert field not in out
+    assert SECRET not in repr(out)
 
 
 def test_permitted_fields_survive():

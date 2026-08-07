@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import logging
 from typing import Protocol
 
 from .clock import Clock
 from .ladder import Activity, classify, interrupts_at
 from .leases import PRESENCE_TTL_S, LeaseRegistry
 from .negotiation import Negotiator
-from .redact import redact
+from .redact import clean_intent, clean_region_dict, redact
 from .types import AgentEvent, Region
+
+log = logging.getLogger("agent_presence.relay")
 
 
 class Conn(Protocol):
@@ -25,6 +28,13 @@ def _region(d: dict) -> Region:
         symbol=d.get("symbol"),
         lines=tuple(lines) if lines else None,
     )
+
+
+def _wire_region(message: dict, key: str = "region") -> Region | None:
+    """A region off a non-event frame. Same allowlist and same opaque hashing
+    the event path gets, because a claim reaches just as far as a touch does."""
+    d = clean_region_dict(message.get(key))
+    return _region(d) if d is not None else None
 
 
 class Relay:
@@ -93,20 +103,29 @@ class Relay:
         kind = message.get("type")
         if kind == "event":
             return self._on_event(room, conn, message)
+        if kind not in ("claim", "release", "heartbeat", "move"):
+            return None
+
+        # Every remaining frame carries a region, and every one of them used to
+        # take it straight off the wire. A region with no usable path is dropped
+        # rather than guessed at.
+        region = _wire_region(message)
+        if region is None:
+            return None
+
         if kind == "claim":
-            return self._on_claim(room, conn, message)
+            return self._on_claim(room, conn, message, region)
         if kind == "release":
-            self.registry.release(room, conn.agent, _region(message["region"]))
+            self.registry.release(room, conn.agent, region)
             return None
         if kind == "heartbeat":
-            self.registry.heartbeat(room, conn.agent, _region(message["region"]))
+            self.registry.heartbeat(room, conn.agent, region)
             return None
         if kind == "move":
-            split = message.get("split_region")
             outcome = self._negotiator.apply(
-                room, conn.agent, _region(message["region"]),
-                message.get("move", ""), message.get("reason", ""),
-                split_scope=_region(split) if split else None,
+                room, conn.agent, region,
+                message.get("move", ""), clean_intent(message.get("reason")),
+                split_scope=_wire_region(message, "split_region"),
             )
             reply = {"type": "move_result", "granted": outcome.granted,
                      "action": outcome.action}
@@ -155,10 +174,12 @@ class Relay:
             "decision": brief.decision,
         }
 
-    def _on_claim(self, room: str, conn: Conn, message: dict) -> dict:
+    def _on_claim(
+        self, room: str, conn: Conn, message: dict, region: Region
+    ) -> dict:
         result = self.registry.acquire(
             room, conn.human, conn.agent,
-            _region(message["region"]), message.get("intent", ""),
+            region, clean_intent(message.get("intent")),
         )
         if result.ok:
             return {"type": "claim_result", "granted": True}
