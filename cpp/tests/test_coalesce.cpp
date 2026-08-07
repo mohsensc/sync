@@ -26,6 +26,28 @@ TEST_CASE("a flood is capped and the overflow counted, not queued") {
     REQUIRE(c.dropped() == 40);
 }
 
+TEST_CASE("the dedup map does not grow without bound") {
+    Coalescer c(1000, 10);
+    // 500 windows, 10 fresh paths each. Nothing repeats, so nothing may be
+    // remembered past its window.
+    for (int w = 0; w < 500; ++w) {
+        const long long now = static_cast<long long>(w) * 1000;
+        for (int i = 0; i < 10; ++i) {
+            c.admit(Ev{"read", "f" + std::to_string(w) + "_" + std::to_string(i) + ".py", "s1"},
+                    now);
+        }
+        REQUIRE(c.tracked() <= 20);
+    }
+}
+
+TEST_CASE("an entry older than the window is forgotten") {
+    Coalescer c(1000, 10);
+    REQUIRE(c.admit(Ev{"read", "a.py", "s1"}, 0));
+    REQUIRE(c.tracked() == 1);
+    c.admit(Ev{"read", "b.py", "s1"}, 5000);
+    REQUIRE(c.tracked() == 1);  // a.py aged out, b.py took its place
+}
+
 TEST_CASE("the cap resets when the window rolls") {
     Coalescer c(1000, 2);
     c.admit(Ev{"search", "a.py", "s1"}, 0);

@@ -19,8 +19,13 @@ public:
 
     bool admit(const Ev& e, long long now_ms);
     std::size_t dropped() const { return dropped_; }
+    /// Size of the dedup map. Exposed because an unbounded one is a leak.
+    std::size_t tracked() const { return last_seen_.size(); }
 
 private:
+    /// Drop keys whose last sighting is older than the window.
+    void evict(long long now_ms);
+
     int window_ms_;
     std::size_t max_per_window_;
     long long window_start_ = 0;
