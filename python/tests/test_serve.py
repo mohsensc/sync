@@ -59,6 +59,24 @@ async def test_malformed_json_does_not_kill_the_connection(server):
         assert reply["type"] == "ack"
 
 
+async def test_binary_frame_with_invalid_utf8_does_not_kill_the_connection(server):
+    async with websockets.connect("ws://127.0.0.1:8799") as ws:
+        await ws.send(json.dumps({"type": "join", "room": "r1",
+                                  "agent": "a1", "human": "sara"}))
+        # A binary frame arrives from `async for` as raw bytes and skips the
+        # UTF-8 validation websockets does on text frames. json.loads then
+        # raises UnicodeDecodeError, which is a ValueError but *not* a
+        # JSONDecodeError, so it used to escape and close the socket with 1011.
+        await ws.send(b"\x80not json")
+        await ws.send(json.dumps({
+            "type": "event", "verb": "read", "source": "hook",
+            "region": {"path": "a.py", "symbol": None, "lines": None},
+        }))
+        reply = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
+        assert reply["type"] == "ack"
+        assert ws.state is websockets.protocol.State.OPEN
+
+
 async def test_join_without_a_room_does_not_kill_the_connection(server):
     async with websockets.connect("ws://127.0.0.1:8799") as ws:
         # No "room" key. Used to raise KeyError and close the socket with 1011.

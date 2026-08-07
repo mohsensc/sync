@@ -43,8 +43,16 @@ async def _session(ws, relay: Relay) -> None:
         async for raw in ws:
             try:
                 msg = json.loads(raw)
-            except json.JSONDecodeError:
+            except Exception:
                 # Malformed input is dropped, never fatal. Fail open.
+                #
+                # Not just JSONDecodeError: a binary frame reaches us as raw
+                # bytes with none of the UTF-8 validation websockets does on
+                # text frames, so json.loads can raise UnicodeDecodeError, and
+                # a deeply nested payload can raise RecursionError. Neither is
+                # a JSONDecodeError and both used to close the socket with a
+                # 1011. Anything that fails to parse is just a dropped frame.
+                log.debug("undecodable frame dropped", exc_info=True)
                 continue
             if not isinstance(msg, dict):
                 continue
