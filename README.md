@@ -35,8 +35,10 @@ remote, session id, `git config user.email`. `AGENT_PRESENCE_ROOM`, `_AGENT` and
 without touching anything; `AGENT_PRESENCE_BIN` sets the install dir.
 
 Tests: `cd python && .venv/bin/python -m pytest`; `cmake -S cpp -B cpp/build &&
-cmake --build cpp/build && ctest --test-dir cpp/build`; `cd web && npx vitest run
-&& npx tsc --noEmit`. Bare `pytest` won't do, `sim/` only imports via `-m`.
+cmake --build cpp/build && ctest --test-dir cpp/build`; `cd web && pnpm install
+--frozen-lockfile && pnpm test && pnpm typecheck`. Bare `pytest` won't do, `sim/`
+only imports via `-m`. Not `npx`: it fetches a different vitest and a `tsc` that
+isn't the compiler. CI runs all three on every push.
 
 ## What's broken
 
