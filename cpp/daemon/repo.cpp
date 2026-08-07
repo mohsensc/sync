@@ -2,41 +2,78 @@
 
 #include <openssl/evp.h>
 
-#include <algorithm>
-#include <cctype>
+#include <cstddef>
 #include <filesystem>
 #include <iomanip>
-#include <regex>
 #include <sstream>
+#include <string_view>
 
 namespace ap {
 namespace {
-const std::regex kScp(R"(^[^/@]+@([^:]+):(.+)$)");
-const std::regex kProto(R"(^[a-z+]+://)");
-const std::regex kUserinfo(R"(^[^/@]+@)");
+
+// Python's str.strip() over the ASCII range: 0x09-0x0d, 0x1c-0x1f, 0x20.
+// (The old set here missed 0x1c-0x1f, so a remote ending in one of those
+// normalized differently in each language.)
+bool ascii_space(unsigned char c) {
+    return c == 0x20 || (c >= 0x09 && c <= 0x0d) || (c >= 0x1c && c <= 0x1f);
+}
+
+bool ascii_lower_alpha(unsigned char c) { return c >= 'a' && c <= 'z'; }
+
+/// Python: `re.compile(r"^[a-z+]+://").sub("", s)`.
+void strip_proto(std::string& s) {
+    size_t i = 0;
+    while (i < s.size() && (ascii_lower_alpha(static_cast<unsigned char>(s[i])) || s[i] == '+')) ++i;
+    if (i == 0) return;
+    if (s.compare(i, 3, "://") != 0) return;
+    s.erase(0, i + 3);
+}
+
+/// Python: `re.compile(r"^[^/@]+@").sub("", s)`.
+void strip_userinfo(std::string& s) {
+    const auto at = s.find('@');
+    if (at == std::string::npos || at == 0) return;
+    if (s.find('/') < at) return;
+    s.erase(0, at + 1);
+}
+
+/// Python: `re.compile(r"^[^/@]+@([^:]+):(.+)$").match(s)`, rewritten as
+/// `group(1) + "/" + group(2)`. Hand-rolled rather than std::regex because
+/// std::regex and Python's re disagree on what `.` and `$` mean around \r and
+/// \n, and this function has to agree with Python byte for byte.
+bool scp_rewrite(std::string& s) {
+    const auto at = s.find('@');                       // ^[^/@]+
+    if (at == std::string::npos || at == 0) return false;
+    if (s.find('/') < at) return false;
+    const auto colon = s.find(':', at + 1);            // ([^:]+):
+    if (colon == std::string::npos || colon == at + 1) return false;
+    if (colon + 1 >= s.size()) return false;           // (.+) is non-empty
+    if (s.find('\n', colon + 1) != std::string::npos) return false;  // `.` is not \n
+    s = s.substr(at + 1, colon - at - 1) + "/" + s.substr(colon + 1);
+    return true;
+}
+
 }  // namespace
 
 std::string normalize_remote(const std::string& url) {
-    std::string s = url;
-    // Python's str.strip() with no argument; these are the characters git
-    // remotes ever pick up.
-    const char* ws = " \t\n\r\f\v";
-    const auto first = s.find_first_not_of(ws);
-    if (first == std::string::npos) {
-        s.clear();
-    } else {
-        s.erase(0, first);
-        s.erase(s.find_last_not_of(ws) + 1);
-    }
-    std::transform(s.begin(), s.end(), s.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    // ASCII-only by contract. C++ has no Unicode case mapping in the standard
+    // library and this is not worth a new dependency, so room_key.py restricts
+    // itself to ASCII too — see the note there. Both sides work on UTF-8, and no
+    // byte of a multi-byte UTF-8 sequence is below 0x80, so doing this per byte
+    // here and per code point in Python gives identical output.
+    size_t b = 0;
+    size_t e = url.size();
+    while (b < e && ascii_space(static_cast<unsigned char>(url[b]))) ++b;
+    while (e > b && ascii_space(static_cast<unsigned char>(url[e - 1]))) --e;
+    std::string s = url.substr(b, e - b);
 
-    std::smatch m;
-    if (std::regex_match(s, m, kScp)) {
-        s = m[1].str() + "/" + m[2].str();
-    } else {
-        s = std::regex_replace(s, kProto, "");
-        s = std::regex_replace(s, kUserinfo, "");
+    for (char& c : s) {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    }
+
+    if (!scp_rewrite(s)) {
+        strip_proto(s);
+        strip_userinfo(s);
     }
 
     if (s.size() >= 4 && s.compare(s.size() - 4, 4, ".git") == 0) {
