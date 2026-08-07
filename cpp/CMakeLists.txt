@@ -53,3 +53,10 @@ target_sources(ap_tests PRIVATE tests/test_daemon_field.cpp)
 
 add_executable(presenced daemon/main.cpp)
 target_link_libraries(presenced PRIVATE ap_daemon_lib)
+
+# The relay transport. Needs SHA-1 for the handshake, which OpenSSL::Crypto
+# above already provides, and a thread for the name lookup it must not block on.
+find_package(Threads REQUIRED)
+target_sources(ap_daemon_lib PRIVATE daemon/relay_client.cpp)
+target_link_libraries(ap_daemon_lib PUBLIC Threads::Threads)
+target_sources(ap_tests PRIVATE tests/test_relay_client.cpp)
