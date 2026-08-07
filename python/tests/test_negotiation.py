@@ -50,8 +50,16 @@ def test_split_grants_a_disjoint_region(neg):
 
 def test_handoff_drops_the_requester_claim_and_leaves_the_holder(neg):
     _, registry, n = neg
-    outcome = n.apply("r1", "a2", R, "HANDOFF")
+    # a2 has to hold something first, or HANDOFF has nothing to drop and a
+    # no-op passes.
+    registry.acquire("r1", "dev", "a2", OTHER, "rename sign_out")
+    assert registry.holder_of("r1", OTHER).agent == "a2"
+
+    outcome = n.apply("r1", "a2", OTHER, "HANDOFF")
     assert not outcome.granted
+    assert outcome.action == "handoff"
+    assert registry.holder_of("r1", OTHER) is None
+    # Handing back your own region must not disturb anyone else's.
     assert registry.holder_of("r1", R).agent == "a1"
 
 

@@ -15,6 +15,9 @@ class FakeConn:
         self.sent.append(payload)
 
 
+SECRET = "hunter2"
+
+
 @pytest.fixture
 def relay():
     return Relay(VirtualClock(1000.0))
@@ -65,13 +68,24 @@ def test_leaving_releases_every_lease_that_connection_held(relay):
     assert relay.registry.active_claims("r1") == []
 
 
-def test_forbidden_fields_never_reach_presence(relay):
-    a = FakeConn("a1")
+def test_forbidden_fields_never_reach_the_wire_or_the_store(relay):
+    # The presence store is built from named fields, so it can't leak whatever
+    # redaction does. The fan-out payload forwards the region the client sent,
+    # so that's the boundary worth testing.
+    a, b = FakeConn("a1"), FakeConn("a2")
     relay.join("r1", a)
+    relay.join("r1", b)
+
     evt = touch("a1")
-    evt["content"] = "hunter2"
+    evt["content"] = SECRET                 # smuggled at the top level
+    evt["region"]["note"] = SECRET          # smuggled inside a permitted key
     relay.handle(a, evt)
-    assert "hunter2" not in repr(relay.presence("r1"))
+
+    assert len(b.sent) == 1
+    payload = b.sent[0]
+    assert SECRET not in repr(payload)
+    assert set(payload["region"]) == {"path", "symbol", "lines"}
+    assert SECRET not in repr(relay.presence("r1"))
 
 
 # -- (C) identity comes from the connection, never from the payload ----------
