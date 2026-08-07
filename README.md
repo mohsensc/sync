@@ -7,8 +7,6 @@ duplicate work and overwrite each other, and you find out at merge time.
 This is one event stream with two readers: an ambient animated world for humans,
 and claims plus negotiation messages for agents.
 
-Early MVP. Right now the repo is docs only — there's no code yet.
-
 ## Shape
 
 Four processes:
@@ -25,23 +23,24 @@ Rooms are keyed off a hash of the git remote, so cloning the repo is the whole
 setup. Leases expire in 90s. Nothing is permanent — if an agent dies you lose
 protection, you never wedge a teammate.
 
-## How to run it
-
-Nothing to run yet. When there is, it'll be:
+## Run it
 
 ```
-cd python && pytest
-cmake -S cpp -B cpp/build && cmake --build cpp/build && ctest --test-dir cpp/build
-cd web && npm test
+cmake -S cpp -B cpp/build && cmake --build cpp/build   # build the binaries
+cd python && pip install -e '.[dev]'                   # install the Python side
+python -m agent_presence.serve                         # run the relay
+./install.sh                                           # copy binaries, print hook config
 ```
 
-## Docs
+`./install.sh --print-settings` just prints the block for `~/.claude/settings.json`
+without touching anything. `AGENT_PRESENCE_BIN` overrides the install dir
+(default `~/.local/bin`).
 
-- `docs/design.md` — what it is and why it's shaped this way.
-- `docs/plan.md` — the task-by-task build order.
+Tests: `cd python && pytest`, `ctest --test-dir cpp/build`, `cd web && pnpm test`.
 
 ## What's broken
 
-Everything, in the sense that none of it exists. Known unknowns from the design:
-the collision ladder's tuning is guesswork until real traffic hits it, and the
-5ms hook budget hasn't been measured on anything.
+The collision ladder's tuning is guesswork until real traffic hits it, and the
+5ms hook budget hasn't been measured under load. Rung 4 (redundant work on
+different files) isn't implemented — it needs embedding similarity and would be
+noisy today. Dashboard renders placeholder primitives, no real assets.
