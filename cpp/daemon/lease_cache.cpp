@@ -17,4 +17,23 @@ std::optional<CachedLease> LeaseCache::conflict_for(const std::string& region_ke
     return it->second;
 }
 
+std::optional<CachedLease> LeaseCache::conflict_for_file(const std::string& path,
+                                                         const std::string& my_agent,
+                                                         long long now_ms) const {
+    if (path.empty()) return std::nullopt;
+    const std::string prefix = path + "|";
+
+    // Whichever live foreign lease is found first. There is no ranking to make
+    // here: every one of them contends with a whole-file edit, and naming one
+    // holder is what the hook renders. Iteration order is unspecified, so a file
+    // held by two agents may name either — both answers are true.
+    for (const auto& [key, lease] : by_region_) {
+        if (key.size() < prefix.size() || key.compare(0, prefix.size(), prefix) != 0) continue;
+        if (lease.agent == my_agent) continue;
+        if (lease.expires_at_ms <= now_ms) continue;
+        return lease;
+    }
+    return std::nullopt;
+}
+
 }  // namespace ap

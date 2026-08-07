@@ -1,111 +1,24 @@
+#include <poll.h>
+#include <unistd.h>
+
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
+#include <filesystem>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
 
 #include "daemon/coalesce.hpp"
+#include "daemon/decide.hpp"
+#include "daemon/json.hpp"
+#include "daemon/lease_cache.hpp"
 #include "daemon/outbound.hpp"
+#include "daemon/relay_client.hpp"
+#include "daemon/repo.hpp"
 #include "daemon/snapshot.hpp"
 #include "daemon/socket_server.hpp"
-
-namespace ap {
-
-namespace {
-
-void append_utf8(std::string& out, unsigned cp) {
-    if (cp < 0x80) {
-        out += static_cast<char>(cp);
-    } else if (cp < 0x800) {
-        out += static_cast<char>(0xC0 | (cp >> 6));
-        out += static_cast<char>(0x80 | (cp & 0x3F));
-    } else if (cp < 0x10000) {
-        out += static_cast<char>(0xE0 | (cp >> 12));
-        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-        out += static_cast<char>(0x80 | (cp & 0x3F));
-    } else {
-        out += static_cast<char>(0xF0 | (cp >> 18));
-        out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
-        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-        out += static_cast<char>(0x80 | (cp & 0x3F));
-    }
-}
-
-/// Four hex digits at `pos`, or false.
-bool hex4(std::string_view s, size_t pos, unsigned& out) {
-    if (pos + 4 > s.size()) return false;
-    unsigned v = 0;
-    for (int i = 0; i < 4; ++i) {
-        const char c = s[pos + i];
-        v <<= 4;
-        if (c >= '0' && c <= '9') v |= static_cast<unsigned>(c - '0');
-        else if (c >= 'a' && c <= 'f') v |= static_cast<unsigned>(c - 'a' + 10);
-        else if (c >= 'A' && c <= 'F') v |= static_cast<unsigned>(c - 'A' + 10);
-        else return false;
-    }
-    out = v;
-    return true;
-}
-
-}  // namespace
-
-/// Same shape as the hook's extractor, escapes included. Scanning for the next
-/// bare '"' is what this used to do, and it quietly truncated every path with a
-/// quote in it: the hook wrote valid JSON, the daemon read half of it, and the
-/// event went nowhere with nothing logged. Decoding here is what makes the path
-/// on this side byte-identical to the path the hook was handed.
-std::string json_field(std::string_view json, std::string_view key) {
-    std::string needle = "\"";
-    needle += key;
-    needle += "\":\"";
-    auto pos = json.find(needle);
-    if (pos == std::string_view::npos) return {};
-    pos += needle.size();
-
-    std::string out;
-    while (pos < json.size()) {
-        const char c = json[pos];
-        if (c == '"') return out;
-        if (c != '\\') {
-            out += c;
-            ++pos;
-            continue;
-        }
-        if (pos + 1 >= json.size()) break;  // truncated payload
-        const char e = json[pos + 1];
-        pos += 2;
-        switch (e) {
-            case 'n': out += '\n'; break;
-            case 't': out += '\t'; break;
-            case 'r': out += '\r'; break;
-            case 'b': out += '\b'; break;
-            case 'f': out += '\f'; break;
-            case 'u': {
-                unsigned cp = 0;
-                if (!hex4(json, pos, cp)) return {};
-                pos += 4;
-                if (cp >= 0xD800 && cp <= 0xDBFF) {  // surrogate pair
-                    unsigned lo = 0;
-                    if (pos + 6 <= json.size() && json[pos] == '\\' && json[pos + 1] == 'u' &&
-                        hex4(json, pos + 2, lo) && lo >= 0xDC00 && lo <= 0xDFFF) {
-                        cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
-                        pos += 6;
-                    } else {
-                        cp = 0xFFFD;  // lone high surrogate
-                    }
-                } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
-                    cp = 0xFFFD;  // lone low surrogate
-                }
-                append_utf8(out, cp);
-                break;
-            }
-            default: out += e; break;  // covers \" \\ \/ and anything odd
-        }
-    }
-    return {};  // unterminated string: no value worth trusting
-}
-
-}  // namespace ap
 
 namespace {
 
@@ -115,6 +28,18 @@ namespace {
 constexpr long long kPresenceTtlMs = 30000;
 constexpr long long kSnapshotTickMs = 1000;
 
+// The tick. One wait, on every fd that matters, then a non-blocking pass over
+// both halves.
+//
+// Splitting the wait — poll the hook socket for a while, then poll the relay
+// for a while — is what the loop used to do, and it cannot answer a hook. The
+// hook spends 2ms total on connect, write and read; a daemon parked inside a
+// relay poll misses that window entirely and the edit allows. So the blocking
+// happens here, over the listen fd and the relay fd together, and whichever
+// speaks first wakes the loop.
+constexpr int kTickMs = 100;
+constexpr int kConnBudgetMs = 5;  // per hook connection; the hook's own cap
+
 long long now_ms() {
     using namespace std::chrono;
     return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
@@ -123,6 +48,65 @@ long long now_ms() {
 std::string env_or(const char* key, const std::string& fallback) {
     const char* v = std::getenv(key);
     return v ? std::string(v) : fallback;
+}
+
+std::string hostname() {
+    char buf[256] = {0};
+    if (::gethostname(buf, sizeof(buf) - 1) != 0) return "unknown-host";
+    return buf[0] ? std::string(buf) : std::string("unknown-host");
+}
+
+std::string shell_quote(const std::string& s) {
+    std::string out = "'";
+    for (char c : s) {
+        if (c == '\'') out += "'\\''";
+        else out += c;
+    }
+    out += "'";
+    return out;
+}
+
+/// The origin remote of a checkout, or empty. Runs git once, at startup, and
+/// never again: forking in the event loop would be the one thing the 5ms
+/// budget cannot absorb.
+std::string git_origin_url(const std::string& root) {
+    const std::string cmd = "git -C " + shell_quote(root) + " remote get-url origin 2>/dev/null";
+    FILE* p = ::popen(cmd.c_str(), "r");
+    if (p == nullptr) return {};
+
+    std::string out;
+    char buf[512];
+    while (std::fgets(buf, sizeof(buf), p) != nullptr) out += buf;
+    ::pclose(p);
+
+    while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) out.pop_back();
+    return out;
+}
+
+/// Which room this daemon's events belong to.
+///
+/// Rooms are a hash of the git remote, so the daemon needs a checkout, and the
+/// one it has is the directory it was started in. AGENT_PRESENCE_ROOM overrides
+/// that for anyone running it somewhere else.
+///
+/// Empty means no relay. That is deliberate: one connection carries one room,
+/// and joining a made-up room would put every unkeyed machine on the planet in
+/// the same one. A daemon with no room still writes the snapshot, which is the
+/// whole local half of the product.
+std::string discover_room() {
+    const std::string forced = env_or("AGENT_PRESENCE_ROOM", "");
+    if (!forced.empty()) return forced;
+
+    std::error_code ec;
+    const auto cwd = std::filesystem::current_path(ec);
+    if (ec) return {};
+
+    const auto root = ap::find_repo_root(cwd.string());
+    if (!root) return {};
+
+    const std::string remote = git_origin_url(*root);
+    if (remote.empty()) return {};
+    return ap::room_id_from_remote(remote);
 }
 
 }  // namespace
@@ -137,8 +121,32 @@ int main() {
     ap::Coalescer coalescer(1000, 200);
     ap::Outbound outbound(1000);
     ap::PresenceTable presence(kPresenceTtlMs);
+    ap::LeaseCache leases;
 
     bool dirty = false;
+
+    ap::RelayConfig relay_cfg;
+    relay_cfg.url = env_or("AGENT_PRESENCE_RELAY", "ws://127.0.0.1:8799");
+    relay_cfg.room = discover_room();
+    // One daemon, one connection, one identity. The relay reads identity off
+    // the connection and ignores what a frame claims, so everything this
+    // machine forwards is attributed to this name. The per-event agent id
+    // still rides along inside the payload for anything downstream that wants
+    // to split it back out.
+    relay_cfg.agent = env_or("AGENT_PRESENCE_AGENT", "presenced@" + hostname());
+    relay_cfg.human = env_or("AGENT_PRESENCE_HUMAN", env_or("USER", hostname()));
+
+    std::optional<ap::RelayClient> relay;
+    if (!relay_cfg.room.empty()) {
+        relay.emplace(relay_cfg, outbound, leases);
+        // Peers on other machines land in the same table local agents do, so
+        // the statusline stops being a mirror of this laptop.
+        relay->on_peer([&](const ap::RelayPeer& p) {
+            if (p.agent.empty()) return;
+            const std::string& who = p.human.empty() ? p.agent : p.human;
+            if (presence.touch(p.agent, who, p.verb, p.path, now_ms())) dirty = true;
+        });
+    }
 
     server.on_line([&](std::string line) {
         const std::string verb = ap::json_field(line, "verb");
@@ -159,8 +167,18 @@ int main() {
         ap::Ev e{verb, path, agent};
         if (!coalescer.admit(e, now_ms())) return;
         // Rebuilt, not forwarded. Anything on the machine can write to this
-        // socket, and whatever it wrote used to reach the relay untouched.
-        outbound.push(ap::redact_line(line));
+        // socket, and whatever it wrote used to reach the relay untouched. The
+        // rewrap on top reads only the four fields redact_line kept.
+        std::string frame = ap::relay_event_frame(ap::redact_line(line));
+        if (!frame.empty()) outbound.push(std::move(frame));
+    });
+
+    // The other half of the socket protocol. on_line above records and forwards;
+    // this answers, on the same connection, inside the hook's budget. Without it
+    // every PreToolUse edit read a clean EOF and allowed, and the leases the
+    // relay pushes into the cache reached nobody.
+    server.on_request([&](const std::string& line) {
+        return ap::decide_response(line, leases, now_ms());
     });
 
     if (!server.start()) return 0;  // fail open: no daemon, hooks no-op
@@ -171,10 +189,34 @@ int main() {
     long long last_write = now_ms();
 
     for (;;) {
-        server.poll_once(200);
-        // Relay transport is attached here; on disconnect, outbound buffers
-        // and the lease cache is left stale-but-harmless (expired entries
-        // never block, see LeaseCache::conflict_for).
+        pollfd fds[2];
+        nfds_t nfds = 0;
+        fds[nfds++] = pollfd{server.listen_fd(), POLLIN, 0};
+        if (relay && relay->fd() >= 0) {
+            // POLLOUT only while the TCP connect is still in flight, which is
+            // how completion is reported. A connected socket is writable
+            // almost always, so asking for it in any other state would turn
+            // this wait into a spin.
+            const short want = static_cast<short>(
+                POLLIN | (relay->state() == ap::RelayClient::State::Connecting ? POLLOUT : 0));
+            fds[nfds++] = pollfd{relay->fd(), want, 0};
+        }
+        // Return value ignored on purpose: both calls below are non-blocking
+        // and cope with having nothing to do. The timeout is what keeps the
+        // backoff timer and the snapshot tick running when both fds are quiet.
+        ::poll(fds, nfds, kTickMs);
+
+        server.poll_once(kConnBudgetMs);
+        // Zero budget, deliberately: one non-blocking step of the state
+        // machine. A relay that is down sits in backoff, and a backoff that
+        // sleeps inside this loop is time the daemon is not on the hook
+        // socket — which the hook's 2ms budget cannot survive. All the waiting
+        // happens in the poll above, over both fds at once.
+        //
+        // On disconnect this buffers into Outbound and keeps retrying, and the
+        // lease cache is left stale-but-harmless: expired entries never block,
+        // see LeaseCache::conflict_for.
+        if (relay) relay->poll(0);
 
         const long long t = now_ms();
         if (presence.expire(t)) dirty = true;

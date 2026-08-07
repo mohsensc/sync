@@ -60,3 +60,8 @@ find_package(Threads REQUIRED)
 target_sources(ap_daemon_lib PRIVATE daemon/relay_client.cpp)
 target_link_libraries(ap_daemon_lib PUBLIC Threads::Threads)
 target_sources(ap_tests PRIVATE tests/test_relay_client.cpp)
+
+# The daemon's half of the hook protocol: the extractor both halves read the
+# wire with, and the responder that answers a decision request.
+target_sources(ap_daemon_lib PRIVATE daemon/json.cpp daemon/decide.cpp)
+target_sources(ap_tests PRIVATE tests/test_decide.cpp tests/test_decision_path.cpp)
