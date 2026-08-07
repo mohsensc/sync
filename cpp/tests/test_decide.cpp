@@ -15,11 +15,24 @@ const std::string kEditPayload =
     R"({"session_id":"sess_b","hook_event_name":"PreToolUse","tool_name":"Edit",)"
     R"("tool_input":{"file_path":"/repo/src/auth.py","old_string":"SECRET"}})";
 
-ap::LeaseCache held_by(const std::string& region, const std::string& agent, long long expires,
-                       const std::string& intent = "rewriting the token refresh") {
-    ap::LeaseCache c;
-    c.replace({{region, ap::CachedLease{agent, "sara", intent, expires}}});
-    return c;
+/// A cache with one lease in it, returned by value.
+///
+/// The wrapper exists because LeaseCache owns a mutex and so cannot be copied
+/// or moved; a prvalue of this is constructed in place at the call site and
+/// converts to the reference decide_response asks for.
+struct Held {
+    ap::LeaseCache cache;
+
+    Held(const std::string& region, const ap::CachedLease& lease) {
+        cache.replace({{region, lease}});
+    }
+
+    operator const ap::LeaseCache&() const { return cache; }  // NOLINT(google-explicit-constructor)
+};
+
+Held held_by(const std::string& region, const std::string& agent, long long expires,
+             const std::string& intent = "rewriting the token refresh") {
+    return Held(region, ap::CachedLease{agent, "sara", intent, expires});
 }
 
 }  // namespace

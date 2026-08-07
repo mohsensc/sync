@@ -1,4 +1,5 @@
 #include "hook/hook.hpp"
+#include "hook/protocol.hpp"
 
 #include <fcntl.h>
 #include <poll.h>
@@ -392,13 +393,16 @@ bool write_line(const std::string& sock_path, const std::string& line, int timeo
     return sent == payload.size();
 }
 
-Decision request_decision(const std::string& sock_path, const std::string& line, int timeout_ms) {
+Decision request_decision(const std::string& sock_path, const std::string& line, int timeout_ms,
+                          bool* connected) {
     // Every early return is the same answer: no decision, therefore allow.
     const SigPipeGuard no_sigpipe;
     const auto start = std::chrono::steady_clock::now();
+    if (connected != nullptr) *connected = false;
 
     const int fd = open_conn(sock_path, start, timeout_ms);
     if (fd < 0) return {};
+    if (connected != nullptr) *connected = true;
 
     std::string payload = line;
     payload.push_back('\n');
@@ -501,10 +505,29 @@ std::string hook_output(const Decision& d, const std::string& path) {
 
 std::string run_hook(const std::string& hook_json, const std::string& sock_path, int budget_ms) {
     if (!wants_decision(hook_json)) {
+        // One way, and onto the event socket, which is the one that is allowed
+        // to be busy. Nothing is waiting on this.
         write_line(sock_path, build_event(hook_json), budget_ms);
         return {};
     }
-    const Decision d = request_decision(sock_path, build_request(hook_json), budget_ms);
+
+    const std::string request = build_request(hook_json);
+    const auto start = std::chrono::steady_clock::now();
+
+    // Decisions go to the decision socket. It exists so that a request cannot
+    // end up behind a burst of events in one accept queue, wait out its budget
+    // and allow an edit with nothing said — see hook/protocol.hpp.
+    bool connected = false;
+    Decision d = request_decision(decision_sock_path(sock_path), request, budget_ms, &connected);
+
+    if (!connected) {
+        // Nothing on that path: an older daemon, or a socket file left behind
+        // by one that died. Both answer on the event socket, so ask there with
+        // what is left of the budget. A refused connect to a unix socket comes
+        // back at once, so in practice that is nearly all of it.
+        const int left = remaining_ms(start, budget_ms);
+        if (left > 0) d = request_decision(sock_path, request, left);
+    }
     return hook_output(d, field(hook_json, "file_path"));
 }
 

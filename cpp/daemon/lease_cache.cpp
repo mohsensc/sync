@@ -1,8 +1,11 @@
 #include "daemon/lease_cache.hpp"
 
+#include <mutex>
+
 namespace ap {
 
 void LeaseCache::replace(std::vector<std::pair<std::string, CachedLease>> entries) {
+    std::unique_lock<std::shared_mutex> lock(mu_);
     by_region_.clear();
     for (auto& [key, lease] : entries) by_region_.emplace(key, std::move(lease));
 }
@@ -10,6 +13,7 @@ void LeaseCache::replace(std::vector<std::pair<std::string, CachedLease>> entrie
 std::optional<CachedLease> LeaseCache::conflict_for(const std::string& region_key,
                                                     const std::string& my_agent,
                                                     long long now_ms) const {
+    std::shared_lock<std::shared_mutex> lock(mu_);
     auto it = by_region_.find(region_key);
     if (it == by_region_.end()) return std::nullopt;      // unknown -> allow
     if (it->second.agent == my_agent) return std::nullopt;
@@ -23,6 +27,7 @@ std::optional<CachedLease> LeaseCache::conflict_for_file(const std::string& path
     if (path.empty()) return std::nullopt;
     const std::string prefix = path + "|";
 
+    std::shared_lock<std::shared_mutex> lock(mu_);
     // Whichever live foreign lease is found first. There is no ranking to make
     // here: every one of them contends with a whole-file edit, and naming one
     // holder is what the hook renders. Iteration order is unspecified, so a file

@@ -12,6 +12,14 @@ namespace ap {
 // in both directions. There are no ids and no multiplexing: a response belongs
 // to the request it arrived on, and the connection is closed after it.
 //
+// Two sockets, not one. Events go to `$AGENT_PRESENCE_SOCK` and decisions to
+// that path plus `.decide` — see protocol.hpp, which both halves derive it
+// with. They are separate because they shared an accept queue and a decision
+// therefore waited behind whatever events were in front of it, spent its
+// budget, and allowed the edit without saying anything. A hook still falls back
+// to asking on the event socket when nothing answers on the decision one, which
+// is what a daemon from before the split does.
+//
 // The protocol is deliberately relay-agnostic. The hook knows nothing about
 // leases, rooms, wait-die or the relay; it asks a local question and renders
 // the answer. Everything the daemon needs to arbitrate it already has.
@@ -108,7 +116,12 @@ std::string hook_output(const Decision& d, const std::string& path);
 /// Connect, send `line`, half-close, and read one response line back — all
 /// inside `timeout_ms` total. Any failure returns a Decision with rung < 0.
 /// Never blocks past the budget, never throws, never raises a signal.
-Decision request_decision(const std::string& sock_path, const std::string& line, int timeout_ms);
+///
+/// `connected`, when given, comes back true if the socket was reached at all,
+/// which is how the caller tells "there is no daemon on this path" from "the
+/// daemon had nothing to say". Only the first is worth asking somewhere else.
+Decision request_decision(const std::string& sock_path, const std::string& line, int timeout_ms,
+                          bool* connected = nullptr);
 
 /// Connect to a unix socket and write one line. Returns false on any failure.
 /// Never blocks longer than timeout_ms and never throws.
