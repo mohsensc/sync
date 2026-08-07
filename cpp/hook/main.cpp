@@ -1,6 +1,8 @@
 #include <unistd.h>
 
+#include <csignal>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <string>
 
@@ -22,9 +24,17 @@ constexpr std::size_t kMaxInput = 1u << 20;  // 1 MiB
 // hands it an EPIPE, and that is a worse way to fail than being slow.
 constexpr int kReadBudgetMs = 1000;
 
-// Left for the socket write once the payload is in. Kept separate so a slow
-// read cannot eat the budget the delivery needs.
-constexpr int kWriteBudgetMs = 5;
+// What the socket phase gets once the payload is in, whether it is a one-way
+// event or a full request and response. Kept separate so a slow read cannot eat
+// the budget the delivery needs.
+//
+// Deliberately well under the 5ms cap. The budget is what poll() is asked to
+// wait, and poll() overshoots: on macOS a 3ms deadline measured anywhere from
+// 3.9 to 4.7ms once timer granularity and a scheduler round trip are paid for,
+// which is close enough to 5 to flake. 2ms measures under 4 and is still an
+// eternity next to the 0.13ms a local lease lookup actually costs.
+// tests/test_latency.cpp measures the real number and asserts the cap.
+constexpr int kSocketBudgetMs = 2;
 
 std::string join_path(std::string dir, const char* leaf) {
     if (!dir.empty() && dir.back() == '/') dir.pop_back();
@@ -36,6 +46,12 @@ std::string join_path(std::string dir, const char* leaf) {
 }  // namespace
 
 int main() {
+    // Nothing this process writes to is worth dying over: not the socket if the
+    // daemon hangs up mid-request, not stdout if Claude Code went away. The
+    // default action for SIGPIPE is death, and a hook that dies fails the tool
+    // call it was supposed to be invisible to.
+    std::signal(SIGPIPE, SIG_IGN);
+
     // Exit 0 on every path. A hook that can fail is a hook that can break an
     // agent session, which is the one outcome that gets this uninstalled.
     try {
@@ -53,7 +69,13 @@ int main() {
             path = "/tmp/agent-presence.sock";
         }
 
-        ap::write_line(path, ap::build_event(input), kWriteBudgetMs);
+        // Empty means say nothing, and saying nothing is how a hook allows.
+        const std::string out = ap::run_hook(input, path, kSocketBudgetMs);
+        if (!out.empty()) {
+            std::fwrite(out.data(), 1, out.size(), stdout);
+            std::fputc('\n', stdout);
+            std::fflush(stdout);
+        }
     } catch (...) {
         // Intentionally swallowed.
     }
