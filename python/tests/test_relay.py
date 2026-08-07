@@ -72,3 +72,140 @@ def test_forbidden_fields_never_reach_presence(relay):
     evt["content"] = "hunter2"
     relay.handle(a, evt)
     assert "hunter2" not in repr(relay.presence("r1"))
+
+
+# -- (C) identity comes from the connection, never from the payload ----------
+
+REGION = {"path": "src/auth.py", "symbol": "sign_in", "lines": None}
+
+
+def _claim(relay, conn, region=None, intent="work"):
+    return relay.handle(conn, {"type": "claim", "agent": conn.agent,
+                               "human": conn.human,
+                               "region": region or REGION, "intent": intent})
+
+
+def test_a_member_cannot_release_someone_elses_lease(relay):
+    a, b = FakeConn("a1", "sara"), FakeConn("a2", "dev")
+    relay.join("r1", a)
+    relay.join("r1", b)
+    _claim(relay, a, intent="refactor")
+    # b lies about who it is.
+    relay.handle(b, {"type": "release", "agent": "a1", "region": REGION})
+    holder = relay.registry.active_claims("r1")
+    assert len(holder) == 1
+    assert holder[0].agent == "a1"
+
+
+def test_a_member_cannot_heartbeat_someone_elses_lease(relay):
+    from agent_presence.leases import LEASE_TTL_S
+
+    clock = relay._clock
+    a, b = FakeConn("a1", "sara"), FakeConn("a2", "dev")
+    relay.join("r1", a)
+    relay.join("r1", b)
+    _claim(relay, a)
+    clock.advance(LEASE_TTL_S - 1)
+    relay.handle(b, {"type": "heartbeat", "agent": "a1", "region": REGION})
+    clock.advance(2)
+    assert relay.registry.active_claims("r1") == []
+
+
+def test_a_member_cannot_claim_under_another_agents_name(relay):
+    a = FakeConn("a2", "dev")
+    relay.join("r1", a)
+    relay.handle(a, {"type": "claim", "agent": "a1", "human": "sara",
+                     "region": REGION, "intent": "work"})
+    claims = relay.registry.active_claims("r1")
+    assert [c.agent for c in claims] == ["a2"]
+    assert [c.human for c in claims] == ["dev"]
+
+
+def test_a_member_cannot_negotiate_under_another_agents_name(relay):
+    a, b = FakeConn("a1", "sara"), FakeConn("a2", "dev")
+    relay.join("r1", a)
+    relay.join("r1", b)
+    _claim(relay, a)
+    # b sends HANDOFF claiming to be a1, which would drop a1's lease.
+    relay.handle(b, {"type": "move", "agent": "a1", "region": REGION,
+                     "move": "HANDOFF"})
+    assert relay.registry.active_claims("r1")[0].agent == "a1"
+
+
+# -- (A) a refused claim carries an instruction ------------------------------
+
+
+def test_a_refused_claim_tells_the_loser_what_to_do(relay):
+    a, b = FakeConn("a1", "sara"), FakeConn("a2", "dev")
+    relay.join("r1", a)
+    relay.join("r1", b)
+    _claim(relay, a, intent="refactor to JWT")
+    relay._clock.advance(5)
+    reply = _claim(relay, b, intent="rename param")
+    assert reply["granted"] is False
+    assert reply["held_by"] == "a1"
+    assert reply["decision"] == "abort"
+
+
+def test_the_older_requester_is_told_to_wait_and_keeps_its_leases(relay):
+    other = {"path": "src/db.py", "symbol": "query", "lines": None}
+    a, b = FakeConn("a1", "sara"), FakeConn("a2", "dev")
+    relay.join("r1", a)
+    relay.join("r1", b)
+    _claim(relay, b, region=other, intent="old work")   # a2 is the old one
+    relay._clock.advance(5)
+    _claim(relay, a, intent="refactor")                 # a1 is younger
+    reply = _claim(relay, b, intent="rename")
+    assert reply["decision"] == "wait"
+    # Waiting must not cost the waiter what it already holds.
+    assert any(c.agent == "a2" for c in relay.registry.active_claims("r1"))
+
+
+def test_an_aborting_requester_actually_loses_its_leases(relay):
+    other = {"path": "src/db.py", "symbol": "query", "lines": None}
+    a, b = FakeConn("a1", "sara"), FakeConn("a2", "dev")
+    relay.join("r1", a)
+    relay.join("r1", b)
+    _claim(relay, a, intent="refactor")
+    relay._clock.advance(5)
+    _claim(relay, b, region=other, intent="side work")
+    reply = _claim(relay, b, intent="rename")
+    assert reply["decision"] == "abort"
+    # Releasing the loser's holdings is what removes the wait-for cycle.
+    assert all(c.agent != "a2" for c in relay.registry.active_claims("r1"))
+
+
+def test_a_contested_edit_brief_carries_the_same_instruction(relay):
+    a, b = FakeConn("a1", "sara"), FakeConn("a2", "dev")
+    relay.join("r1", a)
+    relay.join("r1", b)
+    _claim(relay, a, intent="refactor to JWT")
+    relay.handle(a, touch("a1"))
+    relay._clock.advance(5)
+    reply = relay.handle(b, touch("a2"))
+    assert reply["type"] == "negotiate"
+    assert reply["decision"] == "abort"
+
+
+# -- (F) a bad move name comes back as data, not as an exception -------------
+
+
+def test_an_invented_move_over_the_wire_is_an_error_payload(relay):
+    a = FakeConn("a1", "sara")
+    relay.join("r1", a)
+    reply = relay.handle(a, {"type": "move", "region": REGION, "move": "ARGUE"})
+    assert reply["granted"] is False
+    assert reply["action"] == "invalid_move"
+    assert "ARGUE" in reply["error"]
+
+
+def test_a_lowercase_move_over_the_wire_still_works(relay):
+    a, b = FakeConn("a1", "sara"), FakeConn("a2", "dev")
+    relay.join("r1", a)
+    relay.join("r1", b)
+    _claim(relay, a, intent="refactor")
+    other = {"path": "src/auth.py", "symbol": "sign_out", "lines": None}
+    reply = relay.handle(b, {"type": "move", "region": REGION, "move": "split",
+                             "split_region": other})
+    assert reply["granted"] is True
+    assert reply["action"] == "split"

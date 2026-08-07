@@ -86,24 +86,33 @@ class Relay:
         if room is None:
             return None
 
+        # conn.agent is the authenticated identity. message["agent"] is
+        # whatever the client typed, so it is never trusted for anything that
+        # touches a lease — otherwise any room member could drop, renew or
+        # steal a teammate's claim by naming them.
         kind = message.get("type")
         if kind == "event":
             return self._on_event(room, conn, message)
         if kind == "claim":
             return self._on_claim(room, conn, message)
         if kind == "release":
-            self.registry.release(message["agent"], _region(message["region"]))
+            self.registry.release(room, conn.agent, _region(message["region"]))
             return None
         if kind == "heartbeat":
-            self.registry.heartbeat(message["agent"], _region(message["region"]))
+            self.registry.heartbeat(room, conn.agent, _region(message["region"]))
             return None
         if kind == "move":
+            split = message.get("split_region")
             outcome = self._negotiator.apply(
-                room, message["agent"], _region(message["region"]),
-                message["move"], message.get("reason", ""),
+                room, conn.agent, _region(message["region"]),
+                message.get("move", ""), message.get("reason", ""),
+                split_scope=_region(split) if split else None,
             )
-            return {"type": "move_result", "granted": outcome.granted,
-                    "action": outcome.action}
+            reply = {"type": "move_result", "granted": outcome.granted,
+                     "action": outcome.action}
+            if outcome.error is not None:
+                reply["error"] = outcome.error
+            return reply
         return None
 
     def _on_event(self, room: str, conn: Conn, message: dict) -> dict | None:
@@ -134,23 +143,35 @@ class Relay:
         if not interrupts_at(rung):
             return {"type": "ack", "rung": rung}
 
-        brief = self._negotiator.open(room, conn.agent, now, region, "")
+        brief = self._negotiator.open(
+            room, conn.agent, self.registry.age_of(conn.agent), region, "",
+        )
         if brief is None:
             return {"type": "ack", "rung": rung}
         return {
             "type": "negotiate", "rung": rung,
             "holder_agent": brief.holder_agent, "holder_human": brief.holder_human,
             "holder_intent": brief.holder_intent, "moves": list(brief.moves),
+            "decision": brief.decision,
         }
 
     def _on_claim(self, room: str, conn: Conn, message: dict) -> dict:
         result = self.registry.acquire(
-            room, message.get("human", conn.human), message["agent"],
+            room, conn.human, conn.agent,
             _region(message["region"]), message.get("intent", ""),
         )
         if result.ok:
             return {"type": "claim_result", "granted": True}
+
+        # Refusal alone is not enough: without an instruction two agents can
+        # both sit and retry forever. Wait-die says exactly one of them backs
+        # off and the other dies, and the loser's leases have to actually go,
+        # or the wait-for graph keeps its cycle.
+        if result.decision == "abort":
+            self.registry.release_all(conn.agent)
+
         return {
             "type": "claim_result", "granted": False,
             "held_by": result.held_by.agent, "intent": result.held_by.intent,
+            "decision": result.decision,
         }

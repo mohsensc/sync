@@ -48,13 +48,22 @@ async def _session(ws, relay: Relay) -> None:
             if not isinstance(msg, dict):
                 continue
 
-            if msg.get("type") == "join":
-                conn.agent = msg.get("agent", "")
-                conn.human = msg.get("human", "")
-                relay.join(msg["room"], conn)
-                continue
-
             try:
+                if msg.get("type") == "join":
+                    # A join with no usable room is dropped like any other
+                    # malformed frame. Indexing here used to raise KeyError and
+                    # take the whole connection down with a 1011.
+                    room = msg.get("room")
+                    if not isinstance(room, str) or not room:
+                        log.debug("join without a room; frame dropped")
+                        continue
+                    agent = msg.get("agent")
+                    human = msg.get("human")
+                    conn.agent = agent if isinstance(agent, str) else ""
+                    conn.human = human if isinstance(human, str) else ""
+                    relay.join(room, conn)
+                    continue
+
                 reply = relay.handle(conn, msg)
             except Exception:
                 log.exception("handler error; connection preserved")
