@@ -14,6 +14,7 @@
 #include "daemon/coalesce.hpp"
 #include "daemon/decide.hpp"
 #include "daemon/decision_server.hpp"
+#include "daemon/journal.hpp"
 #include "daemon/json.hpp"
 #include "daemon/lease_cache.hpp"
 #include "daemon/outbound.hpp"
@@ -46,6 +47,15 @@ constexpr int kConnBudgetMs = 5;  // per hook connection; the hook's own cap
 long long now_ms() {
     using namespace std::chrono;
     return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
+/// Wall clock, for the journal alone. Everything else in this daemon is on the
+/// monotonic clock and must stay there — a lease TTL that moves when somebody
+/// sets the system time is a lease that expires early or never. But `ap why`
+/// prints a time of day, and a steady_clock reading is not one.
+long long wall_ms() {
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
 }
 
 std::string env_or(const char* key, const std::string& fallback) {
@@ -189,6 +199,10 @@ int main() {
     ap::PresenceTable presence(kPresenceTtlMs);
     ap::LeaseCache leases;
     ap::PolicyCache policy;
+    // Read by `ap why`. Same directory rule as the snapshot and the sockets,
+    // derived on both sides from the same two env vars rather than passed
+    // between them, so the two halves cannot end up looking at different files.
+    ap::DecisionJournal journal(runtime + "/agent-presence.decisions.jsonl");
     // Once before the socket is up, so the first decision of the session
     // already has the current table rather than the builtin one.
     policy.refresh(policy_cache, now_ms());
@@ -268,7 +282,13 @@ int main() {
     // an older install asks on this one and has to keep getting an answer.
     // Nothing else uses it: current hooks ask on the decision socket.
     auto decide = [&](const std::string& line) {
-        return ap::decide_response(line, leases, policy, now_ms());
+        std::string answer = ap::decide_response(line, leases, policy, now_ms());
+        // Recorded here rather than inside decide_response, which is a pure
+        // function over the request and the two tables and is worth keeping
+        // that way. Both callers — this one and DecisionServer's threads — go
+        // through this lambda, so both are journalled and neither can forget.
+        journal.record(wall_ms(), line, answer, policy);
+        return answer;
     };
     server.on_request(decide);
 
@@ -336,6 +356,10 @@ int main() {
             last_problem = std::move(problem);
             dirty = true;  // a degradation has to reach the statusline promptly
         }
+
+        // Off the decision path on purpose: a hook must never wait on a file
+        // rewrite. Free when there is nothing to cut back.
+        journal.maybe_trim();
 
         if (presence.expire(t)) dirty = true;
         if (dirty || t - last_write >= kSnapshotTickMs) {

@@ -107,6 +107,23 @@ public:
     /// A rung outside 0..4 is "no answer", which is silent.
     Effect effect_for(int rung) const;
 
+    /// Which of the two inputs decided a rung, and where that side came from.
+    ///
+    /// `effect_for` plus `source()` plus `floor_source()` would be three lock
+    /// acquisitions and could straddle a `set_floor` between them, which is how
+    /// `ap why` ends up naming a file that did not decide anything. One shared
+    /// lock, one consistent answer.
+    struct Origin {
+        Effect effect = Effect::Silent;
+        /// True when the floor is strictly louder than the local table, i.e.
+        /// the floor is what the agent actually ran into.
+        bool from_floor = false;
+        /// Where the deciding side came from. Empty means the compiled-in
+        /// table, which is not a file anybody can go and edit.
+        std::string source;
+    };
+    Origin explain(int rung) const;
+
     PolicyTable table() const;
     PolicyTable floor() const;
 

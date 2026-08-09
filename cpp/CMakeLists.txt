@@ -77,6 +77,11 @@ target_sources(ap_daemon_lib PRIVATE daemon/json.cpp daemon/decide.cpp)
 target_sources(ap_tests PRIVATE tests/test_decide.cpp tests/test_decision_path.cpp
                                 tests/test_decide_policy.cpp)
 
+# The writer behind `ap why`. The reader has always been journal.py; this is
+# the half that was missing, so a block can be asked about after the fact.
+target_sources(ap_daemon_lib PRIVATE daemon/journal.cpp)
+target_sources(ap_tests PRIVATE tests/test_journal.cpp)
+
 # Decisions off the event loop, on their own socket. Its test floods the event
 # socket and insists the answers keep coming, which is the thing that used to
 # fail silently.

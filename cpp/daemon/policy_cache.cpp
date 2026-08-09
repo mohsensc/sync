@@ -212,6 +212,18 @@ Effect PolicyCache::effect_for(int rung) const {
     return louder(local_.rung[rung], floor_.rung[rung]);
 }
 
+PolicyCache::Origin PolicyCache::explain(int rung) const {
+    Origin out;
+    if (rung < 0 || rung >= kRungs) return out;
+    std::shared_lock lock(mu_);
+    const Effect local = local_.rung[rung];
+    const Effect floor = floor_.rung[rung];
+    out.effect = louder(local, floor);
+    out.from_floor = floor > local;
+    out.source = out.from_floor ? floor_source_ : source_;
+    return out;
+}
+
 PolicyTable PolicyCache::table() const {
     std::shared_lock lock(mu_);
     return local_;
