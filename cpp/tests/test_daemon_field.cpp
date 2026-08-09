@@ -5,6 +5,8 @@
 #include "daemon/main.cpp"
 
 #include <catch2/catch_test_macros.hpp>
+#include <filesystem>
+#include <fstream>
 #include <string>
 
 #include "hook/hook.hpp"
@@ -50,4 +52,105 @@ TEST_CASE("a truncated or unterminated value yields nothing, not garbage") {
     REQUIRE(ap::json_field(R"({"path":"trailing\)", "path").empty());
     REQUIRE(ap::json_field(R"({"path":"bad\u00)", "path").empty());
     REQUIRE(ap::json_field(R"({"verb":"read"})", "path").empty());
+}
+
+// ---------------------------------------------------------------------------
+// Where the bearer token comes from
+// ---------------------------------------------------------------------------
+//
+// `ap principals add` prints a token once and says: put it in
+// ~/.config/agent-presence/token, or $AGENT_PRESENCE_TOKEN, on the machine that
+// runs as this principal. That sentence was a promise nothing kept — the daemon
+// read neither. These pin down the half the daemon owns.
+
+namespace {
+
+std::string write_token_file(const std::string& dir, const std::string& body) {
+    std::filesystem::create_directories(dir + "/agent-presence");
+    const std::string path = dir + "/agent-presence/token";
+    std::ofstream f(path, std::ios::binary | std::ios::trunc);
+    f << body;
+    f.close();
+    return path;
+}
+
+std::string scratch_dir(const std::string& leaf) {
+    const std::string dir =
+        (std::filesystem::temp_directory_path() / ("ap-tok-" + leaf)).string();
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir);
+    return dir;
+}
+
+}  // namespace
+
+TEST_CASE("the environment token wins, and no file is read for it") {
+    const std::string dir = scratch_dir("env");
+    write_token_file(dir, "from-the-file\n");
+    REQUIRE(discover_token("from-the-env", dir, "/nonexistent") == "from-the-env");
+}
+
+TEST_CASE("the token file is read when the environment is silent") {
+    const std::string dir = scratch_dir("file");
+    write_token_file(dir, "from-the-file\n");
+    REQUIRE(discover_token("", dir, "/nonexistent") == "from-the-file");
+}
+
+TEST_CASE("XDG_CONFIG_HOME beats HOME, and HOME is the fallback") {
+    const std::string xdg = scratch_dir("xdg");
+    const std::string home = scratch_dir("home");
+    write_token_file(xdg, "xdg-token\n");
+    write_token_file(home + "/.config", "home-token\n");
+
+    REQUIRE(discover_token("", xdg, home) == "xdg-token");
+    REQUIRE(discover_token("", "", home) == "home-token");
+}
+
+TEST_CASE("a missing, empty or blank token file is simply no token") {
+    const std::string dir = scratch_dir("blank");
+    REQUIRE(discover_token("", dir, "").empty());       // nothing written yet
+    write_token_file(dir, "");
+    REQUIRE(discover_token("", dir, "").empty());
+    write_token_file(dir, "   \n\t\n");
+    REQUIRE(discover_token("", dir, "").empty());
+}
+
+TEST_CASE("only the first line of the token file is the token") {
+    // The file is written by hand at least some of the time, and an editor that
+    // leaves a trailing note below the secret should not make the secret wrong
+    // in a way whose only symptom is a lost rung.
+    const std::string dir = scratch_dir("firstline");
+    write_token_file(dir, "the-token\n# minted 2026-08-08 by ap principals add\n");
+    REQUIRE(discover_token("", dir, "") == "the-token");
+}
+
+TEST_CASE("surrounding whitespace comes off the token") {
+    const std::string dir = scratch_dir("ws");
+    write_token_file(dir, "  padded-token  \r\n");
+    REQUIRE(discover_token("", dir, "") == "padded-token");
+}
+
+TEST_CASE("a token file too large to be a token is refused rather than read in") {
+    // Anything can be at that path. A daemon that reads an arbitrarily large
+    // file into memory because it was pointed at one is a daemon with a
+    // denial-of-service in its startup path.
+    const std::string dir = scratch_dir("huge");
+    write_token_file(dir, std::string(64 * 1024, 'x'));
+    REQUIRE(discover_token("", dir, "").empty());
+}
+
+TEST_CASE("truthy spellings of the unattended flag") {
+    REQUIRE(env_is_true("1"));
+    REQUIRE(env_is_true("true"));
+    REQUIRE(env_is_true("TRUE"));
+    REQUIRE(env_is_true("yes"));
+    REQUIRE(env_is_true("on"));
+    REQUIRE_FALSE(env_is_true(""));
+    REQUIRE_FALSE(env_is_true("0"));
+    REQUIRE_FALSE(env_is_true("false"));
+    REQUIRE_FALSE(env_is_true("no"));
+    // Not a guess either way: an unreadable value is the safer of the two,
+    // which is attended, because attended is the quieter end of every band.
+    REQUIRE_FALSE(env_is_true("maybe"));
 }

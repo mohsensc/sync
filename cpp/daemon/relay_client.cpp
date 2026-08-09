@@ -1044,7 +1044,28 @@ void RelayClient::send_join() {
     j += json_escape(cfg_.agent);
     j += "\",\"human\":\"";
     j += json_escape(cfg_.human);
-    j += "\"}";
+    j += '"';
+
+    // Only when there is something to say. A daemon that configured nothing
+    // puts exactly the bytes on the wire it always did, and a relay reading an
+    // empty principal would log an unknown-principal line per daemon on the
+    // network for no gain.
+    //
+    // The token goes only where the principal does. On its own it names nobody
+    // and would be a secret sent for no reason.
+    if (!cfg_.principal.empty()) {
+        j += ",\"principal\":\"";
+        j += json_escape(cfg_.principal);
+        j += '"';
+        if (!cfg_.token.empty()) {
+            j += ",\"token\":\"";
+            j += json_escape(cfg_.token);
+            j += '"';
+        }
+    }
+    if (cfg_.unattended) j += ",\"unattended\":true";
+    j += '}';
+
     queue_frame(ws::Opcode::Text, j);
     ++sent_;
 }

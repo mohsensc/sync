@@ -1294,3 +1294,89 @@ TEST_CASE("a lease frame from a relay that names no tier is not a crash or a gue
     REQUIRE(leases.conflict_for("src/auth.py|", "a1", mono_ms())->priority.empty());
 }
 
+// ---------------------------------------------------------------------------
+// Presenting a principal
+// ---------------------------------------------------------------------------
+//
+// `ap principals add` mints a token, prints it once and tells you to put it on
+// the machine that runs as that principal. The relay reads `principal`, `token`
+// and `unattended` off the join frame and grants a tier from them. This is the
+// join frame those two facts meet on.
+
+TEST_CASE("a configured principal is presented on the join frame") {
+    TestServer server;
+    REQUIRE(server.start());
+
+    RelayConfig cfg = cfg_for(server.port());
+    cfg.principal = "sara";
+    cfg.token = "s3cret-token";
+    cfg.unattended = true;
+
+    Outbound out(10);
+    LeaseCache leases;
+    RelayClient client(cfg, out, leases);
+    REQUIRE(pump_until(client, [&] { return !server.all_messages().empty(); }));
+
+    const std::string join = server.all_messages()[0];
+    REQUIRE(join.find(R"("principal":"sara")") != std::string::npos);
+    REQUIRE(join.find(R"("token":"s3cret-token")") != std::string::npos);
+    REQUIRE(join.find(R"("unattended":true)") != std::string::npos);
+}
+
+TEST_CASE("a daemon with nothing configured puts no new fields on the wire") {
+    // The same promise the python golden test makes: installing this and
+    // configuring nothing has to look exactly like it did before. An empty
+    // `principal` is not a principal, and a relay reading one would log an
+    // unknown-principal line for every daemon on the network.
+    TestServer server;
+    REQUIRE(server.start());
+
+    Outbound out(10);
+    LeaseCache leases;
+    RelayClient client(cfg_for(server.port()), out, leases);
+    REQUIRE(pump_until(client, [&] { return !server.all_messages().empty(); }));
+
+    const std::string join = server.all_messages()[0];
+    REQUIRE(join.find("principal") == std::string::npos);
+    REQUIRE(join.find("token") == std::string::npos);
+    REQUIRE(join.find("unattended") == std::string::npos);
+}
+
+TEST_CASE("a principal with no token is still presented, and loses a rung for it") {
+    // Fail-open, end to end: the relay answers a tokenless principal with the
+    // default tier rather than a refusal, so sending the name alone is a
+    // degradation and not an error. Dropping it here instead would hide a
+    // half-finished install rather than let the relay log it.
+    TestServer server;
+    REQUIRE(server.start());
+
+    RelayConfig cfg = cfg_for(server.port());
+    cfg.principal = "sara";
+
+    Outbound out(10);
+    LeaseCache leases;
+    RelayClient client(cfg, out, leases);
+    REQUIRE(pump_until(client, [&] { return !server.all_messages().empty(); }));
+
+    const std::string join = server.all_messages()[0];
+    REQUIRE(join.find(R"("principal":"sara")") != std::string::npos);
+    REQUIRE(join.find("token") == std::string::npos);
+}
+
+TEST_CASE("a token with a quote in it cannot break the join frame") {
+    TestServer server;
+    REQUIRE(server.start());
+
+    RelayConfig cfg = cfg_for(server.port());
+    cfg.principal = "sa\"ra";
+    cfg.token = "tok\\en\"";
+
+    Outbound out(10);
+    LeaseCache leases;
+    RelayClient client(cfg, out, leases);
+    REQUIRE(pump_until(client, [&] { return !server.all_messages().empty(); }));
+
+    const std::string join = server.all_messages()[0];
+    REQUIRE(join.find(R"("principal":"sa\"ra")") != std::string::npos);
+    REQUIRE(join.find(R"("token":"tok\\en\"")") != std::string::npos);
+}

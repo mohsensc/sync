@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -50,6 +51,65 @@ long long now_ms() {
 std::string env_or(const char* key, const std::string& fallback) {
     const char* v = std::getenv(key);
     return v ? std::string(v) : fallback;
+}
+
+/// Longest thing that can be a bearer token. `secrets.token_urlsafe(32)` is 43
+/// characters; this is orders of magnitude above that and still small enough
+/// that being pointed at the wrong file costs a read and not a process.
+constexpr std::size_t kMaxTokenBytes = 4096;
+
+/// The truthy spellings, and nothing else is a guess.
+///
+/// Anything unrecognised reads as false, which is `attended` — the quieter end
+/// of every band. A typo should cost a tier, never gain one.
+bool env_is_true(const std::string& v) {
+    return v == "1" || v == "true" || v == "TRUE" || v == "True" || v == "yes" ||
+           v == "on";
+}
+
+std::string trim_ascii(std::string s) {
+    const char* ws = " \t\r\n\v\f";
+    const auto first = s.find_first_not_of(ws);
+    if (first == std::string::npos) return {};
+    const auto last = s.find_last_not_of(ws);
+    return s.substr(first, last - first + 1);
+}
+
+/// The bearer token this daemon presents, or empty.
+///
+/// `$AGENT_PRESENCE_TOKEN` first, then the file `ap principals add` tells people
+/// to write:  `$XDG_CONFIG_HOME/agent-presence/token`, else
+/// `$HOME/.config/agent-presence/token`. Same rule the python side uses for the
+/// user policy layer, so a machine has one config directory and not two.
+///
+/// Pure over its inputs so it can be tested without an environment. Every
+/// failure is empty: no token means the relay grants the default tier, which is
+/// the same thing that happens with no roster at all.
+std::string discover_token(const std::string& env_token, const std::string& config_home,
+                           const std::string& home) {
+    if (!env_token.empty()) return trim_ascii(env_token);
+
+    std::string base = config_home;
+    if (base.empty()) {
+        if (home.empty()) return {};
+        base = home + "/.config";
+    }
+    const std::string path = base + "/agent-presence/token";
+
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(path, ec);
+    if (ec || size > kMaxTokenBytes) return {};
+
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return {};
+    std::string line;
+    // The first non-blank line, so a hand-edited file with a note under the
+    // secret still works.
+    while (std::getline(f, line)) {
+        const std::string trimmed = trim_ascii(line);
+        if (!trimmed.empty()) return trimmed;
+    }
+    return {};
 }
 
 std::string hostname() {
@@ -145,6 +205,15 @@ int main() {
     // to split it back out.
     relay_cfg.agent = env_or("AGENT_PRESENCE_AGENT", "presenced@" + hostname());
     relay_cfg.human = env_or("AGENT_PRESENCE_HUMAN", env_or("USER", hostname()));
+    // Who this machine runs as, if anyone said. `ap principals add` mints the
+    // token and prints it once; this is the end that reads it back. Nothing is
+    // presented when nothing is configured, so an unrostered install joins
+    // exactly as it always did.
+    relay_cfg.principal = trim_ascii(env_or("AGENT_PRESENCE_PRINCIPAL", ""));
+    relay_cfg.token = discover_token(env_or("AGENT_PRESENCE_TOKEN", ""),
+                                     env_or("XDG_CONFIG_HOME", ""),
+                                     env_or("HOME", ""));
+    relay_cfg.unattended = env_is_true(env_or("AGENT_PRESENCE_UNATTENDED", ""));
 
     std::optional<ap::RelayClient> relay;
     if (!relay_cfg.room.empty()) {

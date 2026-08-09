@@ -67,6 +67,16 @@ ROSTER_ENV = "AGENT_PRESENCE_PRINCIPALS"
 ROSTER_RELPATH = ".agent-presence/principals.toml"
 REPO_ROOT_ENV = "AGENT_PRESENCE_REPO_ROOT"
 
+# The other half of the roster: who *this* machine presents itself as. The
+# roster says who is entitled to what; these say which of those entries the
+# daemon on this box claims to be. cpp/daemon/main.cpp reads the same three, by
+# the same rules, because a machine with two ideas about where its token lives
+# has one that is wrong.
+PRINCIPAL_ENV = "AGENT_PRESENCE_PRINCIPAL"
+TOKEN_ENV = "AGENT_PRESENCE_TOKEN"
+UNATTENDED_ENV = "AGENT_PRESENCE_UNATTENDED"
+TOKEN_RELPATH = "agent-presence/token"
+
 GrantReason = Literal["roster", "no-roster", "no-token", "bad-token", "unknown"]
 
 _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
@@ -80,6 +90,42 @@ def mint_token() -> str:
 
 def hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def token_path(env: Mapping[str, str] | None = None) -> Path:
+    """Where this machine keeps its own bearer token.
+
+    ``$XDG_CONFIG_HOME/agent-presence/token``, else
+    ``$HOME/.config/agent-presence/token`` — the same rule ``policy.py`` uses
+    for the user layer, so a machine has one config directory and not two.
+    """
+    env = os.environ if env is None else env
+    config = env.get("XDG_CONFIG_HOME")
+    base = Path(config) if config else Path(env.get("HOME", "~")).expanduser() / ".config"
+    return base / TOKEN_RELPATH
+
+
+def read_token(env: Mapping[str, str] | None = None) -> str:
+    """This machine's token, or empty. ``$AGENT_PRESENCE_TOKEN`` first.
+
+    Never raises. No token is not an error: the relay grants such a connection
+    the default tier, which is what a room with no roster runs at anyway.
+
+    The first non-blank line, so a file with a note under the secret still
+    works — people do write the date they minted it there.
+    """
+    env = os.environ if env is None else env
+    direct = env.get(TOKEN_ENV, "").strip()
+    if direct:
+        return direct
+    try:
+        text = token_path(env).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+    for line in text.splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
 
 
 @dataclass(frozen=True)

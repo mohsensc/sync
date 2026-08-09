@@ -32,6 +32,7 @@ from typing import Callable, Mapping, Sequence, TextIO
 from . import journal as journal_mod
 from . import policy as policy_mod
 from . import policy_edit
+from . import principals as principals_mod
 from .policy import (
     EFFECTS,
     FLOOR_LAYERS,
@@ -1233,6 +1234,66 @@ def _cache_check(ctx: Context, pol: Policy) -> Check:
     return Check("runtime cache", "ok", f"{path}  [{table}]")
 
 
+def _principal_check(ctx: Context, roster: Roster) -> Check:
+    """Whether this machine actually presents the principal it thinks it does.
+
+    `ap principals add` prints a token once and tells you where to put it. Every
+    way of getting that wrong — a typo in the name, a token pasted with a stray
+    character, the file never written — fails open at the relay: the connection
+    joins and gets the default tier. Which is the right behaviour and a terrible
+    symptom, because it looks exactly like working right up until the contest
+    you should have won.
+    """
+    principal = ctx.env.get(principals_mod.PRINCIPAL_ENV, "").strip()
+    unattended = ctx.env.get(principals_mod.UNATTENDED_ENV, "").strip().lower() in (
+        "1", "true", "yes", "on"
+    )
+    if not principal:
+        return Check("principal", "ok",
+                     f"nothing configured (${principals_mod.PRINCIPAL_ENV}); "
+                     "this machine joins as normal")
+
+    token = principals_mod.read_token(ctx.env)
+    entry = next((p for p in roster.principals() if p.id == principal), None)
+    if entry is None:
+        where = roster.source if roster.present else "no roster"
+        return Check("principal", "fail",
+                     f"{principal!r} is not in the roster ({where}); the relay "
+                     f"will grant {name_of(roster.default_tier)}")
+
+    tier = name_of(entry.unattended if unattended else entry.attended)
+    supervision = "unattended" if unattended else "attended"
+
+    if not token:
+        return Check("principal", "warn",
+                     f"{principal} is configured but there is no token "
+                     f"({principals_mod.token_path(ctx.env)}); the relay will "
+                     f"grant {name_of(roster.default_tier)}, not {tier}")
+
+    if hash_token(token) != entry.token_sha256:
+        return Check("principal", "fail",
+                     f"the token for {principal} does not match the roster; "
+                     f"the relay will grant {name_of(roster.default_tier)}. "
+                     "Re-mint with `ap principals add`, or fix the file")
+
+    detail = f"{principal} -> {tier} ({supervision})"
+
+    # Only when the secret is on disk. An env var has its own exposure and the
+    # mode of a file nobody read is not news about it.
+    if not ctx.env.get(principals_mod.TOKEN_ENV, "").strip():
+        path = principals_mod.token_path(ctx.env)
+        try:
+            mode = path.stat().st_mode & 0o777
+        except OSError:
+            mode = None
+        if mode is not None and mode & 0o077:
+            return Check("principal", "warn",
+                         f"{detail}, but {path} is {mode:04o} — anyone who can "
+                         "read it is this principal. chmod 600")
+
+    return Check("principal", "ok", detail)
+
+
 def cmd_doctor(ctx: Context) -> int:
     out, ink = ctx.out, ctx.out.ink
     pol = ctx.policy()
@@ -1271,6 +1332,7 @@ def cmd_doctor(ctx: Context) -> int:
     checks.append(_cache_check(ctx, ctx.client_policy()))
 
     roster_path = ctx.roster_path()
+    roster = Roster.inert()
     if roster_path is None:
         checks.append(Check("roster", "ok", "no repo, so everyone is normal"))
     else:
@@ -1284,6 +1346,8 @@ def cmd_doctor(ctx: Context) -> int:
             checks.append(Check("roster", "ok",
                                 f"{roster_path}, "
                                 f"{len(roster.principals())} principal(s)"))
+
+    checks.append(_principal_check(ctx, roster))
 
     jpath = journal_mod.journal_path(ctx.env)
     if jpath.exists():

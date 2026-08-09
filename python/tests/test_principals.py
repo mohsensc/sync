@@ -11,6 +11,8 @@ from agent_presence.principals import (
     Roster,
     hash_token,
     mint_token,
+    read_token,
+    token_path,
 )
 from agent_presence.priority import (
     PRIORITY_MAX,
@@ -354,3 +356,35 @@ def test_discover_on_a_repo_with_no_roster_is_inert(tmp_path, monkeypatch):
     found = Roster.discover(str(tmp_path))
     assert not found.present
     assert not found.degraded
+
+
+# -- where this machine keeps its own token ----------------------------------
+
+
+def test_the_token_path_follows_the_same_rule_as_the_user_policy(tmp_path):
+    xdg = tmp_path / "xdg"
+    home = tmp_path / "home"
+    assert token_path({"XDG_CONFIG_HOME": str(xdg)}) == \
+        xdg / "agent-presence" / "token"
+    assert token_path({"HOME": str(home)}) == \
+        home / ".config" / "agent-presence" / "token"
+
+
+def test_the_environment_token_wins_over_the_file(tmp_path):
+    xdg = tmp_path / "xdg"
+    (xdg / "agent-presence").mkdir(parents=True)
+    (xdg / "agent-presence" / "token").write_text("from-the-file\n")
+    env = {"XDG_CONFIG_HOME": str(xdg), "AGENT_PRESENCE_TOKEN": "from-the-env"}
+    assert read_token(env) == "from-the-env"
+
+
+def test_the_token_file_is_read_and_trimmed(tmp_path):
+    xdg = tmp_path / "xdg"
+    (xdg / "agent-presence").mkdir(parents=True)
+    (xdg / "agent-presence" / "token").write_text("  the-token  \n# a note\n")
+    assert read_token({"XDG_CONFIG_HOME": str(xdg)}) == "the-token"
+
+
+def test_no_token_anywhere_is_empty_rather_than_an_error(tmp_path):
+    assert read_token({"XDG_CONFIG_HOME": str(tmp_path / "nope")}) == ""
+    assert read_token({}) == ""

@@ -755,3 +755,116 @@ def test_the_directory_flag_moves_where_the_repo_is_looked_for(box, tmp_path):
     )
     checks = {c["name"]: c["detail"] for c in json.loads(done.stdout)["checks"]}
     assert str(box.repo) in checks["repo"]
+
+
+# -- the principal this machine presents -------------------------------------
+#
+# `ap principals add` prints a token once and says: put it in
+# ~/.config/agent-presence/token, or $AGENT_PRESENCE_TOKEN, on the machine that
+# runs as this principal. Nothing checked whether you did, so a typo in the name
+# or a token pasted with a stray character was indistinguishable from working —
+# right up until the day it mattered and your agent lost a contest it should
+# have won.
+
+
+def add_sara(box, *, tier: str = "elevated") -> str:
+    """Add sara to the roster and return the token that was printed once."""
+    done = box.ap("principals", "add", "sara", "--attended", tier)
+    assert done.returncode == 0, done.stdout + done.stderr
+    for line in done.stdout.splitlines():
+        if line.strip().startswith("token"):
+            return line.split()[-1]
+    raise AssertionError(f"no token in:\n{done.stdout}")
+
+
+def doctor_check(box, name: str, env: dict[str, str] | None = None) -> dict:
+    done = box.ap("doctor", "--json", env=env)
+    checks = json.loads(done.stdout)["checks"]
+    found = [c for c in checks if c["name"] == name]
+    assert found, f"no {name!r} check in {[c['name'] for c in checks]}"
+    return found[0]
+
+
+def test_doctor_says_so_when_this_machine_presents_nobody(box):
+    check = doctor_check(box, "principal")
+    assert check["state"] == "ok"
+    assert "normal" in check["detail"]
+
+
+def test_doctor_confirms_a_principal_whose_token_matches_the_roster(box):
+    token = add_sara(box)
+    env = box.env | {"AGENT_PRESENCE_PRINCIPAL": "sara",
+                     "AGENT_PRESENCE_TOKEN": token}
+    check = doctor_check(box, "principal", env)
+    assert check["state"] == "ok"
+    assert "sara" in check["detail"]
+    assert "elevated" in check["detail"]
+
+
+def test_doctor_reads_the_token_out_of_the_file_the_cli_told_you_to_write(box):
+    token = add_sara(box)
+    token_file = box.config / "agent-presence" / "token"
+    token_file.parent.mkdir(parents=True, exist_ok=True)
+    token_file.write_text(token + "\n")
+    token_file.chmod(0o600)
+
+    env = box.env | {"AGENT_PRESENCE_PRINCIPAL": "sara"}
+    check = doctor_check(box, "principal", env)
+    assert check["state"] == "ok"
+
+
+def test_doctor_fails_a_principal_the_roster_has_never_heard_of(box):
+    add_sara(box)
+    env = box.env | {"AGENT_PRESENCE_PRINCIPAL": "sarah",  # one letter out
+                     "AGENT_PRESENCE_TOKEN": "whatever"}
+    check = doctor_check(box, "principal", env)
+    assert check["state"] == "fail"
+    assert "sarah" in check["detail"]
+
+
+def test_doctor_fails_a_token_that_does_not_match_the_roster(box):
+    add_sara(box)
+    env = box.env | {"AGENT_PRESENCE_PRINCIPAL": "sara",
+                     "AGENT_PRESENCE_TOKEN": "not-the-minted-one"}
+    check = doctor_check(box, "principal", env)
+    assert check["state"] == "fail"
+    assert "does not match" in check["detail"]
+
+
+def test_doctor_warns_when_a_principal_has_no_token_at_all(box):
+    # Fail-open at the relay: this costs a tier, not a join. A warning, because
+    # the machine still works and the person still is not getting what they
+    # configured.
+    add_sara(box)
+    env = box.env | {"AGENT_PRESENCE_PRINCIPAL": "sara"}
+    check = doctor_check(box, "principal", env)
+    assert check["state"] == "warn"
+    assert "no token" in check["detail"]
+
+
+def test_doctor_warns_about_a_token_file_anyone_can_read(box):
+    token = add_sara(box)
+    token_file = box.config / "agent-presence" / "token"
+    token_file.parent.mkdir(parents=True, exist_ok=True)
+    token_file.write_text(token + "\n")
+    token_file.chmod(0o644)
+
+    env = box.env | {"AGENT_PRESENCE_PRINCIPAL": "sara"}
+    check = doctor_check(box, "principal", env)
+    assert check["state"] == "warn"
+    assert "0644" in check["detail"]
+
+
+def test_doctor_names_the_tier_the_unattended_bit_selects(box):
+    done = box.ap("principals", "add", "sara", "--attended", "normal",
+                  "--unattended", "critical")
+    assert done.returncode == 0
+    token = [ln.split()[-1] for ln in done.stdout.splitlines()
+             if ln.strip().startswith("token")][0]
+
+    env = box.env | {"AGENT_PRESENCE_PRINCIPAL": "sara",
+                     "AGENT_PRESENCE_TOKEN": token,
+                     "AGENT_PRESENCE_UNATTENDED": "1"}
+    check = doctor_check(box, "principal", env)
+    assert check["state"] == "ok"
+    assert "critical" in check["detail"]

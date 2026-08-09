@@ -182,6 +182,24 @@ struct RelayConfig {
     std::string agent;
     std::string human;
 
+    /// Who this daemon claims to be, and the shared secret that backs the
+    /// claim. Both empty on an unconfigured install, and both are then left off
+    /// the join frame entirely — the relay grants such a connection `normal`,
+    /// which is what every room without a roster runs at.
+    ///
+    /// The token is a bearer secret. It is sent once, on the join, and the
+    /// relay hashes and compares it; nothing here keeps it anywhere else and
+    /// nothing logs it. Whoever can read the file it came from is this
+    /// principal, which is the same boundary as an SSH key and no better — see
+    /// the header of python/src/agent_presence/principals.py.
+    std::string principal;
+    std::string token;
+
+    /// Whether anybody is watching this machine. The one bit the client is
+    /// allowed to contribute: it selects between the two ends of the band the
+    /// roster already granted this principal, and can never step outside it.
+    bool unattended = false;
+
     long long backoff_min_ms = 250;
     long long backoff_max_ms = 30000;
 
