@@ -216,10 +216,11 @@ def test_a_bad_mcp_log_level_is_refused_before_stdout_is_touched():
 EXPECTED_SCRIPTS = {
     "agent-presence-relay": "agent_presence.serve:main",
     "agent-presence-mcp": "agent_presence.mcp_server:main",
+    "ap": "agent_presence.cli:main",
 }
 
 
-def test_pyproject_declares_both_console_scripts():
+def test_pyproject_declares_every_console_script():
     scripts = tomllib.loads(PYPROJECT.read_text())["project"]["scripts"]
     assert scripts == EXPECTED_SCRIPTS
 
