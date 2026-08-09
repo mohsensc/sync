@@ -290,7 +290,14 @@ private:
     /// Read one lease-shaped object into `held_`. `holder_override` names the
     /// agent when the frame carries it under a different key than "agent",
     /// which is what claim_result does with "held_by".
-    bool upsert_lease(std::string_view entry, const std::string& holder_override);
+    ///
+    /// `priority_key` is which field holds the *holder's* tier. It is
+    /// "priority" everywhere except a refused claim_result, where "priority"
+    /// is the requester's own tier and the holder's sits under
+    /// "holder_priority". Reading the wrong one caches our tier against their
+    /// lease, which is worse than caching none.
+    bool upsert_lease(std::string_view entry, const std::string& holder_override,
+                      std::string_view priority_key = "priority");
 
     /// Drop `held_[key]`, but only when `agent` is the one holding it.
     ///

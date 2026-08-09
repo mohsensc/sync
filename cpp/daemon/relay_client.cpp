@@ -1273,14 +1273,19 @@ void RelayClient::on_text(const std::string& json) {
     if (kind == "claim_result") {
         // Granted means the holder is us; refused names whoever beat us to it.
         // Either way the cache learns something true about that region.
-        const std::string holder = bool_field(j, "granted") ? cfg_.agent : str_field(j, "held_by");
+        const bool granted = bool_field(j, "granted");
+        const std::string holder = granted ? cfg_.agent : str_field(j, "held_by");
         if (holder.empty()) return;
-        if (upsert_lease(j, holder)) apply_leases();
+        // A refusal carries both tiers and only one of them belongs to the
+        // holder. See upsert_lease.
+        if (upsert_lease(j, holder, granted ? "priority" : "holder_priority")) {
+            apply_leases();
+        }
         return;
     }
 }
 
-bool RelayClient::upsert_lease(sv entry, const std::string& holder_override) {
+bool RelayClient::upsert_lease(sv entry, const std::string& holder_override, sv priority_key) {
     const auto region = object_get(entry, "region");
     if (!region || region->empty() || region->front() != '{') return false;
 
@@ -1292,6 +1297,7 @@ bool RelayClient::upsert_lease(sv entry, const std::string& holder_override) {
     if (lease.agent.empty()) return false;
     lease.human = str_field(entry, "human");
     lease.intent = str_field(entry, "intent");
+    lease.priority = str_field(entry, priority_key);
 
     // Time remaining, never an absolute timestamp. The relay stamps wall clock
     // seconds and LeaseCache is asked with the daemon's monotonic clock; the

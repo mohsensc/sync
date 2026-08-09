@@ -64,6 +64,11 @@ std::string decide_response(const std::string& request, const LeaseCache& leases
     append_field(out, "holder", held->agent);
     if (!held->human.empty()) append_field(out, "human", held->human);
     if (!held->intent.empty()) append_field(out, "intent", held->intent);
+    // Passed through exactly as the relay said it, unjudged. Which tiers are
+    // worth telling an agent about is the hook's call, not the daemon's — see
+    // hook_output — and a daemon that filtered here would have to be changed
+    // again the day the tier names change.
+    if (!held->priority.empty()) append_field(out, "holder_priority", held->priority);
     out += '}';
     return out;
 }

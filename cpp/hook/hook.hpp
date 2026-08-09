@@ -90,6 +90,10 @@ struct Decision {
     std::string holder;
     std::string human;
     std::string intent;
+    /// The tier the holder's lease was taken at, by name. Empty when the relay
+    /// said nothing. Only `elevated` and `critical` are ever rendered: they are
+    /// the two that explain why waiting is the right move rather than retrying.
+    std::string holder_priority;
 };
 
 /// True when this payload is a PreToolUse on a tool that writes to a file, and

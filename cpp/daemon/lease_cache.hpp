@@ -13,6 +13,11 @@ struct CachedLease {
     std::string human;
     std::string intent;
     long long expires_at_ms;
+    /// The tier this lease was taken at, by name, exactly as the relay said it.
+    /// Empty means the relay did not say — an older one, or a frame that lost
+    /// the field — and empty is rendered as nothing rather than as "normal",
+    /// because "normal" would be a fact about the room nobody told us.
+    std::string priority;
 };
 
 /// A read-only snapshot of relay-held leases, refreshed by push.

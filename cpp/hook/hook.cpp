@@ -353,6 +353,24 @@ std::string holder_name(const Decision& d) {
     return "another agent";
 }
 
+/// The holder's tier, when it is one worth telling the agent about.
+///
+/// An allowlist of exactly the two names above `normal`, for two reasons.
+/// Rendering `normal` or `background` would spend an agent's attention saying
+/// the holder is ordinary, which is the default and therefore not news. And the
+/// string arrives over a socket anything on this box can write to and ends up in
+/// prose a model reads, so the set of things that can appear there is fixed here
+/// rather than escaped and passed through.
+///
+/// Deliberately a fact about the holder and not a comparison. The daemon knows
+/// what tier the lease was taken at; it does not know the reader's, so
+/// "they outrank you" is a sentence this code is not in a position to write.
+std::string tier_note(const Decision& d) {
+    if (d.holder_priority == "elevated") return " (elevated priority)";
+    if (d.holder_priority == "critical") return " (critical priority)";
+    return {};
+}
+
 void append_field(std::string& out, const char* key, const std::string& value) {
     out += '"';
     out += key;
@@ -447,6 +465,7 @@ Decision parse_decision(const std::string& line) {
     d.holder = field(line, "holder");
     d.human = field(line, "human");
     d.intent = field(line, "intent");
+    d.holder_priority = field(line, "holder_priority");
     return d;
 }
 
@@ -455,7 +474,7 @@ std::string hook_output(const Decision& d, const std::string& path) {
     // the world's business, not the agent's. Silence is what allow looks like.
     if (d.rung <= 0) return {};
 
-    const std::string who = holder_name(d);
+    const std::string who = holder_name(d) + tier_note(d);
     const std::string where = path.empty() ? "this file" : path;
 
     std::string message;
