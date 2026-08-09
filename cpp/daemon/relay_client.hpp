@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "daemon/lease_cache.hpp"
+#include "daemon/policy_cache.hpp"
 
 namespace ap {
 
@@ -162,6 +163,19 @@ struct RelayPeer {
     std::string path;
 };
 
+/// The org floor, as the relay states it.
+///
+/// Only the floor travels. Effects are the client's own business — the relay
+/// cannot see this machine's repo, user or session layers, so a table it
+/// computed would be wrong here more often than right. A floor composes with
+/// whatever the client resolved locally by taking the louder of the two, which
+/// is well defined without knowing what the other side said.
+struct RelayPolicy {
+    PolicyTable floor;
+    std::string source;
+    std::string digest;
+};
+
 struct RelayConfig {
     std::string url = "ws://127.0.0.1:8799";
     std::string room;
@@ -219,6 +233,12 @@ public:
     /// Called for every presence frame the relay fans out to us. This is what
     /// puts other machines' agents into the snapshot.
     void on_peer(std::function<void(const RelayPeer&)> cb);
+
+    /// Called for every `policy` frame: on join, and again whenever the org
+    /// file changes under a running relay. That is the whole of "an org floor
+    /// change reaches a running daemon" — no restart, no poll, no config file
+    /// on this side of the wire.
+    void on_policy(std::function<void(const RelayPolicy&)> cb);
 
     /// Advance the connection. Blocks at most `timeout_ms`, and less when there
     /// is nothing to wait for.
@@ -294,6 +314,7 @@ private:
     Outbound& outbound_;
     LeaseCache& leases_;
     std::function<void(const RelayPeer&)> on_peer_;
+    std::function<void(const RelayPolicy&)> on_policy_;
 
     State state_ = State::Idle;
     int fd_ = -1;

@@ -16,6 +16,7 @@
 #include "daemon/json.hpp"
 #include "daemon/lease_cache.hpp"
 #include "daemon/outbound.hpp"
+#include "daemon/policy_cache.hpp"
 #include "daemon/relay_client.hpp"
 #include "daemon/repo.hpp"
 #include "daemon/snapshot.hpp"
@@ -117,12 +118,20 @@ int main() {
     const std::string runtime = env_or("XDG_RUNTIME_DIR", env_or("TMPDIR", "/tmp"));
     const std::string sock = env_or("AGENT_PRESENCE_SOCK", runtime + "/agent-presence.sock");
     const std::string snap = env_or("AGENT_PRESENCE_SNAPSHOT", runtime + "/agent-presence.json");
+    // Written by `ap policy compile`, the SessionStart hook and the MCP server.
+    // The daemon only ever stats and reads it — no TOML on this side, ever.
+    const std::string policy_cache =
+        env_or("AGENT_PRESENCE_POLICY_CACHE", runtime + "/agent-presence.policy.json");
 
     ap::SocketServer server(sock);
     ap::Coalescer coalescer(1000, 200);
     ap::Outbound outbound(1000);
     ap::PresenceTable presence(kPresenceTtlMs);
     ap::LeaseCache leases;
+    ap::PolicyCache policy;
+    // Once before the socket is up, so the first decision of the session
+    // already has the current table rather than the builtin one.
+    policy.refresh(policy_cache, now_ms());
 
     bool dirty = false;
 
@@ -146,6 +155,13 @@ int main() {
             if (p.agent.empty()) return;
             const std::string& who = p.human.empty() ? p.agent : p.human;
             if (presence.touch(p.agent, who, p.verb, p.path, now_ms())) dirty = true;
+        });
+        // The org floor, live. The relay sends this on join and again whenever
+        // its own file changes, so tightening an org policy reaches every
+        // daemon in the room without anyone restarting anything.
+        relay->on_policy([&](const ap::RelayPolicy& p) {
+            policy.set_floor(p.floor, p.source);
+            dirty = true;
         });
     }
 
@@ -183,7 +199,7 @@ int main() {
     // an older install asks on this one and has to keep getting an answer.
     // Nothing else uses it: current hooks ask on the decision socket.
     auto decide = [&](const std::string& line) {
-        return ap::decide_response(line, leases, now_ms());
+        return ap::decide_response(line, leases, policy, now_ms());
     };
     server.on_request(decide);
 
@@ -206,8 +222,9 @@ int main() {
 
     // Write once up front so the statusline reads a valid file from the first
     // tick instead of treating a missing file as an error.
-    ap::write_snapshot(snap, presence.peers());
+    ap::write_snapshot(snap, presence.peers(), policy.problem());
     long long last_write = now_ms();
+    std::string last_problem = policy.problem();
 
     for (;;) {
         pollfd fds[2];
@@ -240,9 +257,20 @@ int main() {
         if (relay) relay->poll(0);
 
         const long long t = now_ms();
+        // One stat, on a tick that already runs. The parse only happens when
+        // the mtime or the size moved, so a policy that is not changing costs
+        // ten stats a second and nothing else — and a policy that *is* changing
+        // is in force by the next edit, with no restart of anything.
+        policy.refresh(policy_cache, t);
+        std::string problem = policy.problem();
+        if (problem != last_problem) {
+            last_problem = std::move(problem);
+            dirty = true;  // a degradation has to reach the statusline promptly
+        }
+
         if (presence.expire(t)) dirty = true;
         if (dirty || t - last_write >= kSnapshotTickMs) {
-            ap::write_snapshot(snap, presence.peers());
+            ap::write_snapshot(snap, presence.peers(), last_problem);
             last_write = t;
             dirty = false;
         }

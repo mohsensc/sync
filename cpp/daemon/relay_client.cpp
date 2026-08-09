@@ -829,6 +829,10 @@ RelayClient::~RelayClient() {
 
 void RelayClient::on_peer(std::function<void(const RelayPeer&)> cb) { on_peer_ = std::move(cb); }
 
+void RelayClient::on_policy(std::function<void(const RelayPolicy&)> cb) {
+    on_policy_ = std::move(cb);
+}
+
 void RelayClient::send_text(std::string json) { outbound_.push(std::move(json)); }
 
 void RelayClient::close_socket() {
@@ -1247,6 +1251,22 @@ void RelayClient::on_text(const std::string& json) {
             return;
         }
         if (upsert_lease(j, {})) apply_leases();
+        return;
+    }
+
+    if (kind == "policy") {
+        const auto floor = object_get(j, "floor");
+        // Only a real five-name array moves the floor. A frame we half
+        // understand must leave the floor where it was: a policy frame is the
+        // one thing on this socket that can *lower* what this daemon says, and
+        // "lower it on a malformed frame" is not a behaviour worth having.
+        if (!floor) return;
+        RelayPolicy p;
+        p.floor = kBuiltinFloor;
+        if (!parse_effect_list(*floor, p.floor, nullptr)) return;
+        p.source = str_field(j, "source");
+        p.digest = str_field(j, "digest");
+        if (on_policy_) on_policy_(p);
         return;
     }
 
