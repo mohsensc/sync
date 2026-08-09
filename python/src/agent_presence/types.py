@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from .priority import PRIORITY_NORMAL
+
 Verb = Literal["read", "edit", "search", "run", "think"]
 Source = Literal["hook", "mcp"]
 LeaseState = Literal["soft", "held"]
@@ -45,6 +47,11 @@ class Claim:
     # Relay-assigned. Wait-die ordering derives from this.
     acquired_at: float
     expires_at: float
+    # Relay-assigned too, and from the roster, never from the claim frame. It
+    # is the *agent's* tier latched at its first live claim, not this lease's,
+    # for the same reason acquired_at is — see LeaseRegistry.acquire. Defaults
+    # to normal so a Claim built anywhere else orders exactly as it used to.
+    priority: int = PRIORITY_NORMAL
 
 
 def same_region(a: Region, b: Region) -> bool:

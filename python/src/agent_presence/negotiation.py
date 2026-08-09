@@ -6,6 +6,7 @@ from typing import Literal
 
 from .clock import Clock
 from .leases import LeaseRegistry
+from .priority import PRIORITY_NORMAL
 from .types import Region, same_region
 from .wait_die import Decision, resolve
 
@@ -38,6 +39,10 @@ class Brief:
     region: Region
     moves: tuple[Move, ...]
     decision: Decision = "abort"
+    # Both tiers, so a blocked agent can be told *why* it lost rather than only
+    # that it did. Equal at both ends whenever there is no roster.
+    requester_priority: int = PRIORITY_NORMAL
+    holder_priority: int = PRIORITY_NORMAL
 
 
 @dataclass
@@ -58,28 +63,38 @@ class Negotiator:
     def open(
         self, room: str, requester: str, requester_acquired_at: float,
         scope: Region, intent: str,
+        requester_priority: int = PRIORITY_NORMAL,
     ) -> Brief | None:
         """Return a brief if the region is contested, else None.
 
         ``requester_acquired_at`` is the requester's wait-die age. It decides
         whether the brief tells the agent to hold its place and wait or to
         drop everything and retry, so it is never ignored.
+
+        ``requester_priority`` is only a default, and it goes through
+        ``priority_of`` for the same reason ``acquire`` does: an agent that
+        already holds claims is ordered on the tier those claims carry, or the
+        two channels could order one contest two ways.
         """
         held = self._registry.holder_of(room, scope)
         if held is None or held.agent == requester:
             return None
+        tier = self._registry.priority_of(requester, default=requester_priority)
         return Brief(
             holder_agent=held.agent,
             holder_human=held.human,
             holder_intent=held.intent,
             region=scope,
             moves=MOVES,
-            decision=resolve(requester, requester_acquired_at, held),
+            decision=resolve(requester, requester_acquired_at, held, tier),
+            requester_priority=tier,
+            holder_priority=held.priority,
         )
 
     def apply(
         self, room: str, requester: str, scope: Region, move: str,
         reason: str = "", split_scope: Region | None = None,
+        requester_priority: int = PRIORITY_NORMAL,
     ) -> NegotiationOutcome:
         """Apply a negotiation move.
 
@@ -103,7 +118,9 @@ class Negotiator:
             return NegotiationOutcome(granted=False, action="defer")
 
         if canonical == "SPLIT":
-            return self._split(room, requester, scope, split_scope)
+            return self._split(
+                room, requester, scope, split_scope, requester_priority
+            )
 
         if canonical == "HANDOFF":
             self._registry.release(room, requester, scope)
@@ -121,6 +138,7 @@ class Negotiator:
     def _split(
         self, room: str, requester: str, scope: Region,
         split_scope: Region | None,
+        requester_priority: int = PRIORITY_NORMAL,
     ) -> NegotiationOutcome:
         """Carve off a sub-region that does not touch what the holder has.
 
@@ -150,7 +168,10 @@ class Negotiator:
                     requester, room, _name(target),
                 )
 
-        result = self._registry.acquire(room, requester, requester, target, "split")
+        result = self._registry.acquire(
+            room, requester, requester, target, "split",
+            priority=requester_priority,
+        )
         if not result.ok:
             return NegotiationOutcome(
                 granted=False,

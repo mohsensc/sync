@@ -3,8 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .clock import Clock
+from .priority import PRIORITY_NORMAL
 from .types import Claim, Region, same_region
-from .wait_die import Decision, resolve
+from .wait_die import Decision, OrderKey, order_key, resolve
 
 LEASE_TTL_S = 90.0
 PRESENCE_TTL_S = 30.0
@@ -64,6 +65,32 @@ class LeaseRegistry:
         held = [c.acquired_at for c in self._live() if c.agent == agent]
         return min(held) if held else self._clock.now()
 
+    def priority_of(self, agent: str, default: int = PRIORITY_NORMAL) -> int:
+        """The tier stamped on this agent's live claims, or ``default``.
+
+        The exact trick ``age_of`` plays, for the exact same reason. ``resolve``
+        reads the requester's tier from here and the holder's from
+        ``claim.priority``, and those are only comparable while every live claim
+        an agent holds carries one tier. ``acquire`` stamps every claim with
+        this value, so they do.
+
+        Not room-scoped, again like ``age_of``: a wait-for cycle can run through
+        leases in more than one room, and an agent that reads as ``critical`` in
+        one room and ``normal`` in another is exactly the asymmetry that would
+        let one open.
+
+        ``max`` rather than ``min`` because more entitled is the direction that
+        matters, but by the invariant above every element is equal anyway.
+        """
+        held = [c.priority for c in self._live() if c.agent == agent]
+        return max(held) if held else default
+
+    def key_of(self, agent: str, default: int = PRIORITY_NORMAL) -> OrderKey:
+        """This agent's position in the one total order. Smaller is more
+        entitled. What ``resolve`` compares, assembled in one place so a test
+        can assert a claim's stamp against it."""
+        return order_key(self.priority_of(agent, default), self.age_of(agent), agent)
+
     def acquire(
         self,
         room: str,
@@ -72,7 +99,15 @@ class LeaseRegistry:
         scope: Region,
         intent: str,
         requester_acquired_at: float | None = None,
+        priority: int = PRIORITY_NORMAL,
     ) -> AcquireResult:
+        # `priority` is only ever a *default*: an agent that already holds
+        # something keeps the tier those claims carry. Nothing here can be
+        # reached from a claim frame — the relay resolves the tier from the
+        # roster and passes it in, and the roster is not something a client can
+        # write to. See relay.Relay.priority_of.
+        tier = self.priority_of(agent, default=priority)
+
         held = self.holder_of(room, scope)
         if held is not None and held.agent != agent:
             age = (
@@ -81,7 +116,9 @@ class LeaseRegistry:
                 else requester_acquired_at
             )
             return AcquireResult(
-                ok=False, held_by=held, decision=resolve(agent, age, held)
+                ok=False,
+                held_by=held,
+                decision=resolve(agent, age, held, tier),
             )
 
         now = self._clock.now()
@@ -103,6 +140,11 @@ class LeaseRegistry:
         # (ties broken on agent id), and a total order has no cycles.
         #
         # Expiry still runs on the real clock; only the ordering key is shared.
+        #
+        # `priority` is latched the same way and for the same reason. An agent
+        # whose tier changed mid-session must not end up holding two claims at
+        # two tiers, or it reads as senior when it asks and junior when it is
+        # asked — the same two-quantity bug as above, one component to the left.
         claim = Claim(
             room=room,
             human=human,
@@ -112,6 +154,7 @@ class LeaseRegistry:
             state="held",
             acquired_at=self.age_of(agent),
             expires_at=now + LEASE_TTL_S,
+            priority=tier,
         )
         self._claims.append(claim)
         return AcquireResult(ok=True, claim=claim)
