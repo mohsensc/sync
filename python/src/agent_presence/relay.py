@@ -7,6 +7,9 @@ from .clock import Clock
 from .ladder import Activity, classify, interrupts_at
 from .leases import PRESENCE_TTL_S, LeaseRegistry
 from .negotiation import Negotiator
+from .policy import PolicyFile, Resolution
+from .principals import Grant, Roster
+from .priority import PRIORITY_NORMAL, name_of
 from .redact import (
     OPAQUE_MARK,
     clean_intent,
@@ -25,6 +28,21 @@ class Conn(Protocol):
     room: str | None
 
     def send(self, payload: dict) -> None: ...
+
+
+def _declared_str(conn: Conn, attr: str) -> str | None:
+    """A claimed field off a connection, if the transport put one there.
+
+    `principal`, `token` and `unattended` are optional on the join frame, so
+    they are optional on the connection object too — a Conn that has never
+    heard of them is an un-configured client, which is the common case and
+    lands at `normal` like everything else.
+    """
+    value = getattr(conn, attr, None)
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value or None
 
 
 def _region(d: dict) -> Region:
@@ -182,13 +200,34 @@ class Relay:
     degrades to 'nobody has protection for 90 seconds', never to a wedged team.
     """
 
-    def __init__(self, clock: Clock) -> None:
+    def __init__(
+        self,
+        clock: Clock,
+        *,
+        policy: PolicyFile | None = None,
+        roster: Roster | None = None,
+    ) -> None:
         self._clock = clock
         self._members: dict[str, list[Conn]] = {}
         self.registry = _PublishingRegistry(clock, self)
         self._negotiator = Negotiator(self.registry, clock)
         self._activity: dict[str, list[tuple[float, Activity]]] = {}
         self._last_ts: dict[str, float] = {}
+        # Builtin plus org floors, and nothing else. The repo, user and session
+        # layers are files on the client's disk that the relay cannot see, so
+        # what it stamps on a frame is advisory and the daemon's own table is
+        # what actually blocks. They can differ by the client's own local
+        # strictness, which is fine; `ap doctor` reports it when it is not.
+        self._policy = policy if policy is not None else PolicyFile.for_relay(clock)
+        # What the room was last told the floor was. Live reload is only useful
+        # if the change reaches the daemons, and they learn about it here.
+        self._policy_digest = self._policy.current().digest
+        self._roster = roster if roster is not None else Roster.discover()
+        # Grant per connection, latched at join. Keyed on the object, so it dies
+        # with the connection — same mechanism as `_identity`, and deliberately
+        # not an attribute on Conn: nothing a client can write to may decide
+        # what a client is entitled to.
+        self._principal: dict[Conn, tuple[str | None, bool, Grant]] = {}
         # The connection currently being served, if any. Lease fan-out skips
         # it: it gets its own answer on the same socket, and a client waiting
         # on that answer must not have to skip past its own echo to find it.
@@ -213,6 +252,13 @@ class Relay:
         A connection with no agent id is refused outright. Two of those would
         share the identity "", which means either could release the other's
         leases and either one hanging up would take both sets down.
+
+        The grant is latched here too, by the same mechanism and for a sharper
+        version of the same reason. A second join frame re-declaring a
+        principal would be a live connection re-rating itself mid-session, and
+        an agent that could do that could hold two claims at two tiers — which
+        is exactly the asymmetry ``LeaseRegistry.acquire`` latches ``priority``
+        to prevent.
         """
         if not conn.agent:
             log.debug("join with no agent id; refused")
@@ -232,6 +278,9 @@ class Relay:
             )
             return False
 
+        if not self._latch_grant(conn, room):
+            return False
+
         # One connection, one room membership. Without the sweep a connection
         # that moves rooms keeps receiving the old room's traffic forever,
         # because `leave` only ever cleans up conn.room.
@@ -239,10 +288,132 @@ class Relay:
             while conn in members:
                 members.remove(conn)
 
+        # Before the joiner is a member, so a change picked up here fans out to
+        # the room that already exists and the joiner gets its own copy below
+        # rather than two.
+        self._publish_policy_change()
+
         conn.room = room
         self._members.setdefault(room, []).append(conn)
         self._send_lease_snapshot(conn, room)
+        # Only when there is an org policy to state. A relay with no org file
+        # has nothing to say that the daemon's compiled-in floor does not
+        # already say, and saying it anyway would put a new frame on the wire
+        # of every install that configured nothing — which is exactly what
+        # test_golden_noop.py exists to forbid.
+        frame = self._policy_frame()
+        if frame is not None:
+            conn.send(frame)
         return True
+
+    def _policy_frame(self) -> dict | None:
+        """The org floor, as this relay currently reads it.
+
+        Only the floor travels. Effects are the client's business — the relay
+        cannot see this machine's repo, user or session layers — but a floor
+        composes with whatever the client resolved locally by taking the louder
+        of the two, which is well defined without knowing what the other side
+        said. `cpp/daemon/policy_cache.cpp` is what reads this.
+        """
+        policy = self._policy.current()
+        org = policy.layer("org")
+        if org is None:
+            return None
+        return {
+            "type": "policy",
+            "floor": policy.floor_table("").names(),
+            "source": f"org:{org.source}",
+            "digest": policy.digest,
+        }
+
+    def _publish_policy_change(self) -> bool:
+        """Push a new org floor to every room, if there is one.
+
+        This is what makes "saved is applied" true for the org layer without a
+        restart: `PolicyFile.current()` re-reads the file when its mtime moves,
+        and the first frame handled after that carries the new floor to every
+        daemon attached. Nothing polls and nothing is scheduled — the relay only
+        does work when something happens, and when nothing is happening there is
+        nobody whose edit the new floor would have changed.
+        """
+        digest = self._policy.current().digest
+        if digest == self._policy_digest:
+            return False
+        self._policy_digest = digest
+        frame = self._policy_frame()
+        if frame is None:
+            # The org file went away. The floor drops back to the compiled-in
+            # one, which every daemon already has, so there is nothing to send.
+            return False
+        log.info("org policy changed (%s); republishing the floor", digest[:12])
+        for room in list(self._members):
+            self.broadcast(room, frame)
+        return True
+
+    # -- priority -----------------------------------------------------------
+
+    def _latch_grant(self, conn: Conn, room: str) -> bool:
+        """Authenticate once, remember forever. False means refuse the join."""
+        principal = _declared_str(conn, "principal")
+        unattended = getattr(conn, "unattended", False) is True
+
+        latched = self._principal.get(conn)
+        if latched is None:
+            grant = self._roster.authenticate(
+                principal, _declared_str(conn, "token"), room=room
+            )
+            self._principal[conn] = (principal, unattended, grant)
+            if grant.authenticated:
+                log.info(
+                    "principal %s joined room %s at %s",
+                    grant.principal, room, grant.tier_name(unattended=unattended),
+                )
+            return True
+
+        prev_principal, prev_unattended, _grant = latched
+        if (principal, unattended) != (prev_principal, prev_unattended):
+            # Put the latched values back, like the identity check does, so a
+            # re-rate attempt leaves nothing behind on the connection either.
+            with_principal = getattr(conn, "principal", None)
+            if with_principal is not None or prev_principal is not None:
+                conn.principal = prev_principal  # type: ignore[attr-defined]
+            conn.unattended = prev_unattended    # type: ignore[attr-defined]
+            log.warning(
+                "refused principal change on a live connection: %s -> %s",
+                prev_principal, principal,
+            )
+            return False
+        return True
+
+    def grant_of(self, conn: Conn) -> Grant:
+        latched = self._principal.get(conn)
+        if latched is None:
+            return Grant(
+                principal=None, attended=PRIORITY_NORMAL,
+                unattended=PRIORITY_NORMAL, reason="no-roster",
+            )
+        return latched[2]
+
+    def unattended_of(self, conn: Conn) -> bool:
+        latched = self._principal.get(conn)
+        return latched[1] if latched is not None else False
+
+    def priority_of(self, conn: Conn) -> int:
+        """The tier this connection is entitled to.
+
+        Note what is *not* read here: the message body. A claim frame carrying
+        ``"priority": "critical"`` is ignored the same way a claim frame
+        carrying someone else's agent id is ignored — the only inputs are the
+        roster the relay read off disk and the one supervision bit the join
+        frame latched, and that bit only selects inside the band the roster
+        already granted.
+        """
+        return self.grant_of(conn).priority(unattended=self.unattended_of(conn))
+
+    def resolve_policy(self, conn: Conn, rung: int, path: str) -> Resolution:
+        return self._policy.current().resolve(
+            rung, path, unattended=self.unattended_of(conn)
+        )
 
     def _send_lease_snapshot(self, conn: Conn, room: str) -> None:
         """Tell a joiner what this relay holds. Always, even when it is nothing.
@@ -284,6 +455,7 @@ class Relay:
         # presenced@<hostname> — and that room's leases have nothing to do with
         # this socket hanging up.
         identity = self._identity.pop(conn, None)
+        self._principal.pop(conn, None)
         if identity is not None and room is not None:
             self.registry.release_all(room, identity[0])
         conn.room = None
@@ -329,6 +501,13 @@ class Relay:
         # handler cannot leave a stale connection excluded from the next one.
         self._actor = conn
         try:
+            # Live reload, on the only clock the relay has. PolicyFile gates its
+            # own stat at one a second, so this costs a comparison per frame in
+            # the steady state and one file read when somebody edits the org
+            # policy. The broadcast goes out before the frame is dispatched so
+            # the answer this connection is about to get and the floor the room
+            # is holding cannot disagree.
+            self._publish_policy_change()
             return self._dispatch(conn, message)
         finally:
             self._actor = None
@@ -368,6 +547,7 @@ class Relay:
                 room, conn.agent, region,
                 message.get("move", ""), clean_intent(message.get("reason")),
                 split_scope=_wire_region(message, "split_region"),
+                requester_priority=self.priority_of(conn),
             )
             reply = {"type": "move_result", "granted": outcome.granted,
                      "action": outcome.action}
@@ -401,27 +581,43 @@ class Relay:
                               "region": clean["region"], "rung": rung, "ts": now},
                        exclude=conn)
 
-        if not interrupts_at(rung):
-            return {"type": "ack", "rung": rung}
+        # Policy decides how loudly this rung is told. It does not decide the
+        # rung, and it never reaches the lease table: `classify` above and
+        # `Negotiator.open` below run exactly as they did before, whatever the
+        # effect turns out to be.
+        resolution = self.resolve_policy(conn, rung, region.path)
+        effect = resolution.effect
+
+        if not interrupts_at(rung, effect):
+            return {"type": "ack", "rung": rung, "effect": effect}
 
         brief = self._negotiator.open(
             room, conn.agent, self.registry.age_of(conn.agent), region, "",
+            requester_priority=self.priority_of(conn),
         )
         if brief is None:
-            return {"type": "ack", "rung": rung}
+            return {"type": "ack", "rung": rung, "effect": effect}
         return {
             "type": "negotiate", "rung": rung,
             "holder_agent": brief.holder_agent, "holder_human": brief.holder_human,
             "holder_intent": brief.holder_intent, "moves": list(brief.moves),
             "decision": brief.decision,
+            "effect": effect,
+            "effect_source": resolution.winning_layer,
+            "priority": name_of(brief.requester_priority),
+            "holder_priority": name_of(brief.holder_priority),
         }
 
     def _on_claim(
         self, room: str, conn: Conn, message: dict, region: Region
     ) -> dict:
+        # The tier comes off the latched grant, never off `message`. A claim
+        # frame naming its own priority is ignored exactly the way a claim frame
+        # naming somebody else's agent id is ignored.
         result = self.registry.acquire(
             room, conn.human, conn.agent,
             region, clean_intent(message.get("intent")),
+            priority=self.priority_of(conn),
         )
         now = self._clock.now()
 
@@ -432,6 +628,7 @@ class Relay:
         if result.ok:
             granted = {"type": "claim_result", "granted": True}
             granted.update(_lease_entry(result.claim, now))
+            granted["priority"] = name_of(result.claim.priority)
             return granted
 
         # Refusal alone is not enough: without an instruction two agents can
@@ -439,10 +636,23 @@ class Relay:
         # off and the other dies, and the loser's leases in *this* room have to
         # actually go so it is not holding anything while it retries. Leases the
         # same agent id holds in another room are not part of this contest.
+        held = result.held_by
+        # Read the tier before the abort sweep: release_all drops the claims
+        # priority_of reads it off, and a loser told its own tier was `normal`
+        # when it was `elevated` learns the wrong thing about why it lost.
+        requester_priority = self.registry.priority_of(
+            conn.agent, default=self.priority_of(conn)
+        )
+
         if result.decision == "abort":
             self.registry.release_all(room, conn.agent)
 
-        held = result.held_by
+        # A refused claim is a rung 3 by definition: a relay-granted lease on a
+        # contending region. The effect is advisory here — the daemon's own
+        # table is what blocks the edit — but it is what the MCP and web
+        # surfaces render, so it travels.
+        resolution = self.resolve_policy(conn, 3, region.path)
+
         return {
             "type": "claim_result", "granted": False,
             "held_by": held.agent,
@@ -450,6 +660,12 @@ class Relay:
             "human": held.human,
             "intent": held.intent,
             "decision": result.decision,
+            "effect": resolution.effect,
+            "effect_source": resolution.winning_layer,
+            # Both tiers by name, so a blocked agent can be told why it lost
+            # rather than only that it did.
+            "priority": name_of(requester_priority),
+            "holder_priority": name_of(held.priority),
             # The region asked for, not the holder's scope. A whole-file lease
             # refusing a symbol-level claim has to land under the key the hook
             # will look up, which is the one on the request.
