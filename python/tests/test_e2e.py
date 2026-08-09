@@ -198,3 +198,114 @@ async def test_the_token_never_comes_back_out_on_the_wire(roster_server):
                 break
         assert seen, "the relay said nothing at all"
         assert all(BOT_TOKEN not in frame for frame in seen)
+
+
+async def test_the_senior_agent_holds_its_place_and_the_junior_one_backs_off(
+    roster_server,
+):
+    """The point of the roster, over a real socket.
+
+    Two agents contend for a region a third already holds. Both arrive after the
+    holder, so age alone would have both of them abort — the only difference
+    between them is that one is in the roster. That one is told to `wait`, which
+    means keep your place; the other is told to `abort`, which means drop
+    everything and start over.
+
+    Then the holder lets go, and the one that waited is the one that gets it.
+    Nothing was ever taken off a live holder: there is no preemption here and
+    priority did not add any.
+    """
+    url = f"ws://127.0.0.1:{PRIORITY_PORT}"
+    region = {"path": "src/pay.py", "symbol": "charge", "lines": None}
+
+    async with (
+        websockets.connect(url) as holder,
+        websockets.connect(url) as senior,
+        websockets.connect(url) as junior,
+    ):
+        await join(holder, "a1", "nora")
+        await asyncio.sleep(0.1)
+
+        await holder.send(json.dumps({"type": "claim", "region": region,
+                                      "intent": "rewriting the retry path"}))
+        assert (await recv(holder, "claim_result"))["granted"] is True
+
+        # Both challengers are younger than the holder.
+        await join(senior, "a2", "sara", principal="release-bot", token=BOT_TOKEN,
+                   unattended=True)
+        await join(junior, "a3", "dev")
+        await asyncio.sleep(0.1)
+
+        for ws in (senior, junior):
+            await ws.send(json.dumps({"type": "claim", "region": region,
+                                      "intent": "work"}))
+
+        senior_reply = await recv(senior, "claim_result")
+        junior_reply = await recv(junior, "claim_result")
+
+        assert senior_reply["granted"] is False
+        assert junior_reply["granted"] is False
+        # Same contest, same age, same holder. Only the roster differs.
+        assert senior_reply["priority"] == "critical"
+        assert junior_reply["priority"] == "normal"
+        assert senior_reply["holder_priority"] == "normal"
+        assert senior_reply["decision"] == "wait"
+        assert junior_reply["decision"] == "abort"
+
+        # The holder finishes. Whoever waited is still in the room and still
+        # holds whatever it held; whoever aborted dropped everything.
+        await holder.send(json.dumps({"type": "release", "region": region}))
+        await asyncio.sleep(0.1)
+
+        await senior.send(json.dumps({"type": "claim", "region": region,
+                                      "intent": "hotfixing the outage"}))
+        won = await recv(senior, "claim_result")
+        assert won["granted"] is True
+        assert won["priority"] == "critical"
+
+        # And the junior one, asking at the same moment, is behind it now.
+        await junior.send(json.dumps({"type": "claim", "region": region,
+                                      "intent": "work"}))
+        lost = await recv(junior, "claim_result")
+        assert lost["granted"] is False
+        assert lost["held_by"] == "a2"
+        assert lost["holder_priority"] == "critical"
+        assert lost["decision"] == "abort"
+
+
+async def test_the_room_is_told_which_tier_a_lease_was_taken_at(roster_server):
+    """The tier has to reach the *room*, not just the claimer.
+
+    Every daemon renders what the relay pushes, so a lease body that leaves the
+    tier out means `ap-hook` can name the holder and can never say they outrank
+    you — which is the one thing that tells a blocked agent to wait rather than
+    retry.
+    """
+    url = f"ws://127.0.0.1:{PRIORITY_PORT}"
+    region = {"path": "src/pay.py", "symbol": "refund", "lines": None}
+
+    async with (
+        websockets.connect(url) as bot,
+        websockets.connect(url) as watcher,
+    ):
+        await join(bot, "a1", "sara", principal="release-bot", token=BOT_TOKEN)
+        await join(watcher, "a2", "dev")
+        await asyncio.sleep(0.1)
+
+        await bot.send(json.dumps({"type": "claim", "region": region,
+                                   "intent": "cutting the release"}))
+        assert (await recv(bot, "claim_result"))["granted"] is True
+
+        # The fan-out the other daemon in the room receives.
+        pushed = await recv(watcher, "lease")
+        assert pushed["state"] == "held"
+        assert pushed["agent"] == "a1"
+        assert pushed["priority"] == "critical"
+
+        # And a daemon that joins later gets it in the snapshot rather than
+        # having to wait for the next change. Inside the holder's connection,
+        # necessarily: hanging up releases what it held.
+        async with websockets.connect(url) as latecomer:
+            await join(latecomer, "a3", "late")
+            snapshot = await recv(latecomer, "leases")
+            assert [e["priority"] for e in snapshot["leases"]] == ["critical"]
