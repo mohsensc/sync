@@ -94,11 +94,18 @@ def _lease_entry(claim: Claim, now: float) -> dict:
     so an absolute deadline on the wire would expire every lease on arrival or
     none of them ever. `expires_at` rides along on the relay's own clock for
     anything reading this off the wire directly.
+
+    `priority` is here rather than on one frame that remembered it. The relay
+    orders every contest by the tier stamped on the lease, and the daemon
+    renders what the relay pushes; a body without it means `ap-hook` can name
+    the holder and never say they outrank you. Always spelled out, `normal`
+    included, so no reader needs a special case for a missing field.
     """
     return {
         "agent": claim.agent,
         "human": claim.human,
         "intent": claim.intent,
+        "priority": name_of(claim.priority),
         "region": _region_payload(claim.scope),
         "expires_in_ms": max(0, int((claim.expires_at - now) * 1000)),
         "expires_at": claim.expires_at,
@@ -627,8 +634,9 @@ class Relay:
         # guaranteed to care about this region learns nothing from the answer.
         if result.ok:
             granted = {"type": "claim_result", "granted": True}
+            # `priority` comes with the body now; it used to be bolted on here
+            # and nowhere else, which is how the fan-out lost it.
             granted.update(_lease_entry(result.claim, now))
-            granted["priority"] = name_of(result.claim.priority)
             return granted
 
         # Refusal alone is not enough: without an instruction two agents can
