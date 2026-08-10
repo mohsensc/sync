@@ -1255,8 +1255,12 @@ def cmd_principals_add(ctx: Context) -> int:
     out.say(f"added {args.id} to {path}")
     out.say()
     out.say(f"  token  {ink.bold(token)}")
+    # The path is worked out, not written down: `token_path` honours
+    # $XDG_CONFIG_HOME and this line did not, so on a machine that sets it the
+    # instructions named a file nothing would ever read.
     out.say(ink.dim(
-        "  Printed once. Put it in ~/.config/agent-presence/token (chmod 600),\n"
+        f"  Printed once. Put it in {principals_mod.token_path(ctx.env)} "
+        "(chmod 600),\n"
         "  or $AGENT_PRESENCE_TOKEN, on the machine that runs as this\n"
         "  principal. Whoever can read that file is this principal."))
     return OK

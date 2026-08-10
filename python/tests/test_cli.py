@@ -1120,3 +1120,12 @@ def test_why_help_says_what_the_count_does(box):
     assert "--all" in done.stdout
 
 
+def test_principals_add_names_the_token_file_that_is_actually_read(box):
+    xdg = box.home / "xdg"
+    env = box.env | {"XDG_CONFIG_HOME": str(xdg)}
+    done = box.ap("principals", "add", "sara", env=env)
+    assert done.returncode == 0, done.stderr
+    # `read_token` honours $XDG_CONFIG_HOME. The instructions printed here did
+    # not, so on a machine that sets it they named a file nothing would read.
+    assert str(xdg / "agent-presence" / "token") in done.stdout
+    assert "~/.config" not in done.stdout
