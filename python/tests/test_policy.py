@@ -885,3 +885,39 @@ rung3 = "deny"
     # shape but the hashed one — which cannot be told apart from pay.py.
     assert policy.floor_table("/Users/sara/work/myrepo/src/api.py").names()[3] \
         == BUILTIN_FLOOR[3]
+
+
+# -- the cache has to fit through the daemon --------------------------------
+
+
+def test_a_large_policy_compiles_to_a_cache_the_daemon_will_read():
+    """The compiled cache stopped being a fixed 600 bytes.
+
+    It used to resolve the [[path]] rules away; it carries them now, so it
+    grows with the policy. `PolicyCache::kMaxBytes` in
+    cpp/daemon/policy_cache.hpp is the other side of this, and when the two
+    disagree the daemon does not fail loudly — it keeps the builtin table while
+    `ap doctor`, reading the same file in Python, says everything is fine.
+
+    1200 rules is roughly the largest policy anyone has written here. The
+    number below is the daemon's cap; move both or neither.
+    """
+    daemon_cap = 4 * 1024 * 1024
+
+    lines = []
+    for i in range(1200):
+        lines.append(
+            f'[[path]]\nmatch = "src/mod{i:04d}/**/*.py"\n'
+            f'rung3 = "ask"\nrung2 = "notify"\n'
+        )
+    layer = parse_layer("".join(lines), name="repo", source="repo.toml")
+    policy = build_policy([builtin_layer(), layer])
+
+    blob = compile_runtime(policy)
+    size = len(json.dumps(blob, separators=(",", ":")))
+
+    assert len(blob["rules"]) >= 1200
+    assert size < daemon_cap, (
+        f"a 1200-rule policy compiles to {size} bytes and the daemon reads at "
+        f"most {daemon_cap}; it would keep the builtin table instead"
+    )

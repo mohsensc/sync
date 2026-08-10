@@ -440,3 +440,62 @@ TEST_CASE("the compiler's problem and the daemon's are both reported") {
     // The word it could not read left that rung where it was: the builtin deny.
     REQUIRE(p.effect_for(3) == ap::Effect::Deny);
 }
+
+// -- the cache is not five names any more ------------------------------------
+//
+// `ap policy compile` used to resolve the [[path]] rules away and write a blob
+// of about 600 bytes. It carries the globs now, so the file grows with the
+// policy: a 1200-rule repo policy compiles to ~100KB. The daemon still only
+// wants `table` out of it, but it has to get through the file to find it.
+
+namespace {
+
+/// A compiled cache with `rules` in front of `table`, the way `ap policy
+/// compile` writes it, padded out to at least `bytes`.
+std::string fat_blob(const std::string& table, std::size_t bytes) {
+    std::string rules;
+    for (int i = 0; rules.size() < bytes; ++i) {
+        if (!rules.empty()) rules += ",";
+        rules += R"({"match":"src/mod)" + std::to_string(i) +
+                 R"(/**/*.py","effects":["","","","ask",""],"layer":"repo"})";
+    }
+    return R"({"schema":1,"digest":"d","degraded":false,"problem":"","rules":[)" + rules +
+           R"(],"floors":[],"table":)" + table +
+           R"(,"floor":["silent","silent","silent","notify","silent"]})";
+}
+
+}  // namespace
+
+TEST_CASE("a large compiled policy still reaches the daemon") {
+    Scratch s("large");
+    write(s.path, fat_blob(R"(["silent","notify","notify","ask","silent"])", 200 * 1024));
+
+    ap::PolicyCache p;
+    REQUIRE(p.refresh(s.path, tick(1)));
+    REQUIRE(p.effect_for(3) == ap::Effect::Ask);
+    REQUIRE_FALSE(p.degraded());
+}
+
+TEST_CASE("a cache too big to read says so instead of failing quietly") {
+    Scratch s("toobig");
+    write(s.path, blob(R"(["silent","notify","notify","ask","silent"])"));
+
+    ap::PolicyCache p;
+    REQUIRE(p.refresh(s.path, tick(1)));
+    REQUIRE(p.effect_for(3) == ap::Effect::Ask);
+
+    // Past any policy anyone compiles. The point is that the daemon names the
+    // size rather than reporting a generic unreadable file, and that it does
+    // not go back and read the whole thing again on every tick.
+    write(s.path, fat_blob(R"(["silent","deny","deny","deny","deny"])",
+                           ap::PolicyCache::max_bytes() + 1024));
+    REQUIRE_FALSE(p.refresh(s.path, tick(2)));
+
+    REQUIRE(p.effect_for(3) == ap::Effect::Ask);  // last good table stays in force
+    REQUIRE(p.degraded());
+    REQUIRE(p.problem().find("too large") != std::string::npos);
+
+    const std::size_t parsed = p.parses();
+    for (int i = 3; i < 8; ++i) REQUIRE_FALSE(p.refresh(s.path, tick(i)));
+    REQUIRE(p.parses() == parsed);
+}

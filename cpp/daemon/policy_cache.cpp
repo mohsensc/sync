@@ -158,6 +158,19 @@ bool PolicyCache::refresh(const std::string& path, long long now_ms) {
     const long long size = static_cast<long long>(st.st_size);
     if (loaded_ && mtime == mtime_ns_ && size == size_) return false;
 
+    // Too big to be our file. Say which failure this is — "could not be read"
+    // sends you looking at permissions — and remember the stamp, because
+    // re-reading a file we already know is over the cap on every tick is how a
+    // policy nobody can use also becomes a busy loop.
+    if (size > static_cast<long long>(kMaxBytes)) {
+        mtime_ns_ = mtime;
+        size_ = size;
+        note("policy cache " + path + " is too large (" + std::to_string(size) +
+             " bytes, limit " + std::to_string(kMaxBytes) +
+             "); keeping the last table");
+        return false;
+    }
+
     std::string text;
     if (!read_all(path, kMaxBytes, text)) {
         mtime_ns_ = kNever;  // try again next tick rather than latching the failure
