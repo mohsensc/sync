@@ -432,6 +432,11 @@ class Relay:
         # it dies with the connection.
         self._identity: dict[Conn, tuple[str, str]] = {}
 
+    @property
+    def clock(self) -> Clock:
+        """The clock every deadline in the system reads, connections included."""
+        return self._clock
+
     # -- membership ---------------------------------------------------------
 
     def join(self, room: str, conn: Conn) -> bool:
