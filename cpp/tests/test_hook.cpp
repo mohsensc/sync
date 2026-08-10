@@ -15,6 +15,7 @@
 #include <thread>
 #include "hook/hook.hpp"
 #include "tests/fake_daemon.hpp"
+#include "tests/test_paths.hpp"
 
 namespace {
 
@@ -247,10 +248,11 @@ const std::string kEditPayload =
     R"({"session_id":"s2","hook_event_name":"PreToolUse","tool_name":"Edit",)"
     R"("tool_input":{"file_path":"/repo/src/auth.py","old_string":"SECRET"}})";
 
-/// A socket path short enough for sun_path's 104 bytes on macOS.
+/// A socket path short enough for sun_path's 104 bytes on macOS, and unique to
+/// this process so two `ap_tests` binaries running at once do not bind the
+/// same file.
 std::string sock_path(const char* leaf) {
-    const auto p = std::filesystem::temp_directory_path() / leaf;
-    return p.string();
+    return apt::unique_temp_path(leaf);
 }
 
 }  // namespace

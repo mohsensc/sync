@@ -4,6 +4,7 @@
 #include <set>
 #include <string>
 #include "daemon/repo.hpp"
+#include "tests/test_paths.hpp"
 
 TEST_CASE("every url form of one repo collapses to one key") {
     std::set<std::string> keys{
@@ -80,7 +81,7 @@ TEST_CASE("distinct repos and hosts stay distinct") {
 
 TEST_CASE("find_repo_root walks up to the marker and gives up at the top") {
     namespace fs = std::filesystem;
-    const auto base = fs::temp_directory_path() / "ap_repo_test";
+    const auto base = fs::path(apt::unique_temp_path("ap_repo_test"));
     fs::remove_all(base);
     const auto deep = base / "repo" / "src" / "nested";
     fs::create_directories(deep);

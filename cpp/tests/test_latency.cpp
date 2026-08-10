@@ -16,6 +16,7 @@
 #include "daemon/policy_cache.hpp"
 #include "daemon/socket_server.hpp"
 #include "hook/hook.hpp"
+#include "tests/test_paths.hpp"
 #include "tests/fake_daemon.hpp"
 
 namespace {
@@ -90,7 +91,7 @@ TEST_CASE("hook p99 stays under the 5ms budget with no daemon listening") {
 // tool call of a normal session is this one: a daemon is up, the connect
 // succeeds, and the hook has to get in and out inside the same 5ms.
 TEST_CASE("hook p99 stays under the 5ms budget with a live daemon listening") {
-    const auto sock = (std::filesystem::temp_directory_path() / "ap_latency.sock").string();
+    const auto sock = apt::unique_temp_path("ap_latency.sock");
     std::filesystem::remove(sock);
 
     LiveDaemon daemon(sock);
@@ -162,7 +163,7 @@ constexpr int kBudgetMs = 2;
 }  // namespace
 
 TEST_CASE("decision p99 stays under the 5ms budget against a daemon that answers") {
-    const auto sock = (std::filesystem::temp_directory_path() / "ap_lat_rt.sock").string();
+    const auto sock = apt::unique_temp_path("ap_lat_rt.sock");
     apt::FakeDaemon daemon(
         sock, apt::Mode::kReply,
         R"({"rung":3,"holder":"sess_a","human":"sara","intent":"rewriting token refresh"})");
@@ -200,7 +201,7 @@ TEST_CASE("decision p99 stays under the 5ms budget against a daemon that never a
     // nothing comes back. This is the timeout path, and it is the one that
     // would hand every Edit in the session a multi-second stall if the budget
     // were not enforced end to end.
-    const auto sock = (std::filesystem::temp_directory_path() / "ap_lat_hold.sock").string();
+    const auto sock = apt::unique_temp_path("ap_lat_hold.sock");
     apt::FakeDaemon daemon(sock, apt::Mode::kHold);
     REQUIRE(daemon.start());
 
@@ -230,7 +231,7 @@ TEST_CASE("run_hook p99 stays under the 5ms budget against the real daemon") {
     // SocketServer is what presenced actually runs. It reads the request and
     // has no responder yet, which is the integration state this lands in: the
     // hook must cost nothing and print nothing until the daemon side ships.
-    const auto sock = (std::filesystem::temp_directory_path() / "ap_lat_run.sock").string();
+    const auto sock = apt::unique_temp_path("ap_lat_run.sock");
     std::filesystem::remove(sock);
 
     LiveDaemon daemon(sock);
@@ -348,9 +349,9 @@ private:
 }  // namespace
 
 TEST_CASE("decision p99 stays inside the budget with a loaded policy cache") {
-    const auto sock = (std::filesystem::temp_directory_path() / "ap_lat_pol.sock").string();
+    const auto sock = apt::unique_temp_path("ap_lat_pol.sock");
     std::filesystem::remove(sock);
-    CacheFile cache((std::filesystem::temp_directory_path() / "ap_lat_pol.json").string());
+    CacheFile cache(apt::unique_temp_path("ap_lat_pol.json"));
 
     PolicyDaemon daemon(sock);
     REQUIRE(daemon.start());
@@ -386,9 +387,9 @@ TEST_CASE("decision p99 survives a policy cache being reloaded underneath it") {
     // thread takes the write lock as often as it possibly can while the hook
     // is trying to read. If refresh held that lock across the stat and the
     // file read, this is the case that would blow the budget.
-    const auto sock = (std::filesystem::temp_directory_path() / "ap_lat_churn.sock").string();
+    const auto sock = apt::unique_temp_path("ap_lat_churn.sock");
     std::filesystem::remove(sock);
-    CacheFile cache((std::filesystem::temp_directory_path() / "ap_lat_churn.json").string());
+    CacheFile cache(apt::unique_temp_path("ap_lat_churn.json"));
 
     PolicyDaemon daemon(sock);
     REQUIRE(daemon.start());

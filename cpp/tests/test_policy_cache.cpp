@@ -15,15 +15,14 @@
 #include <vector>
 
 #include "daemon/policy_cache.hpp"
+#include "tests/test_paths.hpp"
 
 namespace {
 
 std::string temp_file(const char* stem) {
     static std::atomic<int> counter{0};
-    return (std::filesystem::temp_directory_path() /
-            (std::string("ap_policy_") + stem + "_" +
-             std::to_string(counter.fetch_add(1)) + ".json"))
-        .string();
+    return apt::unique_temp_path(std::string("ap_policy_") + stem + "_" +
+                                  std::to_string(counter.fetch_add(1)) + ".json");
 }
 
 void write(const std::string& path, const std::string& body) {

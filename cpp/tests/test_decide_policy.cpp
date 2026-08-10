@@ -16,6 +16,7 @@
 #include "daemon/lease_cache.hpp"
 #include "daemon/policy_cache.hpp"
 #include "hook/hook.hpp"
+#include "tests/test_paths.hpp"
 
 namespace {
 
@@ -37,9 +38,7 @@ struct Held {
 class Loaded {
 public:
     explicit Loaded(const std::string& table) {
-        path_ = (std::filesystem::temp_directory_path() /
-                 ("ap_decide_policy_" + std::to_string(++seq_) + ".json"))
-                    .string();
+        path_ = apt::unique_temp_path("ap_decide_policy_" + std::to_string(++seq_) + ".json");
         std::ofstream f(path_, std::ios::trunc);
         f << R"({"schema":1,"digest":"d","table":)" << table
           << R"(,"floor":["silent","silent","silent","notify","silent"]})";

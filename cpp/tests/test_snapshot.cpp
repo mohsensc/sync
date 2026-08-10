@@ -21,6 +21,7 @@
 #include <vector>
 #include "daemon/snapshot.hpp"
 #include "hook/hook.hpp"
+#include "tests/test_paths.hpp"
 
 extern char** environ;
 
@@ -62,7 +63,7 @@ bool wait_until(const std::function<bool()>& pred, int budget_ms) {
 }  // namespace
 
 TEST_CASE("snapshot is valid json containing each peer") {
-    auto p = (std::filesystem::temp_directory_path() / "ap_snap.json").string();
+    auto p = apt::unique_temp_path("ap_snap.json");
     ap::write_snapshot(p, {{"sara", "edit", "src/auth.py"}, {"dev", "read", "src/db.py"}});
 
     auto s = read_all(p);
@@ -72,13 +73,13 @@ TEST_CASE("snapshot is valid json containing each peer") {
 }
 
 TEST_CASE("an empty peer list still writes a readable snapshot") {
-    auto p = (std::filesystem::temp_directory_path() / "ap_empty.json").string();
+    auto p = apt::unique_temp_path("ap_empty.json");
     ap::write_snapshot(p, {});
     REQUIRE(read_all(p).find("\"peers\":[]") != std::string::npos);
 }
 
 TEST_CASE("writes leave no partial file behind") {
-    const auto p = (std::filesystem::temp_directory_path() / "ap_atomic.json").string();
+    const auto p = apt::unique_temp_path("ap_atomic.json");
     std::filesystem::remove(p);
 
     // Big enough that a non-atomic write takes several buffer flushes to land.
@@ -173,7 +174,7 @@ TEST_CASE("an agent that goes quiet drops off the statusline") {
 }
 
 TEST_CASE("a snapshot written from the presence table names the peers") {
-    auto p = (std::filesystem::temp_directory_path() / "ap_presence.json").string();
+    auto p = apt::unique_temp_path("ap_presence.json");
     ap::PresenceTable t(30000);
     t.touch("a1", "sara", "edit", "src/auth.py", 0);
     ap::write_snapshot(p, t.peers());
@@ -187,9 +188,8 @@ TEST_CASE("a live daemon keeps the snapshot current as events arrive") {
     const auto bin = exe_dir() / "presenced";
     REQUIRE(std::filesystem::exists(bin));
 
-    const auto dir = std::filesystem::temp_directory_path();
-    const auto sock = (dir / "ap_live.sock").string();
-    const auto snap = (dir / "ap_live.json").string();
+    const auto sock = apt::unique_temp_path("ap_live.sock");
+    const auto snap = apt::unique_temp_path("ap_live.json");
     std::filesystem::remove(sock);
     std::filesystem::remove(snap);
 

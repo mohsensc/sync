@@ -31,6 +31,7 @@
 #include "daemon/socket_server.hpp"
 #include "hook/hook.hpp"
 #include "hook/protocol.hpp"
+#include "tests/test_paths.hpp"
 
 namespace {
 
@@ -56,7 +57,7 @@ long long now_ms() {
 }
 
 std::string sock_path(const char* leaf) {
-    return (std::filesystem::temp_directory_path() / leaf).string();
+    return apt::unique_temp_path(leaf);
 }
 
 /// presenced's two sockets, wired the way daemon/main.cpp wires them.

@@ -25,6 +25,7 @@
 #include "daemon/lease_cache.hpp"
 #include "daemon/socket_server.hpp"
 #include "hook/hook.hpp"
+#include "tests/test_paths.hpp"
 
 namespace {
 
@@ -95,7 +96,7 @@ private:
 };
 
 std::string sock_path(const char* leaf) {
-    return (std::filesystem::temp_directory_path() / leaf).string();
+    return apt::unique_temp_path(leaf);
 }
 
 /// The hook connects, so give the daemon thread a moment to reach its poll.

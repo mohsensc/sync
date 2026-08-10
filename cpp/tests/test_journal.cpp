@@ -24,11 +24,13 @@
 #include "daemon/json.hpp"
 #include "daemon/lease_cache.hpp"
 #include "daemon/policy_cache.hpp"
+#include "tests/test_paths.hpp"
 
 namespace {
 
 std::string scratch(const std::string& leaf) {
-    const auto dir = std::filesystem::temp_directory_path() / ("ap-journal-" + leaf);
+    const auto dir =
+        std::filesystem::path(apt::unique_temp_path("ap-journal-" + leaf));
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
     std::filesystem::create_directories(dir);

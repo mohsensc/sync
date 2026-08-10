@@ -10,6 +10,7 @@
 #include <string>
 
 #include "hook/hook.hpp"
+#include "tests/test_paths.hpp"
 
 // The seam that broke: the hook escapes a path correctly, the daemon read it
 // back by scanning for the next bare '"'. Every event for a path holding a
@@ -75,8 +76,7 @@ std::string write_token_file(const std::string& dir, const std::string& body) {
 }
 
 std::string scratch_dir(const std::string& leaf) {
-    const std::string dir =
-        (std::filesystem::temp_directory_path() / ("ap-tok-" + leaf)).string();
+    const std::string dir = apt::unique_temp_path("ap-tok-" + leaf);
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
     std::filesystem::create_directories(dir);
