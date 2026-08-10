@@ -125,6 +125,42 @@ def test_the_warning_arrives_immediately_not_at_the_next_heartbeat(room):
     assert holder.leases("held"), "the holder was told nothing"
 
 
+def test_the_warning_goes_to_the_holder_and_not_to_the_room(room):
+    # It is about work only the holder has, and no other daemon's cache changes
+    # by a byte. Broadcasting it cost 50% more fan-out on the 200-agent run for
+    # one notice per contention that 199 daemons then discarded.
+    clock, relay, holder, senior = room
+    bystander = FakeConn("bystander", "kim")
+    relay.join(ROOM, bystander)
+
+    claim(relay, holder)
+    holder.sent.clear()
+    bystander.sent.clear()
+
+    claim(relay, senior, "hotfix")
+
+    assert holder.leases("held"), "the holder was not warned"
+    assert bystander.leases() == [], "the room was told the holder's business"
+
+
+def test_a_real_lease_change_still_goes_to_everybody(room):
+    # The routing above must not turn into "the room stops hearing about
+    # leases". Anything the rest of the room caches — a new lease, a renewal, a
+    # changed intent — is still a broadcast.
+    clock, relay, holder, senior = room
+    bystander = FakeConn("bystander", "kim")
+    relay.join(ROOM, bystander)
+    bystander.sent.clear()
+
+    claim(relay, holder)
+    assert [f["state"] for f in bystander.leases()] == ["held"]
+
+    clock.advance(30.0)
+    bystander.sent.clear()
+    claim(relay, holder)                        # a renewal
+    assert [f["state"] for f in bystander.leases()] == ["held"]
+
+
 def test_an_uncontended_lease_carries_no_handover_fields(room):
     _clock, relay, holder, _senior = room
     claim(relay, holder)

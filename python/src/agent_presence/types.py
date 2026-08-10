@@ -50,6 +50,12 @@ class Contender:
     priority: int
     first_asked_at: float
 
+    def order(self) -> tuple[int, float, str]:
+        """Position in the queue for the region. Smaller is more entitled —
+        the same three components, in the same order, as
+        ``wait_die.order_key``."""
+        return (-self.priority, self.first_asked_at, self.agent)
+
 
 @dataclass
 class Claim:
@@ -73,17 +79,44 @@ class Claim:
     # See LeaseRegistry.acquire for why contention has to cap the renewal.
     handover_at: float | None = None
     contenders: dict[AgentId, Contender] = field(default_factory=dict)
+    # The winner, kept rather than derived. Read on every snapshot diff, every
+    # lease body and every refusal — six or so times per frame — while
+    # `contenders` grows to one entry per agent in the room. Recomputing it each
+    # time cost 20 ms of median claim latency at 200 agents, measured with
+    # tests/load/run.py swarm200. Maintained only by `note_contender`.
+    _winner: Contender | None = field(default=None, repr=False, compare=False)
+    _winner_stale: bool = field(default=False, repr=False, compare=False)
+
+    def note_contender(self, contender: Contender) -> None:
+        """Record an ask, keeping the winner up to date in constant time.
+
+        A new contender either beats the incumbent, in which case it *is* the
+        winner and there is nothing to search, or it does not, in which case
+        nothing changed. `<=` rather than `<` on purpose: the incumbent
+        re-asking is the common case by a wide margin, and its key is normally
+        identical, so this is the branch that has to be cheap.
+
+        The one case that needs a rescan is the incumbent re-asking with a
+        *worse* key, which means its tier dropped. That cannot happen while an
+        agent id is bound to one grant (relay._bind_agent), so it is handled
+        lazily rather than made fast.
+        """
+        self.contenders[contender.agent] = contender
+        current = self._winner
+        if current is None or contender.order() <= current.order():
+            self._winner, self._winner_stale = contender, False
+        elif current.agent == contender.agent:
+            self._winner_stale = True
 
     def handover_winner(self) -> Contender | None:
-        """The contender this region goes to when the lease ends. Most entitled
-        first, then whoever asked earliest, then agent id — the same three
-        components, in the same order, as ``wait_die.order_key``."""
-        if not self.contenders:
-            return None
-        return min(
-            self.contenders.values(),
-            key=lambda c: (-c.priority, c.first_asked_at, c.agent),
-        )
+        """The contender this region goes to when the lease ends."""
+        if self._winner_stale:
+            self._winner = (
+                min(self.contenders.values(), key=Contender.order)
+                if self.contenders else None
+            )
+            self._winner_stale = False
+        return self._winner
 
 
 def same_region(a: Region, b: Region) -> bool:

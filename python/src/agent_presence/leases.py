@@ -38,6 +38,11 @@ FAIR_SHARE_GRACE_S = 900.0
 # agent and a third of the cost for a departed one.
 RESERVATION_S = 10.0
 
+# How many carried deadlines are kept before the expired ones are swept. Sized
+# so an ordinary room never reaches it: one entry per (region, agent) that let
+# go of a contended lease early. See LeaseRegistry._hand_over.
+_CARRY_MAX = 512
+
 
 @dataclass(frozen=True)
 class Reservation:
@@ -107,20 +112,26 @@ class LeaseRegistry:
         self._clock = clock
         self._claims: list[Claim] = []
         self._reservations: list[Reservation] = []
-        # (room, region, agent) -> the asks that were pending against that
-        # agent's claim when it ended early, and the deadline they had set. See
-        # `_hand_over` and `_resume_carry`.
+        # (room, region, agent) -> who was first in the queue against that
+        # agent's claim when it ended early, and the deadline that ask had set.
+        # See `_hand_over` and `_resume_carry`.
         self._carry: dict[
-            tuple[str, Region, str], tuple[dict[str, Contender], float | None]
+            tuple[str, Region, str], tuple[Contender, float | None]
         ] = {}
 
     def _live(self) -> list[Claim]:
+        # One pass, and no allocation at all when nothing expired — which is
+        # nearly always, and this is the most-called function in the relay.
         now = self._clock.now()
-        ended = [c for c in self._claims if c.expires_at <= now]
-        self._claims = [c for c in self._claims if c.expires_at > now]
-        for claim in ended:
-            self._hand_over(claim, now)
-        return self._claims
+        claims = self._claims
+        live = [c for c in claims if c.expires_at > now]
+        if len(live) == len(claims):
+            return claims
+        self._claims = live
+        for claim in claims:
+            if claim.expires_at <= now:
+                self._hand_over(claim, now)
+        return live
 
     # -- handover -----------------------------------------------------------
 
@@ -159,13 +170,23 @@ class LeaseRegistry:
             # Ended early. Nothing is reserved, but the asks are remembered, so
             # letting go one second before the deadline and taking the region
             # straight back does not buy the holder a fresh fifteen minutes.
-            self._carry = {
-                k: v for k, v in self._carry.items()
-                if v[1] is not None and v[1] > now
-            }
+            # The winner and the deadline, not the whole queue. Everyone else is
+            # polling and will re-register against the next claim on their own,
+            # so keeping them here buys nothing and costs one live dict per
+            # (region, agent) that ever let go of a contended lease — at 200
+            # agents on 5 regions that was 200k objects the collector had to
+            # walk.
             self._carry[(claim.room, claim.scope, claim.agent)] = (
-                dict(claim.contenders), claim.handover_at,
+                winner, claim.handover_at,
             )
+            if len(self._carry) > _CARRY_MAX:
+                # Swept on growth, not on every write, for the same reason.
+                # Everything here expires on its own deadline; the sweep only
+                # decides when the memory goes back.
+                self._carry = {
+                    k: v for k, v in self._carry.items()
+                    if v[1] is not None and v[1] > now
+                }
             return None
         reservation = Reservation(
             room=claim.room,
@@ -196,18 +217,24 @@ class LeaseRegistry:
         dodging its own deadline. A *different* agent taking the region is the
         handover working, and it starts clean.
         """
+        if not self._carry:
+            return
         key = (claim.room, claim.scope, claim.agent)
         carried = self._carry.pop(key, None)
         if carried is None:
             return
-        contenders, deadline = carried
+        winner, deadline = carried
         if deadline is None or deadline <= now:
             return
-        claim.contenders.update(contenders)
+        claim.note_contender(winner)
         claim.handover_at = deadline
         claim.expires_at = min(claim.expires_at, deadline)
 
     def _live_reservations(self) -> list[Reservation]:
+        # Empty in every room that is not mid-handover, which is the steady
+        # state, so the common path allocates nothing.
+        if not self._reservations:
+            return self._reservations
         now = self._clock.now()
         self._reservations = [r for r in self._reservations if r.expires_at > now]
         return self._reservations
@@ -225,6 +252,8 @@ class LeaseRegistry:
         the one that named it. Claiming the region is the point of the
         reservation, so holding on to it afterwards would only block the agent's
         own later claims on neighbouring symbols."""
+        if not self._reservations:
+            return None
         taken: Reservation | None = None
         kept: list[Reservation] = []
         for r in self._live_reservations():
@@ -247,12 +276,12 @@ class LeaseRegistry:
         deadline a senior one set.
         """
         existing = held.contenders.get(agent)
-        held.contenders[agent] = Contender(
+        held.note_contender(Contender(
             agent=agent,
             human=human,
             priority=tier,
             first_asked_at=now if existing is None else existing.first_asked_at,
-        )
+        ))
 
         grace = HANDOVER_GRACE_S if decision == "wait" else FAIR_SHARE_GRACE_S
         deadline = now + grace

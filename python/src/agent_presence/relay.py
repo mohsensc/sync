@@ -157,24 +157,27 @@ class Refusal:
         }
 
 
-@dataclass(frozen=True)
-class _Snapshot:
-    """What a claim looked like before a registry call touched it."""
+# What a claim looked like before a registry call touched it:
+#
+#     (room, human, intent, expires_at, handover_at, winner)
+#
+# A tuple and not a dataclass. One is built per live claim on both sides of
+# every registry call — the hottest allocation in the relay — and a frozen
+# dataclass costs about four times as much to construct for no reader benefit
+# at this size. The two indices anybody reads by hand are named below.
+_Snapshot = tuple[str, str, str, float, float | None, "Contender | None"]
 
-    room: str
-    human: str
-    intent: str
-    expires_at: float
-    handover_at: float | None
-    winner: Contender | None
+_SNAP_ROOM = 0
+_SNAP_HUMAN = 1
+# Everything the rest of the room caches. Past this index the fields are the
+# handover deadline and the queue, which are the holder's own business — see
+# `_publish`.
+_SNAP_SHARED = slice(0, 4)
 
-    def same_as(self, claim: Claim) -> bool:
-        return (
-            self.intent == claim.intent
-            and self.expires_at == claim.expires_at
-            and self.handover_at == claim.handover_at
-            and self.winner == claim.handover_winner()
-        )
+
+def _snapshot(claim: Claim) -> _Snapshot:
+    return (claim.room, claim.human, claim.intent, claim.expires_at,
+            claim.handover_at, claim.handover_winner())
 
 
 class _PublishingRegistry(LeaseRegistry):
@@ -215,11 +218,8 @@ class _PublishingRegistry(LeaseRegistry):
         that is most of the time it has.
         """
         return {
-            (c.agent, c.scope): _Snapshot(
-                room=c.room, human=c.human, intent=c.intent,
-                expires_at=c.expires_at, handover_at=c.handover_at,
-                winner=c.handover_winner(),
-            )
+            (c.agent, c.scope): (c.room, c.human, c.intent, c.expires_at,
+                                 c.handover_at, c.handover_winner())
             for c in self._claims
         }
 
@@ -229,14 +229,27 @@ class _PublishingRegistry(LeaseRegistry):
 
         for key, claim in after.items():
             prev = before.get(key)
-            if prev is not None and prev.same_as(claim):
+            current = _snapshot(claim)
+            if prev == current:
                 continue
             # New, or renewed. A renewal has to go out too: the daemon expires
             # its copy on the TTL it was last given, and a heartbeat the room
             # never hears about drops protection while the relay still holds it.
             frame = {"type": "lease", "state": "held"}
             frame.update(_lease_entry(claim, now))
-            self._relay.publish(claim.room, frame)
+            if prev is not None and prev[_SNAP_SHARED] == current[_SNAP_SHARED]:
+                # Only the deadline or the queue moved, and that is addressed to
+                # the holder: nobody else's cache changes by a byte, and the
+                # sentence it produces is about work only the holder has.
+                #
+                # Broadcasting it cost 50% more fan-out on the 200-agent run —
+                # 26k frames to 39k — for one notice per contention that 199
+                # daemons then threw away. Fan-out is the thing that does not
+                # scale here (tests/load, "CLAIM LATENCY DEGRADES AT SCALE"), so
+                # a frame that is for one agent goes to one agent.
+                self._relay.publish_to(claim.room, claim.agent, frame)
+            else:
+                self._relay.publish(claim.room, frame)
 
         for (agent, scope), prev in before.items():
             if (agent, scope) in after:
@@ -245,11 +258,11 @@ class _PublishingRegistry(LeaseRegistry):
                 "type": "lease",
                 # All three erase the entry daemon-side. The distinction is for
                 # whoever is reading the wire, not for the cache.
-                "state": "expired" if prev.expires_at <= now else "released",
+                "state": "expired" if prev[3] <= now else "released",
                 "agent": agent,
                 "region": _region_payload(scope),
             }
-            kept = self.reservation_for(prev.room, scope)
+            kept = self.reservation_for(prev[_SNAP_ROOM], scope)
             if kept is not None and kept.from_agent == agent:
                 # This lease did not just run out, it was handed on: somebody
                 # asked for the region, the holder's renewals stopped at the
@@ -268,13 +281,12 @@ class _PublishingRegistry(LeaseRegistry):
                         0, int((kept.expires_at - now) * 1000)
                     ),
                     "from": agent,
-                    "from_human": prev.human,
+                    "from_human": prev[_SNAP_HUMAN],
                 })
-                if prev.winner is not None:
-                    frame["waited_s"] = max(
-                        0.0, now - prev.winner.first_asked_at
-                    )
-            self._relay.publish(prev.room, frame)
+                winner = prev[5]
+                if winner is not None:
+                    frame["waited_s"] = max(0.0, now - winner.first_asked_at)
+            self._relay.publish(prev[_SNAP_ROOM], frame)
 
     def acquire(self, *args, **kwargs):
         before = self._before()
@@ -712,6 +724,19 @@ class Relay:
         actor = self._actor
         mine = actor is not None and actor.agent == payload.get("agent")
         self.broadcast(room, payload, exclude=actor if mine else None)
+
+    def publish_to(self, room: str, agent: str, payload: dict) -> None:
+        """Fan-out to one agent's connections in one room.
+
+        For frames that are about that agent rather than about the room — the
+        handover deadline on its own lease, and nothing else so far. The actor
+        is skipped by the same rule `publish` uses: it is already getting an
+        answer on the same socket.
+        """
+        actor = self._actor
+        for conn in self._members.get(room, []):
+            if conn.agent == agent and conn is not actor:
+                conn.send(payload)
 
     # -- presence -----------------------------------------------------------
 
