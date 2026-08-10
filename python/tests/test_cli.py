@@ -868,3 +868,170 @@ def test_doctor_names_the_tier_the_unattended_bit_selects(box):
     check = doctor_check(box, "principal", env)
     assert check["state"] == "ok"
     assert "critical" in check["detail"]
+
+
+# -- the CLI's claims have to be true ---------------------------------------
+#
+# Everything below is one shape of bug: the tool said something confidently
+# and the machine did something else. That is worse than a missing feature,
+# because a tool you have caught lying once is a tool you stop reading.
+
+
+def _daemon_effect(blob: dict, rung: int, path: str) -> str:
+    """What the daemon gets out of the compiled cache for one path.
+
+    A transcription of the loop documented on `compile_runtime`, kept here so
+    the format is pinned by something that reads it rather than by a comment.
+    Ordering, the empty-slot rule and floors-take-the-max are all load-bearing;
+    if any of them changes, this stops agreeing with `ap policy explain` and
+    the test below says so.
+
+    The glob compiler is borrowed rather than reimplemented. What a `**` means
+    is the daemon's other obligation and has its own tests; this one is about
+    which entry wins.
+    """
+    from agent_presence.policy import _compile_glob
+
+    def hit(match: str) -> bool:
+        if not match:
+            return True
+        compiled = _compile_glob(match)
+        return compiled is not None and compiled.match(path) is not None
+
+    order = ["silent", "notify", "context", "ask", "deny"]
+    effect = blob["table"][rung]
+    for entry in blob["rules"]:
+        if hit(entry["match"]) and entry["effects"][rung]:
+            effect = entry["effects"][rung]
+            break
+    floor = blob["floor"][rung]
+    for entry in blob["floors"]:
+        if hit(entry["match"]) and entry["effects"][rung]:
+            floor = max(floor, entry["effects"][rung], key=order.index)
+    return max(effect, floor, key=order.index)
+
+
+def test_compile_carries_path_rules_into_the_cache(box):
+    box.write_repo_policy(
+        'schema = 1\n'
+        '[effects]\n'
+        'rung3 = "notify"\n'
+        '\n'
+        '[[floor.path]]\n'
+        'match = "**/pay.py"\n'
+        'rung3 = "deny"\n'
+    )
+    done = box.ap("policy", "compile")
+    assert done.returncode == 0, done.stderr
+    assert "**/pay.py" in done.stdout, "a rule you cannot see is one you cannot check"
+
+    blob = json.loads(box.cache.read_text())
+    # The blanket table is still what a path with no rule matching it gets.
+    assert blob["table"][3] == "notify"
+    # And the rule itself is in the file the daemon reads, which is the bug:
+    # it used to be resolved away against one path at compile time, so a repo
+    # could pin **/pay.py to deny, `ap policy explain` would agree, and the
+    # daemon would go on serving notify because that is all the cache held.
+    floors = {e["match"]: e["effects"] for e in blob["floors"]}
+    assert floors["**/pay.py"][3] == "deny"
+
+
+def test_the_compiled_cache_answers_the_way_explain_does(box):
+    # Rung 2, because rung 3 has a builtin floor of notify and would flatten
+    # three of the four answers into one.
+    box.write_repo_policy(
+        'schema = 1\n'
+        '[effects]\n'
+        'rung2 = "notify"\n'
+        '\n'
+        '[[path]]\n'
+        'match = "vendor/**"\n'
+        'rung2 = "silent"\n'
+        '\n'
+        '[[floor.path]]\n'
+        'match = "**/pay.py"\n'
+        'rung2 = "deny"\n'
+    )
+    assert box.ap("policy", "compile").returncode == 0
+    blob = json.loads(box.cache.read_text())
+
+    for path in ("vendor/pay.py", "vendor/util.py", "src/pay.py", "src/app.py"):
+        explained = json.loads(box.ap("policy", "explain", path, "--rung", "2",
+                                      "--json").stdout)
+        assert _daemon_effect(blob, 2, path) == explained["effect"], path
+    # Not a vacuous agreement: the cache has three different answers in it.
+    assert _daemon_effect(blob, 2, "vendor/pay.py") == "deny"
+    assert _daemon_effect(blob, 2, "vendor/util.py") == "silent"
+    assert _daemon_effect(blob, 2, "src/app.py") == "notify"
+
+
+def test_compile_promotes_ask_when_the_environment_says_nobody_is_watching(box):
+    box.write_user_policy('schema = 1\n[effects]\nrung3 = "ask"\n')
+    env = box.env | {"AGENT_PRESENCE_UNATTENDED": "1"}
+    done = box.ap("policy", "compile", env=env)
+    assert done.returncode == 0, done.stderr
+
+    blob = json.loads(box.cache.read_text())
+    # The flag is for a person at a terminal. The env var is the case the
+    # promotion exists for — an agent launched by a script, which is not going
+    # to pass `ap` a flag — and it used to be read nowhere in this command.
+    assert blob["unattended"] is True
+    assert blob["table"][3] == "deny"
+
+
+def test_explain_promotes_ask_when_the_environment_says_so(box):
+    box.write_user_policy('schema = 1\n[effects]\nrung3 = "ask"\n')
+    env = box.env | {"AGENT_PRESENCE_UNATTENDED": "1"}
+    blob = json.loads(box.ap("policy", "explain", "src/auth.py", "--rung", "3",
+                             "--json", env=env).stdout)
+    assert blob["effect"] == "deny"
+    assert blob["unattended_promoted"] is True
+
+
+def test_the_cache_digest_covers_the_supervision_it_was_compiled_for(box):
+    box.write_user_policy('schema = 1\n[effects]\nrung3 = "ask"\n')
+    attended, unattended = box.run / "att.json", box.run / "unatt.json"
+    assert box.ap("policy", "compile", "-o", str(attended)).returncode == 0
+    assert box.ap("policy", "compile", "-o", str(unattended),
+                  "--unattended").returncode == 0
+
+    a = json.loads(attended.read_text())
+    u = json.loads(unattended.read_text())
+    assert a["table"][3] == "ask" and u["table"][3] == "deny"
+    assert a["digest"] != u["digest"], "two tables cannot share one digest"
+
+
+def test_doctor_will_not_pass_a_cache_compiled_for_the_other_supervision(
+    box, listening
+):
+    box.snapshot.write_text('{"peers":[]}')
+    box.write_user_policy('schema = 1\n[effects]\nrung3 = "ask"\n')
+    assert box.ap("policy", "compile").returncode == 0
+
+    env = box.env | {"AGENT_PRESENCE_UNATTENDED": "1"}
+    done = box.ap("doctor", env=env)
+    assert done.returncode == 1
+    assert "unattended" in done.stdout
+    assert "ap policy compile" in done.stdout
+
+
+def test_doctor_will_not_pass_a_cache_pinned_to_one_path(box, listening):
+    box.snapshot.write_text('{"peers":[]}')
+    assert box.ap("policy", "compile", "--path", "src/pay.py").returncode == 0
+    done = box.ap("doctor")
+    assert done.returncode == 1
+    assert "--path src/pay.py" in done.stdout
+
+
+def test_doctor_will_not_pass_a_cache_that_was_edited_by_hand(box, listening):
+    box.snapshot.write_text('{"peers":[]}')
+    assert box.ap("policy", "compile").returncode == 0
+    blob = json.loads(box.cache.read_text())
+    blob["table"][3] = "silent"
+    box.cache.write_text(json.dumps(blob))
+
+    done = box.ap("doctor")
+    assert done.returncode == 1
+    assert "edited by hand" in done.stdout
+
+

@@ -222,6 +222,22 @@ class Context:
             return None
         return self.repo_root / ROSTER_RELPATH
 
+    def unattended(self, flag: bool = False) -> bool:
+        """Whether this run has a human on the other end of an `ask`.
+
+        `--unattended` forces it on and `$AGENT_PRESENCE_UNATTENDED` turns it
+        on, and the env var is the one that matters: the case the promotion
+        exists for is an agent launched by a script, and a script does not pass
+        `ap` a flag. Only the flag was read before, so the exec path — the
+        whole point of the feature — never promoted anything, and `ap doctor`
+        said `ok` over a cache holding `ask` for a run with nobody to ask.
+
+        Nothing turns it off. It can only ever tighten, so there is no reason
+        to be able to, and a switch that says "there is a human here" when
+        there is not is the failure this is meant to prevent.
+        """
+        return bool(flag) or principals_mod.unattended_flag(self.env)
+
     def runtime_dir(self) -> Path:
         base = self.env.get("XDG_RUNTIME_DIR") or self.env.get("TMPDIR") or "/tmp"
         return Path(base)
@@ -606,6 +622,7 @@ def cmd_policy_show(ctx: Context) -> int:
     args, out = ctx.args, ctx.out
     pol = ctx.policy()
     path = args.path or ""
+    unattended = ctx.unattended(args.unattended)
 
     if args.layer:
         layer = pol.layer(args.layer)
@@ -630,13 +647,13 @@ def cmd_policy_show(ctx: Context) -> int:
     if args.json:
         out.json({
             "path": path,
-            "unattended": bool(args.unattended),
+            "unattended": unattended,
             "digest": pol.digest,
             "degraded": pol.degraded,
-            "table": pol.table_for(path, unattended=args.unattended).names(),
+            "table": pol.table_for(path, unattended=unattended).names(),
             "floor": pol.floor_table(path).names(),
             "rungs": [
-                _resolution_json(pol.resolve(r, path, unattended=args.unattended))
+                _resolution_json(pol.resolve(r, path, unattended=unattended))
                 for r in RUNGS
             ],
             "layers": [_layer_json(lyr) for lyr in pol.layers],
@@ -645,7 +662,7 @@ def cmd_policy_show(ctx: Context) -> int:
         return OK
 
     if args.effective:
-        _print_effective(ctx, pol, path, bool(args.unattended))
+        _print_effective(ctx, pol, path, unattended)
         return OK
 
     _show_stack(ctx, pol)
@@ -884,11 +901,29 @@ def cmd_policy_check(ctx: Context) -> int:
 # -- policy compile ---------------------------------------------------------
 
 
+def _rule_lines(blob: dict, ink: Ink) -> list[str]:
+    """The path rules in the cache, as they will be read. Printed because a
+    rule you cannot see is a rule you cannot check."""
+    lines = []
+    for kind, key in (("", "rules"), ("floor ", "floors")):
+        for entry in blob.get(key, []):
+            if not entry.get("match"):
+                continue  # the blanket rules are the table printed above
+            effects = " ".join(
+                f"rung{i}={ink.effect(e)}"
+                for i, e in enumerate(entry["effects"]) if e
+            )
+            label = f"{kind}{entry['match']}"
+            lines.append(f"  {label:<30}{effects}  {ink.dim(entry['layer'])}")
+    return lines
+
+
 def cmd_policy_compile(ctx: Context) -> int:
-    args, out = ctx.args, ctx.out
+    args, out, ink = ctx.args, ctx.out, ctx.out.ink
     pol = ctx.client_policy()
+    unattended = ctx.unattended(args.unattended)
     blob = policy_mod.compile_runtime(
-        pol, path=args.path or "", unattended=bool(args.unattended)
+        pol, path=args.path or "", unattended=unattended
     )
     dest = Path(args.output) if args.output else policy_mod.runtime_cache_path(ctx.env)
     try:
@@ -900,9 +935,22 @@ def cmd_policy_compile(ctx: Context) -> int:
         out.json(blob)
         return OK
     out.say(f"wrote {dest}")
-    out.say("  " + " ".join(f"rung{i}={e}" for i, e in enumerate(blob["table"])))
+    out.say("  " + " ".join(f"rung{i}={ink.effect(e)}"
+                            for i, e in enumerate(blob["table"]))
+            + f"  {ink.dim('any path')}")
+    for line in _rule_lines(blob, ink):
+        out.say(line)
+    if unattended:
+        out.say(ink.dim("  unattended: nothing above can be ask, because there "
+                        "is nobody to answer one"))
+    if blob["path"]:
+        out.say(ink.yellow(
+            f"  --path {blob['path']} pins the table above to that one path, "
+            "for every path. Path rules travel in the cache now; you almost "
+            "certainly want `ap policy compile` with no --path."
+        ))
     if blob["degraded"]:
-        out.say(ctx.out.ink.red(f"  degraded: {blob['problem']}"))
+        out.say(ink.red(f"  degraded: {blob['problem']}"))
     return OK
 
 
@@ -948,7 +996,7 @@ def cmd_policy_explain(ctx: Context) -> int:
 
     pol = ctx.policy()
     path = args.path
-    res = pol.resolve(args.rung, path, unattended=bool(args.unattended))
+    res = pol.resolve(args.rung, path, unattended=ctx.unattended(args.unattended))
     rows = _considered(pol, args.rung, path)
 
     if args.json:
@@ -1214,7 +1262,17 @@ def _socket_check(name: str, path: Path) -> Check:
 
 
 def _cache_check(ctx: Context, pol: Policy) -> Check:
+    """Is the cache the daemon reads the one `ap policy compile` would write?
+
+    That is a bigger question than "do the files match", and it has to be:
+    `compile` takes a supervision bit and a path as well as the files, both of
+    them change the table it writes, and neither was in the digest. So a cache
+    compiled `--unattended`, holding `deny` at rung 3, matched a config saying
+    `ask` and this check said `ok` — the daemon on a table nothing on disk
+    describes, and the command whose whole job is to notice reporting green.
+    """
     path = policy_mod.runtime_cache_path(ctx.env)
+    unattended = ctx.unattended()
     try:
         blob = json.loads(path.read_text(encoding="utf-8"))
     except OSError:
@@ -1226,12 +1284,40 @@ def _cache_check(ctx: Context, pol: Policy) -> Check:
                      f"{path} is not readable JSON. Run `ap policy compile`.")
     if not isinstance(blob, dict):
         return Check("runtime cache", "fail", f"{path} is not a policy blob")
-    if blob.get("digest") != pol.digest:
+
+    want = policy_mod.compile_runtime(pol, unattended=unattended)
+    table = " ".join(str(e) for e in blob.get("table", []))
+
+    if blob.get("policy_digest") != pol.digest:
         return Check("runtime cache", "fail",
                      f"{path} does not match the files on disk — the daemon is "
                      "one edit behind. Run `ap policy compile`.")
-    table = " ".join(str(e) for e in blob.get("table", []))
-    return Check("runtime cache", "ok", f"{path}  [{table}]")
+    if bool(blob.get("unattended")) != unattended:
+        was = "an unattended" if blob.get("unattended") else "an attended"
+        now = "unattended" if unattended else "attended"
+        return Check("runtime cache", "fail",
+                     f"{path} was compiled for {was} run and this one is "
+                     f"{now}, so the daemon is on [{table}]. "
+                     "Run `ap policy compile`.")
+    if str(blob.get("path", "")):
+        return Check("runtime cache", "fail",
+                     f"{path} was compiled with --path {blob['path']}, so it "
+                     f"serves that one path's table [{table}] for every path. "
+                     "Run `ap policy compile` with no --path.")
+    if blob.get("digest") != want["digest"]:
+        return Check("runtime cache", "fail",
+                     f"{path} was compiled from different inputs than the ones "
+                     "here. Run `ap policy compile`.")
+    for key in ("table", "floor", "rules", "floors"):
+        if blob.get(key) != want[key]:
+            return Check("runtime cache", "fail",
+                         f"{path} carries the right digest and a different "
+                         f"{key} — it has been edited by hand. "
+                         "Run `ap policy compile`.")
+
+    rules = sum(1 for entry in want["rules"] + want["floors"] if entry["match"])
+    extra = f", {rules} path rule(s)" if rules else ""
+    return Check("runtime cache", "ok", f"{path}  [{table}]{extra}")
 
 
 def _principal_check(ctx: Context, roster: Roster) -> Check:
@@ -1245,9 +1331,7 @@ def _principal_check(ctx: Context, roster: Roster) -> Check:
     you should have won.
     """
     principal = ctx.env.get(principals_mod.PRINCIPAL_ENV, "").strip()
-    unattended = ctx.env.get(principals_mod.UNATTENDED_ENV, "").strip().lower() in (
-        "1", "true", "yes", "on"
-    )
+    unattended = ctx.unattended()
     if not principal:
         return Check("principal", "ok",
                      f"nothing configured (${principals_mod.PRINCIPAL_ENV}); "
@@ -1480,12 +1564,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     compile_cmd = psub.add_parser(
         "compile", help="write the runtime cache the daemon reads",
-        description="Resolves the client-side layers into one line of JSON. The "
-                    "daemon stats it on a tick it already runs and never parses "
-                    "TOML.")
+        description="Resolves the client-side layers into one line of JSON, "
+                    "path rules and all. The daemon stats it on a tick it "
+                    "already runs and never parses TOML.")
     compile_cmd.add_argument("-o", "--output", default=None, metavar="PATH")
-    compile_cmd.add_argument("--path", default="", metavar="PATH")
-    compile_cmd.add_argument("--unattended", action="store_true")
+    compile_cmd.add_argument("--path", default="", metavar="PATH",
+                             help="pin the blanket table to this one path. "
+                                  "Rarely what you want: path rules travel in "
+                                  "the cache on their own now")
+    compile_cmd.add_argument("--unattended", action="store_true",
+                             help="compile for a run with nobody to ask, where "
+                                  "ask becomes deny. On anyway when "
+                                  "$AGENT_PRESENCE_UNATTENDED is set")
     _add_json(compile_cmd)
     compile_cmd.set_defaults(run=cmd_policy_compile)
 

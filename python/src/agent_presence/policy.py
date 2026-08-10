@@ -957,20 +957,153 @@ def runtime_cache_path(env: Mapping[str, str] | None = None) -> Path:
     return Path(base) / RUNTIME_CACHE_NAME
 
 
+def runtime_digest(
+    policy: Policy, *, path: str = "", unattended: bool = False
+) -> str:
+    """sha256 over everything that decides what ``compile_runtime`` writes.
+
+    ``policy.digest`` covers the files. It does not cover the two arguments,
+    and both of them change the table: a cache compiled ``--unattended`` holds
+    ``deny`` where the same files attended hold ``ask``, and a cache pinned to
+    one path holds that path's table for every path. With only the file digest
+    to compare, ``ap doctor`` said ``ok`` over both — the daemon on a table the
+    config on disk does not describe, and the one command whose job is to
+    notice reporting green. So the compile arguments are in here too.
+    """
+    digest = hashlib.sha256()
+    digest.update(policy.digest.encode())
+    digest.update(b"\x00")
+    digest.update(path.encode())
+    digest.update(b"\x00")
+    digest.update(b"unattended" if unattended else b"attended")
+    return digest.hexdigest()
+
+
+def _compiled_effects(
+    rule: Rule, *, ceiling: Effect | None, unattended: bool
+) -> list[str]:
+    """One rule as five slots, ``""`` where the rule says nothing.
+
+    The ceiling and the unattended promotion are folded in here rather than
+    left for the daemon. The ceiling belongs to the layer that won a rung, and
+    a rule only appears under its own layer, so applying it per rule is the
+    same thing ``resolve`` does. The promotion distributes over the floor —
+    ``max`` of two promoted effects is the promotion of their ``max``, since
+    the only thing it moves is ``ask``, upward — so per-entry is safe there
+    too, and the daemon never has to know which run it is in.
+    """
+    out: list[str] = []
+    for rung in RUNGS:
+        effect = rule.effects.get(rung)
+        if effect is None:
+            out.append("")
+            continue
+        if ceiling is not None:
+            effect = quieter(effect, ceiling)
+        if unattended and effect == "ask":
+            effect = "deny"
+        out.append(effect)
+    return out
+
+
+def _compiled_rules(policy: Policy, *, unattended: bool) -> list[dict]:
+    """Every effect rule, flattened into one first-match-wins list.
+
+    Highest-authority layer first, and within a layer most specific first, so
+    walking this list and taking the first entry that matches the path *and*
+    fills that rung's slot gives exactly what ``Policy.resolve`` gives. The
+    builtin blanket is last and matches everything, so the walk always ends.
+
+    ``match`` is ``""`` for a blanket rule, which is a glob nothing else can
+    spell.
+    """
+    out: list[dict] = []
+    for layer in reversed(policy._ordered()):
+        ceiling: Effect | None = (
+            OBSERVER_CEILING if layer.mode == "observer" else None
+        )
+        ordered = sorted(
+            (r for r in layer.rules if not r.is_floor),
+            key=lambda r: (r.specificity(), r.order),
+            reverse=True,
+        )
+        for rule in ordered:
+            effects = _compiled_effects(
+                rule, ceiling=ceiling, unattended=unattended
+            )
+            if any(effects):
+                out.append({
+                    "match": rule.match or "",
+                    "effects": effects,
+                    "layer": layer.name,
+                })
+    return out
+
+
+def _compiled_floors(policy: Policy, *, unattended: bool) -> list[dict]:
+    """Every floor rule, unordered on purpose.
+
+    A floor is not first-match-wins. The strictest floor that matches applies,
+    across layers and within one, so the daemon takes the max over every entry
+    that matches plus the blanket ``floor`` array.
+    """
+    out: list[dict] = []
+    for layer in policy._ordered():
+        if layer.name not in FLOOR_LAYERS:
+            continue
+        for rule in layer.rules:
+            if not rule.is_floor:
+                continue
+            effects = _compiled_effects(rule, ceiling=None, unattended=unattended)
+            if any(effects):
+                out.append({
+                    "match": rule.match or "",
+                    "effects": effects,
+                    "layer": layer.name,
+                })
+    return out
+
+
 def compile_runtime(
     policy: Policy, *, path: str = "", unattended: bool = False
 ) -> dict:
     """The blob the daemon reads.
 
-    Deliberately tiny and deliberately pre-resolved: no TOML, no globs, no
-    layers. The daemon stats one file on a tick it already runs and parses only
-    when the mtime moves, so a decision costs a shared lock and an array index.
+    Deliberately tiny and deliberately pre-resolved: no TOML, no layers, no
+    modes. The daemon stats one file on a tick it already runs and parses only
+    when the mtime moves.
+
+    ``table`` and ``floor`` are the blanket answer, resolved for ``path``
+    (empty, normally, which no glob matches). ``rules`` and ``floors`` carry
+    the ``[[path]]`` globs, which used to be resolved away here and never
+    reached the daemon at all: a repo could pin ``**/pay.py`` to ``deny``,
+    ``ap policy explain`` would agree, and the daemon would go on serving the
+    blanket table because that is all the cache held.
+
+    The daemon's half, for one rung and one path:
+
+        for entry in rules:            # already in priority order
+            if matches(entry.match, path) and entry.effects[rung]:
+                effect = entry.effects[rung]; break
+        else:
+            effect = table[rung]
+        floor = floor[rung]
+        for entry in floors:
+            if matches(entry.match, path) and entry.effects[rung]:
+                floor = stricter(floor, entry.effects[rung])
+        effect = stricter(effect, floor)
+
+    A daemon that reads only ``table`` and ``floor`` — every daemon shipped so
+    far — keeps behaving exactly as it did.
     """
     return {
         "schema": SCHEMA_VERSION,
         "table": policy.table_for(path, unattended=unattended).names(),
         "floor": policy.floor_table(path).names(),
-        "digest": policy.digest,
+        "rules": _compiled_rules(policy, unattended=unattended),
+        "floors": _compiled_floors(policy, unattended=unattended),
+        "digest": runtime_digest(policy, path=path, unattended=unattended),
+        "policy_digest": policy.digest,
         "degraded": policy.degraded,
         "problem": policy.problems[0] if policy.problems else "",
         "path": path,
