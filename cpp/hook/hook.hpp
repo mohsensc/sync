@@ -90,6 +90,33 @@ struct Decision {
     std::string holder;
     std::string human;
     std::string intent;
+    /// The tier the holder's lease was taken at, by name. Empty when the relay
+    /// said nothing. Only `elevated` and `critical` are ever rendered: they are
+    /// the two that explain why waiting is the right move rather than retrying.
+    std::string holder_priority;
+
+    /// The agent this request came from, so the hook can tell "the region is
+    /// queued for you" from "somebody is ahead of you" without a second lookup.
+    std::string agent;
+
+    /// How long the holder's lease has left, and when it stops being renewable.
+    /// Negative means the daemon did not say — an older one, or an uncontended
+    /// lease, which has no deadline at all.
+    long long expires_in_ms = -1;
+    long long handover_in_ms = -1;
+    /// Who the region goes to when that deadline passes.
+    std::string handover_to;
+    std::string handover_to_human;
+    std::string handover_to_priority;
+    /// How many agents are queued on the region. 0 when unsaid.
+    int waiting = 0;
+
+    /// Set when a region *this* agent held has gone to somebody else. The one
+    /// event an agent cannot piece together on its own: its lease vanishes, its
+    /// next edit is refused, and nothing says the two are the same thing.
+    std::string lost_to;
+    std::string lost_to_priority;
+    long long lost_ms_ago = -1;
 };
 
 /// True when this payload is a PreToolUse on a tool that writes to a file, and

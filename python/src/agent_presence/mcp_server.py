@@ -11,6 +11,7 @@ import uuid
 
 from .clock import RealClock
 from .negotiation import MOVES, Negotiator
+from .principals import LocalIdentity, local_identity
 from .redact import opaque_region_if_enabled
 from .relay import Relay, redundancy_payload
 from .room_key import room_id_from_remote
@@ -29,12 +30,34 @@ class Tools:
     """The deliberate channel. Hooks report what an agent *did*; these tools
     let it declare what it *intends*, which hooks can never infer."""
 
-    def __init__(self, relay: Relay, room: str, agent: str, human: str) -> None:
+    def __init__(
+        self, relay: Relay, room: str, agent: str, human: str,
+        identity: LocalIdentity | None = None,
+    ) -> None:
         self._relay = relay
         self._room = room
         self._agent = agent
         self._human = human
         self._negotiator = Negotiator(relay.registry, relay._clock)
+        # Latched once at construction, exactly as the relay latches a grant at
+        # join, and for the same reason: an agent that could re-rate itself
+        # mid-session could hold two claims at two tiers.
+        #
+        # Before this the tool channel simply did not authenticate. It claimed
+        # at `normal` whatever the roster said, so an exec who added themselves
+        # at `critical`, minted a token and installed it won contention through
+        # the hook and lost it through the tools, on the same machine, in the
+        # same session. That is not a tier you configured, it is a tier that
+        # depends on which code path the model happened to take.
+        who = local_identity() if identity is None else identity
+        self._unattended = who.unattended
+        self._grant = relay.authenticate(who.principal, who.token, room)
+
+    @property
+    def priority(self) -> int:
+        """The tier this tool session claims at. Same grant, same band, same
+        one client-supplied bit as the wire path."""
+        return self._grant.priority(unattended=self._unattended)
 
     # Read-only, because identity is decided once at construction for the same
     # reason the relay latches it at join: a tool that could rename itself
@@ -68,7 +91,8 @@ class Tools:
     def claim_work(self, path: str, symbol: str | None, intent: str) -> dict:
         region = _scope(path, symbol)
         result = self._relay.registry.acquire(
-            self._room, self._human, self._agent, region, intent
+            self._room, self._human, self._agent, region, intent,
+            priority=self.priority,
         )
         if result.ok:
             granted = {"granted": True}
@@ -92,14 +116,43 @@ class Tools:
         if result.decision == "abort":
             self._relay.registry.release_all(self._room, self._agent)
 
-        return {
+        now = self._relay._clock.now()
+        if result.held_by is None:
+            # Not held, kept: a handover freed this region for somebody else a
+            # moment ago. Short and self-clearing, so the answer is a number of
+            # seconds rather than a negotiation.
+            kept = result.reserved_by
+            return {
+                "granted": False,
+                "held_by": kept.agent,
+                "held_by_human": kept.human,
+                "intent": "taking over this region",
+                "decision": result.decision,
+                "reserved": True,
+                "retry_in_s": max(0.0, kept.expires_at - now),
+                "moves": ["DEFER"],
+            }
+
+        held = result.held_by
+        answer = {
             "granted": False,
-            "held_by": result.held_by.agent,
-            "held_by_human": result.held_by.human,
-            "intent": result.held_by.intent,
+            "held_by": held.agent,
+            "held_by_human": held.human,
+            "intent": held.intent,
             "decision": result.decision,
             "moves": ["DEFER", "SPLIT", "HANDOFF", "PROCEED"],
         }
+        winner = held.handover_winner()
+        if held.handover_at is not None and winner is not None:
+            answer["handover_in_s"] = max(0.0, held.handover_at - now)
+            answer["waiting"] = len(held.contenders)
+            if winner.agent == self._agent:
+                # DEFER with a number on it. This is the region's queue, and
+                # this agent is at the front of it.
+                answer["retry_in_s"] = answer["handover_in_s"]
+            else:
+                answer["handover_to"] = winner.agent
+        return answer
 
     def release(self, path: str, symbol: str | None) -> dict:
         self._relay.registry.release(self._room, self._agent, _scope(path, symbol))
@@ -109,7 +162,10 @@ class Tools:
         self, path: str, symbol: str | None, move: str, reason: str = ""
     ) -> dict:
         region = _scope(path, symbol)
-        outcome = self._negotiator.apply(self._room, self._agent, region, move, reason)
+        outcome = self._negotiator.apply(
+            self._room, self._agent, region, move, reason,
+            requester_priority=self.priority,
+        )
         error = getattr(outcome, "error", None)
         if outcome.action == "invalid_move":
             # Hand the valid options back in the result. That is more

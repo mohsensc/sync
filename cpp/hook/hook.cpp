@@ -353,6 +353,45 @@ std::string holder_name(const Decision& d) {
     return "another agent";
 }
 
+/// The holder's tier, when it is one worth telling the agent about.
+///
+/// An allowlist of exactly the two names above `normal`, for two reasons.
+/// Rendering `normal` or `background` would spend an agent's attention saying
+/// the holder is ordinary, which is the default and therefore not news. And the
+/// string arrives over a socket anything on this box can write to and ends up in
+/// prose a model reads, so the set of things that can appear there is fixed here
+/// rather than escaped and passed through.
+///
+/// Deliberately a fact about the holder and not a comparison. The daemon knows
+/// what tier the lease was taken at; it does not know the reader's, so
+/// "they outrank you" is a sentence this code is not in a position to write.
+std::string tier_note(const Decision& d) {
+    if (d.holder_priority == "elevated") return " (elevated priority)";
+    if (d.holder_priority == "critical") return " (critical priority)";
+    return {};
+}
+
+/// The same allowlist for any other tier we render. See tier_note.
+std::string tier_of(const std::string& priority) {
+    if (priority == "elevated") return " (elevated priority)";
+    if (priority == "critical") return " (critical priority)";
+    return {};
+}
+
+/// A duration a model can act on. Seconds under two minutes, then whole
+/// minutes: "in 47 seconds" is a thing to wait out, "in 14 minutes" is a thing
+/// to work around, and "in 863 seconds" is neither.
+std::string humanise_ms(long long ms) {
+    if (ms < 0) return {};
+    const long long seconds = (ms + 999) / 1000;  // round up; never "0 seconds"
+    if (seconds < 120) {
+        return std::to_string(seconds < 1 ? 1 : seconds) +
+               (seconds == 1 ? " second" : " seconds");
+    }
+    const long long minutes = (seconds + 59) / 60;
+    return std::to_string(minutes) + (minutes == 1 ? " minute" : " minutes");
+}
+
 void append_field(std::string& out, const char* key, const std::string& value) {
     out += '"';
     out += key;
@@ -447,46 +486,177 @@ Decision parse_decision(const std::string& line) {
     d.holder = field(line, "holder");
     d.human = field(line, "human");
     d.intent = field(line, "intent");
+    d.holder_priority = field(line, "holder_priority");
+    d.expires_in_ms = int_field(line, "expires_in_ms", -1);
+    d.handover_in_ms = int_field(line, "handover_in_ms", -1);
+    d.handover_to = field(line, "handover_to");
+    d.handover_to_human = field(line, "handover_to_human");
+    d.handover_to_priority = field(line, "handover_to_priority");
+    d.waiting = int_field(line, "waiting", 0);
+    d.lost_to = field(line, "lost_to");
+    d.lost_to_priority = field(line, "lost_to_priority");
+    d.lost_ms_ago = int_field(line, "lost_ms_ago", -1);
     return d;
 }
 
-std::string hook_output(const Decision& d, const std::string& path) {
-    // No answer, and rung 0 — both agents merely present in the same file — are
-    // the world's business, not the agent's. Silence is what allow looks like.
-    if (d.rung <= 0) return {};
+namespace {
 
-    const std::string who = holder_name(d);
+/// What a blocked agent is told, and it is read by a model, so every sentence
+/// is either a fact or an instruction and there is nothing else in it.
+///
+/// Four things, in this order, because that is the order the reader needs them:
+/// who is in the way and what they are doing; when the region frees up; whether
+/// it is coming to this agent or to somebody else; what to do in the meantime.
+///
+/// The "when" used to be the fixed string "their claim expires on its own
+/// within 90 seconds". It was false for every holder that was still working —
+/// a claim frame reset the lease to a fresh 90 seconds and presenced sends one
+/// every 30 — so the one number in the message was wrong precisely when the
+/// message mattered. It is now the real remaining time off the lease table.
+std::string blocked_message(const Decision& d, const std::string& where) {
+    std::string m = holder_name(d) + tier_note(d);
+    m += " is editing ";
+    m += where;
+    m += " right now, in the same region you are about to change";
+    if (!d.intent.empty()) {
+        m += ": \"";
+        m += d.intent;
+        m += "\"";
+    }
+    m += ". This edit is blocked by agent presence so the two of you do not overwrite each "
+         "other.";
+
+    if (!d.lost_to.empty()) {
+        // The block and the loss are one event. Told only the first, the agent
+        // is reading "somebody else is editing this" about a region that was
+        // its own a minute ago, which is the moment the whole thing stops
+        // making sense from the inside.
+        m += " This was your region: it passed to them";
+        if (d.lost_ms_ago > 0) {
+            m += " ";
+            m += humanise_ms(d.lost_ms_ago);
+            m += " ago";
+        }
+        m += " when your lease reached the deadline you were given. Nothing you had already "
+             "written was reverted.";
+    }
+
+    const bool queued_for_me = !d.handover_to.empty() && d.handover_to == d.agent;
+    if (d.handover_in_ms >= 0 && queued_for_me) {
+        m += " Their lease stops being renewable in ";
+        m += humanise_ms(d.handover_in_ms);
+        m += ", and the region is then held for you";
+        if (d.waiting > 1) {
+            m += " ahead of the ";
+            m += std::to_string(d.waiting - 1);
+            m += " other agent";
+            m += d.waiting - 1 == 1 ? "" : "s";
+            m += " waiting";
+        }
+        m += ". Retry this edit once, then; do not poll. Or, before that: take a disjoint part "
+             "of the file, hand your requirement to them, or say plainly why your change is "
+             "independent and proceed anyway.";
+        return m;  // the wait is already answered; do not repeat it below
+    }
+    if (d.handover_in_ms >= 0 && !d.handover_to.empty()) {
+        m += " The region is queued for ";
+        m += d.handover_to_human.empty() ? d.handover_to : d.handover_to_human;
+        m += tier_of(d.handover_to_priority);
+        m += " in ";
+        m += humanise_ms(d.handover_in_ms);
+        m += ", not for you.";
+    } else if (d.expires_in_ms >= 0) {
+        m += " Their lease runs out in ";
+        m += humanise_ms(d.expires_in_ms);
+        m += " unless they renew it.";
+    }
+
+    m += " Do one of these instead: wait and retry, take a disjoint part of the file, hand "
+         "your requirement to them, or say plainly why your change is independent and proceed "
+         "anyway.";
+    return m;
+}
+
+/// A holder being told its own lease has a deadline, while it still holds the
+/// region. This is the only warning it gets and there is no push channel, so it
+/// arrives on its next edit — which is exactly when it is working in the region
+/// and can still do something about it.
+std::string handover_warning(const Decision& d, const std::string& where) {
+    std::string m = "You are about to hand ";
+    m += where;
+    m += " to ";
+    m += d.handover_to_human.empty() ? d.handover_to : d.handover_to_human;
+    m += tier_of(d.handover_to_priority);
+    m += " in ";
+    m += humanise_ms(d.handover_in_ms);
+    m += ": they asked for this region and your lease stops being renewable then. Nothing is "
+         "blocked yet. Finish what you are in the middle of and commit it, or stop at a clean "
+         "point — after that they hold the region and your edits to it will be refused.";
+    return m;
+}
+
+/// And the same agent, after it lost the region. Without this the loss is
+/// unreadable from the inside: the lease is gone, the next edit is refused by a
+/// stranger, and nothing connects the two events or says what to do with work
+/// already sitting in the file.
+std::string lost_message(const Decision& d, const std::string& where) {
+    std::string m = d.lost_to + tier_of(d.lost_to_priority);
+    m += " took over ";
+    m += where;
+    if (d.lost_ms_ago > 0) {
+        m += " ";
+        m += humanise_ms(d.lost_ms_ago);
+        m += " ago";
+    }
+    m += ", because they asked for it and your lease reached the deadline you were given. "
+         "Nothing you had already written was reverted. Keep any unfinished work on that "
+         "region out of the file — a branch, a scratch note, or hand the requirement to them "
+         "— and do not re-claim it until they release it.";
+    return m;
+}
+
+std::string near_message(const Decision& d, const std::string& where) {
+    std::string m = holder_name(d) + tier_note(d);
+    m += " is editing ";
+    m += where;
+    m += " right now";
+    if (!d.intent.empty()) {
+        m += ": \"";
+        m += d.intent;
+        m += "\"";
+    }
+    m += ". Nothing is blocked. Keep your change to a part of the file they are not in, and "
+         "avoid reformatting or moving code around them.";
+    return m;
+}
+
+}  // namespace
+
+std::string hook_output(const Decision& d, const std::string& path) {
+    // No answer at all is allow, and says nothing.
+    if (d.rung < 0) return {};
+
     const std::string where = path.empty() ? "this file" : path;
 
-    std::string message;
-    if (blocks_at(d.rung)) {
-        message = who;
-        message += " is editing ";
-        message += where;
-        message += " right now, in the same region you are about to change";
-        if (!d.intent.empty()) {
-            message += ": \"";
-            message += d.intent;
-            message += "\"";
+    // Rung 0 is co-location, which is the world's business and not the agent's,
+    // so it stays silent — unless the daemon attached one of the two things
+    // that are about this agent's own region rather than about the room. Both
+    // require fields an older relay never sends, so an unconfigured install
+    // produces exactly the silence it always did.
+    if (d.rung == 0) {
+        if (d.handover_in_ms >= 0 && !d.handover_to.empty()) {
+            std::string out = "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",";
+            append_field(out, "additionalContext", handover_warning(d, where));
+            out += "}}";
+            return out;
         }
-        message +=
-            ". This edit is blocked by agent presence so the two of you do not overwrite each "
-            "other. Their claim expires on its own within 90 seconds. Wait for it, take a "
-            "disjoint part of the file, hand your requirement to them, or say plainly why your "
-            "change is independent and proceed anyway.";
-    } else {
-        message = who;
-        message += " is editing ";
-        message += where;
-        message += " right now";
-        if (!d.intent.empty()) {
-            message += ": \"";
-            message += d.intent;
-            message += "\"";
+        if (!d.lost_to.empty()) {
+            std::string out = "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",";
+            append_field(out, "additionalContext", lost_message(d, where));
+            out += "}}";
+            return out;
         }
-        message +=
-            ". Nothing is blocked. Keep your change to a part of the file they are not in, and "
-            "avoid reformatting or moving code around them.";
+        return {};
     }
 
     std::string out = "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",";
@@ -495,9 +665,9 @@ std::string hook_output(const Decision& d, const std::string& path) {
         // one: anything on this machine can write to that socket.
         append_field(out, "permissionDecision", d.decision == "ask" ? "ask" : "deny");
         out += ',';
-        append_field(out, "permissionDecisionReason", message);
+        append_field(out, "permissionDecisionReason", blocked_message(d, where));
     } else {
-        append_field(out, "additionalContext", message);
+        append_field(out, "additionalContext", near_message(d, where));
     }
     out += "}}";
     return out;
@@ -528,6 +698,10 @@ std::string run_hook(const std::string& hook_json, const std::string& sock_path,
         const int left = remaining_ms(start, budget_ms);
         if (left > 0) d = request_decision(sock_path, request, left);
     }
+    // Filled in from our own payload, never from the socket. The daemon has no
+    // business telling us who we are, and the hook needs it to tell "the region
+    // is queued for you" from "somebody is ahead of you".
+    d.agent = field(hook_json, "session_id");
     return hook_output(d, field(hook_json, "file_path"));
 }
 

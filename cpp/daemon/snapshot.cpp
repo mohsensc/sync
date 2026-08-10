@@ -18,9 +18,22 @@ std::string escape(const std::string& s) {
     return out;
 }
 
+/// The problem line is built from a path, and a path can hold a newline. One
+/// line of JSON with a raw newline in it is a snapshot the statusline cannot
+/// parse, which would turn "policy is degraded" into "the daemon is dead".
+std::string one_line(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (const char c : s) {
+        out.push_back(static_cast<unsigned char>(c) < 0x20 ? ' ' : c);
+    }
+    return out;
+}
+
 }  // namespace
 
-void write_snapshot(const std::string& path, const std::vector<Peer>& peers) {
+void write_snapshot(const std::string& path, const std::vector<Peer>& peers,
+                    const std::string& problem) {
     const std::string tmp = path + ".tmp";
     {
         std::ofstream f(tmp, std::ios::trunc);
@@ -32,7 +45,12 @@ void write_snapshot(const std::string& path, const std::vector<Peer>& peers) {
               << "\",\"verb\":\"" << escape(peers[i].verb)
               << "\",\"path\":\"" << escape(peers[i].path) << "\"}";
         }
-        f << "]}";
+        f << "]";
+        if (!problem.empty()) {
+            f << ",\"policy_degraded\":true,\"policy_problem\":\""
+              << escape(one_line(problem)) << "\"";
+        }
+        f << "}";
     }
     std::error_code ec;
     std::filesystem::rename(tmp, path, ec);

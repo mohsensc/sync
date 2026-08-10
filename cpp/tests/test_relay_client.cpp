@@ -1172,3 +1172,325 @@ TEST_CASE("identity fields are escaped, so a quote in a name cannot break the jo
     REQUIRE(join.find(R"("human":"sa\"ra\\")") != std::string::npos);
     REQUIRE(join.find(R"("room":"room\nb")") != std::string::npos);
 }
+
+// ---------------------------------------------------------------------------
+// The holder's tier, off the wire and into the cache
+// ---------------------------------------------------------------------------
+//
+// The relay stamps a tier on every lease and orders every contest by it. If it
+// stops at the socket the daemon can name a holder and can never say they
+// outrank you, which is the one thing that tells a blocked agent to stop
+// retrying rather than back off and try again in a second.
+
+TEST_CASE("a lease frame carries the holder's tier into the cache") {
+    TestServer server;
+    REQUIRE(server.start());
+
+    Outbound out(100);
+    LeaseCache leases;
+    RelayClient client(cfg_for(server.port()), out, leases);
+    REQUIRE(pump_until(client, [&] { return client.open(); }));
+
+    server.send_text(
+        R"({"type":"lease","state":"held","agent":"a2","human":"kai","intent":"x",)"
+        R"("priority":"elevated",)"
+        R"("region":{"path":"src/auth.py","symbol":"sign_in"},"expires_in_ms":60000})");
+
+    REQUIRE(pump_until(client, [&] {
+        return leases.conflict_for("src/auth.py|sign_in", "a1", mono_ms()).has_value();
+    }));
+    REQUIRE(leases.conflict_for("src/auth.py|sign_in", "a1", mono_ms())->priority == "elevated");
+}
+
+TEST_CASE("a lease snapshot carries each holder's tier") {
+    TestServer server;
+    REQUIRE(server.start());
+
+    Outbound out(100);
+    LeaseCache leases;
+    RelayClient client(cfg_for(server.port()), out, leases);
+    REQUIRE(pump_until(client, [&] { return client.open(); }));
+
+    server.send_text(
+        R"({"type":"leases","leases":[)"
+        R"({"agent":"a2","human":"kai","intent":"refactor","priority":"critical",)"
+        R"("region":{"path":"src/auth.py","symbol":null},"expires_in_ms":60000},)"
+        R"({"agent":"a3","human":"lee","intent":"rewrite","priority":"normal",)"
+        R"("region":{"path":"src/db.py","symbol":null},"expires_in_ms":60000})"
+        R"(]})");
+
+    REQUIRE(pump_until(client, [&] {
+        return leases.conflict_for("src/auth.py|", "a1", mono_ms()).has_value();
+    }));
+    REQUIRE(leases.conflict_for("src/auth.py|", "a1", mono_ms())->priority == "critical");
+    REQUIRE(leases.conflict_for("src/db.py|", "a1", mono_ms())->priority == "normal");
+}
+
+// The trap in the claim_result shape. A refusal carries *two* tiers: `priority`
+// is the requester's — ours — and `holder_priority` belongs to whoever beat us.
+// Reading `priority` here would cache our own tier against their lease and tell
+// every later edit that a normal holder was critical, or the reverse.
+TEST_CASE("a refused claim_result caches the holder's tier, not the requester's") {
+    TestServer server;
+    REQUIRE(server.start());
+
+    Outbound out(100);
+    LeaseCache leases;
+    RelayClient client(cfg_for(server.port()), out, leases);
+    REQUIRE(pump_until(client, [&] { return client.open(); }));
+
+    server.send_text(
+        R"({"type":"claim_result","granted":false,"held_by":"a2","intent":"refactor",)"
+        R"("decision":"abort","priority":"normal","holder_priority":"elevated",)"
+        R"("region":{"path":"src/auth.py","symbol":"sign_in"}})");
+
+    REQUIRE(pump_until(client, [&] {
+        return leases.conflict_for("src/auth.py|sign_in", "a1", mono_ms()).has_value();
+    }));
+    const auto hit = leases.conflict_for("src/auth.py|sign_in", "a1", mono_ms());
+    REQUIRE(hit->agent == "a2");
+    REQUIRE(hit->priority == "elevated");
+}
+
+TEST_CASE("a granted claim_result caches our own tier, which is the holder's") {
+    TestServer server;
+    REQUIRE(server.start());
+
+    Outbound out(100);
+    LeaseCache leases;
+    RelayClient client(cfg_for(server.port()), out, leases);
+    REQUIRE(pump_until(client, [&] { return client.open(); }));
+
+    server.send_text(
+        R"({"type":"claim_result","granted":true,"agent":"agent-1","human":"sara",)"
+        R"("intent":"x","priority":"critical",)"
+        R"("region":{"path":"src/auth.py","symbol":null},"expires_in_ms":60000})");
+
+    REQUIRE(pump_until(client, [&] {
+        return leases.conflict_for("src/auth.py|", "other", mono_ms()).has_value();
+    }));
+    REQUIRE(leases.conflict_for("src/auth.py|", "other", mono_ms())->priority == "critical");
+}
+
+TEST_CASE("a lease frame from a relay that names no tier is not a crash or a guess") {
+    // Every shipped relay names one. A frame without it leaves the field empty,
+    // and an empty tier renders as nothing at all rather than as "normal" —
+    // saying "normal" would be inventing a fact about a room we were not told.
+    TestServer server;
+    REQUIRE(server.start());
+
+    Outbound out(100);
+    LeaseCache leases;
+    RelayClient client(cfg_for(server.port()), out, leases);
+    REQUIRE(pump_until(client, [&] { return client.open(); }));
+
+    server.send_text(
+        R"({"type":"lease","state":"held","agent":"a2","human":"kai","intent":"x",)"
+        R"("region":{"path":"src/auth.py","symbol":null},"expires_in_ms":60000})");
+
+    REQUIRE(pump_until(client, [&] {
+        return leases.conflict_for("src/auth.py|", "a1", mono_ms()).has_value();
+    }));
+    REQUIRE(leases.conflict_for("src/auth.py|", "a1", mono_ms())->priority.empty());
+}
+
+// ---------------------------------------------------------------------------
+// Presenting a principal
+// ---------------------------------------------------------------------------
+//
+// `ap principals add` mints a token, prints it once and tells you to put it on
+// the machine that runs as that principal. The relay reads `principal`, `token`
+// and `unattended` off the join frame and grants a tier from them. This is the
+// join frame those two facts meet on.
+
+TEST_CASE("a configured principal is presented on the join frame") {
+    TestServer server;
+    REQUIRE(server.start());
+
+    RelayConfig cfg = cfg_for(server.port());
+    cfg.principal = "sara";
+    cfg.token = "s3cret-token";
+    cfg.unattended = true;
+
+    Outbound out(10);
+    LeaseCache leases;
+    RelayClient client(cfg, out, leases);
+    REQUIRE(pump_until(client, [&] { return !server.all_messages().empty(); }));
+
+    const std::string join = server.all_messages()[0];
+    REQUIRE(join.find(R"("principal":"sara")") != std::string::npos);
+    REQUIRE(join.find(R"("token":"s3cret-token")") != std::string::npos);
+    REQUIRE(join.find(R"("unattended":true)") != std::string::npos);
+}
+
+TEST_CASE("a daemon with nothing configured puts no new fields on the wire") {
+    // The same promise the python golden test makes: installing this and
+    // configuring nothing has to look exactly like it did before. An empty
+    // `principal` is not a principal, and a relay reading one would log an
+    // unknown-principal line for every daemon on the network.
+    TestServer server;
+    REQUIRE(server.start());
+
+    Outbound out(10);
+    LeaseCache leases;
+    RelayClient client(cfg_for(server.port()), out, leases);
+    REQUIRE(pump_until(client, [&] { return !server.all_messages().empty(); }));
+
+    const std::string join = server.all_messages()[0];
+    REQUIRE(join.find("principal") == std::string::npos);
+    REQUIRE(join.find("token") == std::string::npos);
+    REQUIRE(join.find("unattended") == std::string::npos);
+}
+
+TEST_CASE("a principal with no token is still presented, and loses a rung for it") {
+    // Fail-open, end to end: the relay answers a tokenless principal with the
+    // default tier rather than a refusal, so sending the name alone is a
+    // degradation and not an error. Dropping it here instead would hide a
+    // half-finished install rather than let the relay log it.
+    TestServer server;
+    REQUIRE(server.start());
+
+    RelayConfig cfg = cfg_for(server.port());
+    cfg.principal = "sara";
+
+    Outbound out(10);
+    LeaseCache leases;
+    RelayClient client(cfg, out, leases);
+    REQUIRE(pump_until(client, [&] { return !server.all_messages().empty(); }));
+
+    const std::string join = server.all_messages()[0];
+    REQUIRE(join.find(R"("principal":"sara")") != std::string::npos);
+    REQUIRE(join.find("token") == std::string::npos);
+}
+
+TEST_CASE("a token with a quote in it cannot break the join frame") {
+    TestServer server;
+    REQUIRE(server.start());
+
+    RelayConfig cfg = cfg_for(server.port());
+    cfg.principal = "sa\"ra";
+    cfg.token = "tok\\en\"";
+
+    Outbound out(10);
+    LeaseCache leases;
+    RelayClient client(cfg, out, leases);
+    REQUIRE(pump_until(client, [&] { return !server.all_messages().empty(); }));
+
+    const std::string join = server.all_messages()[0];
+    REQUIRE(join.find(R"("principal":"sa\"ra")") != std::string::npos);
+    REQUIRE(join.find(R"("token":"tok\\en\"")") != std::string::npos);
+}
+
+// -- a region changing hands -------------------------------------------------
+
+TEST_CASE("a lease frame carries the handover deadline into the cache") {
+    TestServer server;
+    REQUIRE(server.start());
+
+    Outbound out(100);
+    LeaseCache leases;
+    RelayClient client(cfg_for(server.port()), out, leases);
+    REQUIRE(pump_until(client, [&] { return client.open(); }));
+
+    server.send_text(
+        R"({"type":"lease","state":"held","agent":"a2","human":"kai","intent":"x",)"
+        R"("region":{"path":"src/auth.py","symbol":"sign_in"},"expires_in_ms":60000,)"
+        R"("handover_in_ms":45000,"handover_to":"agent-1","handover_to_human":"sara",)"
+        R"("handover_to_priority":"critical","waiting":2})");
+
+    REQUIRE(pump_until(client, [&] {
+        return leases.conflict_for("src/auth.py|sign_in", "agent-1", mono_ms()).has_value();
+    }));
+    const auto hit = leases.conflict_for("src/auth.py|sign_in", "agent-1", mono_ms());
+    REQUIRE(hit->handover_at_ms > mono_ms());
+    REQUIRE(hit->handover_to == "agent-1");
+    REQUIRE(hit->handover_to_human == "sara");
+    REQUIRE(hit->handover_to_priority == "critical");
+    REQUIRE(hit->waiting == 2);
+}
+
+TEST_CASE("an uncontended lease frame leaves the deadline unset") {
+    TestServer server;
+    REQUIRE(server.start());
+
+    Outbound out(100);
+    LeaseCache leases;
+    RelayClient client(cfg_for(server.port()), out, leases);
+    REQUIRE(pump_until(client, [&] { return client.open(); }));
+
+    server.send_text(
+        R"({"type":"lease","state":"held","agent":"a2","human":"kai","intent":"x",)"
+        R"("region":{"path":"src/auth.py","symbol":"sign_in"},"expires_in_ms":60000})");
+    REQUIRE(pump_until(client, [&] {
+        return leases.conflict_for("src/auth.py|sign_in", "agent-1", mono_ms()).has_value();
+    }));
+    REQUIRE(leases.conflict_for("src/auth.py|sign_in", "agent-1", mono_ms())->handover_at_ms
+            < 0);
+}
+
+TEST_CASE("a handover frame erases the lease rather than re-adding it") {
+    // It carries no expires_in_ms, so falling through to upsert would give the
+    // lease that just ended a fresh full TTL and this daemon would go on
+    // blocking edits on a region nobody holds.
+    TestServer server;
+    REQUIRE(server.start());
+
+    Outbound out(100);
+    LeaseCache leases;
+    RelayClient client(cfg_for(server.port()), out, leases);
+    REQUIRE(pump_until(client, [&] { return client.open(); }));
+
+    server.send_text(
+        R"({"type":"lease","state":"held","agent":"a2","human":"kai","intent":"x",)"
+        R"("region":{"path":"src/auth.py","symbol":"sign_in"},"expires_in_ms":60000})");
+    REQUIRE(pump_until(client, [&] {
+        return leases.conflict_for("src/auth.py|sign_in", "agent-1", mono_ms()).has_value();
+    }));
+
+    server.send_text(
+        R"({"type":"lease","state":"handover","agent":"a2","to":"a3","to_human":"lee",)"
+        R"("to_priority":"critical","reserved_for_ms":10000,)"
+        R"("region":{"path":"src/auth.py","symbol":"sign_in"}})");
+    REQUIRE(pump_until(client, [&] {
+        return !leases.conflict_for("src/auth.py|sign_in", "agent-1", mono_ms()).has_value();
+    }));
+}
+
+TEST_CASE("losing your own region is remembered, and somebody else's is not") {
+    TestServer server;
+    REQUIRE(server.start());
+
+    Outbound out(100);
+    LeaseCache leases;
+    RelayClient client(cfg_for(server.port()), out, leases);
+    REQUIRE(pump_until(client, [&] { return client.open(); }));
+
+    // Ours. cfg_for names this daemon "agent-1".
+    server.send_text(
+        R"({"type":"lease","state":"held","agent":"agent-1","human":"sara","intent":"x",)"
+        R"("region":{"path":"src/pay.py","symbol":"charge"},"expires_in_ms":60000})");
+    REQUIRE(pump_until(client, [&] {
+        return leases.conflict_for("src/pay.py|charge", "other", mono_ms()).has_value();
+    }));
+    server.send_text(
+        R"({"type":"lease","state":"handover","agent":"agent-1","to":"a3",)"
+        R"("to_human":"lee","to_priority":"critical",)"
+        R"("region":{"path":"src/pay.py","symbol":"charge"}})");
+    REQUIRE(pump_until(client, [&] {
+        return leases.handover_note("src/pay.py", mono_ms(), ap::kHandoverNoteMs).has_value();
+    }));
+    const auto note = leases.handover_note("src/pay.py", mono_ms(), ap::kHandoverNoteMs);
+    REQUIRE(note->to == "a3");
+    REQUIRE(note->to_human == "lee");
+    REQUIRE(note->to_priority == "critical");
+
+    // Somebody else's handover is room news, not a note about us.
+    server.send_text(
+        R"({"type":"lease","state":"handover","agent":"a5","to":"a6",)"
+        R"("region":{"path":"src/other.py","symbol":null}})");
+    REQUIRE(pump_until(client, [&] {
+        return leases.handover_note("src/pay.py", mono_ms(), ap::kHandoverNoteMs).has_value();
+    }));
+    REQUIRE_FALSE(
+        leases.handover_note("src/other.py", mono_ms(), ap::kHandoverNoteMs).has_value());
+}
