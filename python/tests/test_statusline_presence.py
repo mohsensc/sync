@@ -21,7 +21,9 @@ CPP = ROOT / "cpp"
 WRITER_SRC = pathlib.Path(__file__).resolve().parent / "helpers" / "snapshot_writer.cpp"
 
 # Either nothing at all, or one whole segment. Nothing in between.
-SEGMENT = re.compile(r"^· (?:[0-9]+ agents here|.+ here)\Z")
+# The trailing `!` is the policy-degraded marker; `· policy degraded` is what
+# that marker becomes when there are no peers to hang it off.
+SEGMENT = re.compile(r"^· (?:policy degraded|(?:[0-9]+ agents here|.+ here)!?)\Z")
 
 
 class Result:
@@ -355,3 +357,60 @@ def test_e2e_odd_names_with_several_peers(writer, tmp_path):
     ])
     r = ok(run(p))
     assert r.out == "· 2 agents here"
+
+
+# --- the degraded marker ------------------------------------------------------
+#
+# cpp/daemon/snapshot.cpp puts these two keys at the top level whenever the
+# daemon's PolicyCache has a problem — a bad effect name the compiler kept going
+# past, a cache that could not be read, one that vanished. docs/policy-design.md
+# §9 says degradation is loud, and names this script as one of the three places
+# it has to show up. It showed up in none of them: the flag was written and
+# nothing read it.
+
+
+def degraded_json(*humans, problem="policy.toml:3: rung3 = 'loud' is not an effect"):
+    body = ",".join(
+        '{"human":"%s","verb":"edit","path":"src/a.py"}' % h for h in humans
+    )
+    return (
+        '{"peers":[' + body + '],"policy_degraded":true,'
+        '"policy_problem":"' + problem + '"}'
+    )
+
+
+def test_degraded_with_no_peers_says_so(tmp_path):
+    # The case the flag exists for. One machine, nobody else about, and a
+    # policy that is not the one the person thinks they configured.
+    r = ok(run(snap(tmp_path, degraded_json())))
+    assert r.out == "· policy degraded"
+
+
+def test_degraded_marks_a_single_peer_segment(tmp_path):
+    r = ok(run(snap(tmp_path, degraded_json("sara"))))
+    assert r.out == "· sara here!"
+
+
+def test_degraded_marks_a_count_segment(tmp_path):
+    r = ok(run(snap(tmp_path, degraded_json("sara", "dev", "kim"))))
+    assert r.out == "· 3 agents here!"
+
+
+def test_a_healthy_snapshot_is_unmarked(tmp_path):
+    # The flag is absent on every healthy write, so this is also the guard
+    # against the marker leaking into the normal segment.
+    assert ok(run(snap(tmp_path, peers_json("sara")))).out == "· sara here"
+    assert ok(run(snap(tmp_path, '{"peers":[]}'))).out == ""
+    # ...and false is not true.
+    body = '{"peers":[],"policy_degraded":false}'
+    assert ok(run(snap(tmp_path, body))).out == ""
+
+
+def test_a_peer_name_cannot_forge_the_marker(tmp_path):
+    # The name arrives over a socket and lands in this string. snapshot.cpp
+    # escapes every quote in it, so there is no way to close the string and
+    # write a top-level key — this is the test that says so.
+    forged = '{"peers":[{"human":"a\\",\\"policy_degraded\\":true,\\"x\\":\\"b",'
+    forged += '"verb":"edit","path":"src/a.py"}]}'
+    r = ok(run(snap(tmp_path, forged)))
+    assert not r.out.endswith("!")

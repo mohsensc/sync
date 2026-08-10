@@ -45,10 +45,26 @@ while [[ $rest == *'"human":"'* ]]; do
   [[ $count -ge 256 ]] && break
 done
 
-[[ $count == 0 ]] && exit 0
+# The daemon sets this when the policy it is running on has something wrong
+# with it: a bad effect name in policy.toml, a compiled cache it could not read,
+# one that vanished. The table it falls back to is never quieter than the
+# builtin floor, so nothing is unprotected — but a degradation nobody can see is
+# the failure mode docs/policy-design.md §9 rules out by name, and this segment
+# is the only surface that is on screen the whole time.
+#
+# One character. `ap doctor` has the sentence.
+mark=""
+[[ $snap == *'"policy_degraded":true'* ]] && mark="!"
+
+if [[ $count == 0 ]]; then
+  # Nobody to report and something to say. This is the case the flag exists
+  # for: a machine on its own, with a policy that is not the one it thinks.
+  [[ -n $mark ]] && printf '· policy degraded'
+  exit 0
+fi
 
 if [[ $count -gt 1 ]]; then
-  printf '· %d agents here' "$count"
+  printf '· %d agents here%s' "$count" "$mark"
   exit 0
 fi
 
@@ -59,7 +75,7 @@ name=${name//[[:cntrl:]]/}  # a stray control byte would garble the prompt
 [[ ${#name} -gt 48 ]] && name="${name:0:47}…"
 
 if [[ -z $name ]]; then
-  printf '· 1 agent here'
+  printf '· 1 agent here%s' "$mark"
 else
-  printf '· %s here' "$name"
+  printf '· %s here%s' "$name" "$mark"
 fi

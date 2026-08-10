@@ -8,6 +8,8 @@
 #include <cstring>
 #include <string>
 
+#include "daemon/json.hpp"
+
 namespace ap {
 namespace {
 
@@ -55,6 +57,18 @@ bool read_all(const std::string& path, std::size_t cap, std::string& out) {
     }
     ::close(fd);
     return true;
+}
+
+/// `"key":true`. Only true is a hit — a missing key, `false`, `null` and
+/// anything unparseable all mean "not flagged", which is the reading that
+/// cannot invent a degradation out of a file we half understood.
+bool json_true(std::string_view json, std::string_view key) {
+    std::string needle = "\"";
+    needle.append(key);
+    needle += "\":";
+    const auto pos = json.find(needle);
+    if (pos == std::string_view::npos) return false;
+    return json.compare(skip_space(json, pos + needle.size()), 4, "true") == 0;
 }
 
 }  // namespace
@@ -163,6 +177,22 @@ bool PolicyCache::refresh(const std::string& path, long long now_ms) {
 
     std::string problem;
     const bool ok = parse_effect_array(text, "table", next, &problem);
+
+    // What the *compiler* thought of the config it read, which is a different
+    // question from whether this file parsed. `ap policy compile` sets these
+    // when a layer had a bad key — `rung3 = "loud"` — and keeps the rest of the
+    // table, so the blob is perfectly well-formed and says so itself.
+    //
+    // Nothing read them. The one failure the design doc calls out by name,
+    // "degradation is loud", was silent for exactly the case it was written
+    // for: a typo in policy.toml resolved to the builtin table, `ap doctor`
+    // exited 0, and the statusline said nothing.
+    if (json_true(text, "degraded")) {
+        std::string said = json_field(text, "problem");
+        if (said.empty()) said = "policy cache " + path + " is marked degraded and says no why";
+        if (!problem.empty()) said += "; " + problem;
+        problem = std::move(said);
+    }
 
     std::unique_lock lock(mu_);
     ++parses_;
