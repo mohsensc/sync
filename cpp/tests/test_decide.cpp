@@ -172,3 +172,107 @@ TEST_CASE("a tier cannot break the response line either") {
     REQUIRE(reply.find('\n') == std::string::npos);
     REQUIRE(ap::parse_decision(reply).holder_priority == "ele\"vat\ned");
 }
+
+// ===========================================================================
+// Two names for one agent
+// ===========================================================================
+//
+// The hook's identity is Claude Code's `session_id`. Every lease in the cache
+// is keyed by the *daemon's* relay agent id — `AGENT_PRESENCE_AGENT`, or
+// `presenced@host` — because presenced is what joins the room, and every claim
+// and contend it sends goes out under that name. The two are different strings
+// in every real deployment, and the decision path compared them:
+//
+//   - a lease this machine holds did not exclude itself, so an agent could be
+//     refused by its own claim;
+//   - `own_handover` never matched, so a holder was never told its lease was on
+//     a clock while it still had the region;
+//   - `handover_to == agent` never matched, so the agent the region was
+//     actually queued for was told it was queued for somebody else.
+//
+// The daemon knows both names. It answers with the one the lease table uses,
+// and says outright when the queue is for the machine that asked.
+
+namespace {
+
+/// The payload as Claude Code sends it: an opaque session id, unrelated to any
+/// agent id the relay has ever seen.
+const std::string kSessionPayload =
+    R"({"session_id":"1f0c2b9e-7a41-4d55-9d0a-6c0b8f2e3a17",)"
+    R"("hook_event_name":"PreToolUse","tool_name":"Edit",)"
+    R"("tool_input":{"file_path":"/repo/src/auth.py"}})";
+
+const std::string kSelf = "presenced@laptop";
+
+}  // namespace
+
+TEST_CASE("this machine's own lease does not block this machine") {
+    ap::CachedLease mine{kSelf, "alice", "adding the retry", 60'000};
+    ap::LeaseCache leases;
+    leases.replace({{"/repo/src/auth.py|", mine}});
+
+    const std::string reply =
+        ap::decide_response(ap::build_request(kSessionPayload), leases, ap::PolicyCache{}, 0, kSelf);
+    REQUIRE(ap::parse_decision(reply).rung == 0);
+}
+
+TEST_CASE("a holder is told its own lease is on a clock") {
+    ap::CachedLease mine{kSelf, "alice", "adding the retry", 60'000};
+    mine.handover_at_ms = 45'000;
+    mine.handover_to = "nora-agent";
+    mine.handover_to_human = "Nora";
+    mine.handover_to_priority = "critical";
+    mine.waiting = 1;
+    ap::LeaseCache leases;
+    leases.replace({{"/repo/src/auth.py|", mine}});
+
+    const ap::Decision d = ap::parse_decision(
+        ap::decide_response(ap::build_request(kSessionPayload), leases, ap::PolicyCache{}, 0, kSelf));
+    REQUIRE(d.rung == 0);
+    REQUIRE(d.handover_in_ms == 45'000);
+    REQUIRE(d.handover_to_human == "Nora");
+    REQUIRE(ap::hook_output(d, "/repo/src/auth.py").find("Nora") != std::string::npos);
+}
+
+TEST_CASE("a region queued for this machine is reported as queued for you") {
+    ap::CachedLease theirs{"bob-agent", "bob", "rewriting the token refresh", 60'000};
+    theirs.handover_at_ms = 90'000;
+    theirs.handover_to = kSelf;
+    theirs.waiting = 1;
+    ap::LeaseCache leases;
+    leases.replace({{"/repo/src/auth.py|", theirs}});
+
+    const ap::Decision d = ap::parse_decision(
+        ap::decide_response(ap::build_request(kSessionPayload), leases, ap::PolicyCache{}, 0, kSelf));
+    REQUIRE(d.rung == 3);
+    REQUIRE(d.handover_to_me);
+
+    const std::string out = ap::hook_output(d, "/repo/src/auth.py");
+    REQUIRE(out.find("held for you") != std::string::npos);
+    REQUIRE(out.find("not for you") == std::string::npos);
+}
+
+TEST_CASE("a region queued for somebody else still says so") {
+    ap::CachedLease theirs{"bob-agent", "bob", "rewriting the token refresh", 60'000};
+    theirs.handover_at_ms = 90'000;
+    theirs.handover_to = "nora-agent";
+    theirs.handover_to_human = "Nora";
+    ap::LeaseCache leases;
+    leases.replace({{"/repo/src/auth.py|", theirs}});
+
+    const ap::Decision d = ap::parse_decision(
+        ap::decide_response(ap::build_request(kSessionPayload), leases, ap::PolicyCache{}, 0, kSelf));
+    REQUIRE(d.rung == 3);
+    REQUIRE_FALSE(d.handover_to_me);
+    REQUIRE(ap::hook_output(d, "/repo/src/auth.py").find("not for you") != std::string::npos);
+}
+
+TEST_CASE("with no relay identity the request's own agent still decides") {
+    // A daemon with no room configured has no relay name to answer with. The
+    // request's agent is all there is, and it behaves exactly as it always did.
+    ap::CachedLease mine{"sess_b", "alice", "adding the retry", 60'000};
+    ap::LeaseCache leases;
+    leases.replace({{"/repo/src/auth.py|", mine}});
+    REQUIRE(ap::parse_decision(ap::decide_response(ap::build_request(kEditPayload), leases, 0))
+                .rung == 0);
+}

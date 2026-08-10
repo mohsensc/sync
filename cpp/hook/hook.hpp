@@ -125,6 +125,12 @@ struct Decision {
     std::string handover_to;
     std::string handover_to_human;
     std::string handover_to_priority;
+    /// The daemon saying the queue is for this machine. It knows: the queue is
+    /// in the relay's namespace and `agent` above is Claude Code's session id,
+    /// so the two are different strings and comparing them here answered "no"
+    /// for every agent that was in fact next in line. False from a daemon that
+    /// does not send it, and then the comparison is still made below.
+    bool handover_to_me = false;
     /// How many agents are queued on the region. 0 when unsaid.
     int waiting = 0;
 

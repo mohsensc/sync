@@ -40,6 +40,18 @@ bool wants_decision_line(std::string_view line);
 /// `"decision":"ask"` still rides along whenever the effect is `ask`, because a
 /// hook built before effects existed reads that field and nothing else. New
 /// hooks read `effect` and ignore it.
+/// `self_agent` is the id this machine joined the room under — the daemon's
+/// relay agent id, which is what every lease in the cache is keyed by. It is
+/// not the same string as the request's `agent`: that one is Claude Code's
+/// `session_id`, which the relay has never seen. Comparing the two is how a
+/// machine ended up blocked by its own claim, never heard that its lease was on
+/// a clock, and got told a region queued for it was queued for somebody else.
+/// Empty means no room is configured, and then the request's own agent is all
+/// there is and behaves as it always did.
+std::string decide_response(const std::string& request, const LeaseCache& leases,
+                            const PolicyCache& policy, long long now_ms,
+                            const std::string& self_agent);
+
 std::string decide_response(const std::string& request, const LeaseCache& leases,
                             const PolicyCache& policy, long long now_ms);
 

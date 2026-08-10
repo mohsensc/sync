@@ -306,7 +306,11 @@ int main() {
     // an older install asks on this one and has to keep getting an answer.
     // Nothing else uses it: current hooks ask on the decision socket.
     auto decide = [&](const std::string& line) {
-        std::string answer = ap::decide_response(line, leases, policy, now_ms());
+        // relay_cfg.agent is the name this daemon joined the room under, and
+        // every lease in the cache is keyed by it. The request carries a
+        // session id instead. See decide.hpp.
+        std::string answer =
+            ap::decide_response(line, leases, policy, now_ms(), relay_cfg.agent);
         // Being stopped is an ask. Recorded here rather than in
         // decide_response, which stays a pure function of the request and the
         // two tables — and noted, never sent: this runs on a decision thread,

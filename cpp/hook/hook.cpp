@@ -500,6 +500,7 @@ Decision parse_decision(const std::string& line) {
     d.handover_to = field(line, "handover_to");
     d.handover_to_human = field(line, "handover_to_human");
     d.handover_to_priority = field(line, "handover_to_priority");
+    d.handover_to_me = line.find("\"handover_to_me\":true") != std::string::npos;
     d.waiting = int_field(line, "waiting", 0);
     d.lost_to = field(line, "lost_to");
     d.lost_to_priority = field(line, "lost_to_priority");
@@ -549,7 +550,12 @@ std::string blocked_message(const Decision& d, const std::string& where) {
              "written was reverted.";
     }
 
-    const bool queued_for_me = !d.handover_to.empty() && d.handover_to == d.agent;
+    // The daemon's word first. Its `handover_to` is a relay agent id and
+    // `d.agent` is a Claude Code session id, so the comparison below is only
+    // ever true when somebody has set AGENT_PRESENCE_AGENT to the session id by
+    // hand. Kept anyway: a daemon from before the flag existed sends no flag.
+    const bool queued_for_me =
+        d.handover_to_me || (!d.handover_to.empty() && d.handover_to == d.agent);
     if (d.handover_in_ms >= 0 && queued_for_me) {
         m += " Their lease stops being renewable in ";
         m += humanise_ms(d.handover_in_ms);
