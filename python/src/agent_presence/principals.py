@@ -128,6 +128,39 @@ def read_token(env: Mapping[str, str] | None = None) -> str:
     return ""
 
 
+def unattended_flag(env: Mapping[str, str] | None = None) -> bool:
+    env = os.environ if env is None else env
+    return env.get(UNATTENDED_ENV, "").strip().lower() in (
+        "1", "true", "yes", "on"
+    )
+
+
+@dataclass(frozen=True)
+class LocalIdentity:
+    """Who this machine presents itself as: the principal, its token, and the
+    one supervision bit.
+
+    One function because there are three consumers — the daemon's relay client,
+    the MCP tool surface and `ap doctor` — and a machine with two ideas about
+    where its token lives has one that is wrong. cpp/daemon/main.cpp reads the
+    same three env vars by the same rules.
+    """
+
+    principal: str | None
+    token: str
+    unattended: bool
+
+
+def local_identity(env: Mapping[str, str] | None = None) -> LocalIdentity:
+    env = os.environ if env is None else env
+    principal = env.get(PRINCIPAL_ENV, "").strip()
+    return LocalIdentity(
+        principal=principal or None,
+        token=read_token(env),
+        unattended=unattended_flag(env),
+    )
+
+
 @dataclass(frozen=True)
 class Principal:
     id: str
@@ -371,6 +404,15 @@ class Roster:
         )
 
 
+def _tier_or(value: object, fallback: int) -> int:
+    """The mirrored end of a half-written band. A bad value there is already
+    reported against the key it was written on, so this one stays quiet."""
+    try:
+        return parse_priority(value)  # type: ignore[arg-type]
+    except ValueError:
+        return fallback
+
+
 def _parse_principal(
     entry: object, index: int, source: str, default_tier: int
 ) -> tuple[Principal | None, list[str]]:
@@ -398,11 +440,22 @@ def _parse_principal(
         ]
     token_sha256 = token_sha256.strip().lower()
 
+    # One tier written down means one tier, supervised or not. Writing
+    # `attended = "critical"` and nothing else used to give you attended
+    # critical and unattended default_tier — an *inverted* band, which the check
+    # below then flattened to default_tier at both ends. So the roster entry an
+    # exec is most likely to write by hand ("I am critical") granted normal,
+    # silently, and the only clue was one warning line in the relay's log at
+    # startup. Naming one end now sets both; you get what you wrote, and the
+    # band only opens when you say two different things on purpose.
     tiers: dict[str, int] = {}
     for key in ("attended", "unattended"):
         raw = entry.get(key)
         if raw is None:
-            tiers[key] = default_tier
+            other = entry.get("unattended" if key == "attended" else "attended")
+            tiers[key] = default_tier if other is None else _tier_or(
+                other, default_tier
+            )
             continue
         try:
             tiers[key] = parse_priority(raw)

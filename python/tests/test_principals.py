@@ -10,6 +10,7 @@ from agent_presence.principals import (
     Principal,
     Roster,
     hash_token,
+    local_identity,
     mint_token,
     read_token,
     token_path,
@@ -388,3 +389,114 @@ def test_the_token_file_is_read_and_trimmed(tmp_path):
 def test_no_token_anywhere_is_empty_rather_than_an_error(tmp_path):
     assert read_token({"XDG_CONFIG_HOME": str(tmp_path / "nope")}) == ""
     assert read_token({}) == ""
+
+
+# -- configure once, and it holds --------------------------------------------
+#
+# The user this is aimed at writes one roster entry and expects it to be true
+# everywhere. Two places it was not.
+
+
+def test_naming_one_end_of_the_band_sets_both():
+    # `attended = "critical"` and nothing else used to mean attended critical
+    # and unattended normal — an inverted band, which the guard below then
+    # flattened to normal at BOTH ends. So the single most likely hand-written
+    # roster entry granted exactly nothing, and said so only in one warning line
+    # in the relay's startup log.
+    roster = Roster.parse(f"""
+[[principal]]
+id = "sara"
+attended = "critical"
+token_sha256 = "{hash_token('t')}"
+""")
+    entry = roster.principals()[0]
+    assert (entry.attended, entry.unattended) == (
+        PRIORITY_NAMES["critical"], PRIORITY_NAMES["critical"]
+    )
+    assert roster.problems == ()
+
+
+def test_naming_only_the_unattended_end_mirrors_the_other_way():
+    roster = Roster.parse(f"""
+[[principal]]
+id = "sara"
+unattended = "elevated"
+token_sha256 = "{hash_token('t')}"
+""")
+    entry = roster.principals()[0]
+    assert (entry.attended, entry.unattended) == (
+        PRIORITY_NAMES["elevated"], PRIORITY_NAMES["elevated"]
+    )
+    assert roster.problems == ()
+
+
+def test_a_band_still_opens_when_two_different_tiers_are_written():
+    roster = Roster.parse(f"""
+[[principal]]
+id = "sara"
+attended = "normal"
+unattended = "critical"
+token_sha256 = "{hash_token('t')}"
+""")
+    entry = roster.principals()[0]
+    assert entry.attended == PRIORITY_NAMES["normal"]
+    assert entry.unattended == PRIORITY_NAMES["critical"]
+
+
+def test_an_inverted_band_is_still_refused():
+    # The mirroring must not paper over a genuinely inverted band: that would
+    # let the client's one bit lower its tier as well as raise it.
+    roster = Roster.parse(f"""
+[[principal]]
+id = "sara"
+attended = "critical"
+unattended = "normal"
+token_sha256 = "{hash_token('t')}"
+""")
+    entry = roster.principals()[0]
+    assert entry.attended == entry.unattended == PRIORITY_NORMAL
+    assert any("above unattended" in p for p in roster.problems)
+
+
+def test_a_principal_who_writes_nothing_still_lands_on_default_tier():
+    roster = Roster.parse(f"""
+default_tier = "elevated"
+
+[[principal]]
+id = "sara"
+token_sha256 = "{hash_token('t')}"
+""")
+    entry = roster.principals()[0]
+    assert entry.attended == entry.unattended == PRIORITY_NAMES["elevated"]
+
+
+def test_a_bad_tier_on_one_end_does_not_poison_the_other():
+    roster = Roster.parse(f"""
+[[principal]]
+id = "sara"
+attended = "urgent"
+unattended = "critical"
+token_sha256 = "{hash_token('t')}"
+""")
+    entry = roster.principals()[0]
+    # attended fell back to the default and the band inverted the safe way
+    # round, so nothing is granted above what was actually written down.
+    assert entry.attended == PRIORITY_NORMAL
+    assert any("urgent" in p for p in roster.problems)
+
+
+def test_local_identity_reads_the_same_three_env_vars_the_daemon_does():
+    env = {
+        "AGENT_PRESENCE_PRINCIPAL": " sara ",
+        "AGENT_PRESENCE_TOKEN": " s3cret ",
+        "AGENT_PRESENCE_UNATTENDED": "yes",
+    }
+    who = local_identity(env)
+    assert (who.principal, who.token, who.unattended) == ("sara", "s3cret", True)
+
+
+def test_local_identity_on_a_machine_that_configured_nothing():
+    who = local_identity({"HOME": "/nonexistent"})
+    assert who.principal is None
+    assert who.token == ""
+    assert who.unattended is False
