@@ -16,7 +16,9 @@
 
 #include <string>
 
+#include "daemon/contend_queue.hpp"
 #include "daemon/decide.hpp"
+#include "daemon/relay_client.hpp"
 #include "daemon/lease_cache.hpp"
 #include "hook/hook.hpp"
 
@@ -312,4 +314,56 @@ TEST_CASE("the agent at the front of the queue is not told to wait twice") {
     REQUIRE_FALSE(has(out, "wait and retry"));
     REQUIRE(has(out, "disjoint"));
     REQUIRE(has(out, "proceed anyway"));
+}
+
+// -- the ask the hook path never made ----------------------------------------
+
+TEST_CASE("a rung 3 answer is recognisable as a block, and nothing else is") {
+    LeaseCache c;
+    c.replace({{kKey, held_by("a1", 47'000)}});
+    REQUIRE(ap::blocked_by_lease(ap::decide_response(ask("a2"), c, 0)));
+
+    // The holder's own edit, an ambient rung 0, a non-edit and an empty answer
+    // are all not asks.
+    REQUIRE_FALSE(ap::blocked_by_lease(ap::decide_response(ask("a1"), c, 0)));
+    REQUIRE_FALSE(ap::blocked_by_lease(R"({"rung":0,"effect":"silent"})"));
+    REQUIRE_FALSE(ap::blocked_by_lease(""));
+    // And it is the rung, not the effect: a room that softened rung 3 to
+    // `notify` still has two agents on one region and the ask still counts.
+    REQUIRE(ap::blocked_by_lease(R"({"rung":3,"effect":"notify","holder":"a1"})"));
+}
+
+TEST_CASE("the contend queue collapses repeats and is bounded") {
+    ap::ContendQueue q;
+    REQUIRE(q.drain().empty());
+
+    q.note("/repo/a.py");
+    q.note("/repo/a.py");
+    q.note("/repo/b.py");
+    q.note("");                       // nothing to say
+    auto out = q.drain();
+    REQUIRE(out.size() == 2);
+    REQUIRE(out[0] == "/repo/a.py");
+    REQUIRE(out[1] == "/repo/b.py");
+    REQUIRE(q.drain().empty());       // draining takes
+
+    for (std::size_t i = 0; i < ap::ContendQueue::kMax + 50; ++i) {
+        q.note("/repo/f" + std::to_string(i) + ".py");
+    }
+    REQUIRE(q.drain().size() == ap::ContendQueue::kMax);
+}
+
+TEST_CASE("the contend frame names the whole file and takes no lease") {
+    const std::string frame = ap::relay_contend_frame("/repo/src/pay.py");
+    REQUIRE(has(frame, R"("type":"contend")"));
+    REQUIRE(has(frame, R"("path":"/repo/src/pay.py")"));
+    REQUIRE(has(frame, R"("symbol":null)"));
+    // Not a claim. The daemon never takes a lease on an agent's behalf.
+    REQUIRE_FALSE(has(frame, "claim"));
+    REQUIRE(ap::relay_contend_frame("").empty());
+}
+
+TEST_CASE("a path with a quote in it still leaves as valid JSON") {
+    const std::string frame = ap::relay_contend_frame(R"(/repo/a"b\c.py)");
+    REQUIRE(has(frame, R"(/repo/a\"b\\c.py)"));
 }

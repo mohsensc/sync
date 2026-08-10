@@ -73,7 +73,8 @@ target_sources(ap_tests PRIVATE tests/test_policy_cache.cpp)
 
 # The daemon's half of the hook protocol: the extractor both halves read the
 # wire with, and the responder that answers a decision request.
-target_sources(ap_daemon_lib PRIVATE daemon/json.cpp daemon/decide.cpp)
+target_sources(ap_daemon_lib PRIVATE daemon/json.cpp daemon/decide.cpp
+                                daemon/contend_queue.cpp)
 target_sources(ap_tests PRIVATE tests/test_decide.cpp tests/test_decision_path.cpp
                                 tests/test_decide_policy.cpp tests/test_handover.cpp)
 

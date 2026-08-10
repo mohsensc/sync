@@ -157,6 +157,13 @@ std::string decide_response(const std::string& request, const LeaseCache& leases
     return out;
 }
 
+bool blocked_by_lease(const std::string& answer) {
+    // Cheap and exact: decide_response writes the rung first and writes it as a
+    // bare integer, so there is no parser to run and no other key to confuse it
+    // with.
+    return answer.rfind("{\"rung\":3", 0) == 0;
+}
+
 std::string decide_response(const std::string& request, const LeaseCache& leases,
                             long long now_ms) {
     // Function-local so there is exactly one, built on first use and never

@@ -806,6 +806,17 @@ std::string relay_event_frame(const std::string& redacted_line) {
     return out;
 }
 
+std::string relay_contend_frame(const std::string& path) {
+    if (path.empty()) return {};
+    // A whole-file region, which is what the hook asked about: it names a path
+    // and no symbol. same_region() on the relay treats that as contending with
+    // every symbol in the file, so this finds whichever holder blocked us.
+    std::string out = "{\"type\":\"contend\",\"region\":{\"path\":\"";
+    out += json_escape(path);
+    out += "\",\"symbol\":null,\"lines\":null}}";
+    return out;
+}
+
 // ---------------------------------------------------------------------------
 // RelayClient
 // ---------------------------------------------------------------------------

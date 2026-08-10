@@ -12,6 +12,7 @@
 #include <utility>
 
 #include "daemon/coalesce.hpp"
+#include "daemon/contend_queue.hpp"
 #include "daemon/decide.hpp"
 #include "daemon/decision_server.hpp"
 #include "daemon/journal.hpp"
@@ -199,6 +200,11 @@ int main() {
     ap::PresenceTable presence(kPresenceTtlMs);
     ap::LeaseCache leases;
     ap::PolicyCache policy;
+    // Filled by the decision threads, drained by this loop. See
+    // daemon/contend_queue.hpp: a blocked PreToolUse edit is answered locally
+    // and produces no PostToolUse, so without this the relay never hears that
+    // anybody wanted the region and the holder's lease never gets a deadline.
+    ap::ContendQueue contended;
     // Read by `ap why`. Same directory rule as the snapshot and the sockets,
     // derived on both sides from the same two env vars rather than passed
     // between them, so the two halves cannot end up looking at different files.
@@ -283,6 +289,11 @@ int main() {
     // Nothing else uses it: current hooks ask on the decision socket.
     auto decide = [&](const std::string& line) {
         std::string answer = ap::decide_response(line, leases, policy, now_ms());
+        // Being stopped is an ask. Recorded here rather than in
+        // decide_response, which stays a pure function of the request and the
+        // two tables — and noted, never sent: this runs on a decision thread,
+        // which touches nothing but the lease cache and this queue.
+        if (ap::blocked_by_lease(answer)) contended.note(ap::json_field(line, "path"));
         // Recorded here rather than inside decide_response, which is a pure
         // function over the request and the two tables and is worth keeping
         // that way. Both callers — this one and DecisionServer's threads — go
@@ -334,6 +345,15 @@ int main() {
         ::poll(fds, nfds, kTickMs);
 
         server.poll_once(kConnBudgetMs);
+
+        // Tell the relay what we were stopped on. Through the coalescer like
+        // any other relay traffic, so an agent retrying the same edit in a loop
+        // costs one frame a second and not one per attempt.
+        for (const std::string& path : contended.drain()) {
+            if (!coalescer.admit(ap::Ev{"contend", path, relay_cfg.agent}, now_ms())) continue;
+            std::string frame = ap::relay_contend_frame(path);
+            if (!frame.empty()) outbound.push(std::move(frame));
+        }
         // Zero budget, deliberately: one non-blocking step of the state
         // machine. A relay that is down sits in backoff, and a backoff that
         // sleeps inside this loop is time the daemon is not on the hook

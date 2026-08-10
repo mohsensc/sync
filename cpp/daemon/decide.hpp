@@ -43,6 +43,14 @@ bool wants_decision_line(std::string_view line);
 std::string decide_response(const std::string& request, const LeaseCache& leases,
                             const PolicyCache& policy, long long now_ms);
 
+/// True when this answer is a rung 3 — the one answer that stops an edit, and
+/// therefore the one that means this agent wanted a region somebody else holds.
+///
+/// The rung, not the effect: a room configured to `notify` at rung 3 still has
+/// two agents on one region, and the waiting agent's ask is worth the same
+/// whether or not the room chose to stop it.
+bool blocked_by_lease(const std::string& answer);
+
 /// The same, against the compiled-in defaults. This is what the shipped tables
 /// produce, so it is also what "installing the engine and configuring nothing"
 /// has to keep producing.

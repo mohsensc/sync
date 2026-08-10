@@ -317,3 +317,72 @@ def test_the_hook_path_starts_the_clock_the_same_way_a_claim_does(room):
 
     run_out(clock, relay, "junior", until=1000.0 + HANDOVER_GRACE_S + 0.5)
     assert claim(relay, senior, "hotfix")["granted"] is True
+
+
+# -- the hook path's ask -----------------------------------------------------
+#
+# The gap that made all of the above unreachable where it matters. A PreToolUse
+# edit is answered by the local daemon out of its lease cache — no relay round
+# trip, which is what keeps it inside 2 ms — and a *blocked* edit produces no
+# PostToolUse, so the relay never heard that anybody wanted the region. An agent
+# could be refused the same region every minute for an hour and the holder's
+# lease would still be renewing with no deadline on it. The daemon now sends a
+# `contend` frame when it stops an edit; see cpp/daemon/contend_queue.hpp.
+
+
+def test_a_contend_frame_starts_the_clock_without_taking_anything(room):
+    _clock, relay, holder, senior = room
+    claim(relay, holder, "rewriting charge")
+    assert relay.registry.holder_of(ROOM, _region()).handover_at is None
+
+    relay.handle(senior, {"type": "contend", "region": REGION})
+
+    held = relay.registry.holder_of(ROOM, _region())
+    assert held.agent == "junior", "contending must never take the lease"
+    assert held.handover_at == pytest.approx(1000.0 + HANDOVER_GRACE_S)
+    assert held.handover_winner().agent == "senior"
+
+
+def test_a_contend_frame_is_answered_with_the_lease_that_blocked_it(room):
+    _clock, relay, holder, senior = room
+    claim(relay, holder, "rewriting charge")
+    senior.sent.clear()
+
+    relay.handle(senior, {"type": "contend", "region": REGION})
+
+    answer = senior.leases("held")
+    assert answer, "the blocked agent was told nothing to cache"
+    assert answer[-1]["agent"] == "junior"
+    assert answer[-1]["handover_in_ms"] > 0
+    assert answer[-1]["handover_to"] == "senior"
+
+
+def test_contending_a_free_region_answers_nothing_and_takes_nothing(room):
+    _clock, relay, _holder, senior = room
+    senior.sent.clear()
+    assert relay.handle(senior, {"type": "contend", "region": REGION}) is None
+    assert senior.leases() == []
+    assert relay.registry.active_claims(ROOM) == []
+
+
+def test_contending_your_own_region_is_not_an_ask(room):
+    _clock, relay, holder, _senior = room
+    claim(relay, holder)
+    relay.handle(holder, {"type": "contend", "region": REGION})
+    assert relay.registry.holder_of(ROOM, _region()).handover_at is None
+
+
+def test_a_contend_frame_cannot_name_somebody_elses_agent(room):
+    # Same rule as every other frame: identity comes off the connection.
+    _clock, relay, holder, senior = room
+    claim(relay, holder)
+    relay.handle(senior, {"type": "contend", "region": REGION,
+                          "agent": "presenced@somebody-else"})
+    assert relay.registry.holder_of(ROOM, _region()).handover_winner().agent == "senior"
+
+
+def test_a_contend_frame_with_no_usable_region_is_dropped(room):
+    _clock, relay, holder, senior = room
+    claim(relay, holder)
+    assert relay.handle(senior, {"type": "contend"}) is None
+    assert relay.registry.holder_of(ROOM, _region()).handover_at is None

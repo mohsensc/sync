@@ -150,6 +150,18 @@ RelayUrl parse_relay_url(const std::string& url);
 /// region; or no verb, which its event path indexes directly).
 std::string relay_event_frame(const std::string& redacted_line);
 
+/// The frame that says "I was stopped on this file and I want it".
+///
+/// The relay records the ask and caps the holder's renewals; without it the
+/// deadline never starts on the hook path, because a blocked PreToolUse edit
+/// produces no PostToolUse event and therefore no relay traffic at all. See
+/// daemon/contend_queue.hpp for why that is easy to miss.
+///
+/// It takes no lease and cannot: a claim is the agent's deliberate declaration
+/// through the MCP tools, and a daemon has no business taking one on its
+/// behalf. This only registers that somebody wanted the region.
+std::string relay_contend_frame(const std::string& path);
+
 /// How the lease cache is keyed. A region is a path plus an optional symbol,
 /// and the two have to combine into one string because that is what LeaseCache
 /// takes. Whole-file regions get an empty symbol, so `src/a.py|` and

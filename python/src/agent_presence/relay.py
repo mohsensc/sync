@@ -780,7 +780,7 @@ class Relay:
         kind = message.get("type")
         if kind == "event":
             return self._on_event(room, conn, message)
-        if kind not in ("claim", "release", "heartbeat", "move"):
+        if kind not in ("claim", "contend", "release", "heartbeat", "move"):
             return None
 
         # Every remaining frame carries a region, and every one of them used to
@@ -792,6 +792,8 @@ class Relay:
 
         if kind == "claim":
             return self._on_claim(room, conn, message, region)
+        if kind == "contend":
+            return self._on_contend(room, conn, region)
         if kind == "release":
             self.registry.release(room, conn.agent, region)
             return None
@@ -874,7 +876,48 @@ class Relay:
             if brief.handover_to == conn.agent:
                 frame["retry_in_ms"] = frame["handover_in_ms"]
                 frame["reserved_for_ms"] = int(RESERVATION_S * 1000)
+
+            # And hand the blocked agent the lease that blocked it, the way
+            # `claim_result` does. Its daemon caches this and its hook renders
+            # the sentence out of that cache, so without it the one agent being
+            # stopped is the one that cannot be told when it will be let
+            # through. The room does not get a copy: the deadline is between
+            # these two, and `_publish` already told the holder.
+            held = self.registry.holder_of(room, region)
+            if held is not None:
+                conn.send({"type": "lease", "state": "held",
+                           **_lease_entry(held, now)})
         return frame
+
+    def _on_contend(self, room: str, conn: Conn, region: Region) -> dict | None:
+        """An agent was stopped on this region and wants it. Records the ask;
+        takes nothing.
+
+        This closes the gap that made the whole deadline mechanism unreachable
+        from the path it matters on. A PreToolUse edit is answered by the local
+        daemon out of its lease cache — no relay round trip, which is what keeps
+        it inside 2 ms — and a *blocked* edit produces no PostToolUse, so the
+        relay never saw the one thing that was happening. An agent could be
+        refused the same region every minute for an hour and the holder's lease
+        would still be renewing without a deadline, because nobody had ever
+        asked. See cpp/daemon/contend_queue.hpp for the daemon's half.
+
+        Deliberately not a claim. The daemon takes no leases on an agent's
+        behalf — declaring intent is what the MCP tools are for — so this only
+        registers the ask, and an agent that never claims still cannot end up
+        holding something it did not ask for.
+
+        The answer is the holder's lease, so the blocked agent's next hook can
+        say when rather than only no.
+        """
+        held = self.registry.contend(
+            room, region, conn.agent, conn.human, self.priority_of(conn)
+        )
+        if held is None:
+            return None
+        conn.send({"type": "lease", "state": "held",
+                   **_lease_entry(held, self._clock.now())})
+        return None
 
     def _on_claim(
         self, room: str, conn: Conn, message: dict, region: Region
