@@ -15,7 +15,7 @@ from collections.abc import Callable
 import websockets
 from websockets.asyncio.server import Server
 
-from .clock import RealClock
+from .clock import Clock, RealClock
 from .redact import opaque_outbound
 from .relay import Relay
 
@@ -36,6 +36,10 @@ SEND_STALL_S = 15.0
 # same thing: it is never going to catch up, and it is not getting a coherent
 # view of the room either way.
 SEND_SATURATED_S = 10.0
+# How often a writer that is parked on a socket looks at the clock. Not a
+# threshold — the two above are the thresholds, and they are read off the
+# injectable clock. This is only the resolution we notice them at.
+SEND_POLL_S = 0.05
 
 
 class WsConn:
@@ -57,11 +61,24 @@ class WsConn:
     view of the room anyway, and the alternative is the relay paying for it
     forever. Every connection has its own queue and its own writer, so none of
     this reaches anybody else.
+
+    Both shed thresholds are measured on the injectable clock, like every other
+    deadline in this codebase. That is what makes the decision the same on a
+    laptop and on a slow runner, and what lets a test reach it by moving the
+    clock instead of by hoping a socket wedges at the right moment.
+
+    The queue is the part this class bounds, and it is not the whole cost of a
+    deaf peer: there is also the asyncio transport's write buffer and the
+    kernel's own send buffer under it, which on Linux autotunes into megabytes.
+    All of it is bounded and constant per connection — unlike the unbounded
+    per-frame task set this replaced — but "one bounded queue" undersells the
+    ceiling, and that is worth knowing before calibrating anything against it.
     """
 
-    def __init__(self, ws, loop: asyncio.AbstractEventLoop) -> None:
+    def __init__(self, ws, loop: asyncio.AbstractEventLoop, clock: Clock) -> None:
         self._ws = ws
         self._loop = loop
+        self._clock = clock
         self.agent = ""
         self.human = ""
         self.room: str | None = None
@@ -71,11 +88,13 @@ class WsConn:
         self._max = SEND_QUEUE_MAX
         self._stall_s = SEND_STALL_S
         self._saturated_s = SEND_SATURATED_S
+        self._poll_s = SEND_POLL_S
 
         self._queue: deque[dict] = deque()
         self._writer: asyncio.Task | None = None
         self._closed = False
         self._saturated_since: float | None = None
+        self._sending_since: float | None = None
         self.dropped = 0
 
     def send(self, payload: dict) -> None:
@@ -87,9 +106,25 @@ class WsConn:
             self._queue.popleft()
             self.dropped += 1
             if self._saturated_since is None:
-                self._saturated_since = self._loop.time()
+                self._saturated_since = self._clock.now()
         if self._writer is None or self._writer.done():
             self._writer = self._loop.create_task(self._drain())
+
+    def shed_reason(self) -> str | None:
+        """Why this peer should be hung up on, or None to keep it.
+
+        A pure function of the clock and two timestamps, so it gives the same
+        answer on a fast laptop and a slow runner, and a test can reach either
+        branch by moving the clock rather than by waiting.
+        """
+        now = self._clock.now()
+        if (self._sending_since is not None
+                and now - self._sending_since >= self._stall_s):
+            return f"one frame did not leave in {self._stall_s}s"
+        if (self._saturated_since is not None
+                and now - self._saturated_since >= self._saturated_s):
+            return f"send queue full for over {self._saturated_s}s"
+        return None
 
     async def _drain(self) -> None:
         while self._queue and not self._closed:
@@ -97,28 +132,62 @@ class WsConn:
             if not self._queue:
                 # Caught up. Whatever saturation there was is over.
                 self._saturated_since = None
-            try:
-                await asyncio.wait_for(
-                    self._ws.send(json.dumps(opaque_outbound(payload))),
-                    timeout=self._stall_s,
-                )
-            except asyncio.TimeoutError:
-                await self._shed(f"one frame did not leave in {self._stall_s}s")
+            if not await self._write(json.dumps(opaque_outbound(payload))):
                 return
+
+    async def _write(self, text: str) -> bool:
+        """Put one frame on the socket. False means this writer is finished.
+
+        The send is a task we watch rather than an `asyncio.wait_for`, because
+        `wait_for` can only measure its timeout on the event loop's own clock.
+        Watching it lets both deadlines come off the injectable clock, and a
+        peer whose socket has stopped draining is shed on the first look after
+        the deadline passes rather than whenever the loop gets round to it.
+        """
+        send = asyncio.ensure_future(self._ws.send(text))
+        self._sending_since = self._clock.now()
+        try:
+            while True:
+                done, _ = await asyncio.wait({send}, timeout=self._poll_s)
+                if done:
+                    break
+                why = self.shed_reason()
+                if why is None:
+                    continue
+                # Off the socket before closing it: two coroutines touching one
+                # websocket is not a supported thing to do, mid-shed included.
+                send.cancel()
+                await self._shed(why)
+                return False
+
+            try:
+                send.result()
             except Exception:
                 # Closed, reset, anything else: the session loop notices and
                 # runs the ordinary teardown. Nothing to do here but stop.
                 log.debug("dropped send to a dead connection", exc_info=True)
                 self._closed = True
                 self._queue.clear()
-                return
-            if (self._saturated_since is not None
-                    and self._loop.time() - self._saturated_since
-                    > self._saturated_s):
-                await self._shed(
-                    f"send queue full for over {self._saturated_s}s"
-                )
-                return
+                return False
+
+            # It landed, but a peer can be slow enough to keep the queue
+            # permanently full without ever stalling one frame outright. That
+            # counts too.
+            why = self.shed_reason()
+            if why is not None:
+                await self._shed(why)
+                return False
+            return True
+        finally:
+            # However this writer leaves — shed, error, or the session
+            # cancelling it — the send does not outlive it. An orphan task
+            # pinning a payload nobody will ever collect is the exact leak this
+            # class exists to stop.
+            self._sending_since = None
+            if not send.done():
+                send.cancel()
+            elif not send.cancelled():
+                send.exception()   # retrieved, so nothing warns about it later
 
     async def _shed(self, why: str) -> None:
         """Hang up on a subscriber that is not keeping up.
@@ -129,6 +198,7 @@ class WsConn:
         """
         self._closed = True
         self._queue.clear()
+        self._sending_since = None
         log.warning("dropping subscriber %r (room %r): %s, %d frames shed",
                     self.agent, self.room, why, self.dropped)
         # 1013 Try Again Later. The close handshake needs the peer to read, and
@@ -148,12 +218,13 @@ class WsConn:
         """Stop writing to a connection whose session has ended."""
         self._closed = True
         self._queue.clear()
+        self._sending_since = None
         if self._writer is not None and not self._writer.done():
             self._writer.cancel()
 
 
 async def _session(ws, relay: Relay) -> None:
-    conn = WsConn(ws, asyncio.get_running_loop())
+    conn = WsConn(ws, asyncio.get_running_loop(), relay.clock)
     try:
         async for raw in ws:
             try:
