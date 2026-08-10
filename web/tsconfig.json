@@ -1,0 +1,34 @@
+{
+  // Nothing here typechecked before this file existed: vite and vitest both
+  // strip types without reading them, so `npx tsc --noEmit` was the only thing
+  // that would have caught a wrong type and there was no config to run it with.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+
+    // The source imports "./characters.js" and means characters.ts, which is
+    // what bundler resolution is for. "node16" would demand the emitted name
+    // and break every import in src/.
+    "moduleResolution": "bundler",
+    "types": ["vite/client"],
+
+    "strict": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "useDefineForClassFields": true,
+
+    // noUncheckedIndexedAccess and exactOptionalPropertyTypes are off. Both are
+    // defensible and neither is what this code was written against: turning
+    // them on produces ~60 errors, all of them in shapes like
+    // `HAIR_COLORS[h % HAIR_COLORS.length]` that cannot actually be undefined.
+    // Adding a first typecheck is not the moment to also rewrite the tests it
+    // is meant to be checking.
+
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["src", "test"]
+}

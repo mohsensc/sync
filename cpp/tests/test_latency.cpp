@@ -11,6 +11,7 @@
 
 #include "daemon/socket_server.hpp"
 #include "hook/hook.hpp"
+#include "tests/fake_daemon.hpp"
 
 namespace {
 
@@ -133,4 +134,134 @@ TEST_CASE("hook p99 stays under the 5ms budget with a live daemon listening") {
     }
     INFO("daemon saw " << daemon.lines() << " lines, hook sent " << delivered);
     REQUIRE(daemon.lines() >= delivered);
+}
+
+// ---------------------------------------------------------------------------
+// The request/response path. The cases above measure a one-way write; this is
+// the one that now runs before every Edit and Write, and it has a daemon on the
+// other end that has to be asked and answered inside the same 5ms.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+const std::string kEditHook =
+    R"({"session_id":"s1","hook_event_name":"PreToolUse","tool_name":"Edit",)"
+    R"("tool_input":{"file_path":"/repo/src/a.py"}})";
+
+// What ap-hook itself passes, and well under the cap on purpose. The budget is
+// what poll() is asked to wait; poll() overshoots by a millisecond or so, and
+// the measurement is that wait plus the call around it. Spending the whole 5ms
+// on the wait would put the timeout path over the line it has to stay under.
+constexpr int kBudgetMs = 2;
+
+}  // namespace
+
+TEST_CASE("decision p99 stays under the 5ms budget against a daemon that answers") {
+    const auto sock = (std::filesystem::temp_directory_path() / "ap_lat_rt.sock").string();
+    apt::FakeDaemon daemon(
+        sock, apt::Mode::kReply,
+        R"({"rung":3,"holder":"sess_a","human":"sara","intent":"rewriting token refresh"})");
+    REQUIRE(daemon.start());
+
+    const std::string req = ap::build_request(kEditHook);
+    for (int i = 0; i < 20; ++i) {  // warm the accept loop; startup is not per-call cost
+        ap::request_decision(sock, req, kBudgetMs);
+        spin_us(200);
+    }
+
+    constexpr int kCalls = 500;
+    std::vector<double> samples;
+    samples.reserve(kCalls);
+    int answered = 0;
+    for (int i = 0; i < kCalls; ++i) {
+        const auto t0 = std::chrono::steady_clock::now();
+        const ap::Decision d = ap::request_decision(sock, req, kBudgetMs);
+        const auto t1 = std::chrono::steady_clock::now();
+        samples.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
+        if (d.rung == 3) ++answered;
+        spin_us(200);
+    }
+
+    // A run where every round trip failed would be fast and meaningless.
+    INFO("answered " << answered << "/" << kCalls);
+    REQUIRE(answered == kCalls);
+
+    INFO("p99 was " << p99(samples) << "ms over " << samples.size() << " calls");
+    REQUIRE(p99(std::move(samples)) < 5.0);
+}
+
+TEST_CASE("decision p99 stays under the 5ms budget against a daemon that never answers") {
+    // The expensive case: the daemon is up, the connect succeeds, and then
+    // nothing comes back. This is the timeout path, and it is the one that
+    // would hand every Edit in the session a multi-second stall if the budget
+    // were not enforced end to end.
+    const auto sock = (std::filesystem::temp_directory_path() / "ap_lat_hold.sock").string();
+    apt::FakeDaemon daemon(sock, apt::Mode::kHold);
+    REQUIRE(daemon.start());
+
+    const std::string req = ap::build_request(kEditHook);
+    constexpr int kCalls = 200;
+    std::vector<double> samples;
+    samples.reserve(kCalls);
+    double worst = 0.0;
+    for (int i = 0; i < kCalls; ++i) {
+        const auto t0 = std::chrono::steady_clock::now();
+        const ap::Decision d = ap::request_decision(sock, req, kBudgetMs);
+        const auto t1 = std::chrono::steady_clock::now();
+        const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        samples.push_back(ms);
+        worst = std::max(worst, ms);
+        REQUIRE(d.rung < 0);  // no answer means allow
+    }
+
+    // Not just the p99: on this path every single call pays the full budget, so
+    // the worst case is the number that matters and it is bounded too.
+    INFO("p99 " << p99(samples) << "ms, worst " << worst << "ms over " << samples.size());
+    REQUIRE(worst < 5.0);
+    REQUIRE(p99(std::move(samples)) < 5.0);
+}
+
+TEST_CASE("run_hook p99 stays under the 5ms budget against the real daemon") {
+    // SocketServer is what presenced actually runs. It reads the request and
+    // has no responder yet, which is the integration state this lands in: the
+    // hook must cost nothing and print nothing until the daemon side ships.
+    const auto sock = (std::filesystem::temp_directory_path() / "ap_lat_run.sock").string();
+    std::filesystem::remove(sock);
+
+    LiveDaemon daemon(sock);
+    REQUIRE(daemon.start());
+
+    for (int i = 0; i < 20; ++i) {
+        ap::run_hook(kEditHook, sock, kBudgetMs);
+        spin_us(200);
+    }
+
+    constexpr int kCalls = 500;
+    std::vector<double> samples;
+    samples.reserve(kCalls);
+    for (int i = 0; i < kCalls; ++i) {
+        const auto t0 = std::chrono::steady_clock::now();
+        const std::string out = ap::run_hook(kEditHook, sock, kBudgetMs);
+        const auto t1 = std::chrono::steady_clock::now();
+        samples.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
+        REQUIRE(out.empty());  // a daemon with no answer never blocks a tool call
+        spin_us(200);
+    }
+
+    // Well under the budget, not merely under the cap. The hook half-closes its
+    // write side, so a daemon with no responder hangs up and the hook learns in
+    // microseconds that no answer is coming. Drop the half-close and every Edit
+    // in the session quietly starts paying the whole timeout instead.
+    INFO("p99 was " << p99(samples) << "ms over " << samples.size() << " calls");
+    REQUIRE(p99(samples) < static_cast<double>(kBudgetMs));
+    REQUIRE(p99(std::move(samples)) < 5.0);
+
+    // The request still reached the daemon: this is one socket conversation,
+    // not a wasted connect.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (daemon.lines() < kCalls && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    INFO("daemon saw " << daemon.lines() << " request lines");
+    REQUIRE(daemon.lines() >= kCalls);
 }

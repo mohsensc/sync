@@ -1,15 +1,26 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
+import errno
 import json
 import logging
+import os
+import signal
+import sys
+from collections.abc import Callable
 
 import websockets
+from websockets.asyncio.server import Server
 
+from .clock import RealClock
 from .redact import opaque_outbound
 from .relay import Relay
 
 log = logging.getLogger("agent_presence.serve")
+
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 8799
 
 
 class WsConn:
@@ -91,6 +102,131 @@ async def _session(ws, relay: Relay) -> None:
         relay.leave(conn)
 
 
-async def serve(host: str, port: int, relay: Relay) -> None:
-    async with websockets.serve(lambda ws: _session(ws, relay), host, port):
-        await asyncio.Future()
+async def serve(
+    host: str,
+    port: int,
+    relay: Relay,
+    *,
+    stop: asyncio.Event | None = None,
+    on_ready: Callable[[Server], None] | None = None,
+) -> None:
+    """Serve until `stop` is set, or forever if there's nothing to stop it.
+
+    `on_ready` fires once the listening sockets are bound. Pass port 0 and read
+    the real port off the server there — that's the only way to learn it.
+    """
+    async with websockets.serve(lambda ws: _session(ws, relay), host, port) as server:
+        if on_ready is not None:
+            on_ready(server)
+        if stop is None:
+            await asyncio.Future()
+        else:
+            await stop.wait()
+
+
+def _bound_ports(server: Server) -> list[tuple[str, int]]:
+    out = []
+    for sock in server.sockets:
+        name = sock.getsockname()
+        if isinstance(name, tuple) and len(name) >= 2:
+            out.append((str(name[0]), int(name[1])))
+    return out
+
+
+def _install_stop_handlers(stop: asyncio.Event) -> None:
+    """SIGINT and SIGTERM set the stop event instead of tearing the loop down.
+
+    add_signal_handler is the loop-safe route and it's what we want; the
+    signal.signal fallback is for loops that don't implement it (Windows
+    proactor), where a plain handler is still better than a traceback.
+    """
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, stop.set)
+        except (NotImplementedError, RuntimeError, ValueError):
+            signal.signal(sig, lambda *_: loop.call_soon_threadsafe(stop.set))
+
+
+async def run(host: str, port: int) -> None:
+    """One relay, one process, shut down on a signal."""
+    relay = Relay(RealClock())
+    stop = asyncio.Event()
+    _install_stop_handlers(stop)
+
+    def ready(server: Server) -> None:
+        for bound_host, bound_port in _bound_ports(server):
+            log.info("relay listening on %s:%d", bound_host, bound_port)
+
+    await serve(host, port, relay, stop=stop, on_ready=ready)
+    log.info("shutting down")
+
+
+def _env_port(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        raise SystemExit(f"{name} must be an integer, got {raw!r}") from None
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="agent-presence-relay",
+        description="Run the agent-presence relay. Leases and fan-out live here.",
+    )
+    parser.add_argument(
+        "--host",
+        default=os.environ.get("AGENT_PRESENCE_HOST", DEFAULT_HOST),
+        help="interface to bind (env AGENT_PRESENCE_HOST, default %(default)s)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=_env_port("AGENT_PRESENCE_PORT", DEFAULT_PORT),
+        help="port to bind, 0 picks a free one (env AGENT_PRESENCE_PORT, "
+             "default %(default)s)",
+    )
+    parser.add_argument(
+        "--log-level",
+        default=os.environ.get("AGENT_PRESENCE_LOG_LEVEL", "INFO"),
+        help="python logging level (env AGENT_PRESENCE_LOG_LEVEL, default INFO)",
+    )
+    args = parser.parse_args(argv)
+
+    level = args.log_level.upper()
+    if level not in logging.getLevelNamesMapping():
+        raise SystemExit(f"unknown log level {args.log_level!r}")
+
+    # stderr, not stdout: something downstream will want to parse stdout one
+    # day and logs on it would be a nuisance to unpick later.
+    logging.basicConfig(
+        stream=sys.stderr,
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    # websockets logs open and close per connection at INFO. One line per hook
+    # burst per machine is noise, not information. Turn it on with DEBUG.
+    if level != "DEBUG":
+        logging.getLogger("websockets").setLevel(logging.WARNING)
+
+    try:
+        asyncio.run(run(args.host, args.port))
+    except KeyboardInterrupt:
+        # Only reachable if a signal lands outside the running loop.
+        pass
+    except OSError as exc:
+        # Bind failures are the common case and deserve the specific message.
+        # Anything else that gets this far is still fatal, just not a bind.
+        if exc.errno in (errno.EADDRINUSE, errno.EADDRNOTAVAIL, errno.EACCES):
+            log.error("cannot bind %s:%d — %s", args.host, args.port, exc)
+        else:
+            log.error("relay stopped on an OS error: %s", exc)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

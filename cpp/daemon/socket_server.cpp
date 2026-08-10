@@ -40,6 +40,46 @@ SocketServer::~SocketServer() { stop(); }
 
 void SocketServer::on_line(std::function<void(std::string)> cb) { cb_ = std::move(cb); }
 
+void SocketServer::on_request(std::function<std::string(const std::string&)> cb) {
+    responder_ = std::move(cb);
+}
+
+bool SocketServer::serve_line(int conn, std::string line, long long deadline) {
+    if (cb_) cb_(line);
+    if (!responder_) return true;
+
+    std::string reply = responder_(line);
+    if (reply.empty()) return true;
+    reply.push_back('\n');
+
+#ifdef MSG_NOSIGNAL
+    constexpr int kSendFlags = MSG_NOSIGNAL;
+#else
+    constexpr int kSendFlags = 0;
+#endif
+
+    size_t sent = 0;
+    while (sent < reply.size()) {
+        const ssize_t n = ::send(conn, reply.data() + sent, reply.size() - sent, kSendFlags);
+        if (n > 0) {
+            sent += static_cast<size_t>(n);
+            continue;
+        }
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            const int left = left_ms(deadline);
+            if (left == 0) return false;  // out of budget; the hook allows
+            pollfd pfd{conn, POLLOUT, 0};
+            if (::poll(&pfd, 1, left) != 1 || (pfd.revents & POLLOUT) == 0) return false;
+            continue;
+        }
+        // EPIPE and friends: the hook gave up and closed. That is a normal way
+        // for this to end, and the daemon has nowhere to report it anyway.
+        return false;
+    }
+    return true;
+}
+
 bool SocketServer::start() {
     // A stale socket file from a crashed daemon must never prevent restart.
     std::error_code ec;
@@ -89,6 +129,16 @@ void SocketServer::drain_conn(int conn, int budget_ms) {
         return;
     }
 
+#ifdef SO_NOSIGPIPE
+    // The responder writes back, and a hook that has already spent its budget
+    // and closed turns that write into a SIGPIPE whose default action is death.
+    // The daemon dying because one hook timed out would take presence down for
+    // every session on the machine. Linux gets the same cover from MSG_NOSIGNAL
+    // on the send in serve_line.
+    const int nosigpipe = 1;
+    ::setsockopt(conn, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe, sizeof(nosigpipe));
+#endif
+
     const long long deadline = now_ms() + (budget_ms > 0 ? budget_ms : 0);
     std::string buf;
     char chunk[4096];
@@ -100,13 +150,16 @@ void SocketServer::drain_conn(int conn, int budget_ms) {
             // Emit as we go so a long-lived connection is not held hostage by
             // its own tail.
             size_t start = 0;
+            bool keep = true;
             for (;;) {
                 const size_t nl = buf.find('\n', start);
                 if (nl == std::string::npos) break;
-                if (cb_) cb_(buf.substr(start, nl - start));
+                keep = serve_line(conn, buf.substr(start, nl - start), deadline);
                 start = nl + 1;
+                if (!keep) break;
             }
             if (start) buf.erase(0, start);
+            if (!keep) break;  // the peer is gone; nothing left to read or say
             continue;
         }
         if (n == 0) break;  // clean EOF: the client said everything it had

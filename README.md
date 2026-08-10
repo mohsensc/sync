@@ -1,46 +1,46 @@
 # Agent Presence
 
-When a few people on a team each run coding agents against the same repo, nobody
-can see what the agents are doing and the agents can't see each other. They
-duplicate work and overwrite each other, and you find out at merge time.
+A few people on a team each run coding agents against the same repo. Nobody can
+see what the agents are doing and the agents can't see each other, so they
+duplicate work and overwrite each other, and you find out at merge time. One
+event stream, two readers: an ambient world for humans, claims for agents.
 
-This is one event stream with two readers: an ambient animated world for humans,
-and claims plus negotiation messages for agents.
+`ap-hook` is a C++ binary on Claude Code's tool calls — observe, write to a unix
+socket, exit. `presenced` is one daemon per machine that coalesces, redacts and
+keeps a snapshot on disk for the statusline. The relay is Python and owns leases
+and collision arbitration. Dashboard and statusline are read-only subscribers.
 
-## Shape
-
-Four processes:
-
-- **hooks** — a small C++ binary on Claude Code's tool calls. Observe, write to a
-  unix socket, exit. 5ms p99, hard cap.
-- **presenced** — one daemon per machine. Coalesces, redacts, keeps one WebSocket
-  to the relay and a snapshot on disk for the statusline.
-- **relay** — Python. The only stateful part. Owns leases and collision
-  arbitration.
-- **dashboard / statusline** — read-only subscribers.
-
-Rooms are keyed off a hash of the git remote, so cloning the repo is the whole
-setup. Leases expire in 90s. Nothing is permanent — if an agent dies you lose
-protection, you never wedge a teammate.
+Rooms key off a hash of the git remote, so cloning the repo is the setup. Leases
+expire in 90s: if an agent dies you lose protection, you never wedge a teammate.
 
 ## Run it
 
+From the repo root:
+
 ```
-cmake -S cpp -B cpp/build && cmake --build cpp/build   # build the binaries
-cd python && pip install -e '.[dev]'                   # install the Python side
-python -m agent_presence.serve                         # run the relay
-./install.sh                                           # copy binaries, print hook config
+cd python && python3 -m venv .venv && .venv/bin/pip install -e '.[dev]' && cd ..
+python/.venv/bin/agent-presence-relay              # 127.0.0.1:8799
+claude mcp add agent-presence -- "$PWD/python/.venv/bin/agent-presence-mcp"
+cmake -S cpp -B cpp/build && cmake --build cpp/build
+./install.sh                                       # copy binaries, print hooks
 ```
 
-`./install.sh --print-settings` just prints the block for `~/.claude/settings.json`
-without touching anything. `AGENT_PRESENCE_BIN` overrides the install dir
-(default `~/.local/bin`).
+The relay takes `--host`, `--port` and `--log-level`, or the same three as
+`AGENT_PRESENCE_HOST` / `_PORT` / `_LOG_LEVEL`. Port 0 picks a free one and logs
+it. `python -m agent_presence.serve` is the same entry point.
 
-Tests: `cd python && pytest`, `ctest --test-dir cpp/build`, `cd web && pnpm test`.
+The MCP server derives room, agent and human from the repo it's launched in: git
+remote, session id, `git config user.email`. `AGENT_PRESENCE_ROOM`, `_AGENT` and
+`_HUMAN` override. `./install.sh --print-settings` prints the settings.json block
+without touching anything; `AGENT_PRESENCE_BIN` sets the install dir.
+
+Tests: `cd python && .venv/bin/python -m pytest`; `cmake -S cpp -B cpp/build &&
+cmake --build cpp/build && ctest --test-dir cpp/build`; `cd web && npx vitest run
+&& npx tsc --noEmit`. Bare `pytest` won't do, `sim/` only imports via `-m`.
 
 ## What's broken
 
-The collision ladder's tuning is guesswork until real traffic hits it, and the
-5ms hook budget hasn't been measured under load. Rung 4 (redundant work on
-different files) isn't implemented — it needs embedding similarity and would be
-noisy today. Dashboard renders placeholder primitives, no real assets.
+The MCP server keeps its own in-process registry instead of claiming over the
+wire, so a claim made through the tool never reaches another machine. Ladder
+tuning is guesswork, rung 4 isn't built, and the chain has only ever been driven
+by scripted clients, never two real sessions.
