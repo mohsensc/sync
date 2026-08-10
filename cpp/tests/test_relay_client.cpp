@@ -1380,3 +1380,117 @@ TEST_CASE("a token with a quote in it cannot break the join frame") {
     REQUIRE(join.find(R"("principal":"sa\"ra")") != std::string::npos);
     REQUIRE(join.find(R"("token":"tok\\en\"")") != std::string::npos);
 }
+
+// -- a region changing hands -------------------------------------------------
+
+TEST_CASE("a lease frame carries the handover deadline into the cache") {
+    TestServer server;
+    REQUIRE(server.start());
+
+    Outbound out(100);
+    LeaseCache leases;
+    RelayClient client(cfg_for(server.port()), out, leases);
+    REQUIRE(pump_until(client, [&] { return client.open(); }));
+
+    server.send_text(
+        R"({"type":"lease","state":"held","agent":"a2","human":"kai","intent":"x",)"
+        R"("region":{"path":"src/auth.py","symbol":"sign_in"},"expires_in_ms":60000,)"
+        R"("handover_in_ms":45000,"handover_to":"agent-1","handover_to_human":"sara",)"
+        R"("handover_to_priority":"critical","waiting":2})");
+
+    REQUIRE(pump_until(client, [&] {
+        return leases.conflict_for("src/auth.py|sign_in", "agent-1", mono_ms()).has_value();
+    }));
+    const auto hit = leases.conflict_for("src/auth.py|sign_in", "agent-1", mono_ms());
+    REQUIRE(hit->handover_at_ms > mono_ms());
+    REQUIRE(hit->handover_to == "agent-1");
+    REQUIRE(hit->handover_to_human == "sara");
+    REQUIRE(hit->handover_to_priority == "critical");
+    REQUIRE(hit->waiting == 2);
+}
+
+TEST_CASE("an uncontended lease frame leaves the deadline unset") {
+    TestServer server;
+    REQUIRE(server.start());
+
+    Outbound out(100);
+    LeaseCache leases;
+    RelayClient client(cfg_for(server.port()), out, leases);
+    REQUIRE(pump_until(client, [&] { return client.open(); }));
+
+    server.send_text(
+        R"({"type":"lease","state":"held","agent":"a2","human":"kai","intent":"x",)"
+        R"("region":{"path":"src/auth.py","symbol":"sign_in"},"expires_in_ms":60000})");
+    REQUIRE(pump_until(client, [&] {
+        return leases.conflict_for("src/auth.py|sign_in", "agent-1", mono_ms()).has_value();
+    }));
+    REQUIRE(leases.conflict_for("src/auth.py|sign_in", "agent-1", mono_ms())->handover_at_ms
+            < 0);
+}
+
+TEST_CASE("a handover frame erases the lease rather than re-adding it") {
+    // It carries no expires_in_ms, so falling through to upsert would give the
+    // lease that just ended a fresh full TTL and this daemon would go on
+    // blocking edits on a region nobody holds.
+    TestServer server;
+    REQUIRE(server.start());
+
+    Outbound out(100);
+    LeaseCache leases;
+    RelayClient client(cfg_for(server.port()), out, leases);
+    REQUIRE(pump_until(client, [&] { return client.open(); }));
+
+    server.send_text(
+        R"({"type":"lease","state":"held","agent":"a2","human":"kai","intent":"x",)"
+        R"("region":{"path":"src/auth.py","symbol":"sign_in"},"expires_in_ms":60000})");
+    REQUIRE(pump_until(client, [&] {
+        return leases.conflict_for("src/auth.py|sign_in", "agent-1", mono_ms()).has_value();
+    }));
+
+    server.send_text(
+        R"({"type":"lease","state":"handover","agent":"a2","to":"a3","to_human":"lee",)"
+        R"("to_priority":"critical","reserved_for_ms":10000,)"
+        R"("region":{"path":"src/auth.py","symbol":"sign_in"}})");
+    REQUIRE(pump_until(client, [&] {
+        return !leases.conflict_for("src/auth.py|sign_in", "agent-1", mono_ms()).has_value();
+    }));
+}
+
+TEST_CASE("losing your own region is remembered, and somebody else's is not") {
+    TestServer server;
+    REQUIRE(server.start());
+
+    Outbound out(100);
+    LeaseCache leases;
+    RelayClient client(cfg_for(server.port()), out, leases);
+    REQUIRE(pump_until(client, [&] { return client.open(); }));
+
+    // Ours. cfg_for names this daemon "agent-1".
+    server.send_text(
+        R"({"type":"lease","state":"held","agent":"agent-1","human":"sara","intent":"x",)"
+        R"("region":{"path":"src/pay.py","symbol":"charge"},"expires_in_ms":60000})");
+    REQUIRE(pump_until(client, [&] {
+        return leases.conflict_for("src/pay.py|charge", "other", mono_ms()).has_value();
+    }));
+    server.send_text(
+        R"({"type":"lease","state":"handover","agent":"agent-1","to":"a3",)"
+        R"("to_human":"lee","to_priority":"critical",)"
+        R"("region":{"path":"src/pay.py","symbol":"charge"}})");
+    REQUIRE(pump_until(client, [&] {
+        return leases.handover_note("src/pay.py", mono_ms(), ap::kHandoverNoteMs).has_value();
+    }));
+    const auto note = leases.handover_note("src/pay.py", mono_ms(), ap::kHandoverNoteMs);
+    REQUIRE(note->to == "a3");
+    REQUIRE(note->to_human == "lee");
+    REQUIRE(note->to_priority == "critical");
+
+    // Somebody else's handover is room news, not a note about us.
+    server.send_text(
+        R"({"type":"lease","state":"handover","agent":"a5","to":"a6",)"
+        R"("region":{"path":"src/other.py","symbol":null}})");
+    REQUIRE(pump_until(client, [&] {
+        return leases.handover_note("src/pay.py", mono_ms(), ap::kHandoverNoteMs).has_value();
+    }));
+    REQUIRE_FALSE(
+        leases.handover_note("src/other.py", mono_ms(), ap::kHandoverNoteMs).has_value());
+}

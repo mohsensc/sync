@@ -75,7 +75,7 @@ target_sources(ap_tests PRIVATE tests/test_policy_cache.cpp)
 # wire with, and the responder that answers a decision request.
 target_sources(ap_daemon_lib PRIVATE daemon/json.cpp daemon/decide.cpp)
 target_sources(ap_tests PRIVATE tests/test_decide.cpp tests/test_decision_path.cpp
-                                tests/test_decide_policy.cpp)
+                                tests/test_decide_policy.cpp tests/test_handover.cpp)
 
 # The writer behind `ap why`. The reader has always been journal.py; this is
 # the half that was missing, so a block can be asked about after the fact.

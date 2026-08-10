@@ -248,18 +248,40 @@ One ordering key, from two parts to three:
 Priority is negated so the same `<` that means "older" also means "higher tier". There is
 exactly one comparison in the whole system.
 
-### 5.2 No preemption
+### 5.2 No preemption, but a deadline
 
 Preemption is **not** in this design. Not as a knob, not behind a flag. A lease is never
 taken from an agent that is mid-edit, at any tier gap. That invariant predates this work
 and is worth more than the latency it costs.
 
-What priority buys without preemption: today a fresh senior agent contending with an
-older junior holder is told to `abort` and retry, forever, as long as the junior keeps
-renewing. With priority in the key the senior is "older" in the order, so it is told to
-`wait` — it keeps its place — and the junior agent aborts on its next contending claim.
-The senior waits out at most one 90 s TTL and then wins, and keeps winning. That is the
-requirement met. Say the 90 s honestly rather than reaching for revocation to shave it.
+What priority buys: a fresh senior agent contending with an older junior holder used to be
+told to `abort` and retry. With priority in the key the senior is "older" in the order, so
+it is told to `wait` — it keeps its place.
+
+That was the whole design, and it did not work. `wait` meant wait indefinitely. A claim
+frame from the holder reset its lease to a fresh 90 s and presenced sends one every 30 s,
+so the sentence this section used to end with — "the senior waits out at most one 90 s TTL
+and then wins" — was true only of a holder that had already stopped working. Measured: a
+critical, roster-authenticated requester asking every five seconds for eight virtual hours
+got 5760 refusals and zero grants.
+
+So the ask now carries a deadline. Being asked for a region caps the holder's renewals:
+
+| the asker | grace | why |
+|---|---|---|
+| outranks the holder (`wait`) | 90 s | one TTL, which is what the docs always claimed |
+| does not (`abort`) | 15 min | the anti-starvation bound — see below |
+
+When the cap is reached the lease ends on the ordinary lazy expiry, and the region is kept
+for the agent that waited for 10 s so the ex-holder's next heartbeat cannot take it
+straight back. Nothing is revoked; the holder is told its deadline on the ask, while it
+still has the region and time to finish. Measured after: first critical grant at t = 95 s.
+
+The 15 minute arm is the starvation guard, and it is the half that is easy to miss. A
+junior contending a critical holder is told to `abort`, so it never reaches `wait` — but it
+has still *asked*, and the ask still counts. Without it, priority would mean a normal-tier
+agent behind a busy senior one waits forever, which is the same defect wearing the other
+hat.
 
 ### 5.3 The argument
 
@@ -335,8 +357,9 @@ for exactly that (§10).
 2. `ask` spends a human's attention. `deny` spends the model's, and the model gets a brief
    with four moves and a `PROCEED` escape hatch. Cheaper and more actionable.
 3. For the unattended agents this feature exists to serve, `ask` has nobody to ask.
-4. Bounded blast radius: the holder's lease expires in 90 s on its own and wait-die
-   guarantees exactly one side backs off.
+4. Bounded blast radius: the ask caps the holder's lease at 90 s (§5.2) and wait-die
+   guarantees exactly one side backs off. The block carries that number, so the agent is
+   told when to come back rather than only that it cannot pass.
 
 **The floor at rung 3 is `notify`, not `silent`.** A silent rung 3 is the product lying:
 two agents editing the same symbol with nothing said anywhere is the pre-install world. If

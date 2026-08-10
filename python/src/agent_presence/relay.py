@@ -951,22 +951,21 @@ class Relay:
         winner = held.handover_winner()
         if held.handover_at is not None and winner is not None:
             handover_in_ms = max(0, int((held.handover_at - now) * 1000))
-            reply["waiting"] = len(held.contenders)
+            # `handover_to` travels even when it is this agent, so whoever reads
+            # this frame can tell "wait, it is coming to you" from "wait, and
+            # somebody is ahead of you" by comparing one field to its own id
+            # rather than by noticing which fields are missing.
+            reply.update({
+                "handover_in_ms": handover_in_ms,
+                "handover_at": held.handover_at,
+                "handover_to": winner.agent,
+                "handover_to_human": winner.human,
+                "handover_to_priority": name_of(winner.priority),
+                "waiting": len(held.contenders),
+            })
             if winner.agent == conn.agent:
-                reply.update({
-                    "handover_in_ms": handover_in_ms,
-                    "handover_at": held.handover_at,
-                    # The region is yours after this, and kept for you while you
-                    # come back for it. Retry once, not in a loop.
-                    "retry_in_ms": handover_in_ms,
-                    "reserved_for_ms": int(RESERVATION_S * 1000),
-                })
-            else:
-                reply.update({
-                    "handover_in_ms": handover_in_ms,
-                    "handover_at": held.handover_at,
-                    "handover_to": winner.agent,
-                    "handover_to_human": winner.human,
-                    "handover_to_priority": name_of(winner.priority),
-                })
+                # The region is yours after this, and kept for you while you
+                # come back for it. Retry once, not in a loop.
+                reply["retry_in_ms"] = handover_in_ms
+                reply["reserved_for_ms"] = int(RESERVATION_S * 1000)
         return reply

@@ -118,6 +118,8 @@ One human may have many concurrent agents; the world must cluster them visually 
 
 `presenced` heartbeats renewals every 30s. **Nothing is permanent.** If an agent crashes, a laptop sleeps, or a process is killed, every lease it holds evaporates within 90 seconds. This is the deliberate inverse of a lock file: the failure mode is *losing protection*, never *wedging a teammate*. Presence events carry a shorter 30s TTL, which is what makes a character wander off when its agent moves on.
 
+Renewals are unbounded only while nobody else wants the region. The moment somebody asks, the holder's lease gets a deadline — one TTL if the asker outranks it, fifteen minutes if it does not — and the holder is told the deadline on the ask, while it still has the region. Nothing is ever taken mid-edit. See §5.2 of `policy-design.md` for why an uncapped renewal made "wait" mean "wait forever".
+
 **All timestamps are assigned by the relay on receipt, never by clients.** Deadlock resolution compares lease ages; client-assigned timestamps plus clock skew would let two agents each believe they are older. Same rule for identity: the relay uses the identity of the connection the message arrived on, not the `agent`/`human` fields in the message.
 
 ### Privacy

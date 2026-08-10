@@ -189,6 +189,9 @@ def test_a_wait_verdict_says_when(room):
     # Come back once, at this time, and the region will be kept for you.
     assert refused["retry_in_ms"] == refused["handover_in_ms"]
     assert refused["reserved_for_ms"] == int(RESERVATION_S * 1000)
+    # Named even when it is you, so a reader tells the two cases apart by
+    # comparing a field rather than by noticing an absent one.
+    assert refused["handover_to"] == "senior"
 
 
 def test_an_abort_verdict_also_says_when(room):

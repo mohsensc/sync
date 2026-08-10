@@ -1259,16 +1259,31 @@ void RelayClient::on_text(const std::string& json) {
 
     if (kind == "lease") {
         const std::string state = str_field(j, "state");
-        if (state == "released" || state == "expired") {
+        // `handover` erases like the other two. Falling through to upsert_lease
+        // would be worse than wrong: the frame carries no expires_in_ms, so the
+        // lease that just ended would be re-added at a full TTL and this daemon
+        // would go on blocking edits on it.
+        if (state == "released" || state == "expired" || state == "handover") {
             const auto region = object_get(j, "region");
             if (!region) return;
             const std::string path = str_field(*region, "path");
             if (path.empty()) return;
+            const std::string agent = str_field(j, "agent");
             // Matched on the agent, not just the region — see erase_lease.
-            if (erase_lease(region_key(path, str_field(*region, "symbol")),
-                            str_field(j, "agent"))) {
-                apply_leases();
+            const bool erased =
+                erase_lease(region_key(path, str_field(*region, "symbol")), agent);
+            if (state == "handover" && agent == cfg_.agent) {
+                // It was ours. Remember who has it now: this is the only frame
+                // that ever explains why a region stopped being this agent's,
+                // and the agent is not reading the socket — its hook is.
+                HandoverNote note;
+                note.to = str_field(j, "to");
+                note.to_human = str_field(j, "to_human");
+                note.to_priority = str_field(j, "to_priority");
+                note.at_ms = now_ms();
+                leases_.note_handover(path, std::move(note));
             }
+            if (erased) apply_leases();
             return;
         }
         if (upsert_lease(j, {})) apply_leases();
@@ -1332,6 +1347,20 @@ bool RelayClient::upsert_lease(sv entry, const std::string& holder_override, sv 
     }
     if (ttl < 0) ttl = 0;
     lease.expires_at_ms = now_ms() + ttl;
+
+    // Same rule for the handover deadline: a duration on the wire, an absolute
+    // monotonic instant here. Absent means nobody has asked for the region,
+    // which is the common case and stays at -1.
+    if (const auto ms = num_field(entry, "handover_in_ms")) {
+        const long long left = static_cast<long long>(*ms);
+        lease.handover_at_ms = now_ms() + (left > 0 ? left : 0);
+        lease.handover_to = str_field(entry, "handover_to");
+        lease.handover_to_human = str_field(entry, "handover_to_human");
+        lease.handover_to_priority = str_field(entry, "handover_to_priority");
+    }
+    if (const auto n = num_field(entry, "waiting")) {
+        lease.waiting = static_cast<int>(*n);
+    }
 
     held_[region_key(path, str_field(*region, "symbol"))] = std::move(lease);
     return true;
