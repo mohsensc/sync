@@ -1071,3 +1071,19 @@ def test_set_exits_nonzero_when_it_cannot_apply_what_it_wrote(box):
     assert 'rung3 = "ask"' in box.user_policy.read_text()
 
 
+def test_check_does_not_claim_a_whole_layer_fell_back(box):
+    box.write_user_policy(
+        'schema = 1\n[effects]\nrung2 = "deny"\nrung3 = "loudly"\n'
+    )
+    done = box.ap("policy", "check")
+    assert done.returncode == 1
+    # rung2 parsed and is still in force, so "anything they were meant to
+    # change falls back to the builtin table" sent people to check the wrong
+    # thing. Only the line that did not parse fell through.
+    resolved = json.loads(box.ap("policy", "explain", "src/a.py", "--rung", "2",
+                                 "--json").stdout)
+    assert resolved["effect"] == "deny"
+    assert "Anything they were meant to change" not in done.stdout
+    assert "the rest of the same file still applies" in done.stdout
+
+

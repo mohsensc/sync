@@ -339,7 +339,8 @@ def _check_rung_table(
             out.append(Finding(
                 at, "error",
                 f"{label}: {key} = {value!r} is not one of "
-                f"{', '.join(EFFECTS)}; falling back to the default",
+                f"{', '.join(EFFECTS)}; this line is dropped and the rung "
+                f"falls to the layer below",
             ))
             continue
         rung = int(match.group(1))
@@ -921,10 +922,20 @@ def cmd_policy_check(ctx: Context) -> int:
 
     out.say()
     if failed:
+        # It used to say the whole layer fell back to the builtin table, which
+        # is not what the loader does and is the more comforting of the two
+        # answers. `parse_layer` drops the line it could not read and keeps the
+        # rest, so a file with one bad rung goes on applying its other four,
+        # and the dropped rung falls to the next layer down — which may be
+        # another file, not the builtin. Someone reading the old line would
+        # check the wrong thing.
         out.say(ink.red(
-            f"{failed} layer(s) degraded. Anything they were meant to change "
-            "falls back to the builtin table; nothing drops below the builtin "
-            "floor, so rung 3 still reaches you."
+            f"{failed} layer(s) degraded. Only the lines above are dropped, "
+            "each falling through to the next layer down and ending at the "
+            "builtin table; the rest of the same file still applies. A file "
+            "that is not valid TOML at all is dropped whole. Nothing drops "
+            "below the builtin floor, so rung 3 still reaches you. Check what "
+            "you are actually getting with `ap policy show --effective`."
         ))
         return PROBLEM
     out.say(ink.green("every layer parses"))
@@ -1489,9 +1500,11 @@ def cmd_doctor(ctx: Context) -> int:
     out.say()
     if failed:
         out.say(ink.red(
-            f"{len(failed)} check(s) failed. None of this blocks an agent — the "
-            "builtin table stays in force and nothing falls below the builtin "
-            "floor — but you are not getting the policy you configured."))
+            f"{len(failed)} check(s) failed. Nothing here can drop a rung "
+            "below the builtin floor, so rung 3 still reaches you — but a line "
+            "that did not parse is dropped on its own, with the rest of its "
+            "file still applying, so you are getting neither the policy you "
+            "configured nor the builtin one."))
         return PROBLEM
     out.say(ink.green("everything checks out"))
     return OK
