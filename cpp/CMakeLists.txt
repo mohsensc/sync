@@ -70,6 +70,12 @@ target_sources(ap_tests PRIVATE tests/test_relay_client.cpp)
 target_sources(ap_daemon_lib PRIVATE daemon/json.cpp daemon/decide.cpp)
 target_sources(ap_tests PRIVATE tests/test_decide.cpp tests/test_decision_path.cpp)
 
+# Decisions off the event loop, on their own socket. Its test floods the event
+# socket and insists the answers keep coming, which is the thing that used to
+# fail silently.
+target_sources(ap_daemon_lib PRIVATE daemon/decision_server.cpp)
+target_sources(ap_tests PRIVATE tests/test_decision_server.cpp)
+
 # One test, running the whole binary, because `ctest --test-dir cpp/build` used
 # to fail with "No test configuration file found" and everyone had to know to
 # run ./build/ap_tests instead.

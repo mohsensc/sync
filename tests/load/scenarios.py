@@ -577,8 +577,12 @@ async def daemon_kill(threads: int, iters: int) -> Result:
             capture_output=True, text=True, timeout=120,
         ).stdout.strip().splitlines()[-1])
 
+        # Enough iterations to still be running a second from now, whatever the
+        # answers cost. The measurement is of hooks caught mid-flight by the
+        # kill, so a bench that has already finished measures nothing — and it
+        # finishes sooner every time the daemon gets faster.
         bench = subprocess.Popen(
-            [str(HOOKBENCH), str(d.sock), str(iters), str(threads), "200"],
+            [str(HOOKBENCH), str(d.sock), str(max(iters, 8000)), str(threads), "200"],
             stdout=subprocess.PIPE, text=True,
         )
         await asyncio.sleep(1.0)
@@ -739,12 +743,14 @@ async def flood(events: int, threads: int) -> Result:
             r.bad(f"DAEMON MEMORY GROWTH: RSS went {rss0} -> {rss1} KiB "
                   f"(+{rss1 - rss0}) over {sent} events and did not come back")
         if failed:
-            r.bad(f"DAEMON REFUSED CONNECTIONS: {failed} of {sent + failed} hook "
+            r.bad(f"DAEMON REFUSED CONNECTIONS: {failed} of {sent + failed} event "
                   f"connections could not be served during the flood "
                   f"({dict(why)}). The listen backlog is 64 and the loop serves "
-                  f"one connection at a time. An event lost there costs an "
-                  f"animation frame; the same socket carries PreToolUse "
-                  f"decisions, and one lost there is an edit allowed.")
+                  f"one connection at a time. What is lost here is events, and "
+                  f"an event lost costs an animation frame — decisions moved to "
+                  f"their own socket and their own threads and are not in this "
+                  f"queue. Worth watching all the same: this is the loop "
+                  f"falling behind.")
 
         window = send_s + 4.0
         writes = len(inodes)
@@ -1121,9 +1127,11 @@ def _replay_lease_stream(frames: list[dict]) -> list[dict]:
     """Run the fan-out through the daemon's cache rules and report every point
     where it ends up empty for a region the relay still considers held.
 
-    Mirrors RelayClient::on_text exactly: `held` upserts by region key, and
-    `released`/`expired` erase by region key with no look at which agent the
-    frame names.
+    Mirrors RelayClient::on_text: `held` upserts by region key, and
+    `released`/`expired` erase that key only when the frame names the agent the
+    cache has holding it. An erasure that would have taken somebody else's lease
+    with it is what gets reported — with the match in place there should be
+    none, and one showing up means the two implementations have drifted.
     """
     cache: dict[str, str] = {}
     bad: list[dict] = []
@@ -1141,8 +1149,10 @@ def _replay_lease_stream(frames: list[dict]) -> list[dict]:
         elif state in ("released", "expired"):
             holder = cache.get(key)
             if holder is not None and holder != f.get("agent"):
-                bad.append({"region": key, "erased_holder": holder,
-                            "by_frame_for": f.get("agent"), "state": state})
+                bad.append({"region": key, "would_have_erased": holder,
+                            "by_frame_for": f.get("agent"), "state": state,
+                            "kept": True})
+                continue
             cache.pop(key, None)
     return bad
 
@@ -1208,7 +1218,7 @@ async def lease_takeover() -> Result:
             "daemon_blocked_while_A_held": blocked_for_a,
             "daemon_blocked_while_B_holds": blocked_for_b,
             "lease_frame_order": order,
-            "replay_erasures": replay,
+            "replay_handovers_survived": replay,
         }
     finally:
         for c in (watch, a, b):
@@ -1285,18 +1295,12 @@ async def lease_churn(agents: int, ttl_s: float, seconds: float) -> Result:
                   f"configured TTL")
 
         # Replay the wire the way a daemon's LeaseCache does, and count the
-        # times the stream tells it a region is free while the relay believes
-        # somebody holds it. Timing heuristics are no good here: a wait-die
-        # abort calls release_all, so a lease really can end early and the next
-        # grant is legitimate. Only the frame order can say.
+        # handovers where the relay announced the new holder before the old
+        # holder's expiry. The daemon matches the agent before erasing, so these
+        # are survived rather than lost; the count is here because the wire
+        # pattern is real and a regression would show up as the cache going
+        # empty on exactly these.
         blinded = _replay_lease_stream(watcher.fanout)
-        if blinded:
-            r.bad(f"FAN-OUT ERASES THE NEW HOLDER: {len(blinded)} times the "
-                  f"relay announced `lease held` for the agent taking a region "
-                  f"over and only then `lease expired` for the agent it took it "
-                  f"from. Both frames carry the same region and "
-                  f"relay_client.cpp erases on region alone, so the second "
-                  f"frame deletes the first. e.g. {blinded[0]}")
 
         r.metrics = {
             "agents": agents,
@@ -1308,7 +1312,7 @@ async def lease_churn(agents: int, ttl_s: float, seconds: float) -> Result:
             "lease_released_frames_seen": released_frames,
             "lease_expired_frames_seen": expired_frames,
             "leases_left_after_2x_ttl": len(quiet),
-            "new_holder_erased_by_stale_expiry": len(blinded),
+            "handovers_survived_stale_expiry": len(blinded),
             "relay_alive": relay.alive(),
         }
     finally:

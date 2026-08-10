@@ -48,12 +48,12 @@ def test_rooms_are_isolated_even_with_identical_paths(reg):
     assert registry.acquire("r2", "dev", "a2", R, "y").ok
 
 
-def test_release_all_drops_every_lease_for_one_agent(reg):
+def test_release_all_drops_every_lease_an_agent_holds_in_the_room(reg):
     _, registry = reg
     other = Region(path="src/db.py", symbol="query", lines=None)
     registry.acquire("r1", "sara", "a1", R, "x")
     registry.acquire("r1", "sara", "a1", other, "y")
-    registry.release_all("a1")
+    registry.release_all("r1", "a1")
     assert registry.active_claims("r1") == []
 
 
@@ -78,6 +78,19 @@ def test_release_still_works_in_the_right_room(reg):
     registry.acquire("r1", "sara", "a1", R, "refactor")
     registry.release("r1", "a1", R)
     assert registry.holder_of("r1", R) is None
+
+
+def test_release_all_cannot_reach_across_rooms(reg):
+    # presenced names itself presenced@<hostname>, so two checkouts on one
+    # laptop are two rooms sharing one agent id. A sweep triggered by something
+    # that happened in r2 must not touch r1.
+    _, registry = reg
+    registry.acquire("r1", "sara", "a1", R, "the innocent lease")
+    registry.acquire("r2", "sara", "a1", R, "the one that goes")
+    registry.release_all("r2", "a1")
+    assert registry.holder_of("r2", R) is None
+    held = registry.active_claims("r1")
+    assert [c.intent for c in held] == ["the innocent lease"]
 
 
 # -- wait-die on refusal -----------------------------------------------------

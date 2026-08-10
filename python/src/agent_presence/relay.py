@@ -282,25 +282,29 @@ class Relay:
         return True
 
     def _send_lease_snapshot(self, conn: Conn, room: str) -> None:
-        """Hand a joiner the leases it missed.
+        """Tell a joiner what this relay holds. Always, even when it is nothing.
 
         Incremental frames only ever reach whoever was already in the room, so
         without this a daemon that connects after a claim never learns about it
-        and its hook waves the edit through. The daemon replaces its whole
-        table from this frame.
+        and its hook waves the edit through. The daemon replaces its whole table
+        from this frame — `relay_client.cpp` clears `held_` and refills it — so
+        this is a reconciliation against the authority, not a top-up.
 
-        Nothing is sent for an empty room. A daemon reconnecting into one still
-        has its old entries, but those age out on the TTL they were issued
-        with, which is the same bound that already covers a relay restart.
+        The empty case is the one that matters most. The relay is stateless
+        across restarts by design, so a restarted one comes back holding
+        nothing; the daemons do not, and they go on enforcing what they cached.
+        Staying quiet used to leave them blocking edits on a lease nobody holds
+        until their own copy aged out, up to the full 90 second TTL. An empty
+        `leases` array says "the authority holds none", which is a fact, and it
+        clears the cache in the time a reconnect takes.
         """
-        held = self.registry.active_claims(room)
-        if not held:
-            return
         now = self._clock.now()
+        held = self.registry.active_claims(room)
         conn.send({"type": "leases",
                    "leases": [_lease_entry(c, now) for c in held]})
 
     def leave(self, conn: Conn) -> None:
+        room = conn.room
         for members in self._members.values():
             while conn in members:
                 members.remove(conn)
@@ -311,9 +315,14 @@ class Relay:
         # The connection is off every member list before the release, so the
         # release frames go to everyone still there and not to the socket that
         # just died.
+        #
+        # Only this connection's room. The same agent id can be live in another
+        # room on another socket — two checkouts on one laptop share the default
+        # presenced@<hostname> — and that room's leases have nothing to do with
+        # this socket hanging up.
         identity = self._identity.pop(conn, None)
-        if identity is not None:
-            self.registry.release_all(identity[0])
+        if identity is not None and room is not None:
+            self.registry.release_all(room, identity[0])
         conn.room = None
 
     def broadcast(
@@ -539,10 +548,11 @@ class Relay:
 
         # Refusal alone is not enough: without an instruction two agents can
         # both sit and retry forever. Wait-die says exactly one of them backs
-        # off and the other dies, and the loser's leases have to actually go,
-        # or the wait-for graph keeps its cycle.
+        # off and the other dies, and the loser's leases in *this* room have to
+        # actually go so it is not holding anything while it retries. Leases the
+        # same agent id holds in another room are not part of this contest.
         if result.decision == "abort":
-            self.registry.release_all(conn.agent)
+            self.registry.release_all(room, conn.agent)
 
         held = result.held_by
         return {

@@ -37,8 +37,13 @@ def build_hookbench() -> None:
     the product and a harness has no business editing it.
     """
     HOOKBENCH.parent.mkdir(parents=True, exist_ok=True)
-    if HOOKBENCH.exists() and \
-            HOOKBENCH.stat().st_mtime > HOOKBENCH_SRC.stat().st_mtime:
+    # Against every source it is built from, not just its own. It links the
+    # product's hook.cpp, and a run that quietly measured last week's copy of
+    # that is a run that says nothing about the daemon in front of it.
+    sources = [HOOKBENCH_SRC, ROOT / "cpp" / "hook" / "hook.cpp",
+               ROOT / "cpp" / "hook" / "hook.hpp", ROOT / "cpp" / "hook" / "protocol.hpp"]
+    newest = max(p.stat().st_mtime for p in sources if p.exists())
+    if HOOKBENCH.exists() and HOOKBENCH.stat().st_mtime > newest:
         return
     subprocess.run(
         ["c++", "-std=c++20", "-O2", "-I", str(ROOT / "cpp"), str(HOOKBENCH_SRC),

@@ -1,5 +1,6 @@
 #pragma once
 #include <optional>
+#include <shared_mutex>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -20,6 +21,12 @@ struct CachedLease {
 /// wound-wait, no arbitration. It answers exactly one question — "is there a
 /// live lease on this region held by somebody else?" — so the C++ side can
 /// never drift from the Python authority.
+///
+/// Safe to read from any thread. DecisionServer answers hooks off the event
+/// loop so a flood of events cannot delay a decision, which means the loop's
+/// relay frames and the decision threads' lookups land here at the same time.
+/// Reads take a shared lock and replace() an exclusive one — the right way
+/// round, since replace() happens per lease frame and reads happen per edit.
 class LeaseCache {
 public:
     void replace(std::vector<std::pair<std::string, CachedLease>> entries);
@@ -46,6 +53,7 @@ public:
                                                  long long now_ms) const;
 
 private:
+    mutable std::shared_mutex mu_;
     std::unordered_map<std::string, CachedLease> by_region_;
 };
 

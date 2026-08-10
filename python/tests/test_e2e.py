@@ -32,6 +32,16 @@ async def join(ws, agent, human):
                               "agent": agent, "human": human}))
 
 
+async def recv(ws, kind, timeout=2):
+    """The next frame of `kind`. A join is answered with a lease snapshot and a
+    claim fans out to the room, so the socket carries more than one thing."""
+    for _ in range(10):
+        msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=timeout))
+        if msg.get("type") == kind:
+            return msg
+    raise AssertionError(f"no {kind!r} frame arrived")
+
+
 async def test_second_agent_learns_the_first_agents_intent_before_editing(server):
     """The whole product in one test: two agents, one region, and the second
     one is told who is there and what they are doing before it writes."""
@@ -44,21 +54,14 @@ async def test_second_agent_learns_the_first_agents_intent_before_editing(server
         # Sara's agent declares intent and takes the lease.
         await sara.send(json.dumps({"type": "claim", "agent": "a1", "human": "sara",
                                     "region": REGION, "intent": "refactor to JWT"}))
-        first = json.loads(await asyncio.wait_for(sara.recv(), timeout=2))
+        first = await recv(sara, "claim_result")
         assert first["granted"] is True
 
         # Dev's agent tries to claim the same symbol.
         await dev.send(json.dumps({"type": "claim", "agent": "a2", "human": "dev",
                                    "region": REGION, "intent": "rename param"}))
 
-        reply = None
-        for _ in range(5):
-            msg = json.loads(await asyncio.wait_for(dev.recv(), timeout=2))
-            if msg.get("type") == "claim_result":
-                reply = msg
-                break
-
-        assert reply is not None
+        reply = await recv(dev, "claim_result")
         assert reply["granted"] is False
         assert reply["held_by"] == "a1"
         # The point of the entire system: the second agent is told the intent.
@@ -79,8 +82,7 @@ async def test_no_double_edit_occurs_on_the_same_symbol(server):
 
         granted = 0
         for ws in (sara, dev):
-            msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
-            if msg.get("type") == "claim_result" and msg.get("granted"):
+            if (await recv(ws, "claim_result")).get("granted"):
                 granted += 1
 
         assert granted == 1

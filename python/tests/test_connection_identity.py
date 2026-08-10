@@ -32,6 +32,11 @@ class FakeConn:
     def send(self, payload: dict) -> None:
         self.sent.append(payload)
 
+    @property
+    def fanout(self) -> list[dict]:
+        """Room traffic, minus the lease snapshot each join is answered with."""
+        return [f for f in self.sent if f.get("type") != "leases"]
+
 
 def holders(relay: Relay) -> dict[str, str]:
     return {c.scope.path: c.agent for c in relay.registry.active_claims(ROOM)}
@@ -116,7 +121,7 @@ def test_moving_rooms_does_not_leave_the_connection_in_the_old_one():
     relay.join("r1", other)
 
     relay.broadcast("r1", {"type": "presence"})
-    assert conn.sent == [], "a connection that moved to r2 still gets r1 traffic"
+    assert conn.fanout == [], "a connection that moved to r2 still gets r1 traffic"
 
 
 def test_leaving_removes_the_connection_from_every_room():
@@ -128,7 +133,7 @@ def test_leaving_removes_the_connection_from_every_room():
 
     relay.broadcast("r1", {"type": "presence"})
     relay.broadcast("r2", {"type": "presence"})
-    assert conn.sent == [], "a closed connection is still on a member list"
+    assert conn.fanout == [], "a closed connection is still on a member list"
 
 
 def test_rejoining_the_same_room_does_not_duplicate_the_membership():
@@ -140,7 +145,7 @@ def test_rejoining_the_same_room_does_not_duplicate_the_membership():
     relay.join(ROOM, other)
 
     relay.broadcast(ROOM, {"type": "presence"}, exclude=other)
-    assert len(conn.sent) == 1, f"one broadcast fanned out {len(conn.sent)} times"
+    assert len(conn.fanout) == 1, f"one broadcast fanned out {len(conn.fanout)} times"
 
 
 # -- an unnamed connection cannot own anything -------------------------------

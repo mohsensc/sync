@@ -227,11 +227,11 @@ def test_random_schedules_never_produce_a_wait_for_cycle():
             if roll < 0.6:
                 result = registry.acquire(room, "h", agent, scope, "work")
                 if not result.ok and result.decision == "abort":
-                    registry.release_all(agent)
+                    registry.release_all(room, agent)
             elif roll < 0.75:
                 registry.release(room, agent, scope)
             elif roll < 0.82:
-                registry.release_all(agent)
+                registry.release_all(room, agent)
             else:
                 clock.advance(rand.choice([0.5, 7.0, 40.0]))
 
