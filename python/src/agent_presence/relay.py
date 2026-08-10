@@ -4,9 +4,9 @@ import logging
 from typing import Protocol
 
 from .clock import Clock
-from .ladder import Activity, classify, interrupts_at
+from .ladder import Activity, Redundancy, classify, interrupts_at, redundant_peer
 from .leases import PRESENCE_TTL_S, LeaseRegistry
-from .negotiation import Negotiator
+from .negotiation import MOVES, Negotiator
 from .redact import (
     OPAQUE_MARK,
     clean_intent,
@@ -14,7 +14,7 @@ from .redact import (
     opaque_enabled,
     redact,
 )
-from .types import AgentEvent, Claim, Region
+from .types import AgentEvent, Claim, Region, Source
 
 log = logging.getLogger("agent_presence.relay")
 
@@ -64,6 +64,43 @@ def _region_payload(region: Region) -> dict:
     if opaque_enabled():
         payload[OPAQUE_MARK] = True
     return payload
+
+
+def _source(value: object) -> Source:
+    """Which channel an event claims to have come from.
+
+    Narrowed to the two legal values rather than trusted, because the field
+    decides rung 4 eligibility. An agent declaring intent about its own work is
+    not an escalation - the intent is its own text about its own region - but
+    an unrecognised string must not sail through into a Literal-typed field.
+    """
+    return "mcp" if value == "mcp" else "hook"
+
+
+def redundancy_payload(red: Redundancy) -> dict:
+    """A rung 4 hit, in the shape both channels hand back.
+
+    Everything the second agent needs to decide for itself and nothing else:
+    who is already on this, what they said they were doing, where, and the
+    score that triggered it. The score travels so the interrupt is auditable -
+    an agent that thinks the match is nonsense can see how close it was, and
+    the override log is the tuning signal for the threshold.
+
+    The moves are the rung 3 four, but they are advice here, not lease
+    operations. Rung 4 fires on *different* paths, so there is no contested
+    region for the negotiator to arbitrate: DEFER means wait and build on
+    their work, SPLIT means take a different piece of it, PROCEED means the
+    match is wrong. Nothing in the lease table changes either way.
+    """
+    return {
+        "agent": red.agent,
+        "human": red.human,
+        "intent": red.intent,
+        "region": _region_payload(red.region),
+        "score": round(red.score, 3),
+        "moves": list(MOVES),
+        "advisory": True,
+    }
 
 
 def _lease_entry(claim: Claim, now: float) -> dict:
@@ -321,6 +358,47 @@ class Relay:
     def last_event_ts(self, room: str) -> float | None:
         return self._last_ts.get(room)
 
+    # -- rung 4 -------------------------------------------------------------
+
+    def declared_work(self, room: str) -> list[Activity]:
+        """Every live MCP-declared intent in the room.
+
+        Live claims, not presence activity, because a claim is the only thing
+        an agent ever attaches an intent to. Presence comes off hooks, which
+        observe a path and a verb and can never know *why*. Claims also expire
+        on the lease TTL, so a rung 4 match is always against work somebody is
+        still doing.
+        """
+        return [
+            Activity(agent=c.agent, human=c.human, verb="edit",
+                     region=c.scope, intent=c.intent, source="mcp")
+            for c in self.registry.active_claims(room)
+            if c.intent
+        ]
+
+    def check_redundancy(
+        self, room: str, agent: str, human: str, region: Region, intent: str
+    ) -> Redundancy | None:
+        """Is somebody else already doing this, somewhere else in the tree?
+
+        Both declaration channels land here - the wire `claim` frame and the
+        MCP `claim_work` tool - so they cannot drift. Returns None whenever the
+        flag is off, which is the default and is checked inside the ladder
+        before any text is compared.
+
+        The ladder decides, not this method: `classify` has to actually return
+        4 before the match is looked up, so the rung the relay reports and the
+        rung the ladder computes are the same number by construction.
+        """
+        peers = self.declared_work(room)
+        probe = AgentEvent(
+            room=room, human=human, agent=agent, kind="claim", source="mcp",
+            verb="edit", region=region, ts=self._clock.now(),
+        )
+        if classify(probe, peers, intent) != 4:
+            return None
+        return redundant_peer(probe, peers, intent)
+
     # -- ingest -------------------------------------------------------------
 
     def handle(self, conn: Conn, message: dict) -> dict | None:
@@ -382,18 +460,21 @@ class Relay:
         self._last_ts[room] = now
 
         region = _region(clean["region"])
+        # Hooks never carry one; only an MCP-sourced event does, and only that
+        # kind can reach rung 4.
+        intent = clean_intent(clean.get("intent"))
         event = AgentEvent(
             room=room, human=conn.human, agent=conn.agent, kind="touch",
-            source=clean.get("source", "hook"), verb=clean["verb"],
+            source=_source(clean.get("source")), verb=clean["verb"],
             region=region, ts=now,
         )
 
         others = self.presence(room)
-        rung = classify(event, others)
+        rung = classify(event, others, intent)
 
         self._activity.setdefault(room, []).append(
             (now, Activity(agent=conn.agent, human=conn.human, verb=event.verb,
-                           region=region, intent=""))
+                           region=region, intent=intent, source=event.source))
         )
 
         self.broadcast(room, {"type": "presence", "agent": conn.agent,
@@ -404,24 +485,44 @@ class Relay:
         if not interrupts_at(rung):
             return {"type": "ack", "rung": rung}
 
+        # A lease conflict on this exact region outranks a text match on a
+        # different one. Rung 3 is a fact; rung 4 is an inference, and when
+        # both are true the agent should be told about the certain one.
         brief = self._negotiator.open(
             room, conn.agent, self.registry.age_of(conn.agent), region, "",
         )
-        if brief is None:
-            return {"type": "ack", "rung": rung}
-        return {
-            "type": "negotiate", "rung": rung,
-            "holder_agent": brief.holder_agent, "holder_human": brief.holder_human,
-            "holder_intent": brief.holder_intent, "moves": list(brief.moves),
-            "decision": brief.decision,
-        }
+        if brief is not None:
+            return {
+                "type": "negotiate", "rung": rung,
+                "holder_agent": brief.holder_agent,
+                "holder_human": brief.holder_human,
+                "holder_intent": brief.holder_intent,
+                "moves": list(brief.moves),
+                "decision": brief.decision,
+            }
+
+        # Note this compares against presence only, not against live claims -
+        # `others` is what the ladder was handed for rungs 0-3 and folding
+        # claims into it would change those rungs, which is not this feature's
+        # business. So an event matches other events and a claim matches other
+        # claims. Nothing emits an MCP-sourced event today, so in practice rung
+        # 4 arrives through `_on_claim`; if the daemon ever starts forwarding
+        # intent as events, the two peer sets want unifying.
+        if rung == 4:
+            red = redundant_peer(event, others, intent)
+            if red is not None:
+                frame = {"type": "redundant_work", "rung": 4}
+                frame.update(redundancy_payload(red))
+                return frame
+
+        return {"type": "ack", "rung": rung}
 
     def _on_claim(
         self, room: str, conn: Conn, message: dict, region: Region
     ) -> dict:
+        intent = clean_intent(message.get("intent"))
         result = self.registry.acquire(
-            room, conn.human, conn.agent,
-            region, clean_intent(message.get("intent")),
+            room, conn.human, conn.agent, region, intent,
         )
         now = self._clock.now()
 
@@ -432,6 +533,17 @@ class Relay:
         if result.ok:
             granted = {"type": "claim_result", "granted": True}
             granted.update(_lease_entry(result.claim, now))
+            # The lease is granted either way. Rung 4 is not contention - the
+            # paths are disjoint, so there is nothing to arbitrate - it is the
+            # news that somebody else already declared this work, delivered at
+            # the one moment the agent is still deciding what to do.
+            red = self.check_redundancy(room, conn.agent, conn.human,
+                                        region, intent)
+            if red is not None:
+                granted["rung"] = 4
+                granted["redundant"] = redundancy_payload(red)
+                log.info("rung 4: %s duplicates %s (%.3f) room=%s",
+                         conn.agent, red.agent, red.score, room)
             return granted
 
         # Refusal alone is not enough: without an instruction two agents can
