@@ -15,11 +15,24 @@ const std::string kEditPayload =
     R"({"session_id":"sess_b","hook_event_name":"PreToolUse","tool_name":"Edit",)"
     R"("tool_input":{"file_path":"/repo/src/auth.py","old_string":"SECRET"}})";
 
-ap::LeaseCache held_by(const std::string& region, const std::string& agent, long long expires,
-                       const std::string& intent = "rewriting the token refresh") {
-    ap::LeaseCache c;
-    c.replace({{region, ap::CachedLease{agent, "sara", intent, expires}}});
-    return c;
+/// A cache with one lease in it, returned by value.
+///
+/// The wrapper exists because LeaseCache owns a mutex and so cannot be copied
+/// or moved; a prvalue of this is constructed in place at the call site and
+/// converts to the reference decide_response asks for.
+struct Held {
+    ap::LeaseCache cache;
+
+    Held(const std::string& region, const ap::CachedLease& lease) {
+        cache.replace({{region, lease}});
+    }
+
+    operator const ap::LeaseCache&() const { return cache; }  // NOLINT(google-explicit-constructor)
+};
+
+Held held_by(const std::string& region, const std::string& agent, long long expires,
+             const std::string& intent = "rewriting the token refresh") {
+    return Held(region, ap::CachedLease{agent, "sara", intent, expires});
 }
 
 }  // namespace
@@ -126,4 +139,36 @@ TEST_CASE("conflict_for_file only matches whole path segments") {
     // the separator is what makes it a path match and there isn't one here.
     REQUIRE_FALSE(c.conflict_for_file("/repo/src/auth.py", "sess_b", 0).has_value());
     REQUIRE(c.conflict_for_file("/repo/src/auth.pyc", "sess_b", 0).has_value());
+}
+
+// ---------------------------------------------------------------------------
+// The holder's tier in the answer
+// ---------------------------------------------------------------------------
+
+TEST_CASE("the answer names the holder's tier when the relay gave one") {
+    ap::LeaseCache cache;
+    cache.replace({{"/repo/src/auth.py|",
+                    ap::CachedLease{"sess_a", "sara", "rotating the signing key", 60'000,
+                                    "elevated"}}});
+    const ap::Decision d =
+        ap::parse_decision(ap::decide_response(ap::build_request(kEditPayload), cache, 0));
+    REQUIRE(d.rung == 3);
+    REQUIRE(d.holder_priority == "elevated");
+}
+
+TEST_CASE("a lease with no tier answers with no tier, rather than inventing one") {
+    const auto leases = held_by("/repo/src/auth.py|", "sess_a", 60'000);
+    const ap::Decision d =
+        ap::parse_decision(ap::decide_response(ap::build_request(kEditPayload), leases, 0));
+    REQUIRE(d.rung == 3);
+    REQUIRE(d.holder_priority.empty());
+}
+
+TEST_CASE("a tier cannot break the response line either") {
+    ap::LeaseCache cache;
+    cache.replace({{"/repo/src/auth.py|",
+                    ap::CachedLease{"sess_a", "sara", "x", 60'000, "ele\"vat\ned"}}});
+    const std::string reply = ap::decide_response(ap::build_request(kEditPayload), cache, 0);
+    REQUIRE(reply.find('\n') == std::string::npos);
+    REQUIRE(ap::parse_decision(reply).holder_priority == "ele\"vat\ned");
 }

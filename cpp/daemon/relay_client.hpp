@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "daemon/lease_cache.hpp"
+#include "daemon/policy_cache.hpp"
 
 namespace ap {
 
@@ -149,6 +150,18 @@ RelayUrl parse_relay_url(const std::string& url);
 /// region; or no verb, which its event path indexes directly).
 std::string relay_event_frame(const std::string& redacted_line);
 
+/// The frame that says "I was stopped on this file and I want it".
+///
+/// The relay records the ask and caps the holder's renewals; without it the
+/// deadline never starts on the hook path, because a blocked PreToolUse edit
+/// produces no PostToolUse event and therefore no relay traffic at all. See
+/// daemon/contend_queue.hpp for why that is easy to miss.
+///
+/// It takes no lease and cannot: a claim is the agent's deliberate declaration
+/// through the MCP tools, and a daemon has no business taking one on its
+/// behalf. This only registers that somebody wanted the region.
+std::string relay_contend_frame(const std::string& path);
+
 /// How the lease cache is keyed. A region is a path plus an optional symbol,
 /// and the two have to combine into one string because that is what LeaseCache
 /// takes. Whole-file regions get an empty symbol, so `src/a.py|` and
@@ -162,11 +175,42 @@ struct RelayPeer {
     std::string path;
 };
 
+/// The org floor, as the relay states it.
+///
+/// Only the floor travels. Effects are the client's own business — the relay
+/// cannot see this machine's repo, user or session layers, so a table it
+/// computed would be wrong here more often than right. A floor composes with
+/// whatever the client resolved locally by taking the louder of the two, which
+/// is well defined without knowing what the other side said.
+struct RelayPolicy {
+    PolicyTable floor;
+    std::string source;
+    std::string digest;
+};
+
 struct RelayConfig {
     std::string url = "ws://127.0.0.1:8799";
     std::string room;
     std::string agent;
     std::string human;
+
+    /// Who this daemon claims to be, and the shared secret that backs the
+    /// claim. Both empty on an unconfigured install, and both are then left off
+    /// the join frame entirely — the relay grants such a connection `normal`,
+    /// which is what every room without a roster runs at.
+    ///
+    /// The token is a bearer secret. It is sent once, on the join, and the
+    /// relay hashes and compares it; nothing here keeps it anywhere else and
+    /// nothing logs it. Whoever can read the file it came from is this
+    /// principal, which is the same boundary as an SSH key and no better — see
+    /// the header of python/src/agent_presence/principals.py.
+    std::string principal;
+    std::string token;
+
+    /// Whether anybody is watching this machine. The one bit the client is
+    /// allowed to contribute: it selects between the two ends of the band the
+    /// roster already granted this principal, and can never step outside it.
+    bool unattended = false;
 
     long long backoff_min_ms = 250;
     long long backoff_max_ms = 30000;
@@ -220,6 +264,12 @@ public:
     /// puts other machines' agents into the snapshot.
     void on_peer(std::function<void(const RelayPeer&)> cb);
 
+    /// Called for every `policy` frame: on join, and again whenever the org
+    /// file changes under a running relay. That is the whole of "an org floor
+    /// change reaches a running daemon" — no restart, no poll, no config file
+    /// on this side of the wire.
+    void on_policy(std::function<void(const RelayPolicy&)> cb);
+
     /// Advance the connection. Blocks at most `timeout_ms`, and less when there
     /// is nothing to wait for.
     void poll(int timeout_ms);
@@ -270,7 +320,30 @@ private:
     /// Read one lease-shaped object into `held_`. `holder_override` names the
     /// agent when the frame carries it under a different key than "agent",
     /// which is what claim_result does with "held_by".
-    bool upsert_lease(std::string_view entry, const std::string& holder_override);
+    ///
+    /// `priority_key` is which field holds the *holder's* tier. It is
+    /// "priority" everywhere except a refused claim_result, where "priority"
+    /// is the requester's own tier and the holder's sits under
+    /// "holder_priority". Reading the wrong one caches our tier against their
+    /// lease, which is worse than caching none.
+    bool upsert_lease(std::string_view entry, const std::string& holder_override,
+                      std::string_view priority_key = "priority");
+
+    /// Drop `held_[key]`, but only when `agent` is the one holding it.
+    ///
+    /// A region key alone is not enough to identify what an expiry is talking
+    /// about. On a handover the relay publishes the new holder and the old
+    /// holder's expiry as two frames about the same region, and erasing on the
+    /// key would let the second delete what the first just granted — the region
+    /// then reads as free until the new holder's next heartbeat, which is
+    /// exactly the silent loss of protection this daemon exists to prevent.
+    ///
+    /// An unattributed frame matches nothing and erases nothing: the entry then
+    /// dies on its own TTL, which costs at worst a prompt about a holder who has
+    /// left. Wrong in that direction is recoverable; wrong in the other is not.
+    ///
+    /// Returns whether the table changed.
+    bool erase_lease(const std::string& key, const std::string& agent);
     void apply_leases();
 
     RelayConfig cfg_;
@@ -278,6 +351,7 @@ private:
     Outbound& outbound_;
     LeaseCache& leases_;
     std::function<void(const RelayPeer&)> on_peer_;
+    std::function<void(const RelayPolicy&)> on_policy_;
 
     State state_ = State::Idle;
     int fd_ = -1;

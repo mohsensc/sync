@@ -3,6 +3,7 @@
 #include <string_view>
 
 #include "daemon/lease_cache.hpp"
+#include "daemon/policy_cache.hpp"
 
 namespace ap {
 
@@ -29,6 +30,30 @@ bool wants_decision_line(std::string_view line);
 /// request carries no symbol, so they cannot arise here.
 ///
 /// Never returns a trailing newline; the caller frames it.
+///
+/// The response carries the rung *and* the effect. The rung is a fact about the
+/// lease table and policy cannot change it — a room configured to `notify` at
+/// rung 3 still answers `{"rung":3}`, so the wire stays a truthful record and
+/// `ap why` can say what was seen as well as what was done about it. The effect
+/// is what the hook renders.
+///
+/// `"decision":"ask"` still rides along whenever the effect is `ask`, because a
+/// hook built before effects existed reads that field and nothing else. New
+/// hooks read `effect` and ignore it.
+std::string decide_response(const std::string& request, const LeaseCache& leases,
+                            const PolicyCache& policy, long long now_ms);
+
+/// True when this answer is a rung 3 — the one answer that stops an edit, and
+/// therefore the one that means this agent wanted a region somebody else holds.
+///
+/// The rung, not the effect: a room configured to `notify` at rung 3 still has
+/// two agents on one region, and the waiting agent's ask is worth the same
+/// whether or not the room chose to stop it.
+bool blocked_by_lease(const std::string& answer);
+
+/// The same, against the compiled-in defaults. This is what the shipped tables
+/// produce, so it is also what "installing the engine and configuring nothing"
+/// has to keep producing.
 std::string decide_response(const std::string& request, const LeaseCache& leases,
                             long long now_ms);
 

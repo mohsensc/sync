@@ -122,7 +122,9 @@ def test_a_claim_does_not_leak_into_another_room(relay):
 
     claim(relay, a)
 
-    assert b.sent == []
+    # b's own join snapshot is all it ever got, and that snapshot is r2's.
+    assert [f.get("type") for f in b.sent] == ["leases"]
+    assert b.sent[0]["leases"] == []
 
 
 def test_the_claimers_own_result_carries_what_its_cache_needs(relay):
@@ -277,10 +279,44 @@ def test_a_joiner_is_handed_the_leases_it_missed(relay):
     assert region_key(entries[0]) == "src/auth.py|sign_in"
 
 
-def test_an_empty_room_sends_no_snapshot(relay):
+def test_an_empty_room_still_sends_an_authoritative_snapshot(relay):
+    """The snapshot is what the daemon reconciles against, so silence is wrong.
+
+    A relay restart comes back with an empty table. If the joiner hears nothing
+    it keeps whatever it cached before the restart and goes on blocking edits
+    for a lease nothing holds, until its own copy ages out — up to 90 seconds.
+    An empty `leases` array is the frame that says "the authority holds none",
+    and relay_client.cpp clears its table on it.
+    """
     a = FakeConn("a1", "sara")
     relay.join("r1", a)
-    assert a.sent == []
+    snapshots = frames(a, "leases")
+    assert snapshots, "a joiner must be told what the relay holds, even if nothing"
+    assert snapshots[0]["leases"] == []
+
+
+def test_a_rejoin_after_a_restart_clears_what_the_relay_no_longer_holds(relay):
+    """The full cycle at relay level: claim, relay restarts, daemon rejoins.
+
+    A restarted relay is a new Relay with an empty registry. The joiner's first
+    frame has to be the empty snapshot, otherwise nothing tells it to drop the
+    lease it is still enforcing.
+    """
+    a = FakeConn("a1", "sara")
+    relay.join("r1", a)
+    claim(relay, a, intent="held across the restart")
+    assert frames(a, "leases")[0]["leases"] == []      # joined before the claim
+
+    restarted = Relay(VirtualClock(2000.0))
+    b = FakeConn("a1", "sara")
+    restarted.join("r1", b)
+
+    snapshots = frames(b, "leases")
+    assert snapshots, "the restarted relay told the daemon nothing"
+    assert snapshots[0]["leases"] == [], (
+        "a stale lease survives the restart: the daemon has no frame telling it "
+        "the relay holds nothing, so it blocks until the TTL runs out"
+    )
 
 
 # -- shape contract with cpp/daemon/relay_client.cpp -------------------------

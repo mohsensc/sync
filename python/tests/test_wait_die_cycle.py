@@ -12,8 +12,11 @@ sides can then read as "older", both are told to wait, and neither ever dies.
 
 from __future__ import annotations
 
+import pytest
+
 from agent_presence.clock import VirtualClock
 from agent_presence.leases import LEASE_TTL_S, LeaseRegistry
+from agent_presence.principals import Principal, Roster, hash_token
 from agent_presence.relay import Relay
 from agent_presence.types import Region
 
@@ -31,6 +34,9 @@ def wire_region(path: str) -> dict:
 class FakeConn:
     def __init__(self, agent: str, human: str) -> None:
         self.agent, self.human, self.room = agent, human, None
+        self.principal: str | None = None
+        self.token: str | None = None
+        self.unattended = False
         self.sent: list[dict] = []
 
     def send(self, payload: dict) -> None:
@@ -58,6 +64,28 @@ def test_every_live_claim_is_stamped_with_its_agents_wait_die_age():
         assert c.acquired_at == registry.age_of(c.agent), (
             f"{c.agent}'s claim on {c.scope.path} is stamped {c.acquired_at} "
             f"but the agent's age is {registry.age_of(c.agent)}"
+        )
+
+
+def test_every_live_claim_is_stamped_with_its_agents_tier():
+    # The same invariant, one component to the left. resolve() reads the
+    # requester's tier off priority_of and the holder's off holder.priority, so
+    # every claim an agent holds has to carry that agent's tier. Stamp them
+    # separately and an agent reads as senior when it asks and junior when it
+    # is asked, which is the same two-quantity bug the age stamp fixed.
+    clock = VirtualClock()
+    registry = LeaseRegistry(clock)
+
+    registry.acquire(ROOM, "dev", "a2", region("b1.py"), "first", priority=2)
+    clock.advance(10)
+    # A second claim naming a different tier. The first one stands.
+    registry.acquire(ROOM, "dev", "a2", region("b2.py"), "second", priority=0)
+
+    for c in registry.active_claims(ROOM):
+        assert registry.key_of(c.agent) == (-c.priority, c.acquired_at, c.agent), (
+            f"{c.agent}'s claim on {c.scope.path} is stamped "
+            f"{(c.priority, c.acquired_at)} but its key says "
+            f"{registry.key_of(c.agent)}"
         )
 
 
@@ -147,6 +175,62 @@ def test_the_standoff_resolves_instead_of_running_out_the_lease_ttl():
     )
 
 
+# -- the same standoff, with a tier gap on top -------------------------------
+
+
+def _tiered_standoff(a_tier: int, b_tier: int):
+    """The two-lease standoff, run through the relay, with a roster in play.
+
+    Tiers reach the registry the only way they can: off a Grant the relay
+    latched at join. Nothing in the claim frames below carries one.
+    """
+    roster = Roster(
+        (
+            Principal("sara", "Sara", a_tier, a_tier, hash_token("sara-token")),
+            Principal("dev", "Dev", b_tier, b_tier, hash_token("dev-token")),
+        ),
+        source="<test>", present=True,
+    )
+    relay = Relay(VirtualClock(0.0), roster=roster)
+    a, b = FakeConn("a1", "sara"), FakeConn("a2", "dev")
+    a.principal, a.token = "sara", "sara-token"
+    b.principal, b.token = "dev", "dev-token"
+    relay.join(ROOM, a)
+    relay.join(ROOM, b)
+
+    def claim(conn, path):
+        return relay.handle(
+            conn, {"type": "claim", "region": wire_region(path), "intent": "work"}
+        )
+
+    assert claim(b, "b1.py")["granted"] is True     # t=0
+    relay._clock.advance(10)
+    assert claim(a, "a1.py")["granted"] is True     # t=10
+    relay._clock.advance(40)
+    assert claim(b, "b2.py")["granted"] is True     # t=50
+    relay._clock.advance(10)
+    return relay, a, b
+
+
+@pytest.mark.parametrize(
+    "a_tier,b_tier",
+    [(t, u) for t in range(4) for u in range(4)],
+)
+def test_no_tier_gap_lets_both_agents_be_told_to_wait(a_tier, b_tier):
+    relay, a, b = _tiered_standoff(a_tier, b_tier)
+
+    a_to_b = relay.handle(
+        a, {"type": "claim", "region": wire_region("b2.py"), "intent": "work"}
+    )
+    b_to_a = relay.handle(
+        b, {"type": "claim", "region": wire_region("a1.py"), "intent": "work"}
+    )
+
+    assert not (
+        a_to_b.get("decision") == "wait" and b_to_a.get("decision") == "wait"
+    ), f"a1 at tier {a_tier} and a2 at tier {b_tier} are parked on each other"
+
+
 # -- searching for a cycle of any length -------------------------------------
 
 
@@ -155,6 +239,10 @@ def _wait_for_edges(registry: LeaseRegistry, rooms, regions):
 
     An edge x -> y means: if x asked for the region y holds, wait-die would tell
     x to sit and wait. A cycle in this graph is a deadlock, whatever its length.
+
+    Built from the whole three-part key, not just the age: the tier is the
+    component most likely to be read off the wrong side, and an edge set that
+    ignored it would go on looking acyclic while the real one wedged.
     """
     from agent_presence.wait_die import resolve
 
@@ -164,10 +252,11 @@ def _wait_for_edges(registry: LeaseRegistry, rooms, regions):
         agents = {c.agent for c in claims}
         for asker in agents:
             age = registry.age_of(asker)
+            tier = registry.priority_of(asker)
             for held in claims:
                 if held.agent == asker:
                     continue
-                if resolve(asker, age, held) == "wait":
+                if resolve(asker, age, held, tier) == "wait":
                     edges.add((asker, held.agent))
     return edges
 
@@ -227,11 +316,11 @@ def test_random_schedules_never_produce_a_wait_for_cycle():
             if roll < 0.6:
                 result = registry.acquire(room, "h", agent, scope, "work")
                 if not result.ok and result.decision == "abort":
-                    registry.release_all(agent)
+                    registry.release_all(room, agent)
             elif roll < 0.75:
                 registry.release(room, agent, scope)
             elif roll < 0.82:
-                registry.release_all(agent)
+                registry.release_all(room, agent)
             else:
                 clock.advance(rand.choice([0.5, 7.0, 40.0]))
 
@@ -239,6 +328,13 @@ def test_random_schedules_never_produce_a_wait_for_cycle():
                 assert c.acquired_at == registry.age_of(c.agent), (
                     f"seed {seed} step {step}: {c.agent}'s stamp {c.acquired_at} "
                     f"!= its age {registry.age_of(c.agent)}"
+                )
+                assert registry.key_of(c.agent) == (
+                    -c.priority, c.acquired_at, c.agent
+                ), (
+                    f"seed {seed} step {step}: {c.agent}'s stamp "
+                    f"{(c.priority, c.acquired_at)} != its key "
+                    f"{registry.key_of(c.agent)}"
                 )
 
             cycle = _find_cycle(_wait_for_edges(registry, rooms, regions))

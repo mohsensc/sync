@@ -14,6 +14,15 @@ class FakeConn:
     def send(self, payload):
         self.sent.append(payload)
 
+    @property
+    def fanout(self):
+        """Everything the room sent this connection.
+
+        Minus the lease snapshot, which is a reconciliation answer to this
+        connection's own join and not traffic from anyone.
+        """
+        return [f for f in self.sent if f.get("type") != "leases"]
+
 
 SECRET = "hunter2"
 
@@ -46,8 +55,8 @@ def test_events_fan_out_to_other_members_but_not_the_sender(relay):
     relay.join("r1", a)
     relay.join("r1", b)
     relay.handle(a, touch("a1"))
-    assert len(b.sent) == 1
-    assert a.sent == []
+    assert len(b.fanout) == 1
+    assert a.fanout == []
 
 
 def test_rooms_are_isolated(relay):
@@ -55,7 +64,7 @@ def test_rooms_are_isolated(relay):
     relay.join("r1", a)
     relay.join("r2", b)
     relay.handle(a, touch("a1"))
-    assert b.sent == []
+    assert b.fanout == []
 
 
 def test_leaving_releases_every_lease_that_connection_held(relay):
@@ -81,8 +90,8 @@ def test_forbidden_fields_never_reach_the_wire_or_the_store(relay):
     evt["region"]["note"] = SECRET          # smuggled inside a permitted key
     relay.handle(a, evt)
 
-    assert len(b.sent) == 1
-    payload = b.sent[0]
+    assert len(b.fanout) == 1
+    payload = b.fanout[0]
     assert SECRET not in repr(payload)
     assert set(payload["region"]) == {"path", "symbol", "lines"}
     assert SECRET not in repr(relay.presence("r1"))
@@ -223,3 +232,61 @@ def test_a_lowercase_move_over_the_wire_still_works(relay):
                              "split_region": other})
     assert reply["granted"] is True
     assert reply["action"] == "split"
+
+
+# -- (G) a sweep in one room never reaches another ---------------------------
+#
+# presenced defaults its relay identity to presenced@<hostname>, so two
+# checkouts on one laptop are two rooms and one agent id. Both of the relay's
+# release paths used to sweep every room.
+
+ONLY_IN_A = {"path": "src/only-in-repo-a.py", "symbol": None, "lines": None}
+
+
+def _two_room_standoff(relay):
+    """a1 holds a lease in repo-a. rival already holds the contested region in
+    repo-b, and holds it first, so a1's claim there loses wait-die."""
+    in_a = FakeConn("presenced@laptop", "sara")
+    in_b = FakeConn("presenced@laptop", "sara")
+    rival = FakeConn("rival-agent", "dev")
+
+    relay.join("repo-b", rival)
+    _claim(relay, rival, intent="older holder")
+    relay._clock.advance(5)
+    relay.join("repo-a", in_a)
+    _claim(relay, in_a, region=ONLY_IN_A, intent="the innocent lease")
+    relay.join("repo-b", in_b)
+    return in_a, in_b, rival
+
+
+def test_a_wait_die_abort_in_one_room_leaves_another_rooms_leases_alone(relay):
+    in_a, in_b, _ = _two_room_standoff(relay)
+
+    reply = _claim(relay, in_b, intent="loser")
+    assert reply["granted"] is False
+    assert reply["decision"] == "abort", "the setup has to actually abort"
+
+    held = relay.registry.active_claims("repo-a")
+    assert [c.scope.path for c in held] == ["src/only-in-repo-a.py"], (
+        "an abort in repo-b released the same agent id's repo-a lease"
+    )
+
+
+def test_a_disconnect_in_one_room_leaves_another_rooms_leases_alone(relay):
+    in_a, in_b, _ = _two_room_standoff(relay)
+
+    relay.leave(in_b)
+
+    held = relay.registry.active_claims("repo-a")
+    assert [c.scope.path for c in held] == ["src/only-in-repo-a.py"], (
+        "closing the repo-b connection released the repo-a lease"
+    )
+
+
+def test_a_disconnect_still_releases_that_rooms_leases(relay):
+    # The scoping must not turn into "releases nothing".
+    a = FakeConn("a1", "sara")
+    relay.join("r1", a)
+    _claim(relay, a)
+    relay.leave(a)
+    assert relay.registry.active_claims("r1") == []

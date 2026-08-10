@@ -185,3 +185,110 @@ async def test_the_mcp_server_lists_and_calls_the_four_tools(setup):
         arguments={"path": "src/db.py", "symbol": "query", "intent": "add index"},
     ))
     assert json.loads(result.content[0].text) == {"granted": True}
+
+
+# -- the tool channel is on the same roster as the wire channel --------------
+
+
+def _roster():
+    from agent_presence.principals import Principal, Roster, hash_token
+    from agent_presence.priority import PRIORITY_NAMES
+
+    return Roster(
+        (Principal(id="sara", display="Sara",
+                   attended=PRIORITY_NAMES["critical"],
+                   unattended=PRIORITY_NAMES["critical"],
+                   token_sha256=hash_token("s3cret")),),
+        present=True, source="<test>",
+    )
+
+
+def test_claim_work_claims_at_the_tier_the_roster_granted():
+    # It used to stamp `normal` whatever the roster said, so an exec who put
+    # themselves at critical and installed a token won contention through the
+    # hook and lost it through the tools, in the same session.
+    from agent_presence.principals import LocalIdentity
+    from agent_presence.priority import PRIORITY_NAMES, name_of
+    from agent_presence.types import Region
+
+    relay = Relay(VirtualClock(1000.0), roster=_roster())
+    tools = Tools(relay, "r1", "presenced@exec", "sara",
+                  identity=LocalIdentity("sara", "s3cret", unattended=True))
+    assert tools.priority == PRIORITY_NAMES["critical"]
+
+    tools.claim_work("src/pay.py", "charge", "hotfix")
+    claim = relay.registry.holder_of(
+        "r1", Region(path="src/pay.py", symbol="charge", lines=None)
+    )
+    assert name_of(claim.priority) == "critical"
+
+
+def test_a_tool_session_with_no_token_is_still_normal():
+    from agent_presence.principals import LocalIdentity
+    from agent_presence.priority import PRIORITY_NORMAL
+
+    relay = Relay(VirtualClock(1000.0), roster=_roster())
+    tools = Tools(relay, "r1", "a2", "dev",
+                  identity=LocalIdentity("sara", "", unattended=False))
+    assert tools.priority == PRIORITY_NORMAL
+
+
+def test_a_tool_session_cannot_re_rate_itself_mid_session():
+    from agent_presence.principals import LocalIdentity
+    from agent_presence.priority import PRIORITY_NAMES
+
+    relay = Relay(VirtualClock(1000.0), roster=_roster())
+    tools = Tools(relay, "r1", "a2", "sara",
+                  identity=LocalIdentity("sara", "s3cret", unattended=False))
+    before = tools.priority
+    # No setter exists, and the grant is a frozen dataclass latched at
+    # construction. Same rule the relay applies to a join frame.
+    with pytest.raises(AttributeError):
+        tools.priority = PRIORITY_NAMES["background"]
+    assert tools.priority == before
+
+
+def test_claim_work_refused_by_a_reservation_says_when_to_come_back():
+    from agent_presence.leases import HANDOVER_GRACE_S, HEARTBEAT_S
+    from agent_presence.priority import PRIORITY_NAMES
+    from agent_presence.types import Region
+
+    clock = VirtualClock(1000.0)
+    relay = Relay(clock)
+    scope = Region(path="src/pay.py", symbol="charge", lines=None)
+    tools = Tools(relay, "r1", "a2", "dev")
+
+    # a2 holds it, a1 asks and is queued, a2's deadline fires.
+    tools.claim_work("src/pay.py", "charge", "work")
+    relay.registry.acquire("r1", "sara", "a1", scope, "hotfix",
+                           priority=PRIORITY_NAMES["critical"])
+    deadline = 1000.0 + HANDOVER_GRACE_S + 0.5
+    while clock.now() < deadline:
+        clock.advance(min(HEARTBEAT_S, deadline - clock.now()))
+        relay.registry.heartbeat("r1", "a2", scope)
+
+    answer = tools.claim_work("src/pay.py", "charge", "work")
+    assert answer["granted"] is False
+    assert answer["reserved"] is True
+    assert answer["held_by"] == "a1"
+    assert answer["retry_in_s"] > 0
+    assert answer["moves"] == ["DEFER"]
+
+
+def test_claim_work_refused_by_a_holder_says_when_the_region_frees_up():
+    from agent_presence.priority import PRIORITY_NAMES
+    from agent_presence.types import Region
+
+    relay = Relay(VirtualClock(1000.0))
+    scope = Region(path="src/pay.py", symbol="charge", lines=None)
+    relay.registry.acquire("r1", "dev", "a1", scope, "long refactor")
+
+    tools = Tools(relay, "r1", "a2", "sara")
+    answer = tools.claim_work("src/pay.py", "charge", "hotfix")
+    assert answer["granted"] is False
+    assert answer["held_by"] == "a1"
+    assert answer["intent"] == "long refactor"
+    # The number that turns DEFER from a shrug into an instruction.
+    assert answer["handover_in_s"] > 0
+    assert answer["retry_in_s"] == answer["handover_in_s"]
+    assert answer["waiting"] == 1

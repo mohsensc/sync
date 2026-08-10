@@ -8,6 +8,7 @@ import pytest
 from agent_presence import leases
 from agent_presence.clock import VirtualClock
 from agent_presence.leases import LEASE_TTL_S, LeaseRegistry
+from agent_presence.priority import PRIORITY_NAMES, PRIORITY_NORMAL
 from agent_presence.types import Region
 from sim.simulation import Simulation
 
@@ -55,7 +56,13 @@ class Contention:
     wedge this.
     """
 
-    def __init__(self, seed: int, agents: int = 8, regions: int = 4) -> None:
+    def __init__(
+        self,
+        seed: int,
+        agents: int = 8,
+        regions: int = 4,
+        tiers: dict[str, int] | None = None,
+    ) -> None:
         self._rand = random.Random(seed)
         self._clock = VirtualClock()
         self._registry = LeaseRegistry(self._clock)
@@ -70,11 +77,15 @@ class Contention:
             )
             for i in range(agents)
         ]
+        # Per-agent priority tier. Empty means everyone at normal, which is the
+        # room-with-no-roster case and what every test above runs.
+        self._tiers = tiers or {}
 
     def _turn(self, ag: _Agent, out: Outcome) -> str:
         self._clock.advance(STEP_S)
         result = self._registry.acquire(
-            ROOM, "human", ag.name, ag.want[ag.held], "work"
+            ROOM, "human", ag.name, ag.want[ag.held], "work",
+            priority=self._tiers.get(ag.name, PRIORITY_NORMAL),
         )
         if result.ok:
             out.grants += 1
@@ -83,13 +94,13 @@ class Contention:
             if ag.held == len(ag.want):
                 # Got everything it needed: do the work, drop the lot.
                 ag.finished += 1
-                self._registry.release_all(ag.name)
+                self._registry.release_all(ROOM, ag.name)
                 ag.held = 0
             return "grant"
 
         if result.decision == "abort":
             out.aborts += 1
-            self._registry.release_all(ag.name)
+            self._registry.release_all(ROOM, ag.name)
             ag.held = 0
             return "abort"
 
@@ -159,7 +170,12 @@ def test_the_deadlock_check_catches_a_symmetric_resolver(monkeypatch):
     # asymmetric; make it symmetric (everyone waits, nobody dies) and the ring
     # above has to wedge. If this test stops failing-by-detection, the ones
     # above have stopped meaning anything.
-    monkeypatch.setattr(leases, "resolve", lambda agent, age, holder: "wait")
+    # The fake takes the tier argument acquire now passes and ignores it — the
+    # point of the control is that the *relation* is symmetric, not which
+    # arguments it reads.
+    monkeypatch.setattr(
+        leases, "resolve", lambda agent, age, holder, priority=PRIORITY_NORMAL: "wait"
+    )
     with pytest.raises(Deadlock):
         Contention(0).run(300)
 
@@ -168,12 +184,79 @@ def test_a_deadlocked_run_still_grants_plenty_before_it_wedges(monkeypatch):
     # Why the old assertion (granted > 0) was worth nothing: a deadlock-prone
     # resolver hands out leases happily right up to the moment the ring closes.
     # Counting grants can only ever catch a system that never started.
-    monkeypatch.setattr(leases, "resolve", lambda agent, age, holder: "wait")
+    # The fake takes the tier argument acquire now passes and ignores it — the
+    # point of the control is that the *relation* is symmetric, not which
+    # arguments it reads.
+    monkeypatch.setattr(
+        leases, "resolve", lambda agent, age, holder, priority=PRIORITY_NORMAL: "wait"
+    )
     model = Contention(0)
     with pytest.raises(Deadlock):
         model.run(300)
     assert model.last.grants > 0
     assert model.last.rounds < 300  # it stopped early; it did not finish
+
+
+# -- the same ring, with priority in the key ---------------------------------
+
+
+def _mixed_tiers(seed: int, agents: int = 8) -> dict[str, int]:
+    rand = random.Random(seed)
+    names = list(PRIORITY_NAMES.values())
+    return {f"a{i}": rand.choice(names) for i in range(agents)}
+
+
+@pytest.mark.parametrize("seed", range(50))
+def test_mixed_tiers_never_reach_a_state_where_every_agent_waits(seed):
+    # Priority added a third component to the ordering key. A third component
+    # is only safe while the whole key stays a strict total order, and this
+    # ring is the shape that notices when it stops being one: give two agents a
+    # reason to each read as senior to the other and it wedges.
+    Contention(seed, tiers=_mixed_tiers(seed)).run(300)
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_no_tier_starves_another_when_priorities_are_mixed(seed):
+    # Priority decides who waits, not who eats. The background agents still
+    # have to finish work: wait-die aborts them against a critical holder, and
+    # an abort is a retry, not a life sentence.
+    out = Contention(seed, tiers=_mixed_tiers(seed)).run(300)
+    stuck = [a for a, n in out.finished.items() if n == 0]
+    assert not stuck, f"acquired but never completed a unit of work: {stuck}"
+
+
+def test_a_critical_agent_never_takes_a_lease_off_a_live_holder():
+    # The no-preemption invariant, on the production path. A critical requester
+    # against a normal holder is told to wait — it keeps its place in the order
+    # and wins as soon as the holder lets go — and the holder's lease is
+    # untouched at every step.
+    clock = VirtualClock()
+    registry = LeaseRegistry(clock)
+    region = Region(path="src/pay.py", symbol="charge", lines=None)
+
+    assert registry.acquire(ROOM, "sara", "junior", region, "work").ok
+    stamp = registry.holder_of(ROOM, region).expires_at
+
+    for _ in range(10):
+        clock.advance(1.0)
+        result = registry.acquire(
+            ROOM, "ops", "senior", region, "urgent",
+            priority=PRIORITY_NAMES["critical"],
+        )
+        assert not result.ok, "a lease was handed over while it was still held"
+        assert result.decision == "wait", (
+            "a critical requester should hold its place, not abort"
+        )
+        holder = registry.holder_of(ROOM, region)
+        assert holder.agent == "junior"
+        assert holder.expires_at == stamp, "the holder's lease was cut short"
+
+    # The holder finishes on its own terms. Only then does the senior win.
+    registry.release(ROOM, "junior", region)
+    assert registry.acquire(
+        ROOM, "ops", "senior", region, "urgent",
+        priority=PRIORITY_NAMES["critical"],
+    ).ok
 
 
 # -- the coarse simulation still holds its own invariants --------------------
