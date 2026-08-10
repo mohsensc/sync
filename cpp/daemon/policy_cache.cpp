@@ -11,8 +11,6 @@
 namespace ap {
 namespace {
 
-constexpr const char* kNames[kRungs] = {"silent", "notify", "context", "ask", "deny"};
-
 bool is_space(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
 
 std::size_t skip_space(std::string_view s, std::size_t i) {
@@ -60,19 +58,6 @@ bool read_all(const std::string& path, std::size_t cap, std::string& out) {
 }
 
 }  // namespace
-
-const char* effect_name(Effect e) {
-    const int i = static_cast<int>(e);
-    if (i < 0 || i >= kRungs) return kNames[0];
-    return kNames[i];
-}
-
-std::optional<Effect> parse_effect(std::string_view s) {
-    for (int i = 0; i < kRungs; ++i) {
-        if (s == kNames[i]) return static_cast<Effect>(i);
-    }
-    return std::nullopt;
-}
 
 bool parse_effect_list(std::string_view array, PolicyTable& out, std::string* problem) {
     std::size_t i = skip_space(array, 0);

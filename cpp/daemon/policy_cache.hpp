@@ -7,6 +7,11 @@
 #include <string>
 #include <string_view>
 
+// Effect, effect_name, parse_effect, louder. They are wire vocabulary — the
+// daemon writes `"effect":"deny"` and the hook reads it — so they live with the
+// rest of the protocol both halves have to agree on letter for letter.
+#include "hook/protocol.hpp"
+
 namespace ap {
 
 // ===========================================================================
@@ -38,25 +43,7 @@ namespace ap {
 // set, which is what makes "a degraded policy never resolves below the builtin
 // floor" a structural property rather than a promise.
 
-enum class Effect : int {
-    Silent = 0,
-    Notify = 1,
-    Context = 2,
-    Ask = 3,
-    Deny = 4,
-};
-
 constexpr int kRungs = 5;
-
-/// The wire name. Never null; an out-of-range value reads as "silent".
-const char* effect_name(Effect e);
-
-/// The inverse. Empty for anything not one of the five.
-std::optional<Effect> parse_effect(std::string_view s);
-
-/// Louder of the two. The lattice is totally ordered by attention spent, so
-/// this is the whole of "apply a floor".
-inline Effect louder(Effect a, Effect b) { return a >= b ? a : b; }
 
 struct PolicyTable {
     std::array<Effect, kRungs> rung;
