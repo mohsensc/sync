@@ -135,7 +135,13 @@ class EffectTable:
 # on a contending region), `ask` spends a human's attention while `deny` spends
 # the model's and hands it four moves plus a PROCEED escape hatch, and for the
 # unattended agents this feature exists to serve there is nobody to ask.
-BUILTIN = EffectTable(("silent", "notify", "context", "deny", "silent"))
+#
+# Rung 4 defaults to `context`, not `silent`. It has its own off switch already
+# - AGENT_PRESENCE_RUNG4, off unless you set it - and a second one here would
+# mean turning the feature on and getting silence with nothing to say why. So
+# the flag decides whether rung 4 runs and this decides how loudly a hit is
+# reported: `context` tells the agent without spending anybody's attention.
+BUILTIN = EffectTable(("silent", "notify", "context", "deny", "context"))
 
 # The floor at rung 3 is `notify`, not `silent`. A silent rung 3 is the product
 # lying: two agents editing one symbol with nothing said anywhere is the

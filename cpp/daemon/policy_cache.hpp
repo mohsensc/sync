@@ -64,8 +64,10 @@ struct PolicyTable {
 
 /// Installing the engine and configuring nothing has to be today's behaviour,
 /// byte for byte. These are the tables that make that true.
+/// Rung 4 sits at `context`: AGENT_PRESENCE_RUNG4 is already its off switch, so
+/// a second one here would make turning the feature on do nothing.
 inline constexpr PolicyTable kBuiltin{
-    {Effect::Silent, Effect::Notify, Effect::Context, Effect::Deny, Effect::Silent}};
+    {Effect::Silent, Effect::Notify, Effect::Context, Effect::Deny, Effect::Context}};
 
 /// Rung 3's floor is `notify`, not `silent`. A silent rung 3 is the product
 /// lying: two agents in one symbol with nothing said anywhere is the pre-install
