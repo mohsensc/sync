@@ -65,6 +65,14 @@ class WsConn:
         self.agent = ""
         self.human = ""
         self.room: str | None = None
+        # Off the join frame, all optional. `principal` and `token` are a claim
+        # of identity the relay checks against the roster; `unattended` is one
+        # bit that selects inside whatever band that principal already owns.
+        # None of them is authority — the relay latches a Grant from them once
+        # and reads that from then on.
+        self.principal: str | None = None
+        self.token: str | None = None
+        self.unattended = False
 
         # Read once, per connection: the limits are module constants so an
         # operator (or a test) can retune them without touching this class.
@@ -185,12 +193,28 @@ async def _session(ws, relay: Relay) -> None:
                     human = msg.get("human")
                     conn.agent = agent if isinstance(agent, str) else ""
                     conn.human = human if isinstance(human, str) else ""
+                    principal = msg.get("principal")
+                    token = msg.get("token")
+                    conn.principal = (
+                        principal if isinstance(principal, str) else None
+                    )
+                    conn.token = token if isinstance(token, str) else None
+                    conn.unattended = msg.get("unattended") is True
                     # The relay owns identity. It latches the first declaration
                     # and refuses a later one, and it puts the real identity
                     # back on the connection when it does, so a rename attempt
-                    # leaves nothing behind on this side either.
+                    # leaves nothing behind on this side either. The grant is
+                    # latched by the same call and by the same rule.
+                    # A refusal is answered, not dropped: the relay puts a
+                    # `join_refused` frame on the socket saying which rule
+                    # refused it and what to do instead. Silence left the client
+                    # blocked on a lease snapshot that was never coming.
                     if not relay.join(room, conn):
                         log.debug("join refused for room %s; frame dropped", room)
+                    # The relay has hashed and compared it. Keeping a bearer
+                    # secret alive on a long-lived object for no further use is
+                    # how it ends up in a traceback or a repr somewhere.
+                    conn.token = None
                     continue
 
                 reply = relay.handle(conn, msg)

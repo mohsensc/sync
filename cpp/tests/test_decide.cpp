@@ -140,3 +140,35 @@ TEST_CASE("conflict_for_file only matches whole path segments") {
     REQUIRE_FALSE(c.conflict_for_file("/repo/src/auth.py", "sess_b", 0).has_value());
     REQUIRE(c.conflict_for_file("/repo/src/auth.pyc", "sess_b", 0).has_value());
 }
+
+// ---------------------------------------------------------------------------
+// The holder's tier in the answer
+// ---------------------------------------------------------------------------
+
+TEST_CASE("the answer names the holder's tier when the relay gave one") {
+    ap::LeaseCache cache;
+    cache.replace({{"/repo/src/auth.py|",
+                    ap::CachedLease{"sess_a", "sara", "rotating the signing key", 60'000,
+                                    "elevated"}}});
+    const ap::Decision d =
+        ap::parse_decision(ap::decide_response(ap::build_request(kEditPayload), cache, 0));
+    REQUIRE(d.rung == 3);
+    REQUIRE(d.holder_priority == "elevated");
+}
+
+TEST_CASE("a lease with no tier answers with no tier, rather than inventing one") {
+    const auto leases = held_by("/repo/src/auth.py|", "sess_a", 60'000);
+    const ap::Decision d =
+        ap::parse_decision(ap::decide_response(ap::build_request(kEditPayload), leases, 0));
+    REQUIRE(d.rung == 3);
+    REQUIRE(d.holder_priority.empty());
+}
+
+TEST_CASE("a tier cannot break the response line either") {
+    ap::LeaseCache cache;
+    cache.replace({{"/repo/src/auth.py|",
+                    ap::CachedLease{"sess_a", "sara", "x", 60'000, "ele\"vat\ned"}}});
+    const std::string reply = ap::decide_response(ap::build_request(kEditPayload), cache, 0);
+    REQUIRE(reply.find('\n') == std::string::npos);
+    REQUIRE(ap::parse_decision(reply).holder_priority == "ele\"vat\ned");
+}

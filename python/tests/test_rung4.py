@@ -363,7 +363,9 @@ def test_hook_traffic_alone_never_reaches_rung_4(relay, rung4_on):
 
     relay.handle(sara, touch("src/login/session.py"))
     reply = relay.handle(dev, touch("src/auth/jwt.py"))
-    assert reply == {"type": "ack", "rung": 0}
+    # `effect` rides along on every ack since the policy engine landed; rung 0
+    # is silent by default. The rung is what this test is about.
+    assert reply == {"type": "ack", "rung": 0, "effect": "silent"}
 
 
 def test_an_mcp_event_with_intent_gets_a_redundant_work_frame(relay, rung4_on):
@@ -439,3 +441,97 @@ def test_claim_work_is_unchanged_with_the_flag_off(relay, monkeypatch):
 
     sara.claim_work("src/login/session.py", None, TOKEN)
     assert dev.claim_work("src/auth/jwt.py", None, JWT) == {"granted": True}
+
+
+# -- rung 4 under a policy ---------------------------------------------------
+#
+# Rung 4 and the policy engine were built on branches that never saw each other.
+# Rung 4 arrived with its own off switch (RUNG4_ENV); policy arrived with an
+# effect per rung. These pin how the two compose: the flag decides whether rung
+# 4 runs at all, the effect decides how loudly a hit is reported, and neither is
+# allowed to reach the lease table.
+
+
+def declare(path, intent):
+    return {"type": "event", "kind": "touch", "source": "mcp", "verb": "edit",
+            "intent": intent,
+            "region": {"path": path, "symbol": None, "lines": None}}
+
+
+def test_a_rung_4_hit_says_which_layer_set_its_volume(relay, rung4_on):
+    sara = FakeConn("a1", "sara")
+    dev = FakeConn("a2", "dev")
+    relay.join("r1", sara)
+    relay.join("r1", dev)
+
+    relay.handle(sara, declare("src/login/session.py", TOKEN))
+    reply = relay.handle(dev, declare("src/auth/jwt.py", JWT))
+
+    assert reply["type"] == "redundant_work"
+    # Unconfigured, so this is BUILTIN talking: told, but not an interruption.
+    assert reply["effect"] == "context"
+    assert reply["effect_source"] == "builtin"
+
+
+
+def rung4_relay(tmp_path, effect):
+    """A relay whose org policy sets rung 4's volume. The relay only ever loads
+    the org layer, and it loads it once at construction."""
+    from agent_presence.policy import PolicyFile
+
+    path = tmp_path / "org.toml"
+    path.write_text(f'[effects]\nrung4 = "{effect}"\n')
+    clock = VirtualClock(1000.0)
+    return Relay(clock, policy=PolicyFile([("org", path)], clock))
+
+
+def test_policy_can_silence_a_rung_4_hit(rung4_on, tmp_path):
+    relay = rung4_relay(tmp_path, "silent")
+    sara = FakeConn("a1", "sara")
+    dev = FakeConn("a2", "dev")
+    relay.join("r1", sara)
+    relay.join("r1", dev)
+
+    relay.handle(sara, declare("src/login/session.py", TOKEN))
+    reply = relay.handle(dev, declare("src/auth/jwt.py", JWT))
+
+    assert reply["type"] == "ack"
+    assert reply["effect"] == "silent"
+
+
+def test_silencing_rung_4_still_grants_the_lease(rung4_on, tmp_path):
+    """The volume knob is not an arbitration knob. A silenced rung 4 changes
+    what the agent is told and nothing about who holds what."""
+    relay = rung4_relay(tmp_path, "silent")
+    sara = FakeConn("a1", "sara")
+    dev = FakeConn("a2", "dev")
+    relay.join("r1", sara)
+    relay.join("r1", dev)
+
+    relay.handle(sara, claim("src/login/session.py", TOKEN))
+    reply = relay.handle(dev, claim("src/auth/jwt.py", JWT))
+
+    assert reply["granted"] is True
+    assert "redundant" not in reply
+    assert reply.get("rung") != 4
+
+
+def test_a_silent_rung_4_does_not_silence_a_real_lease_conflict(
+    rung4_on, tmp_path
+):
+    """The one that matters. Turning rung 4's *reporting* down must not swallow
+    a rung-3-grade fact underneath it: the text match is an inference about
+    another file, the lease is a fact about this one."""
+    relay = rung4_relay(tmp_path, "silent")
+    sara = FakeConn("a1", "sara")
+    dev = FakeConn("a2", "dev")
+    relay.join("r1", sara)
+    relay.join("r1", dev)
+
+    # sara holds the region dev is about to touch, and separately declared
+    # matching work elsewhere, so classify says 4 while a lease says 3.
+    relay.handle(sara, claim("src/auth/jwt.py", "rewrite the token store"))
+    relay.handle(sara, declare("src/login/session.py", TOKEN))
+
+    reply = relay.handle(dev, declare("src/auth/jwt.py", JWT))
+    assert reply["type"] == "negotiate"

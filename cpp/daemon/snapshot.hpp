@@ -14,7 +14,15 @@ struct Peer {
 
 /// Write atomically: temp file then rename. The statusline reads this file
 /// once a second and must never observe a partial write.
-void write_snapshot(const std::string& path, const std::vector<Peer>& peers);
+///
+/// `problem` is how a policy degradation gets said out loud. Fail open and fail
+/// safe are different things: the daemon keeps running on the last good table
+/// (open), and it is not allowed to do that quietly (safe). The two fields are
+/// written only when there *is* a problem, so a healthy snapshot is byte for
+/// byte what it always was and nothing downstream has to learn a new shape to
+/// keep working.
+void write_snapshot(const std::string& path, const std::vector<Peer>& peers,
+                    const std::string& problem = "");
 
 /// Who is currently doing what, one entry per agent.
 ///

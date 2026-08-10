@@ -6,6 +6,7 @@ from typing import Literal
 
 from .clock import Clock
 from .leases import LeaseRegistry
+from .priority import PRIORITY_NORMAL
 from .types import Region, same_region
 from .wait_die import Decision, resolve
 
@@ -38,6 +39,15 @@ class Brief:
     region: Region
     moves: tuple[Move, ...]
     decision: Decision = "abort"
+    # Both tiers, so a blocked agent can be told *why* it lost rather than only
+    # that it did. Equal at both ends whenever there is no roster.
+    requester_priority: int = PRIORITY_NORMAL
+    holder_priority: int = PRIORITY_NORMAL
+    # When the holder's lease stops being renewable, and who the region is
+    # queued for. None means nobody has asked yet, which cannot happen on a
+    # brief this class built — opening one is an ask.
+    handover_at: float | None = None
+    handover_to: str = ""
 
 
 @dataclass
@@ -58,28 +68,53 @@ class Negotiator:
     def open(
         self, room: str, requester: str, requester_acquired_at: float,
         scope: Region, intent: str,
+        requester_priority: int = PRIORITY_NORMAL,
+        requester_human: str = "",
     ) -> Brief | None:
         """Return a brief if the region is contested, else None.
 
         ``requester_acquired_at`` is the requester's wait-die age. It decides
         whether the brief tells the agent to hold its place and wait or to
         drop everything and retry, so it is never ignored.
+
+        ``requester_priority`` is only a default, and it goes through
+        ``priority_of`` for the same reason ``acquire`` does: an agent that
+        already holds claims is ordered on the tier those claims carry, or the
+        two channels could order one contest two ways.
+
+        Opening a brief *is* an ask, so it starts the holder's clock exactly the
+        way a claim frame does. It has to: this is the path the hook takes, and
+        an agent blocked at rung 3 a hundred times over an hour was, before
+        this, an agent that had never asked for anything.
         """
         held = self._registry.holder_of(room, scope)
         if held is None or held.agent == requester:
             return None
+        tier = self._registry.priority_of(requester, default=requester_priority)
+        self._registry.contend(
+            room, scope, requester, requester_human or requester, tier,
+            requester_acquired_at=requester_acquired_at,
+        )
         return Brief(
             holder_agent=held.agent,
             holder_human=held.human,
             holder_intent=held.intent,
             region=scope,
             moves=MOVES,
-            decision=resolve(requester, requester_acquired_at, held),
+            decision=resolve(requester, requester_acquired_at, held, tier),
+            requester_priority=tier,
+            holder_priority=held.priority,
+            handover_at=held.handover_at,
+            handover_to=(
+                held.handover_winner().agent
+                if held.handover_winner() is not None else ""
+            ),
         )
 
     def apply(
         self, room: str, requester: str, scope: Region, move: str,
         reason: str = "", split_scope: Region | None = None,
+        requester_priority: int = PRIORITY_NORMAL,
     ) -> NegotiationOutcome:
         """Apply a negotiation move.
 
@@ -103,7 +138,9 @@ class Negotiator:
             return NegotiationOutcome(granted=False, action="defer")
 
         if canonical == "SPLIT":
-            return self._split(room, requester, scope, split_scope)
+            return self._split(
+                room, requester, scope, split_scope, requester_priority
+            )
 
         if canonical == "HANDOFF":
             self._registry.release(room, requester, scope)
@@ -121,6 +158,7 @@ class Negotiator:
     def _split(
         self, room: str, requester: str, scope: Region,
         split_scope: Region | None,
+        requester_priority: int = PRIORITY_NORMAL,
     ) -> NegotiationOutcome:
         """Carve off a sub-region that does not touch what the holder has.
 
@@ -150,14 +188,28 @@ class Negotiator:
                     requester, room, _name(target),
                 )
 
-        result = self._registry.acquire(room, requester, requester, target, "split")
+        result = self._registry.acquire(
+            room, requester, requester, target, "split",
+            priority=requester_priority,
+        )
         if not result.ok:
+            # `held_by` is None when the region is not held but reserved: a
+            # handover freed it for somebody else moments ago. Naming the agent
+            # it is being kept for is the useful half either way.
+            blocker = (
+                result.held_by.agent if result.held_by is not None
+                else result.reserved_by.agent
+            )
+            waiting = (
+                "" if result.reserved_by is None
+                else " (reserved for them after a handover; retry shortly)"
+            )
             return NegotiationOutcome(
                 granted=False,
                 action="split_rejected",
                 error=(
                     f"split scope {_name(target)} is already held by "
-                    f"{result.held_by.agent}"
+                    f"{blocker}{waiting}"
                 ),
             )
         return NegotiationOutcome(granted=True, action="split")

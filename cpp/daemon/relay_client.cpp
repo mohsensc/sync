@@ -806,6 +806,17 @@ std::string relay_event_frame(const std::string& redacted_line) {
     return out;
 }
 
+std::string relay_contend_frame(const std::string& path) {
+    if (path.empty()) return {};
+    // A whole-file region, which is what the hook asked about: it names a path
+    // and no symbol. same_region() on the relay treats that as contending with
+    // every symbol in the file, so this finds whichever holder blocked us.
+    std::string out = "{\"type\":\"contend\",\"region\":{\"path\":\"";
+    out += json_escape(path);
+    out += "\",\"symbol\":null,\"lines\":null}}";
+    return out;
+}
+
 // ---------------------------------------------------------------------------
 // RelayClient
 // ---------------------------------------------------------------------------
@@ -828,6 +839,10 @@ RelayClient::~RelayClient() {
 }
 
 void RelayClient::on_peer(std::function<void(const RelayPeer&)> cb) { on_peer_ = std::move(cb); }
+
+void RelayClient::on_policy(std::function<void(const RelayPolicy&)> cb) {
+    on_policy_ = std::move(cb);
+}
 
 void RelayClient::send_text(std::string json) { outbound_.push(std::move(json)); }
 
@@ -1040,7 +1055,28 @@ void RelayClient::send_join() {
     j += json_escape(cfg_.agent);
     j += "\",\"human\":\"";
     j += json_escape(cfg_.human);
-    j += "\"}";
+    j += '"';
+
+    // Only when there is something to say. A daemon that configured nothing
+    // puts exactly the bytes on the wire it always did, and a relay reading an
+    // empty principal would log an unknown-principal line per daemon on the
+    // network for no gain.
+    //
+    // The token goes only where the principal does. On its own it names nobody
+    // and would be a secret sent for no reason.
+    if (!cfg_.principal.empty()) {
+        j += ",\"principal\":\"";
+        j += json_escape(cfg_.principal);
+        j += '"';
+        if (!cfg_.token.empty()) {
+            j += ",\"token\":\"";
+            j += json_escape(cfg_.token);
+            j += '"';
+        }
+    }
+    if (cfg_.unattended) j += ",\"unattended\":true";
+    j += '}';
+
     queue_frame(ws::Opcode::Text, j);
     ++sent_;
 }
@@ -1234,33 +1270,69 @@ void RelayClient::on_text(const std::string& json) {
 
     if (kind == "lease") {
         const std::string state = str_field(j, "state");
-        if (state == "released" || state == "expired") {
+        // `handover` erases like the other two. Falling through to upsert_lease
+        // would be worse than wrong: the frame carries no expires_in_ms, so the
+        // lease that just ended would be re-added at a full TTL and this daemon
+        // would go on blocking edits on it.
+        if (state == "released" || state == "expired" || state == "handover") {
             const auto region = object_get(j, "region");
             if (!region) return;
             const std::string path = str_field(*region, "path");
             if (path.empty()) return;
+            const std::string agent = str_field(j, "agent");
             // Matched on the agent, not just the region — see erase_lease.
-            if (erase_lease(region_key(path, str_field(*region, "symbol")),
-                            str_field(j, "agent"))) {
-                apply_leases();
+            const bool erased =
+                erase_lease(region_key(path, str_field(*region, "symbol")), agent);
+            if (state == "handover" && agent == cfg_.agent) {
+                // It was ours. Remember who has it now: this is the only frame
+                // that ever explains why a region stopped being this agent's,
+                // and the agent is not reading the socket — its hook is.
+                HandoverNote note;
+                note.to = str_field(j, "to");
+                note.to_human = str_field(j, "to_human");
+                note.to_priority = str_field(j, "to_priority");
+                note.at_ms = now_ms();
+                leases_.note_handover(path, std::move(note));
             }
+            if (erased) apply_leases();
             return;
         }
         if (upsert_lease(j, {})) apply_leases();
         return;
     }
 
+    if (kind == "policy") {
+        const auto floor = object_get(j, "floor");
+        // Only a real five-name array moves the floor. A frame we half
+        // understand must leave the floor where it was: a policy frame is the
+        // one thing on this socket that can *lower* what this daemon says, and
+        // "lower it on a malformed frame" is not a behaviour worth having.
+        if (!floor) return;
+        RelayPolicy p;
+        p.floor = kBuiltinFloor;
+        if (!parse_effect_list(*floor, p.floor, nullptr)) return;
+        p.source = str_field(j, "source");
+        p.digest = str_field(j, "digest");
+        if (on_policy_) on_policy_(p);
+        return;
+    }
+
     if (kind == "claim_result") {
         // Granted means the holder is us; refused names whoever beat us to it.
         // Either way the cache learns something true about that region.
-        const std::string holder = bool_field(j, "granted") ? cfg_.agent : str_field(j, "held_by");
+        const bool granted = bool_field(j, "granted");
+        const std::string holder = granted ? cfg_.agent : str_field(j, "held_by");
         if (holder.empty()) return;
-        if (upsert_lease(j, holder)) apply_leases();
+        // A refusal carries both tiers and only one of them belongs to the
+        // holder. See upsert_lease.
+        if (upsert_lease(j, holder, granted ? "priority" : "holder_priority")) {
+            apply_leases();
+        }
         return;
     }
 }
 
-bool RelayClient::upsert_lease(sv entry, const std::string& holder_override) {
+bool RelayClient::upsert_lease(sv entry, const std::string& holder_override, sv priority_key) {
     const auto region = object_get(entry, "region");
     if (!region || region->empty() || region->front() != '{') return false;
 
@@ -1272,6 +1344,7 @@ bool RelayClient::upsert_lease(sv entry, const std::string& holder_override) {
     if (lease.agent.empty()) return false;
     lease.human = str_field(entry, "human");
     lease.intent = str_field(entry, "intent");
+    lease.priority = str_field(entry, priority_key);
 
     // Time remaining, never an absolute timestamp. The relay stamps wall clock
     // seconds and LeaseCache is asked with the daemon's monotonic clock; the
@@ -1285,6 +1358,20 @@ bool RelayClient::upsert_lease(sv entry, const std::string& holder_override) {
     }
     if (ttl < 0) ttl = 0;
     lease.expires_at_ms = now_ms() + ttl;
+
+    // Same rule for the handover deadline: a duration on the wire, an absolute
+    // monotonic instant here. Absent means nobody has asked for the region,
+    // which is the common case and stays at -1.
+    if (const auto ms = num_field(entry, "handover_in_ms")) {
+        const long long left = static_cast<long long>(*ms);
+        lease.handover_at_ms = now_ms() + (left > 0 ? left : 0);
+        lease.handover_to = str_field(entry, "handover_to");
+        lease.handover_to_human = str_field(entry, "handover_to_human");
+        lease.handover_to_priority = str_field(entry, "handover_to_priority");
+    }
+    if (const auto n = num_field(entry, "waiting")) {
+        lease.waiting = static_cast<int>(*n);
+    }
 
     held_[region_key(path, str_field(*region, "symbol"))] = std::move(lease);
     return true;

@@ -9,6 +9,8 @@ dependencies = ["websockets>=13.0", "mcp>=2.0.0"]
 [project.scripts]
 agent-presence-relay = "agent_presence.serve:main"
 agent-presence-mcp = "agent_presence.mcp_server:main"
+# Short on purpose. It gets typed mid-session, next to git.
+ap = "agent_presence.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "hypothesis>=6.100", "pytest-asyncio>=0.24"]
