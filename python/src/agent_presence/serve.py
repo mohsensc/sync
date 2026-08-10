@@ -205,6 +205,10 @@ async def _session(ws, relay: Relay) -> None:
                     # back on the connection when it does, so a rename attempt
                     # leaves nothing behind on this side either. The grant is
                     # latched by the same call and by the same rule.
+                    # A refusal is answered, not dropped: the relay puts a
+                    # `join_refused` frame on the socket saying which rule
+                    # refused it and what to do instead. Silence left the client
+                    # blocked on a lease snapshot that was never coming.
                     if not relay.join(room, conn):
                         log.debug("join refused for room %s; frame dropped", room)
                     # The relay has hashed and compared it. Keeping a bearer

@@ -20,6 +20,20 @@ Four keys are allowed to be new, and no others:
 With no policy.toml and no principals.toml on the search path all four sit at
 their defaults — `silent`/`context`/`deny` straight off BUILTIN, `builtin` as
 the source, `normal` at both ends of every contest.
+
+One class of *frame* is allowed to be new, and it is not a policy frame. A
+contended lease now carries a deadline (leases.py, HANDOVER_GRACE_S), and the
+holder is told about it on the ask rather than at its next heartbeat, because
+the notice is only worth anything while there is still time to act on it. So a
+holder picks up one extra `lease` frame per contention. That is a deliberate
+change in what an unconfigured relay puts on the wire, and pretending otherwise
+would mean either dropping the notice or letting this file quietly stop
+checking frame counts.
+
+It is fenced rather than waved through: an inserted frame has to be a `lease`
+frame carrying handover fields and naming the holder it is warning, the
+handover keys may appear on nothing else, and both the new fields and the new
+frames have to actually turn up or the test fails for the opposite reason.
 """
 
 from __future__ import annotations
@@ -38,6 +52,32 @@ from golden_scenario import run  # noqa: E402
 ALLOWED_ADDITIONS = frozenset(
     {"effect", "effect_source", "priority", "holder_priority"}
 )
+
+# The fields a handover notice carries, and the only fields whose presence makes
+# a whole frame skippable. Kept apart from ALLOWED_ADDITIONS so neither set can
+# quietly cover for the other.
+HANDOVER_KEYS = frozenset({
+    "handover_in_ms", "handover_at", "handover_to", "handover_to_human",
+    "handover_to_priority", "waiting",
+    # The other half of the same fact, on the answer the asker gets: when to
+    # come back, and how long the region is kept once you do.
+    "retry_in_ms", "reserved_for_ms",
+})
+
+
+def _is_handover_notice(frame) -> bool:
+    """A push to a holder saying its lease now has a deadline.
+
+    Narrow on purpose. Only a live `lease` frame qualifies, and only one that
+    actually carries the handover fields, so this cannot grow into a hole that
+    swallows an unrelated new frame somebody adds later.
+    """
+    return (
+        isinstance(frame, dict)
+        and frame.get("type") == "lease"
+        and frame.get("state") == "held"
+        and bool(HANDOVER_KEYS & set(frame))
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -64,45 +104,75 @@ def _baseline() -> dict:
     return json.loads((HELPERS / "golden_base.json").read_text())
 
 
-def _compare(old, new, where: str) -> set[str]:
+def _compare(old, new, where: str, notices: list) -> set[str]:
     """Walk both sides together. Returns every key that is new."""
     added: set[str] = set()
     assert type(old) is type(new), f"{where}: {type(old)} became {type(new)}"
 
     if isinstance(old, list):
-        assert len(old) == len(new), (
-            f"{where}: {len(old)} frames became {len(new)}"
+        # Handover notices are the one permitted insertion. Everything else
+        # still has to line up one for one, in order, exactly as it did.
+        kept = []
+        for frame in new:
+            (notices if _is_handover_notice(frame) else kept).append(frame)
+        assert len(old) == len(kept), (
+            f"{where}: {len(old)} frames became {len(kept)} "
+            f"(setting aside {len(notices)} handover notices)"
         )
-        for index, (a, b) in enumerate(zip(old, new)):
-            added |= _compare(a, b, f"{where}[{index}]")
+        for index, (a, b) in enumerate(zip(old, kept)):
+            added |= _compare(a, b, f"{where}[{index}]", notices)
         return added
 
     if isinstance(old, dict):
         gone = set(old) - set(new)
         assert not gone, f"{where}: fields disappeared: {sorted(gone)}"
         new_keys = set(new) - set(old)
-        assert new_keys <= ALLOWED_ADDITIONS, (
-            f"{where}: undocumented new fields {sorted(new_keys - ALLOWED_ADDITIONS)}"
+        allowed = ALLOWED_ADDITIONS | HANDOVER_KEYS
+        assert new_keys <= allowed, (
+            f"{where}: undocumented new fields {sorted(new_keys - allowed)}"
         )
         added |= new_keys
         for key in old:
-            added |= _compare(old[key], new[key], f"{where}.{key}")
+            added |= _compare(old[key], new[key], f"{where}.{key}", notices)
         return added
 
     assert old == new, f"{where}: {old!r} became {new!r}"
     return added
 
 
-def test_every_relay_visible_frame_is_what_it_was_before_policy_existed():
-    added = set()
+def _walk() -> tuple[set[str], list[dict]]:
+    added, notices = set(), []
     baseline, current = _baseline(), run()
     assert set(baseline) == set(current)
     for section in baseline:
-        added |= _compare(baseline[section], current[section], section)
+        added |= _compare(baseline[section], current[section], section, notices)
+    return added, notices
+
+
+def test_every_relay_visible_frame_is_what_it_was_before_policy_existed():
+    added, notices = _walk()
     # Not just "nothing broke": the additions have to have actually landed, or
     # this test would pass just as happily against a policy engine that was
     # never wired in at all.
-    assert added == ALLOWED_ADDITIONS
+    assert added >= ALLOWED_ADDITIONS
+    assert added - ALLOWED_ADDITIONS <= HANDOVER_KEYS
+    # Same again for the frames. No notice at all would mean holders have gone
+    # back to finding out they lost a region after the fact.
+    assert notices, "no handover notice was pushed to any holder"
+
+
+def test_the_one_new_frame_is_a_holder_hearing_its_lease_has_a_deadline():
+    _added, notices = _walk()
+    for frame in notices:
+        # Addressed to the holder being warned, not to the agent that asked.
+        assert frame["agent"] == "a1", frame
+        # And it says the three things that make the warning worth reading:
+        # when the region goes, who it goes to, how many are queued.
+        assert frame["handover_in_ms"] > 0, frame
+        assert frame["handover_to"] == "a2", frame
+        assert frame["handover_to_human"] == "dev", frame
+        assert frame["handover_to_priority"] == "normal", frame
+        assert frame["waiting"] >= 1, frame
 
 
 def test_the_added_fields_all_sit_at_their_documented_defaults():
