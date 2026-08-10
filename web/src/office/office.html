@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Agent Presence — the office</title>
+<style>
+  html,body{margin:0;height:100%;background:#F0ECE6;overflow:hidden;
+    font:14px/1.5 ui-sans-serif,-apple-system,Segoe UI,sans-serif;color:#35455C}
+  #c{display:block;width:100%;height:100%;cursor:grab}
+  #c:active{cursor:grabbing}
+  #hud{position:fixed;left:18px;top:16px;background:#fffdfaee;border:1px solid #C3B39B;
+    border-radius:10px;padding:12px 14px;max-width:290px;box-shadow:0 6px 24px #4a1f3d18}
+  #hud h1{font-size:15px;margin:0 0 3px;letter-spacing:-.01em}
+  #hud p{margin:0 0 10px;font-size:12px;color:#6b5f56}
+  .row{display:flex;gap:6px;flex-wrap:wrap}
+  button{font:inherit;font-size:12px;padding:5px 10px;border-radius:6px;
+    border:1px solid #C3B39B;background:#fff;color:#35455C;cursor:pointer}
+  button:hover{background:#E9E0CE}
+  button[aria-pressed="true"]{background:#35455C;color:#F0ECE6;border-color:#35455C}
+  #log{position:fixed;left:18px;bottom:16px;font:11px ui-monospace,monospace;color:#6b5f56;
+    background:#fffdfacc;border-radius:8px;padding:7px 10px;max-width:60vw}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">
+  <h1>The office</h1>
+  <p>Every object is a generated clay mesh. Drag to orbit, scroll to zoom.</p>
+  <div class="row">
+    <button id="bSpin" aria-pressed="true">Auto-rotate</button>
+    <button id="bTop" aria-pressed="false">Top down</button>
+    <button id="bWire" aria-pressed="false">Wireframe</button>
+  </div>
+</div>
+<div id="log">loading…</div>
+
+<script type="importmap">
+{"imports":{"three":"./vendor/three.module.js","three/addons/":"./vendor/addons/"}}
+</script>
+<script type="module">
+import * as THREE from 'three'
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
+import { clone as skinnedClone } from 'three/addons/utils/SkeletonUtils.js'
+
+const P = { cream:0xF0ECE6, sand:0xE9E0CE, taupe:0xC3B39B, sage:0xE5E1D2, butter:0xF7DFAF,
+            mustard:0xD6B45C, caramel:0xC0762A, coffee:0xB0674F, terracotta:0xD9714F,
+            salmon:0xE8946C, rose:0xD8BDB6, mauve:0xA5738C, slate:0x8A94A3, navy:0x35455C }
+
+const canvas = document.getElementById('c')
+const logEl = document.getElementById('log')
+const renderer = new THREE.WebGLRenderer({ canvas, antialias:true })
+renderer.setPixelRatio(Math.min(devicePixelRatio,2))
+renderer.shadowMap.enabled = true
+renderer.shadowMap.type = THREE.PCFSoftShadowMap
+
+const scene = new THREE.Scene()
+scene.background = new THREE.Color(P.cream)
+scene.fog = new THREE.Fog(P.cream, 26, 52)
+const camera = new THREE.PerspectiveCamera(34, 1, 0.1, 200)
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.95))
+const key = new THREE.DirectionalLight(0xfff0d8, 2.0)
+key.position.set(9, 15, 8)
+key.castShadow = true
+key.shadow.mapSize.set(2048,2048)
+const S = 16
+Object.assign(key.shadow.camera, { left:-S, right:S, top:S, bottom:-S, near:1, far:60 })
+scene.add(key)
+const fill = new THREE.DirectionalLight(0xd6e0f0, 0.5); fill.position.set(-8,6,-6); scene.add(fill)
+
+// ---- room -------------------------------------------------------------
+const W = 20, D = 15, WALL = 4
+const matFloor = new THREE.MeshStandardMaterial({ color:P.sand, roughness:1 })
+const matWall  = new THREE.MeshStandardMaterial({ color:P.cream, roughness:1 })
+const floor = new THREE.Mesh(new THREE.BoxGeometry(W, 0.4, D), matFloor)
+floor.position.set(0,-0.2,0); floor.receiveShadow = true; scene.add(floor)
+const rug = new THREE.Mesh(new THREE.CylinderGeometry(3.4,3.4,0.06,48),
+  new THREE.MeshStandardMaterial({ color:P.rose, roughness:1 }))
+rug.position.set(0.5,0.03,1.6); rug.receiveShadow = true; scene.add(rug)
+const back = new THREE.Mesh(new THREE.BoxGeometry(W,WALL,0.35), matWall)
+back.position.set(0,WALL/2,-D/2); back.receiveShadow = true; scene.add(back)
+const left = new THREE.Mesh(new THREE.BoxGeometry(0.35,WALL,D), matWall)
+left.position.set(-W/2,WALL/2,0); left.receiveShadow = true; scene.add(left)
+
+// ---- asset placement --------------------------------------------------
+// Each prop is normalised to a real-world height, then grounded.
+const PLAN = [
+  { url:'glb/vault-door.glb',   h:2.6,  pos:[-6.4,0,-7.0], rot:0            },
+  { url:'glb/phone-wall.glb',   h:2.0,  pos:[ 5.6,1.1,-7.1], rot:0, air:true },
+  { url:'glb/cable-ball.glb',   h:1.1,  pos:[-8.0,0, 5.2], rot:0.6          },
+  { url:'glb/tortoise-v2.glb',  h:0.55, pos:[ 2.2,0, 4.6], rot:-0.9         },
+  // desks
+  { url:'glb/desk-tripo-12k.glb', h:0.78, pos:[-3.2,0,-2.4], rot:0 },
+  { url:'glb/desk-tripo-12k.glb', h:0.78, pos:[ 0.4,0,-2.4], rot:0 },
+  { url:'glb/desk-tripo-12k.glb', h:0.78, pos:[ 4.0,0,-2.4], rot:0 },
+  { url:'glb/desk-tripo-12k.glb', h:0.78, pos:[-3.2,0, 1.4], rot:Math.PI },
+  { url:'glb/desk-tripo-12k.glb', h:0.78, pos:[ 0.4,0, 1.4], rot:Math.PI },
+  { url:'glb/desk-tripo-12k.glb', h:0.78, pos:[ 4.0,0, 1.4], rot:Math.PI },
+  // reception
+  { url:'glb/desk-tripo-12k.glb', h:0.95, pos:[-7.2,0, 1.0], rot:Math.PI/2, sx:1.7 },
+  // cups on desks
+  { url:'glb/coffee-cup-v2.glb', h:0.14, pos:[-3.0,0.78,-2.2], rot:0.4 },
+  { url:'glb/coffee-cup-v2.glb', h:0.14, pos:[ 0.7,0.78,-2.5], rot:1.1 },
+  { url:'glb/coffee-cup-v2.glb', h:0.14, pos:[ 3.8,0.78, 1.5], rot:2.2 },
+  { url:'glb/coffee-cup-v2.glb', h:0.14, pos:[-7.4,0.95, 1.3], rot:0.2 },
+]
+// characters: one rigged mesh, placed around the room
+const PEOPLE = [
+  { pos:[-3.2,0,-1.2], rot:0 }, { pos:[ 0.4,0,-1.2], rot:0.1 },
+  { pos:[ 4.0,0,-1.2], rot:-0.2 }, { pos:[-3.2,0, 0.2], rot:Math.PI },
+  { pos:[ 0.4,0, 0.2], rot:Math.PI-0.15 }, { pos:[-6.2,0, 1.0], rot:Math.PI/2 },
+  { pos:[-5.0,0,-5.2], rot:-0.5 }, { pos:[ 6.4,0,-5.0], rot:0.8 },
+]
+
+const loader = new GLTFLoader()
+const meshes = []
+let pending = 0, done = 0
+
+function place(gltf, spec) {
+  const o = gltf.scene
+  // A freshly cloned skeleton has stale world matrices, so Box3 reads a
+  // degenerate height and h/size.y explodes. Update before measuring.
+  o.updateMatrixWorld(true)
+  const box = new THREE.Box3().setFromObject(o)
+  const size = box.getSize(new THREE.Vector3())
+  const c = box.getCenter(new THREE.Vector3())
+  const s = spec.h / Math.max(size.y, 1e-4)
+  const g = new THREE.Group()
+  o.position.set(-c.x, -box.min.y, -c.z)
+  o.scale.setScalar(1)
+  g.add(o); g.scale.setScalar(s)
+  if (spec.sx) o.scale.x = spec.sx
+  g.position.set(spec.pos[0], spec.pos[1], spec.pos[2])
+  g.rotation.y = spec.rot || 0
+  o.traverse(n => { if (n.isMesh) { n.castShadow = true; n.receiveShadow = true; meshes.push(n) } })
+  scene.add(g)
+  return g
+}
+
+function load(spec) {
+  pending++
+  loader.load(spec.url, gltf => { place(gltf, spec); done++; tally() },
+    undefined, e => { done++; console.warn('failed', spec.url, e); tally() })
+}
+function tally(){ logEl.textContent = `${done}/${pending} objects loaded` }
+
+PLAN.forEach(load)
+// people share one download
+pending++
+loader.load('glb/character.glb', gltf => {
+  PEOPLE.forEach((p,i) => {
+    const clone = skinnedClone(gltf.scene)
+    place({ scene: clone }, { h:1.68, pos:p.pos, rot:p.rot })
+  })
+  done++; tally()
+}, undefined, () => { done++; tally() })
+
+// ---- camera / interaction --------------------------------------------
+let yaw = 0.75, pitch = 0.42, dist = 1, spin = true, top = false, wire = false
+// The room is a cutaway, open on +x and +z only. Orbiting past these puts the
+// camera behind a wall and the view goes blank, so the arc is clamped.
+const YAW_MIN = 0.18, YAW_MAX = 1.39
+let spinDir = 1
+const target = new THREE.Vector3(0, 1.1, -0.4)
+const RADIUS = 21
+
+let drag=false, px=0, py=0
+canvas.addEventListener('pointerdown', e => { drag=true; px=e.clientX; py=e.clientY; spin=false; setB(bSpin,false) })
+addEventListener('pointerup', () => drag=false)
+addEventListener('pointermove', e => {
+  if(!drag) return
+  yaw = Math.max(YAW_MIN, Math.min(YAW_MAX, yaw - (e.clientX-px)*0.006))
+  pitch = Math.max(0.08, Math.min(1.45, pitch + (e.clientY-py)*0.005))
+  px=e.clientX; py=e.clientY
+})
+canvas.addEventListener('wheel', e => { e.preventDefault()
+  dist = Math.max(0.35, Math.min(2.2, dist + e.deltaY*0.0012)) }, {passive:false})
+
+const bSpin=document.getElementById('bSpin'), bTop=document.getElementById('bTop'), bWire=document.getElementById('bWire')
+const setB=(b,v)=>b.setAttribute('aria-pressed',String(v))
+bSpin.onclick=()=>{spin=!spin; setB(bSpin,spin)}
+bTop.onclick=()=>{top=!top; setB(bTop,top); pitch = top?1.35:0.42; dist = top?1.15:1}
+bWire.onclick=()=>{wire=!wire; setB(bWire,wire); meshes.forEach(m=>{m.material.wireframe=wire})}
+
+function resize(){
+  const w=canvas.clientWidth,h=canvas.clientHeight
+  if(canvas.width!==w||canvas.height!==h){
+    renderer.setSize(w,h,false); camera.aspect=w/h; camera.updateProjectionMatrix() }
+}
+window.__scene = scene; window.__cam = camera;
+function tick(){
+  resize()
+  if(spin){ yaw += 0.0016*spinDir
+    if(yaw>YAW_MAX){ yaw=YAW_MAX; spinDir=-1 }
+    if(yaw<YAW_MIN){ yaw=YAW_MIN; spinDir=1 } }
+  const r = RADIUS*dist, cp = Math.cos(pitch)
+  camera.position.set(target.x + Math.sin(yaw)*r*cp,
+                      target.y + Math.sin(pitch)*r,
+                      target.z + Math.cos(yaw)*r*cp)
+  camera.lookAt(target)
+  renderer.render(scene,camera)
+  requestAnimationFrame(tick)
+}
+tick()
+</script>
+</body>
+</html>
