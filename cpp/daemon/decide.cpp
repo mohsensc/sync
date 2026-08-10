@@ -52,6 +52,15 @@ std::string open_response(int rung, Effect effect) {
     return out;
 }
 
+/// A region this agent lost, as fields. Only ever recorded for handovers away
+/// from *us* (see RelayClient), so its presence is already the whole claim.
+void append_lost(std::string& out, const HandoverNote& lost, long long now_ms) {
+    append_field(out, "lost_to", lost.to_human.empty() ? lost.to : lost.to_human);
+    if (!lost.to.empty()) append_field(out, "lost_to_agent", lost.to);
+    if (!lost.to_priority.empty()) append_field(out, "lost_to_priority", lost.to_priority);
+    append_number(out, "lost_ms_ago", std::max(0LL, now_ms - lost.at_ms));
+}
+
 /// The two things an agent that is *not* blocked may still need to hear: that a
 /// region it holds has a deadline on it, and that a region it held has gone.
 ///
@@ -82,12 +91,7 @@ std::string ambient_response(const LeaseCache& leases, const PolicyCache& policy
     }
 
     if (const auto lost = leases.handover_note(path, now_ms, kHandoverNoteMs)) {
-        append_field(out, "lost_to", lost->to_human.empty() ? lost->to : lost->to_human);
-        if (!lost->to.empty()) append_field(out, "lost_to_agent", lost->to);
-        if (!lost->to_priority.empty()) {
-            append_field(out, "lost_to_priority", lost->to_priority);
-        }
-        append_number(out, "lost_ms_ago", std::max(0LL, now_ms - lost->at_ms));
+        append_lost(out, *lost, now_ms);
         out += '}';
         return out;
     }
@@ -140,6 +144,14 @@ std::string decide_response(const std::string& request, const LeaseCache& leases
         // right instruction is "wait, it is yours" or "wait, and you are second".
         append_field(out, "handover_to", held->handover_to);
         if (held->waiting > 0) append_number(out, "waiting", held->waiting);
+    }
+
+    // And if this agent is blocked on a region it used to hold, the block and
+    // the loss are the same event. Saying only the first leaves the agent
+    // reading "sara is editing pay.py" with no idea that it was its own region
+    // ten seconds ago, which is the moment the whole thing feels arbitrary.
+    if (const auto lost = leases.handover_note(path, now_ms, kHandoverNoteMs)) {
+        append_lost(out, *lost, now_ms);
     }
     out += '}';
     return out;

@@ -274,3 +274,42 @@ TEST_CASE("durations read as a person would say them") {
     d.expires_in_ms = 863'000;
     REQUIRE(has(ap::hook_output(d, kPath), "15 minutes"));
 }
+
+TEST_CASE("a blocked agent that lost the region is told both halves") {
+    // Told only that somebody else is editing it, an agent reads that about a
+    // region that was its own a minute ago and cannot connect the two events.
+    LeaseCache c;
+    c.replace({{kKey, held_by("a2", 90'000)}});
+    c.note_handover(kPath, HandoverNote{"a2", "kim", "critical", 1'000});
+
+    const std::string out = ap::decide_response(ask("a1"), c, 41'000);
+    REQUIRE(has(out, R"("rung":3)"));
+    REQUIRE(has(out, R"("lost_to":"kim")"));
+    REQUIRE(has(out, R"("lost_ms_ago":40000)"));
+
+    Decision d = ap::parse_decision(out);
+    d.agent = "a1";
+    const std::string text = ap::hook_output(d, kPath);
+    REQUIRE(has(text, "This was your region"));
+    REQUIRE(has(text, "40 seconds ago"));
+    REQUIRE(has(text, "reverted"));
+    REQUIRE(has(text, R"("permissionDecision":"deny")"));
+}
+
+TEST_CASE("the agent at the front of the queue is not told to wait twice") {
+    Decision d;
+    d.rung = 3;
+    d.agent = "a2";
+    d.holder = "a1";
+    d.human = "sara";
+    d.handover_in_ms = 60'000;
+    d.handover_to = "a2";
+    const std::string out = ap::hook_output(d, kPath);
+
+    REQUIRE(has(out, "do not poll"));
+    // The generic list still offers the other three ways out, but not the one
+    // the sentence above just gave a deadline for.
+    REQUIRE_FALSE(has(out, "wait and retry"));
+    REQUIRE(has(out, "disjoint"));
+    REQUIRE(has(out, "proceed anyway"));
+}

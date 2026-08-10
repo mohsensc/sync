@@ -526,6 +526,21 @@ std::string blocked_message(const Decision& d, const std::string& where) {
     m += ". This edit is blocked by agent presence so the two of you do not overwrite each "
          "other.";
 
+    if (!d.lost_to.empty()) {
+        // The block and the loss are one event. Told only the first, the agent
+        // is reading "somebody else is editing this" about a region that was
+        // its own a minute ago, which is the moment the whole thing stops
+        // making sense from the inside.
+        m += " This was your region: it passed to them";
+        if (d.lost_ms_ago > 0) {
+            m += " ";
+            m += humanise_ms(d.lost_ms_ago);
+            m += " ago";
+        }
+        m += " when your lease reached the deadline you were given. Nothing you had already "
+             "written was reverted.";
+    }
+
     const bool queued_for_me = !d.handover_to.empty() && d.handover_to == d.agent;
     if (d.handover_in_ms >= 0 && queued_for_me) {
         m += " Their lease stops being renewable in ";
@@ -538,8 +553,12 @@ std::string blocked_message(const Decision& d, const std::string& where) {
             m += d.waiting - 1 == 1 ? "" : "s";
             m += " waiting";
         }
-        m += ". Retry this edit once, then; do not poll.";
-    } else if (d.handover_in_ms >= 0 && !d.handover_to.empty()) {
+        m += ". Retry this edit once, then; do not poll. Or, before that: take a disjoint part "
+             "of the file, hand your requirement to them, or say plainly why your change is "
+             "independent and proceed anyway.";
+        return m;  // the wait is already answered; do not repeat it below
+    }
+    if (d.handover_in_ms >= 0 && !d.handover_to.empty()) {
         m += " The region is queued for ";
         m += d.handover_to_human.empty() ? d.handover_to : d.handover_to_human;
         m += tier_of(d.handover_to_priority);
