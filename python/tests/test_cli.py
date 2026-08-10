@@ -566,7 +566,9 @@ def test_doctor_passes_once_everything_is_in_place(box, listening):
 def test_doctor_notices_a_cache_that_is_one_edit_behind(box, listening):
     box.snapshot.write_text('{"peers":[]}')
     assert box.ap("policy", "compile").returncode == 0
-    assert box.ap("policy", "set", "rung3=ask").returncode == 0
+    # Edited in $EDITOR rather than through `ap policy set`, which recompiles
+    # on its way out. This is the way a cache actually goes stale.
+    box.write_user_policy('schema = 1\n[effects]\nrung3 = "ask"\n')
     done = box.ap("doctor")
     assert done.returncode == 1
     assert "one edit behind" in done.stdout
@@ -1033,5 +1035,39 @@ def test_doctor_will_not_pass_a_cache_that_was_edited_by_hand(box, listening):
     done = box.ap("doctor")
     assert done.returncode == 1
     assert "edited by hand" in done.stdout
+
+
+def test_set_makes_now_mean_now(box):
+    assert box.ap("policy", "compile").returncode == 0
+    assert json.loads(box.cache.read_text())["table"][3] == "deny"
+
+    done = box.ap("policy", "set", "rung3=ask")
+    assert done.returncode == 0, done.stderr
+    assert "now:" in done.stdout
+    # The TOML is not what the daemon reads. Saying "now" in the present tense
+    # while the daemon carries on off a cache nobody rewrote is the lie.
+    assert json.loads(box.cache.read_text())["table"][3] == "ask"
+    assert str(box.cache) in done.stdout
+
+
+def test_unset_makes_now_mean_now_as_well(box):
+    assert box.ap("policy", "set", "rung3=ask").returncode == 0
+    assert json.loads(box.cache.read_text())["table"][3] == "ask"
+    assert box.ap("policy", "unset", "rung3").returncode == 0
+    assert json.loads(box.cache.read_text())["table"][3] == "deny"
+
+
+def test_set_exits_nonzero_when_it_cannot_apply_what_it_wrote(box):
+    box.run.chmod(0o500)
+    try:
+        done = box.ap("policy", "set", "rung3=ask")
+    finally:
+        box.run.chmod(0o700)
+
+    assert done.returncode == 1
+    assert "still on the old table" in done.stdout
+    # The edit landed. It is the applying that failed, and the exit code is
+    # about the behaviour, not the bytes.
+    assert 'rung3 = "ask"' in box.user_policy.read_text()
 
 

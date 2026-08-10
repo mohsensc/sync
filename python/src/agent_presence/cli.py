@@ -740,6 +740,43 @@ def _writable_layer(ctx: Context, name: str) -> Path | None:
     return None
 
 
+def _apply(ctx: Context) -> int:
+    """Make the edit that just landed on disk true of the running daemon.
+
+    `set` and `unset` write a TOML file, and the daemon does not read TOML — it
+    reads the compiled cache. So `now: ... resolves to ask` was a statement
+    about a file, printed in the present tense, while the daemon went on
+    denying off a cache nobody had rewritten. Two ways to fix that; this is the
+    one that keeps the promise on the front of `ap --help`, that saved is
+    applied and nothing needs restarting.
+
+    A failed rewrite is a failure of the command, even though the edit landed:
+    the point of the command is the behaviour, not the bytes.
+    """
+    out, ink = ctx.out, ctx.out.ink
+    dest = policy_mod.runtime_cache_path(ctx.env)
+    blob = policy_mod.compile_runtime(
+        ctx.client_policy(), unattended=ctx.unattended()
+    )
+    try:
+        policy_mod.write_runtime_cache(dest, blob)
+    except OSError as exc:
+        out.say(ink.red(
+            f"  but the daemon is still on the old table: cannot write "
+            f"{dest}: {exc}"
+        ))
+        return PROBLEM
+    out.say(ink.dim(f"  applied: {dest}"))
+    return OK
+
+
+def _now_and_apply(ctx: Context, rung: int, path: str | None) -> int:
+    """What the rung resolves to now, and then make "now" true."""
+    after = ctx.policy().resolve(rung, path or "", unattended=ctx.unattended())
+    ctx.out.say(ctx.out.ink.dim(f"  now: {after.reason()}"))
+    return _apply(ctx)
+
+
 def cmd_policy_set(ctx: Context) -> int:
     args, out = ctx.args, ctx.out
     key, sep, value = args.assignment.partition("=")
@@ -758,7 +795,7 @@ def cmd_policy_set(ctx: Context) -> int:
             return USAGE
         what = policy_edit.set_mode(path, value)
         out.say(f"{what} mode = {value} in {path}")
-        return OK
+        return _apply(ctx)
 
     try:
         rung = _rung_number(key)
@@ -782,9 +819,7 @@ def cmd_policy_set(ctx: Context) -> int:
     scope = f"{args.path} " if args.path else ""
     kind = "floor " if args.floor else ""
     out.say(f"{what} {kind}{scope}rung{rung} = {value} in {path}")
-    after = ctx.policy().resolve(rung, args.path or "")
-    out.say(ctx.out.ink.dim(f"  now: {after.reason()}"))
-    return OK
+    return _now_and_apply(ctx, rung, args.path)
 
 
 def cmd_policy_unset(ctx: Context) -> int:
@@ -804,9 +839,7 @@ def cmd_policy_unset(ctx: Context) -> int:
         out.say(f"removed rung{rung} from {path}")
     else:
         out.say(f"nothing to remove: rung{rung} is not set in {path}")
-    after = ctx.policy().resolve(rung, args.path or "")
-    out.say(ctx.out.ink.dim(f"  now: {after.reason()}"))
-    return OK
+    return _now_and_apply(ctx, rung, args.path)
 
 
 # -- policy check -----------------------------------------------------------
