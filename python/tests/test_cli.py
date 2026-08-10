@@ -28,7 +28,7 @@ PYTHON_ROOT = Path(__file__).resolve().parents[1]
 BIN_DIR = Path(sys.executable).parent
 TIMEOUT_S = 60.0
 
-BUILTIN_TABLE = ["silent", "notify", "context", "deny", "silent"]
+BUILTIN_TABLE = ["silent", "notify", "context", "deny", "context"]
 
 
 class Box:
@@ -452,7 +452,7 @@ def test_compile_writes_the_blob_the_daemon_reads(box):
     assert str(box.cache) in done.stdout
 
     blob = json.loads(box.cache.read_text())
-    assert blob["table"] == ["silent", "notify", "context", "ask", "silent"]
+    assert blob["table"] == ["silent", "notify", "context", "ask", "context"]
     assert blob["floor"][3] == "notify"
     assert blob["schema"] == 1
 

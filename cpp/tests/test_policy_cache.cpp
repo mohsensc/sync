@@ -61,7 +61,7 @@ TEST_CASE("an untouched cache is the compiled-in table") {
     REQUIRE(p.effect_for(1) == ap::Effect::Notify);
     REQUIRE(p.effect_for(2) == ap::Effect::Context);
     REQUIRE(p.effect_for(3) == ap::Effect::Deny);
-    REQUIRE(p.effect_for(4) == ap::Effect::Silent);
+    REQUIRE(p.effect_for(4) == ap::Effect::Context);
     REQUIRE_FALSE(p.degraded());
 }
 
@@ -262,7 +262,7 @@ TEST_CASE("refresh reports whether the table moved, not whether a file was read"
     // use the return value to decide whether to rewrite the snapshot; "the file
     // was read" is not a reason to do that.
     Scratch s("nomove");
-    write(s.path, blob(R"(["silent","notify","context","deny","silent"])"));
+    write(s.path, blob(R"(["silent","notify","context","deny","context"])"));
 
     ap::PolicyCache p;
     REQUIRE_FALSE(p.refresh(s.path, tick(1)));

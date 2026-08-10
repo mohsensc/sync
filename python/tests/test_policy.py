@@ -49,7 +49,7 @@ def test_an_empty_stack_resolves_to_builtin_on_every_rung():
 
 
 def test_the_shipped_defaults_are_the_documented_ones():
-    assert BUILTIN.names() == ["silent", "notify", "context", "deny", "silent"]
+    assert BUILTIN.names() == ["silent", "notify", "context", "deny", "context"]
     assert BUILTIN_FLOOR.names() == [
         "silent", "silent", "silent", "notify", "silent"
     ]
@@ -62,12 +62,21 @@ def test_an_empty_config_file_changes_nothing():
     assert not policy.degraded
 
 
-def test_rung_4_is_silent_by_default_which_is_the_off_switch():
-    # A silent rung 4 also short-circuits the similarity computation. One
-    # concept, not a flag plus an effect. Rung 4 is unimplemented, so this
-    # ships as "still off".
-    assert BUILTIN[4] == "silent"
-    assert build_policy([builtin_layer()]).resolve(4, ANY).effect == "silent"
+def test_rung_4_defaults_to_context_because_the_env_flag_is_the_off_switch():
+    # Rung 4 shipped (AGENT_PRESENCE_RUNG4) after this table was written, and it
+    # arrived with its own off switch. Two off switches would mean setting the
+    # flag and getting silence with nothing to say why, so the flag decides
+    # whether rung 4 runs and the effect decides how loudly a hit is reported.
+    assert BUILTIN[4] == "context"
+    assert build_policy([builtin_layer()]).resolve(4, ANY).effect == "context"
+
+
+def test_rung_4_can_still_be_silenced_by_policy():
+    # The volume knob has to keep working in both directions: `context` is the
+    # default, not a floor. BUILTIN_FLOOR leaves rung 4 at `silent`, so a room
+    # that wants the matching off entirely can still say so.
+    policy = layers(("user", '[effects]\nrung4 = "silent"\n'))
+    assert policy.resolve(4, ANY).effect == "silent"
 
 
 # -- every documented bad input ----------------------------------------------
@@ -468,10 +477,10 @@ def test_table_for_agrees_with_resolve_on_every_rung():
 def test_effect_tables_clamp_elementwise():
     low = EffectTable(("silent",) * 5)
     assert low.raised_to(BUILTIN_FLOOR).names() == BUILTIN_FLOOR.names()
-    # A cap only pulls down what is above it. rung 0 and rung 4 are already
-    # quieter than notify and stay where they are.
+    # A cap only pulls down what is above it. rung 0 is already quieter than
+    # notify and stays where it is; rung 4 sits at context and comes down.
     assert BUILTIN.capped_at("notify").names() == [
-        "silent", "notify", "notify", "notify", "silent"
+        "silent", "notify", "notify", "notify", "notify"
     ]
     assert EffectTable(("deny",) * 5).capped_at("silent").names() == ["silent"] * 5
 

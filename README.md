@@ -41,12 +41,22 @@ gets reviewed in a PR. `ap principals add sara --attended elevated` prints a
 token once; put it in `~/.config/agent-presence/token` and `presenced` presents
 it on join. Seniority among people playing along, not a security boundary.
 
-Tests: `cd python && .venv/bin/python -m pytest` (bare `pytest` misses `sim/`);
-`cmake -S cpp -B cpp/build && cmake --build cpp/build && ctest --test-dir
-cpp/build`; `cd web && pnpm install --frozen-lockfile` then its local binaries.
+Tests: `cd python && .venv/bin/python -m pytest`; `cmake -S cpp -B cpp/build &&
+cmake --build cpp/build && ctest --test-dir cpp/build`; `cd web && pnpm install
+--frozen-lockfile && pnpm test && pnpm typecheck`. Bare `pytest` won't do, `sim/`
+only imports via `-m`. Not `npx`: it fetches a different vitest and a `tsc` that
+isn't the compiler. CI runs all three on every push.
 
 ## What's broken
 
-The MCP server keeps an in-process registry instead of claiming over the wire, so
-a claim through the tool never reaches another machine. Rung 4 isn't built, and
+The MCP server keeps its own in-process registry instead of claiming over the
+wire, so a claim through the tool never reaches another machine. Ladder tuning is
+guesswork and the chain has only run against scripted clients, not real sessions.
 `ap policy compile` resolves one path, so a `[[path]]` rule only covers that one.
+
+Rung 4 (same work, different files) is off unless `AGENT_PRESENCE_RUNG4=1`;
+`_RUNG4_THRESHOLD` moves the bar from 0.82. It matches declared intents by token
+overlap over a hand-written synonym table, not embeddings, so paraphrase gets
+missed. `python/tools/tune_rung4.py` prints the pairs it was tuned on. Its
+`rung4` effect defaults to `context`: the env flag is the off switch, and policy
+sets how loudly a hit is reported.
