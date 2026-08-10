@@ -1089,7 +1089,8 @@ def _stamp(at_ms: int) -> str:
 def cmd_why(ctx: Context) -> int:
     args, out, ink = ctx.args, ctx.out, ctx.out.ink
     path = journal_mod.journal_path(ctx.env)
-    records = journal_mod.read_journal(path, limit=args.number, env=ctx.env)
+    limit = None if args.all_records else args.number
+    records = journal_mod.read_journal(path, limit=limit, env=ctx.env)
 
     if args.json:
         out.json([r.as_dict() for r in records])
@@ -1479,7 +1480,7 @@ def cmd_doctor(ctx: Context) -> int:
 
     jpath = journal_mod.journal_path(ctx.env)
     if jpath.exists():
-        count = len(journal_mod.read_journal(jpath, limit=0, env=ctx.env))
+        count = len(journal_mod.read_journal(jpath, limit=None, env=ctx.env))
         checks.append(Check("journal", "ok", f"{jpath} ({count} decisions)"))
     else:
         checks.append(Check("journal", "warn", f"{jpath} is not there yet"))
@@ -1518,6 +1519,23 @@ def _help_for(parser: argparse.ArgumentParser) -> Callable[[Context], int]:
         parser.print_help(ctx.out.stdout)
         return USAGE
     return run
+
+
+def _count(value: str) -> int:
+    """A count is one or more. `-n 0` used to print the whole journal and so
+    did `-n -20`, because the reader sliced `lines[-limit:]` and `[-0:]` is
+    everything. Refusing the number is better than guessing at what somebody
+    meant by it; `--all` is the way to ask for all of them."""
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value!r} is not a number") from None
+    if number < 1:
+        raise argparse.ArgumentTypeError(
+            f"{number} is not a count; -n takes 1 or more, and --all reads the "
+            "whole journal"
+        )
+    return number
 
 
 def _add_json(parser: argparse.ArgumentParser) -> None:
@@ -1639,7 +1657,11 @@ def build_parser() -> argparse.ArgumentParser:
         "why", help="the last real decisions, and their reasons",
         description="Read from the daemon's journal. A block you cannot get a "
                     "reason for is a block you stop trusting.")
-    why.add_argument("-n", "--number", type=int, default=10, metavar="N")
+    why.add_argument("-n", "--number", type=_count, default=10, metavar="N",
+                     help="how many of the most recent decisions to show "
+                          "(default 10)")
+    why.add_argument("--all", action="store_true", dest="all_records",
+                     help="every decision in the journal, not just the last N")
     _add_json(why)
     why.set_defaults(run=cmd_why)
 

@@ -1087,3 +1087,36 @@ def test_check_does_not_claim_a_whole_layer_fell_back(box):
     assert "the rest of the same file still applies" in done.stdout
 
 
+def _five_records(box) -> None:
+    box.journal.write_text("\n".join(
+        json.dumps({"at_ms": i, "rung": 3, "effect": "deny",
+                    "path": f"src/f{i}.py"}) for i in range(5)
+    ) + "\n")
+
+
+@pytest.mark.parametrize("count", ["0", "-1", "-20"])
+def test_why_refuses_a_count_that_is_not_a_count(box, count):
+    _five_records(box)
+    done = box.ap("why", "-n", count, "--json")
+    # `lines[-0:]` is the whole list, so -n 0 used to print every record in the
+    # journal, and so did -n -20. Asking for none and getting fifty is the
+    # opposite of what was typed.
+    assert done.returncode == 2, done.stdout
+    assert done.stdout == ""
+    assert "1 or more" in done.stderr
+
+
+def test_why_all_reads_the_whole_journal(box):
+    _five_records(box)
+    done = box.ap("why", "--all", "--json")
+    assert done.returncode == 0, done.stderr
+    assert len(json.loads(done.stdout)) == 5
+
+
+def test_why_help_says_what_the_count_does(box):
+    done = box.ap("why", "--help")
+    assert done.returncode == 0
+    assert "most recent" in done.stdout
+    assert "--all" in done.stdout
+
+

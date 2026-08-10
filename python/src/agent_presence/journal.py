@@ -80,12 +80,22 @@ def parse_record(line: str) -> DecisionRecord | None:
 def read_journal(
     path: Path | str | None = None,
     *,
-    limit: int = 20,
+    limit: int | None = 20,
     env: Mapping[str, str] | None = None,
 ) -> list[DecisionRecord]:
     """The last `limit` decisions, oldest first. An absent journal is an empty
     list, not an error: a daemon that has decided nothing yet is the normal
-    state of a fresh machine."""
+    state of a fresh machine.
+
+    `limit=None` reads the whole file. `limit=0` reads nothing, and so does any
+    negative, which is worth being explicit about: this used to say
+    `if limit > 0`, and `lines[-0:]` is the entire list, so asking for none
+    printed everything and asking for -1 printed everything too. A count you
+    typed and a count you got have to be the same number.
+    """
+    if limit is not None and limit <= 0:
+        return []
+
     p = Path(path) if path is not None else journal_path(env)
     try:
         with open(p, "r", encoding="utf-8", errors="replace") as f:
@@ -93,7 +103,7 @@ def read_journal(
     except OSError:
         return []
 
-    if limit > 0:
+    if limit is not None:
         lines = lines[-limit:]
     out: list[DecisionRecord] = []
     for line in lines:
