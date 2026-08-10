@@ -171,24 +171,29 @@ int blocked_out_of(int n, const std::string& sock, int budget_ms = kHookBudgetMs
 TEST_CASE("the hook asks on the decision socket, not the event socket") {
     // The event socket answers nothing at all here. If the hook were still
     // asking there, every one of these would allow.
+    //
+    // This is a routing question, not a latency one — test_latency.cpp owns
+    // the budget itself — so it asks with room for the scheduler rather than
+    // the shipped 2ms. A slow reply here is still the right reply.
     Daemon daemon(sock_path("ap_ds_route.sock"), true, false);
     daemon.hold("/repo/src/auth.py|", "sess_a", "sara", "rewriting the token refresh");
     REQUIRE(daemon.start());
     settle();
 
-    REQUIRE(blocked_out_of(50, sock_path("ap_ds_route.sock")) == 50);
+    REQUIRE(blocked_out_of(50, sock_path("ap_ds_route.sock"), kSlackBudgetMs) == 50);
 }
 
 TEST_CASE("a daemon with no decision socket still answers on the event socket") {
     // The compatibility direction: a hook that has learned about the decision
     // socket, against a daemon that has not. The connect is refused and the
-    // hook asks where it always used to, inside the same budget.
+    // hook asks where it always used to. Routing, not latency, so the slack
+    // budget: see the case above.
     Daemon daemon(sock_path("ap_ds_compat.sock"), false, true);
     daemon.hold("/repo/src/auth.py|", "sess_a", "sara", "rewriting the token refresh");
     REQUIRE(daemon.start());
     settle();
 
-    REQUIRE(blocked_out_of(50, sock_path("ap_ds_compat.sock")) == 50);
+    REQUIRE(blocked_out_of(50, sock_path("ap_ds_compat.sock"), kSlackBudgetMs) == 50);
 }
 
 TEST_CASE("a leftover decision socket does not swallow the decision") {
@@ -196,6 +201,7 @@ TEST_CASE("a leftover decision socket does not swallow the decision") {
     // next daemon up unlinks and rebinds them — but between the two, and for a
     // daemon too old to bind the decision path at all, a file sits there that
     // refuses connections. The hook has to notice and ask on the event socket.
+    // Routing, not latency, so the slack budget: see the case above.
     const std::string sock = sock_path("ap_ds_stale.sock");
     const std::string stale = ap::decision_sock_path(sock);
     std::filesystem::remove(stale);
@@ -206,7 +212,7 @@ TEST_CASE("a leftover decision socket does not swallow the decision") {
     REQUIRE(daemon.start());
     settle();
 
-    const int blocked = blocked_out_of(50, sock);
+    const int blocked = blocked_out_of(50, sock, kSlackBudgetMs);
     std::filesystem::remove(stale);
     REQUIRE(blocked == 50);
 }
