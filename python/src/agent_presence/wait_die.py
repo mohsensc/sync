@@ -50,9 +50,18 @@ def resolve(
     on. Wait-die buys the same guarantee for free: it is equally deadlock-free
     and it never removes a lease from someone actively using it. Priority does
     not change that. A senior requester is told to ``wait`` rather than
-    ``abort``, so it keeps its place and wins as soon as the holder is done or
-    its 90 second TTL runs out — it is never handed something another agent is
-    still holding.
+    ``abort``, so it keeps its place — it is never handed something another
+    agent is still holding.
+
+    What ``wait`` does *not* mean is "wait indefinitely", and it used to. A
+    holder renewing every 30 s reset its own expiry forever, so a senior
+    requester told to wait waited for as long as the junior kept typing. The
+    bound now lives in ``LeaseRegistry``: being told ``wait`` also caps the
+    holder's renewals, so the verdict comes with a deadline attached
+    (``AcquireResult.handover_at``) and the requester can be told when, not just
+    that. Same for ``abort`` — the aborting agent's ask still caps the holder,
+    on the longer fair-share grace, which is what stops a junior agent starving
+    behind a senior one that never stops working.
 
     Exact ties break on agent id so the relation is never symmetric. Symmetry is
     exactly what would permit a wait-cycle, so this makes deadlock unreachable

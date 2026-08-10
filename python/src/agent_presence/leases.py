@@ -4,12 +4,55 @@ from dataclasses import dataclass
 
 from .clock import Clock
 from .priority import PRIORITY_NORMAL
-from .types import Claim, Region, same_region
+from .types import Claim, Contender, Region, same_region
 from .wait_die import Decision, OrderKey, order_key, resolve
 
 LEASE_TTL_S = 90.0
 PRESENCE_TTL_S = 30.0
 HEARTBEAT_S = 30.0
+
+# How long a holder keeps a region after somebody more entitled has asked for
+# it. One TTL, so the sentence the docs and the hook have always said — "wait
+# out at most 90 seconds and it is yours" — is finally true of a holder that is
+# still working, not only of one that walked away.
+HANDOVER_GRACE_S = 90.0
+
+# The same cap for a contender that is *not* more entitled: the anti-starvation
+# bound. Fifteen minutes is long enough that a senior agent finishes a real unit
+# of work uninterrupted, and short enough that a junior agent behind it makes
+# progress inside a coffee break instead of never.
+FAIR_SHARE_GRACE_S = 900.0
+
+# How long a region freed by a handover is kept for the contender it was freed
+# for. Without this the fair-share cap is theatre: the region opens, the agent
+# that has been renewing for fifteen minutes claims it again on its next
+# heartbeat, and the loser is back where it started.
+#
+# Ten seconds, and it started at thirty. The winner is not waiting on a
+# heartbeat — it was handed the deadline in the refusal it is sitting on and
+# retries on its next tool call, which is milliseconds — so thirty seconds was
+# slack for an agent that is there and a thirty second hole for one that is not.
+# The hole is real and it is measurable: at thirty seconds the forty-agent
+# contention run in tests/test_invariants.py lost 13% of its grants to regions
+# nobody was in. Ten is still three orders of magnitude of slack for a live
+# agent and a third of the cost for a departed one.
+RESERVATION_S = 10.0
+
+
+@dataclass(frozen=True)
+class Reservation:
+    """A region held open for the agent a handover freed it for."""
+
+    room: str
+    scope: Region
+    agent: str
+    human: str
+    priority: int
+    expires_at: float
+    # Who was holding it. The relay puts this in the grant so the winner is told
+    # it inherited the region rather than merely won a race for it.
+    from_agent: str
+    from_human: str
 
 
 @dataclass
@@ -19,6 +62,16 @@ class AcquireResult:
     held_by: Claim | None = None
     # Only set when ok is False: what wait-die says the requester should do.
     decision: Decision | None = None
+    # Set when ok is False because somebody else's handover reserved the region.
+    # `held_by` is None in that case: nobody holds it, it is being kept.
+    reserved_by: Reservation | None = None
+    # Set when ok is False and the requester will be handed the region: the
+    # wall clock at which the holder's lease stops being renewable. This is the
+    # number that makes a `wait` verdict actionable instead of open-ended.
+    handover_at: float | None = None
+    # Set when ok is True and this claim consumed a reservation left by a
+    # handover, so the grant can say where the region came from.
+    inherited: Reservation | None = None
 
 
 class LeaseRegistry:
@@ -29,16 +82,217 @@ class LeaseRegistry:
 
     Every per-lease operation is scoped by room. Two rooms may use identical
     paths and must never see each other's leases.
+
+    Contention is bounded, and this is the part worth reading before changing
+    anything here. An uncontended lease renews forever: an agent working alone
+    is never interrupted, which is the whole point of the thing. The moment
+    somebody else asks for the region, the holder's renewals stop being
+    open-ended and get a deadline — ``HANDOVER_GRACE_S`` from the ask if the
+    asker outranks it, ``FAIR_SHARE_GRACE_S`` if it does not. When the deadline
+    passes the lease ends normally, on the same lazy expiry as everything else,
+    and the region is kept for the waiting agent for ``RESERVATION_S``.
+
+    So there are exactly three ways to wait here and all three are finite:
+
+        holder is idle       -> LEASE_TTL_S
+        holder is working    -> HANDOVER_GRACE_S  (you outrank it)
+                             -> FAIR_SHARE_GRACE_S (you do not)
+        region is reserved   -> RESERVATION_S
+
+    No lease is ever revoked mid-edit and nothing is preempted; the holder is
+    told its deadline while it still has time to finish. See ``_hand_over``.
     """
 
     def __init__(self, clock: Clock) -> None:
         self._clock = clock
         self._claims: list[Claim] = []
+        self._reservations: list[Reservation] = []
+        # (room, region, agent) -> the asks that were pending against that
+        # agent's claim when it ended early, and the deadline they had set. See
+        # `_hand_over` and `_resume_carry`.
+        self._carry: dict[
+            tuple[str, Region, str], tuple[dict[str, Contender], float | None]
+        ] = {}
 
     def _live(self) -> list[Claim]:
         now = self._clock.now()
+        ended = [c for c in self._claims if c.expires_at <= now]
         self._claims = [c for c in self._claims if c.expires_at > now]
+        for claim in ended:
+            self._hand_over(claim, now)
         return self._claims
+
+    # -- handover -----------------------------------------------------------
+
+    def _hand_over(self, claim: Claim, now: float) -> Reservation | None:
+        """A claim has left the table. If its renewal deadline is what ended it,
+        keep the region for the agent that was waiting.
+
+        This is the half of the fair-share bound that makes it a bound. Capping
+        renewal only frees the region; without a reservation the agent that has
+        been renewing for fifteen minutes wins the re-claim race on its next
+        heartbeat and the contender starves anyway, just noisily.
+
+        Only a fired deadline reserves, and the narrowness is the point. A lease
+        that ended some other way — released, finished, aborted, or gone quiet
+        for a whole TTL — leaves the region open to whoever asks first, because
+        in none of those cases is the holder being forced off and about to grab
+        it back. Reserving there too puts a 30 second queue in front of every
+        region anybody ever glanced at, which is not fairness, it is a room
+        where nothing moves. (Measured: it deadlocked the contention simulation
+        outright — see tests/test_invariants.py.) The one way a holder could
+        still dodge its deadline by letting go and re-taking the region is
+        closed by ``_carry``, which costs nobody anything.
+
+        A reservation says `wait` to everyone else, including agents that
+        outrank the reserved one, and that is on purpose: it is the only edge in
+        the whole system that is not ordered by tier. It is safe because it is
+        the only one with a hard expiry that nothing can renew — `RESERVATION_S`
+        from a lease that has already ended — so it cannot participate in an
+        unbounded wait. Every wait in this system is now bounded: by the
+        holder's TTL, by the handover grace, or by this.
+        """
+        winner = claim.handover_winner()
+        if winner is None:
+            return None
+        if claim.handover_at is None or claim.handover_at > now:
+            # Ended early. Nothing is reserved, but the asks are remembered, so
+            # letting go one second before the deadline and taking the region
+            # straight back does not buy the holder a fresh fifteen minutes.
+            self._carry = {
+                k: v for k, v in self._carry.items()
+                if v[1] is not None and v[1] > now
+            }
+            self._carry[(claim.room, claim.scope, claim.agent)] = (
+                dict(claim.contenders), claim.handover_at,
+            )
+            return None
+        reservation = Reservation(
+            room=claim.room,
+            scope=claim.scope,
+            agent=winner.agent,
+            human=winner.human,
+            priority=winner.priority,
+            expires_at=now + RESERVATION_S,
+            from_agent=claim.agent,
+            from_human=claim.human,
+        )
+        self._reservations.append(reservation)
+        return reservation
+
+    def _resume_carry(self, claim: Claim, now: float) -> None:
+        """Re-attach the asks a previous claim on this exact region by this
+        exact agent was carrying, if its deadline has not passed us by.
+
+        Without this the fair-share bound has one seam: a holder that releases
+        at minute fourteen and re-claims immediately starts a brand new claim
+        with no contenders and a brand new fifteen minutes, and can keep doing
+        that forever. Nothing legitimate churns a lease that way — presenced
+        renews, it does not let go and re-take — so in practice this restores
+        nothing and costs one dict lookup per grant. It is here because "nothing
+        legitimate does that" is not the same as "nothing can".
+
+        Keyed on the agent as well as the region: this is about one agent
+        dodging its own deadline. A *different* agent taking the region is the
+        handover working, and it starts clean.
+        """
+        key = (claim.room, claim.scope, claim.agent)
+        carried = self._carry.pop(key, None)
+        if carried is None:
+            return
+        contenders, deadline = carried
+        if deadline is None or deadline <= now:
+            return
+        claim.contenders.update(contenders)
+        claim.handover_at = deadline
+        claim.expires_at = min(claim.expires_at, deadline)
+
+    def _live_reservations(self) -> list[Reservation]:
+        now = self._clock.now()
+        self._reservations = [r for r in self._reservations if r.expires_at > now]
+        return self._reservations
+
+    def reservation_for(self, room: str, region: Region) -> Reservation | None:
+        for r in self._live_reservations():
+            if r.room == room and same_region(r.scope, region):
+                return r
+        return None
+
+    def _consume_reservation(self, room: str, region: Region, agent: str) -> (
+        Reservation | None
+    ):
+        """Drop every reservation this agent's claim satisfies, and hand back
+        the one that named it. Claiming the region is the point of the
+        reservation, so holding on to it afterwards would only block the agent's
+        own later claims on neighbouring symbols."""
+        taken: Reservation | None = None
+        kept: list[Reservation] = []
+        for r in self._live_reservations():
+            if r.room == room and same_region(r.scope, region) and r.agent == agent:
+                taken = r if taken is None else taken
+                continue
+            kept.append(r)
+        self._reservations = kept
+        return taken
+
+    def _contend(
+        self, held: Claim, agent: str, human: str, tier: int,
+        decision: Decision, now: float,
+    ) -> None:
+        """Record that `agent` wants this region, and cap the holder's renewal.
+
+        The cap is anchored to the *first* time anybody asked and only ever
+        moves earlier. A holder cannot push its own deadline out by outlasting
+        one contender, and a stream of junior contenders cannot push out the
+        deadline a senior one set.
+        """
+        existing = held.contenders.get(agent)
+        held.contenders[agent] = Contender(
+            agent=agent,
+            human=human,
+            priority=tier,
+            first_asked_at=now if existing is None else existing.first_asked_at,
+        )
+
+        grace = HANDOVER_GRACE_S if decision == "wait" else FAIR_SHARE_GRACE_S
+        deadline = now + grace
+        if held.handover_at is None or deadline < held.handover_at:
+            held.handover_at = deadline
+        held.expires_at = min(held.expires_at, held.handover_at)
+
+    def contend(
+        self, room: str, scope: Region, agent: str, human: str, tier: int,
+        requester_acquired_at: float | None = None,
+    ) -> Claim | None:
+        """Register an ask for a region somebody else holds, without taking it.
+
+        The hook path never sends a claim frame — it asks the daemon whether an
+        edit may proceed and the relay answers out of the lease table — so an
+        agent can be blocked on the same region a hundred times and, before
+        this, never once start the holder's clock. The bound has to attach to
+        the *ask*, whichever channel it arrives on, or the two channels give
+        the same contention two different endings.
+
+        Returns the holder, or None if there is nothing to contend.
+        """
+        held = self.holder_of(room, scope)
+        if held is None or held.agent == agent:
+            return None
+        age = (
+            self.age_of(agent)
+            if requester_acquired_at is None
+            else requester_acquired_at
+        )
+        decision = resolve(agent, age, held, tier)
+        self._contend(held, agent, human, tier, decision, self._clock.now())
+        return held
+
+    def _renew_to(self, claim: Claim, now: float) -> float:
+        """A renewed expiry, never past the handover deadline."""
+        want = now + LEASE_TTL_S
+        if claim.handover_at is None:
+            return want
+        return min(want, claim.handover_at)
 
     def holder_of(self, room: str, region: Region) -> Claim | None:
         for c in self._live():
@@ -106,7 +360,19 @@ class LeaseRegistry:
         # reached from a claim frame — the relay resolves the tier from the
         # roster and passes it in, and the roster is not something a client can
         # write to. See relay.Relay.priority_of.
+        #
+        # That latch is only safe because an agent id means one thing at a time.
+        # It used to not: this line reads the tier off *any* live claim carrying
+        # the id, and an unauthenticated client that declared a rostered
+        # principal's agent id — broadcast on every presence frame and in the
+        # join snapshot — inherited that principal's tier here, in another room,
+        # and kept inheriting it from its own laundered claims after the real
+        # principal went home. `Relay.join` now binds an id to one grant for as
+        # long as any connection holds it, so "the tier on this agent's claims"
+        # and "the tier this agent was granted" cannot disagree. Do not relax
+        # one of those two without the other.
         tier = self.priority_of(agent, default=priority)
+        now = self._clock.now()
 
         held = self.holder_of(room, scope)
         if held is not None and held.agent != agent:
@@ -115,16 +381,47 @@ class LeaseRegistry:
                 if requester_acquired_at is None
                 else requester_acquired_at
             )
+            decision = resolve(agent, age, held, tier)
+            # Contention is what bounds a lease. Until this call the holder
+            # could renew forever: every claim frame from it reset expires_at to
+            # now + 90 s, so "the senior waits out at most one TTL and then
+            # wins" was true only of a holder that had stopped working, which is
+            # the one case where nobody needed it to be true. An active holder
+            # blocked a critical requester indefinitely — measured at 5760
+            # refusals over eight hours with not one grant.
+            #
+            # Recording the ask caps the holder's renewal, so the wait has an
+            # end the requester can be told about. It is not preemption: the
+            # holder keeps the region for the whole grace, is told the deadline
+            # while there is still time to finish, and nothing is taken from it
+            # mid-edit.
+            self._contend(held, agent, human, tier, decision, now)
             return AcquireResult(
                 ok=False,
                 held_by=held,
-                decision=resolve(agent, age, held, tier),
+                decision=decision,
+                handover_at=held.handover_at,
             )
 
-        now = self._clock.now()
         if held is not None:
-            held.expires_at = now + LEASE_TTL_S
+            # Renewal by the holder. Checked before reservations on purpose: an
+            # agent that already holds a region must never be refused its own
+            # renewal, or a reservation on a neighbouring symbol could expire a
+            # lease out from under an agent that is mid-edit.
+            held.expires_at = self._renew_to(held, now)
             return AcquireResult(ok=True, claim=held)
+
+        reserved = self.reservation_for(room, scope)
+        if reserved is not None and reserved.agent != agent:
+            # Somebody else's handover freed this region for them seconds ago.
+            # Always `wait`, never `abort`: aborting would drop this agent's
+            # other leases over a condition that clears on its own inside
+            # RESERVATION_S, which is a lot of destruction for a short queue.
+            return AcquireResult(
+                ok=False, decision="wait", reserved_by=reserved,
+            )
+
+        inherited = self._consume_reservation(room, scope, agent)
 
         # acquired_at is the agent's wait-die timestamp, not this lease's wall
         # clock. A second lease inherits the age of the first, so all of an
@@ -156,23 +453,36 @@ class LeaseRegistry:
             expires_at=now + LEASE_TTL_S,
             priority=tier,
         )
+        self._resume_carry(claim, now)
         self._claims.append(claim)
-        return AcquireResult(ok=True, claim=claim)
+        return AcquireResult(ok=True, claim=claim, inherited=inherited)
 
     def heartbeat(self, room: str, agent: str, scope: Region) -> bool:
+        now = self._clock.now()
         for c in self._live():
             if c.room == room and c.agent == agent and same_region(c.scope, scope):
-                c.expires_at = self._clock.now() + LEASE_TTL_S
+                # Capped like every other renewal. The daemon heartbeats every
+                # 30 s whether or not anybody is waiting, so leaving this one
+                # uncapped would reopen the whole hole from the other side.
+                c.expires_at = self._renew_to(c, now)
                 return True
         return False
 
     def release(self, room: str, agent: str, scope: Region) -> None:
-        self._claims = [
-            c for c in self._live()
-            if not (
+        now = self._clock.now()
+        keep, gone = [], []
+        for c in self._live():
+            target = (
                 c.room == room and c.agent == agent and same_region(c.scope, scope)
             )
-        ]
+            (gone if target else keep).append(c)
+        self._claims = keep
+        # A released region owes its contenders the same reservation an expired
+        # one does, or the polite holder — the one that did HANDOFF, or finished
+        # early and let go — hands the region straight back to itself on its
+        # next claim and the agent that waited gets nothing for waiting.
+        for c in gone:
+            self._hand_over(c, now)
 
     def release_all(self, room: str, agent: str) -> None:
         """Drop every lease an agent holds *in one room*. Used on session end
@@ -192,6 +502,10 @@ class LeaseRegistry:
         still holding things while it retries, and the room it was refused in is
         the only room that has anything to do with that.
         """
-        self._claims = [
-            c for c in self._live() if not (c.room == room and c.agent == agent)
-        ]
+        now = self._clock.now()
+        keep, gone = [], []
+        for c in self._live():
+            (gone if (c.room == room and c.agent == agent) else keep).append(c)
+        self._claims = keep
+        for c in gone:
+            self._hand_over(c, now)

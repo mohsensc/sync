@@ -48,6 +48,12 @@ class Simulation:
                 if result.ok:
                     granted += 1
                     self._age.setdefault(agent, self._clock.now())
+                elif result.held_by is None:
+                    # Nobody holds it: a handover freed it for somebody else and
+                    # it is being kept for them. There is no claim to compare
+                    # against and nothing to abort over — it clears on its own
+                    # inside one heartbeat.
+                    waits += 1
                 else:
                     decision = resolve(
                         agent, self._age.get(agent, self._clock.now()), result.held_by
