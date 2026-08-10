@@ -360,6 +360,12 @@ class _PublishingRegistry(LeaseRegistry):
         self._publish(before)
         return result
 
+    def release_everywhere(self, *args, **kwargs):
+        before = self._before()
+        result = super().release_everywhere(*args, **kwargs)
+        self._publish(before)
+        return result
+
 
 class Relay:
     """Sole authority on leases and the only place protocol decisions are made.
@@ -671,6 +677,7 @@ class Relay:
         """
         agent, grant = conn.agent, self.grant_of(conn)
         tier = self.priority_of(conn)
+        held_by_a_peer = False
 
         for other in list(self._identity):
             mine = self._identity.get(other)
@@ -678,6 +685,9 @@ class Relay:
                 continue
             theirs = self.grant_of(other)
             if (theirs.principal, self.priority_of(other)) == (grant.principal, tier):
+                # The ordinary shared-id case: same principal, same tier. That
+                # connection's claims are somebody's live work, not leftovers.
+                held_by_a_peer = True
                 continue
             if theirs.authenticated:
                 log.warning(
@@ -697,7 +707,42 @@ class Relay:
                 agent, grant.principal,
             )
             self.leave(other)
+
+        if not held_by_a_peer:
+            self._drop_stranded_claims(agent, tier)
         return None
+
+    def _drop_stranded_claims(self, agent: str, tier: int) -> None:
+        """The other half of the binding, and the half that outlives a socket.
+
+        Binding an id to one grant covers the ids that are *held*. A claim can
+        outlive the connection that took it: ``leave`` releases the leases of
+        the room the connection was in when it hung up, and a connection that
+        moved rooms — one daemon, one repo switch — leaves the first room's
+        leases behind to age out over a TTL.
+
+        For that TTL the id is unheld and its claims still carry the tier they
+        were taken at, and ``acquire`` reads an agent's tier off that agent's
+        live claims. So an unauthenticated client that took the name in the gap
+        inherited ``critical`` from a session that had already gone home, which
+        is exactly the laundering the binding exists to stop, ninety seconds
+        late.
+
+        Nobody is being interrupted here: no connection holds this id, so the
+        claims belong to no live session. They are only dropped when the tier
+        they carry disagrees with the tier the new holder was granted — a
+        reconnect after a dropped socket comes back at the same tier and keeps
+        its leases, which is the case worth protecting.
+        """
+        stranded = self.registry.priority_of(agent, default=tier)
+        if stranded == tier:
+            return
+        log.warning(
+            "agent id %s changed hands at %s while claims taken at %s were "
+            "still live; dropping them",
+            agent, name_of(tier), name_of(stranded),
+        )
+        self.registry.release_everywhere(agent)
 
     def authenticate(
         self, principal: str | None, token: str, room: str

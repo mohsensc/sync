@@ -513,6 +513,31 @@ class LeaseRegistry:
         for c in gone:
             self._hand_over(c, now)
 
+    def release_everywhere(self, agent: str) -> None:
+        """Drop every lease this agent id holds, in every room.
+
+        The one caller is ``Relay._bind_agent``, and the narrowness is the whole
+        justification. ``release_all`` is room-scoped because an agent id is not
+        unique to a room — two checkouts on one laptop share
+        ``presenced@<hostname>`` — and one room's refusal has no business
+        dropping another room's leases.
+
+        This is the opposite case. The id itself has changed hands: no live
+        connection holds it and the one that does now was granted a different
+        tier, so every claim still standing under that id belongs to a session
+        that is gone. Leaving them is what let the tier outlive the session —
+        ``acquire`` reads an agent's tier off that agent's live claims, so a
+        stranded ``critical`` claim hands ``critical`` to whoever takes the name
+        next.
+        """
+        now = self._clock.now()
+        keep, gone = [], []
+        for c in self._live():
+            (gone if c.agent == agent else keep).append(c)
+        self._claims = keep
+        for c in gone:
+            self._hand_over(c, now)
+
     def release_all(self, room: str, agent: str) -> None:
         """Drop every lease an agent holds *in one room*. Used on session end
         and on a wait-die abort.
