@@ -606,7 +606,10 @@ def test_principals_add_prints_the_token_once_and_stores_only_its_hash(box):
     assert token not in roster
     assert 'id           = "sara"' in roster
 
-    hashed = box.ap("token", "hash", token)
+    # Via stdin, not argv: token_urlsafe can start with "-", and argparse
+    # then reads it as an option rather than the positional it is. `ap token
+    # hash` reads stdin for exactly this reason.
+    hashed = box.ap("token", "hash", stdin=token)
     assert hashed.returncode == 0
     assert hashed.stdout.strip() in roster
 
