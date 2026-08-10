@@ -850,6 +850,95 @@ class Policy:
     def floor_table(self, path: str) -> EffectTable:
         return EffectTable(tuple(self._floor_for(r, path)[0] for r in RUNGS))
 
+    def floor_rules(self) -> list[dict]:
+        """Every path-scoped floor, in the shape the wire carries them.
+
+        ``floor_table`` answers for one path, and the relay does not have one:
+        it sends its floor once, on join, and the daemon applies it to every
+        file afterwards. So the flat table is what a blanket floor comes to and
+        these are the lines it cannot express — ``[[floor.path]] match =
+        "**/pay.py"`` and the like. Without them the wire dropped every
+        path-scoped floor an org wrote, which is most of what an org writes:
+        `floor_table("")` matches no glob, so the frame said `notify` for a file
+        the relay itself was denying.
+
+        Five slots per rule, ``""`` where the rule says nothing, so a reader can
+        raise rung by rung without knowing which rungs a line mentioned. Order
+        does not matter: a floor is the strictest thing that matches, never the
+        most specific. ``floor_from_frame`` is the reader, written out so the
+        daemon has something to mirror.
+        """
+        out: list[dict] = []
+        for layer in self._ordered():
+            if layer.name not in FLOOR_LAYERS:
+                continue
+            for rule in layer.rules:
+                if not rule.is_floor or rule.match is None:
+                    continue
+                effects = [rule.effects.get(rung, "") for rung in RUNGS]
+                if any(effects):
+                    out.append({
+                        "match": rule.match,
+                        "effects": effects,
+                        "layer": layer.name,
+                    })
+        return out
+
+
+def glob_covers(pattern: str, path: str) -> bool:
+    """Does this repo-relative glob cover this path, in whatever shape the path
+    turned up in? The one matching rule, in one place, for callers outside the
+    layer machinery. See the `_readings` block for the three shapes."""
+    compiled = _compile_glob(pattern)
+    if compiled is None:
+        return False
+    path = normalize_path(path)
+    if path_is_opaque(path):
+        # A hash is not distinguishable from the file the rule names, so a
+        # floor written against that file applies. Strictest reading wins.
+        return True
+    return any(compiled.match(reading) is not None for reading in _readings(path))
+
+
+def floor_from_frame(frame: Mapping[str, object], path: str) -> EffectTable:
+    """The floor a daemon should enforce for one path, out of one relay frame.
+
+    The daemon's half of ``Relay._policy_frame``, written on this side so the
+    two halves cannot drift and so a test can drive it. In order:
+
+        start at the builtin floor, which is compiled into both sides;
+        raise it with `floor`, the org's blanket floor;
+        raise it again with every `floors` entry whose glob covers the path.
+
+    Only ever raises — a floor that could lower something is a default with
+    extra steps — so an unknown or malformed field costs the reader nothing and
+    a frame from an older relay with no `floors` key behaves exactly as it did.
+    """
+    table = list(BUILTIN_FLOOR.rungs)
+
+    blanket = frame.get("floor")
+    if isinstance(blanket, (list, tuple)) and len(blanket) == len(table):
+        for rung, name in enumerate(blanket):
+            if isinstance(name, str) and name in RANK:
+                table[rung] = stricter(table[rung], name)  # type: ignore[arg-type]
+
+    entries = frame.get("floors")
+    if isinstance(entries, (list, tuple)):
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                continue
+            match = entry.get("match")
+            effects = entry.get("effects")
+            if not isinstance(match, str) or not isinstance(effects, (list, tuple)):
+                continue
+            if not glob_covers(match, path):
+                continue
+            for rung, name in enumerate(effects[:len(table)]):
+                if isinstance(name, str) and name in RANK:
+                    table[rung] = stricter(table[rung], name)  # type: ignore[arg-type]
+
+    return EffectTable(tuple(table))  # type: ignore[arg-type]
+
 
 # -- parsing -----------------------------------------------------------------
 

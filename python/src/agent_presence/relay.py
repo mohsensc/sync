@@ -511,17 +511,40 @@ class Relay:
         composes with whatever the client resolved locally by taking the louder
         of the two, which is well defined without knowing what the other side
         said. `cpp/daemon/policy_cache.cpp` is what reads this.
+
+        Two fields, because a floor is not one table. `floor` is the blanket
+        one, five names, exactly as it always was. `floors` carries the
+        `[[floor.path]]` lines, which used to be resolved away here against the
+        empty path and so never left the building: an org that wrote
+
+            [[floor.path]]
+            match  = "**/pay.py"
+            rung3  = "deny"
+
+        had that floor enforced on the relay's own answers and never on any
+        daemon's, because the frame said `notify` — the blanket answer for a
+        path no glob matches. Path floors are most of what an org writes, and
+        the org floor is the one control an org actually enforces.
+
+        `floors` is omitted when there is nothing to say, so a relay whose org
+        file is all blanket rules puts the same bytes on the wire it always
+        did. `policy.floor_from_frame` is the reading of this frame both sides
+        are meant to agree on.
         """
         policy = self._policy.current()
         org = policy.layer("org")
         if org is None:
             return None
-        return {
+        frame = {
             "type": "policy",
             "floor": policy.floor_table("").names(),
             "source": f"org:{org.source}",
             "digest": policy.digest,
         }
+        floors = policy.floor_rules()
+        if floors:
+            frame["floors"] = floors
+        return frame
 
     def _publish_policy_change(self) -> bool:
         """Push a new org floor to every room, if there is one.
