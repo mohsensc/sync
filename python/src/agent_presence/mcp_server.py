@@ -12,7 +12,7 @@ import uuid
 from .clock import RealClock
 from .negotiation import MOVES, Negotiator
 from .redact import opaque_region_if_enabled
-from .relay import Relay
+from .relay import Relay, redundancy_payload
 from .room_key import room_id_from_remote
 from .types import Region
 
@@ -71,7 +71,18 @@ class Tools:
             self._room, self._human, self._agent, region, intent
         )
         if result.ok:
-            return {"granted": True}
+            granted = {"granted": True}
+            # Rung 4. The claim stands - different files never contend - but
+            # if somebody else declared the same work somewhere else in the
+            # tree, this is the moment to say so, while the agent has not
+            # written anything yet. Off unless AGENT_PRESENCE_RUNG4 is set.
+            red = self._relay.check_redundancy(
+                self._room, self._agent, self._human, region, intent
+            )
+            if red is not None:
+                granted["rung"] = 4
+                granted["redundant"] = redundancy_payload(red)
+            return granted
 
         # Same wait-die handling the wire path does, for the same reason: a
         # refusal with no instruction leaves both agents retrying at each other,
@@ -79,7 +90,7 @@ class Tools:
         # survives. Two channels ordering claims differently would be a cycle
         # the relay cannot see.
         if result.decision == "abort":
-            self._relay.registry.release_all(self._agent)
+            self._relay.registry.release_all(self._room, self._agent)
 
         return {
             "granted": False,

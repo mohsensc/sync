@@ -1239,8 +1239,11 @@ void RelayClient::on_text(const std::string& json) {
             if (!region) return;
             const std::string path = str_field(*region, "path");
             if (path.empty()) return;
-            held_.erase(region_key(path, str_field(*region, "symbol")));
-            apply_leases();
+            // Matched on the agent, not just the region — see erase_lease.
+            if (erase_lease(region_key(path, str_field(*region, "symbol")),
+                            str_field(j, "agent"))) {
+                apply_leases();
+            }
             return;
         }
         if (upsert_lease(j, {})) apply_leases();
@@ -1284,6 +1287,15 @@ bool RelayClient::upsert_lease(sv entry, const std::string& holder_override) {
     lease.expires_at_ms = now_ms() + ttl;
 
     held_[region_key(path, str_field(*region, "symbol"))] = std::move(lease);
+    return true;
+}
+
+bool RelayClient::erase_lease(const std::string& key, const std::string& agent) {
+    if (agent.empty()) return false;
+    const auto it = held_.find(key);
+    if (it == held_.end()) return false;
+    if (it->second.agent != agent) return false;  // somebody else holds it now
+    held_.erase(it);
     return true;
 }
 

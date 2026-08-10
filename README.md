@@ -43,6 +43,10 @@ isn't the compiler. CI runs all three on every push.
 ## What's broken
 
 The MCP server keeps its own in-process registry instead of claiming over the
-wire, so a claim made through the tool never reaches another machine. Ladder
-tuning is guesswork, rung 4 isn't built, and the chain has only ever been driven
-by scripted clients, never two real sessions.
+wire, so a claim through the tool never reaches another machine. Ladder tuning is
+guesswork and the chain has only run against scripted clients, not real sessions.
+
+Rung 4 (same work, different files) is off unless `AGENT_PRESENCE_RUNG4=1`;
+`_RUNG4_THRESHOLD` moves the bar from 0.82. It matches declared intents by token
+overlap over a hand-written synonym table, not embeddings, so paraphrase gets
+missed. `python/tools/tune_rung4.py` prints the pairs it was tuned on.

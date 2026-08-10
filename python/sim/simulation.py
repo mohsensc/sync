@@ -56,7 +56,7 @@ class Simulation:
                         aborted += 1
                         # Aborting releases everything the agent holds. That is
                         # what guarantees the wait-for graph cannot keep a cycle.
-                        self._registry.release_all(agent)
+                        self._registry.release_all("r1", agent)
                         self._age.pop(agent, None)
                     else:
                         waits += 1

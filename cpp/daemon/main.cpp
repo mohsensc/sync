@@ -12,6 +12,7 @@
 
 #include "daemon/coalesce.hpp"
 #include "daemon/decide.hpp"
+#include "daemon/decision_server.hpp"
 #include "daemon/json.hpp"
 #include "daemon/lease_cache.hpp"
 #include "daemon/outbound.hpp"
@@ -177,11 +178,31 @@ int main() {
     // this answers, on the same connection, inside the hook's budget. Without it
     // every PreToolUse edit read a clean EOF and allowed, and the leases the
     // relay pushes into the cache reached nobody.
-    server.on_request([&](const std::string& line) {
+    //
+    // Still here now that decisions have their own socket, because a hook from
+    // an older install asks on this one and has to keep getting an answer.
+    // Nothing else uses it: current hooks ask on the decision socket.
+    auto decide = [&](const std::string& line) {
         return ap::decide_response(line, leases, now_ms());
-    });
+    };
+    server.on_request(decide);
 
     if (!server.start()) return 0;  // fail open: no daemon, hooks no-op
+
+    // Decisions, off the loop entirely.
+    //
+    // Everything below this line — draining events, stepping the relay,
+    // writing the snapshot — happens between polls, and a hook that connects
+    // during any of it used to wait. Under an event storm the wait was longer
+    // than the hook's whole budget, so the edit went through unchecked and
+    // nothing said so. The decision socket has its own queue and its own
+    // threads; the only thing it shares with the loop is a read lock on the
+    // lease cache.
+    //
+    // If it cannot start, the loop keeps answering on the event socket and the
+    // hook falls back to asking there. Slower under load, never wrong.
+    ap::DecisionServer decisions(ap::decision_sock_path(sock), decide);
+    decisions.start();
 
     // Write once up front so the statusline reads a valid file from the first
     // tick instead of treating a missing file as an error.

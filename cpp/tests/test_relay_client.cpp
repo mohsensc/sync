@@ -584,6 +584,13 @@ bool pump_until(RelayClient& c, F done, int budget_ms = 4000) {
     return done();
 }
 
+/// Poll for a fixed stretch. For asserting that something did *not* happen,
+/// where there is no condition to wait on.
+void pump_for(RelayClient& c, int ms) {
+    const long long end = mono_ms() + ms;
+    while (mono_ms() < end) c.poll(10);
+}
+
 RelayConfig cfg_for(int port) {
     RelayConfig cfg;
     cfg.url = "ws://127.0.0.1:" + std::to_string(port);
@@ -780,6 +787,94 @@ TEST_CASE("a released lease frame drops the entry rather than leaving it to expi
     REQUIRE(pump_until(client, [&] {
         return !leases.conflict_for("src/auth.py|sign_in", "a1", mono_ms()).has_value();
     }));
+}
+
+TEST_CASE("an expiry for the old holder does not delete the new holder's lease") {
+    TestServer server;
+    REQUIRE(server.start());
+
+    Outbound out(100);
+    LeaseCache leases;
+    RelayClient client(cfg_for(server.port()), out, leases);
+    REQUIRE(pump_until(client, [&] { return client.open(); }));
+
+    // A holds the region.
+    server.send_text(
+        R"({"type":"lease","state":"held","agent":"agent-A","human":"ann","intent":"A works",)"
+        R"("region":{"path":"src/handover.py","symbol":null},"expires_in_ms":60000})");
+    REQUIRE(pump_until(client, [&] {
+        return leases.conflict_for("src/handover.py|", "a1", mono_ms()).has_value();
+    }));
+
+    // The handover as the relay publishes it: the new holder first, then the
+    // old holder's expiry. Both frames name the same region.
+    server.send_text(
+        R"({"type":"lease","state":"held","agent":"agent-B","human":"ben","intent":"B works",)"
+        R"("region":{"path":"src/handover.py","symbol":null},"expires_in_ms":60000})");
+    REQUIRE(pump_until(client, [&] {
+        auto hit = leases.conflict_for("src/handover.py|", "a1", mono_ms());
+        return hit && hit->agent == "agent-B";
+    }));
+
+    server.send_text(
+        R"({"type":"lease","state":"expired","agent":"agent-A",)"
+        R"("region":{"path":"src/handover.py","symbol":null}})");
+
+    // Nothing to wait for — the wrong behaviour is an erase — so pump a while
+    // and then insist the region is still protected, by B.
+    pump_for(client, 200);
+    auto hit = leases.conflict_for("src/handover.py|", "a1", mono_ms());
+    REQUIRE(hit.has_value());
+    REQUIRE(hit->agent == "agent-B");
+    REQUIRE(hit->human == "ben");
+}
+
+TEST_CASE("an expiry naming an agent who does not hold the region changes nothing") {
+    TestServer server;
+    REQUIRE(server.start());
+
+    Outbound out(100);
+    LeaseCache leases;
+    RelayClient client(cfg_for(server.port()), out, leases);
+    REQUIRE(pump_until(client, [&] { return client.open(); }));
+
+    server.send_text(
+        R"({"type":"lease","state":"held","agent":"a2","human":"kai","intent":"x",)"
+        R"("region":{"path":"src/auth.py","symbol":"sign_in"},"expires_in_ms":60000})");
+    REQUIRE(pump_until(client, [&] {
+        return leases.conflict_for("src/auth.py|sign_in", "a1", mono_ms()).has_value();
+    }));
+
+    server.send_text(
+        R"({"type":"lease","state":"released","agent":"a9",)"
+        R"("region":{"path":"src/auth.py","symbol":"sign_in"}})");
+    pump_for(client, 200);
+    REQUIRE(leases.conflict_for("src/auth.py|sign_in", "a1", mono_ms()).has_value());
+}
+
+TEST_CASE("an expiry with no agent leaves the lease to its own TTL") {
+    TestServer server;
+    REQUIRE(server.start());
+
+    Outbound out(100);
+    LeaseCache leases;
+    RelayClient client(cfg_for(server.port()), out, leases);
+    REQUIRE(pump_until(client, [&] { return client.open(); }));
+
+    server.send_text(
+        R"({"type":"lease","state":"held","agent":"a2","human":"kai","intent":"x",)"
+        R"("region":{"path":"src/auth.py","symbol":"sign_in"},"expires_in_ms":60000})");
+    REQUIRE(pump_until(client, [&] {
+        return leases.conflict_for("src/auth.py|sign_in", "a1", mono_ms()).has_value();
+    }));
+
+    // An unattributed removal cannot be matched against a holder. Keeping the
+    // entry costs a prompt the holder's TTL will clear; dropping it costs
+    // protection, silently.
+    server.send_text(
+        R"({"type":"lease","state":"released","region":{"path":"src/auth.py","symbol":"sign_in"}})");
+    pump_for(client, 200);
+    REQUIRE(leases.conflict_for("src/auth.py|sign_in", "a1", mono_ms()).has_value());
 }
 
 TEST_CASE("junk from the relay is dropped and the connection survives it") {

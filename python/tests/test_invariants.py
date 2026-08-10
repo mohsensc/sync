@@ -83,13 +83,13 @@ class Contention:
             if ag.held == len(ag.want):
                 # Got everything it needed: do the work, drop the lot.
                 ag.finished += 1
-                self._registry.release_all(ag.name)
+                self._registry.release_all(ROOM, ag.name)
                 ag.held = 0
             return "grant"
 
         if result.decision == "abort":
             out.aborts += 1
-            self._registry.release_all(ag.name)
+            self._registry.release_all(ROOM, ag.name)
             ag.held = 0
             return "abort"
 
