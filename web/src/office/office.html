@@ -35,7 +35,7 @@
 <div id="log">loading…</div>
 
 <script type="importmap">
-{"imports":{"three":"./vendor/three.module.js","three/addons/":"./vendor/addons/"}}
+{"imports":{"three":"../../public/vendor/three.module.js","three/addons/":"../../public/vendor/addons/"}}
 </script>
 <script type="module">
 import * as THREE from 'three'
@@ -84,25 +84,36 @@ left.position.set(-W/2,WALL/2,0); left.receiveShadow = true; scene.add(left)
 
 // ---- asset placement --------------------------------------------------
 // Each prop is normalised to a real-world height, then grounded.
+//
+// desk-tripo-12k.glb is the exception: raycasting its top face (dense grid,
+// ~1500 columns) shows the desktop plateau sits 0.536m above the mesh's
+// lowest point in raw model units, while the full raw bbox is 0.553m tall.
+// The extra ~3% above the surface is a thin raised back lip, not the work
+// surface. Normalising by total bbox height (as every other prop does) puts
+// that lip at `h` and the actual desktop ~2cm low. DESK_SURFACE_RAW is the
+// raw-unit height to the desktop, so `h` on desk entries below means "put
+// the SURFACE here", not "make the mesh this tall".
+const DESK_SURFACE_RAW = 0.536
 const PLAN = [
-  { url:'glb/vault-door.glb',   h:2.6,  pos:[-6.4,0,-7.0], rot:0            },
-  { url:'glb/phone-wall.glb',   h:2.0,  pos:[ 5.6,1.1,-7.1], rot:0, air:true },
-  { url:'glb/cable-ball.glb',   h:1.1,  pos:[-8.0,0, 5.2], rot:0.6          },
-  { url:'glb/tortoise-v2.glb',  h:0.55, pos:[ 2.2,0, 4.6], rot:-0.9         },
-  // desks
-  { url:'glb/desk-tripo-12k.glb', h:0.78, pos:[-3.2,0,-2.4], rot:0 },
-  { url:'glb/desk-tripo-12k.glb', h:0.78, pos:[ 0.4,0,-2.4], rot:0 },
-  { url:'glb/desk-tripo-12k.glb', h:0.78, pos:[ 4.0,0,-2.4], rot:0 },
-  { url:'glb/desk-tripo-12k.glb', h:0.78, pos:[-3.2,0, 1.4], rot:Math.PI },
-  { url:'glb/desk-tripo-12k.glb', h:0.78, pos:[ 0.4,0, 1.4], rot:Math.PI },
-  { url:'glb/desk-tripo-12k.glb', h:0.78, pos:[ 4.0,0, 1.4], rot:Math.PI },
-  // reception
-  { url:'glb/desk-tripo-12k.glb', h:0.95, pos:[-7.2,0, 1.0], rot:Math.PI/2, sx:1.7 },
-  // cups on desks
-  { url:'glb/coffee-cup-v2.glb', h:0.14, pos:[-3.0,0.78,-2.2], rot:0.4 },
-  { url:'glb/coffee-cup-v2.glb', h:0.14, pos:[ 0.7,0.78,-2.5], rot:1.1 },
-  { url:'glb/coffee-cup-v2.glb', h:0.14, pos:[ 3.8,0.78, 1.5], rot:2.2 },
-  { url:'glb/coffee-cup-v2.glb', h:0.14, pos:[-7.4,0.95, 1.3], rot:0.2 },
+  { url:'../../public/glb/vault-door.glb',   h:2.6,  pos:[-6.4,0,-7.0], rot:0            },
+  { url:'../../public/glb/phone-wall.glb',   h:2.0,  pos:[ 5.6,1.1,-7.1], rot:0, air:true },
+  { url:'../../public/glb/cable-ball.glb',   h:1.1,  pos:[-8.0,0, 5.2], rot:0.6          },
+  { url:'../../public/glb/tortoise-v2.glb',  h:0.55, pos:[ 2.2,0, 4.6], rot:-0.9         },
+  // desks — h is the target SURFACE height (~0.74m: a bit above a 1.68m
+  // character's hip at 0.70m, clearly below the waist), see DESK_SURFACE_RAW
+  { url:'../../public/glb/desk-tripo-12k.glb', h:0.74, surfaceRaw:DESK_SURFACE_RAW, pos:[-3.2,0,-2.4], rot:0 },
+  { url:'../../public/glb/desk-tripo-12k.glb', h:0.74, surfaceRaw:DESK_SURFACE_RAW, pos:[ 0.4,0,-2.4], rot:0 },
+  { url:'../../public/glb/desk-tripo-12k.glb', h:0.74, surfaceRaw:DESK_SURFACE_RAW, pos:[ 4.0,0,-2.4], rot:0 },
+  { url:'../../public/glb/desk-tripo-12k.glb', h:0.74, surfaceRaw:DESK_SURFACE_RAW, pos:[-3.2,0, 1.4], rot:Math.PI },
+  { url:'../../public/glb/desk-tripo-12k.glb', h:0.74, surfaceRaw:DESK_SURFACE_RAW, pos:[ 0.4,0, 1.4], rot:Math.PI },
+  { url:'../../public/glb/desk-tripo-12k.glb', h:0.74, surfaceRaw:DESK_SURFACE_RAW, pos:[ 4.0,0, 1.4], rot:Math.PI },
+  // reception — taller standing-height counter, same surface logic
+  { url:'../../public/glb/desk-tripo-12k.glb', h:0.95, surfaceRaw:DESK_SURFACE_RAW, pos:[-7.2,0, 1.0], rot:Math.PI/2, sx:1.7 },
+  // cups on desks, resting on the corrected surface heights above
+  { url:'../../public/glb/coffee-cup-v2.glb', h:0.14, pos:[-3.0,0.74,-2.2], rot:0.4 },
+  { url:'../../public/glb/coffee-cup-v2.glb', h:0.14, pos:[ 0.7,0.74,-2.5], rot:1.1 },
+  { url:'../../public/glb/coffee-cup-v2.glb', h:0.14, pos:[ 3.8,0.74, 1.5], rot:2.2 },
+  { url:'../../public/glb/coffee-cup-v2.glb', h:0.14, pos:[-7.4,0.95, 1.3], rot:0.2 },
 ]
 // characters: one rigged mesh, placed around the room
 const PEOPLE = [
@@ -124,7 +135,9 @@ function place(gltf, spec) {
   const box = new THREE.Box3().setFromObject(o)
   const size = box.getSize(new THREE.Vector3())
   const c = box.getCenter(new THREE.Vector3())
-  const s = spec.h / Math.max(size.y, 1e-4)
+  // Most props: h is the mesh's total height. Desks pass surfaceRaw so h is
+  // instead the target height of the desktop surface (see DESK_SURFACE_RAW).
+  const s = spec.h / Math.max(spec.surfaceRaw || size.y, 1e-4)
   const g = new THREE.Group()
   o.position.set(-c.x, -box.min.y, -c.z)
   o.scale.setScalar(1)
@@ -147,7 +160,7 @@ function tally(){ logEl.textContent = `${done}/${pending} objects loaded` }
 PLAN.forEach(load)
 // people share one download
 pending++
-loader.load('glb/character.glb', gltf => {
+loader.load('../../public/glb/character.glb', gltf => {
   PEOPLE.forEach((p,i) => {
     const clone = skinnedClone(gltf.scene)
     place({ scene: clone }, { h:1.68, pos:p.pos, rot:p.rot })
@@ -187,7 +200,7 @@ function resize(){
   if(canvas.width!==w||canvas.height!==h){
     renderer.setSize(w,h,false); camera.aspect=w/h; camera.updateProjectionMatrix() }
 }
-window.__scene = scene; window.__cam = camera;
+window.__scene = scene; window.__cam = camera; window.__THREE = THREE; window.__meshes = meshes;
 function tick(){
   resize()
   if(spin){ yaw += 0.0016*spinDir

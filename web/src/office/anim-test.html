@@ -40,7 +40,7 @@
 <div id="log">loading…</div>
 
 <script type="importmap">
-{"imports":{"three":"./vendor/three.module.js","three/addons/":"./vendor/addons/"}}
+{"imports":{"three":"../../public/vendor/three.module.js","three/addons/":"../../public/vendor/addons/"}}
 </script>
 <script type="module">
 import * as THREE from 'three'
@@ -106,7 +106,7 @@ function place(src, x, rotY) {
 }
 
 const loader = new GLTFLoader()
-loader.load('glb/character.glb', gltf => {
+loader.load('../../public/glb/character.glb', gltf => {
   chars.push(place(gltf.scene, 0, 0))
   chars.push(place(gltf.scene, 1.05, 0))
   chars[1].group.visible = false
