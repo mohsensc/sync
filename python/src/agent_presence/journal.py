@@ -50,8 +50,16 @@ class DecisionRecord:
 
 
 def journal_path(env: Mapping[str, str] | None = None) -> Path:
-    """Same directory rule as the snapshot and the sockets."""
+    """Same rule as the snapshot and the sockets: derive it, let one var move it.
+
+    `$AGENT_PRESENCE_JOURNAL` has to be read here as well as in the daemon —
+    two presenced sharing an XDG_RUNTIME_DIR is the normal way to run one per
+    repo, and a reader that ignores the override reads the other repo's file.
+    """
     env = os.environ if env is None else env
+    configured = env.get("AGENT_PRESENCE_JOURNAL")
+    if configured:
+        return Path(configured)
     base = env.get("XDG_RUNTIME_DIR") or env.get("TMPDIR") or "/tmp"
     return Path(base) / JOURNAL_NAME
 
