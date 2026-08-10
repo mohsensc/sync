@@ -37,6 +37,39 @@ int rung_of(const std::string& response) {
     return static_cast<int>(value);
 }
 
+/// Copy whatever landed in `src` at or after `from` onto the end of `dst`,
+/// count the lines, and move `from` on to where it stopped.
+///
+/// The bytes a trim could not have seen, in other words: it read the file up to
+/// `from` with nothing locked, so anything past that offset arrived while it
+/// was rewriting and would otherwise be dropped by the rename.
+///
+/// Called twice. Once unlocked, which carries the bulk of whatever a busy
+/// machine wrote during the rewrite, and once under the exclusive lock, which
+/// carries only what arrived during that first pass. The second call is what
+/// makes the rename safe and it is the one that has to be small.
+bool splice_tail(const std::string& src, long long& from, const std::string& dst,
+                 std::size_t& lines_out) {
+    std::ifstream in(src, std::ios::binary);
+    if (!in) return true;  // gone from under us; nothing to carry over
+    in.seekg(static_cast<std::streamoff>(from));
+    if (!in) return true;
+
+    std::string line;
+    if (!std::getline(in, line)) return true;  // nothing appended: the common case
+
+    std::ofstream out(dst, std::ios::app | std::ios::binary);
+    if (!out) return false;
+    do {
+        from += static_cast<long long>(line.size()) + 1;
+        if (line.empty()) continue;
+        out << line << '\n';
+        ++lines_out;
+    } while (std::getline(in, line));
+    out.flush();
+    return static_cast<bool>(out);
+}
+
 /// Why this decision came out the way it did, in one sentence a human reads.
 ///
 /// Two things and no more: which side of the policy decided, and — when there
@@ -149,9 +182,17 @@ void DecisionJournal::record(long long at_ms, const std::string& request,
     }
 }
 
+bool DecisionJournal::give_up() {
+    // Not `lines_ = 0`: the count is the only thing that will ever bring us
+    // back here, so it has to keep counting. Move the bar instead.
+    gate_.store(lines_.load(std::memory_order_relaxed) + kJournalTrimRetryLines,
+                std::memory_order_relaxed);
+    return false;
+}
+
 bool DecisionJournal::maybe_trim() {
     if (path_.empty()) return false;
-    if (lines_.load(std::memory_order_relaxed) <= kJournalMaxLines) {
+    if (lines_.load(std::memory_order_relaxed) <= gate_.load(std::memory_order_relaxed)) {
         // Nothing to cut. Still worth noticing that the file we hold open has
         // been deleted under us — a tmp sweep would otherwise leave every later
         // record going into an unlinked inode, and `ap why` reading an empty
@@ -165,28 +206,62 @@ bool DecisionJournal::maybe_trim() {
                     fd_ = -1;  // the next record opens a fresh one
                 }
                 lines_.store(0, std::memory_order_relaxed);
+                gate_.store(kJournalMaxLines, std::memory_order_relaxed);
             }
         }
         return false;
     }
 
-    std::unique_lock lock(mu_);
-    // Re-checked under the lock: another tick may have trimmed already.
-    if (lines_.load(std::memory_order_relaxed) <= kJournalMaxLines) return false;
+    // One trim at a time. `try_to_lock` and not a wait: this runs on the tick,
+    // and a tick that blocks is a tick not on the socket. `record` never takes
+    // this mutex, so nothing a decision does can queue behind it.
+    std::unique_lock<std::mutex> trim(trim_mu_, std::try_to_lock);
+    if (!trim.owns_lock()) return false;
+    if (lines_.load(std::memory_order_relaxed) <= gate_.load(std::memory_order_relaxed)) {
+        return false;
+    }
+
+    // ---- everything from here to the rename runs with `mu_` untaken --------
+    // Writers keep writing to the file we are reading. That is fine, and it is
+    // the point: the journal is append-only, so every byte below the offset we
+    // stop at is stable, and the bytes above it are carried over by splice_tail
+    // under the lock at the end.
+    scans_.fetch_add(1, std::memory_order_relaxed);
+
+    std::error_code ec;
+    const auto size_now = std::filesystem::file_size(path_, ec);
+    if (ec) {
+        // Somebody took the file away. Nothing to trim, and the count has to
+        // come back down or every tick from here on tries again.
+        lines_.store(0, std::memory_order_relaxed);
+        gate_.store(kJournalMaxLines, std::memory_order_relaxed);
+        return false;
+    }
+    const auto before = static_cast<long long>(size_now);
 
     std::vector<std::string> kept;
+    long long consumed = 0;
     {
-        std::ifstream in(path_);
+        std::ifstream in(path_, std::ios::binary);
         if (!in) {
-            // Somebody took the file away. Nothing to trim, and the count has
-            // to come back down or every tick from here on tries again.
-            lines_ = 0;
+            lines_.store(0, std::memory_order_relaxed);
+            gate_.store(kJournalMaxLines, std::memory_order_relaxed);
             return false;
         }
         std::string line;
-        while (std::getline(in, line)) {
+        while (consumed < before && std::getline(in, line)) {
+            // Counted, not `tellg`ed: libc++ implements tellg as a real seek
+            // that throws the read buffer away, which would turn one pass over
+            // the file into one syscall per line.
+            //
+            // `+ 1` for the newline getline ate. A torn last line has none, so
+            // this ends up one past the end — which is exactly what we want:
+            // splice_tail then finds nothing to carry over, rather than
+            // re-emitting the fragment the rewrite has already repaired.
+            consumed += static_cast<long long>(line.size()) + 1;
             if (line.empty()) continue;
             kept.push_back(std::move(line));
+            line.clear();
             if (kept.size() > kJournalKeepLines * 2) {
                 // Keep the tail without holding the whole file: erase from the
                 // front in blocks rather than per line, which would be a copy
@@ -203,30 +278,54 @@ bool DecisionJournal::maybe_trim() {
     // and must never see a half-written journal.
     const std::string tmp = path_ + ".tmp";
     {
-        std::ofstream out(tmp, std::ios::trunc);
-        if (!out) return false;
+        std::ofstream out(tmp, std::ios::trunc | std::ios::binary);
+        if (!out) return give_up();
         for (const auto& line : kept) out << line << '\n';
         out.flush();
         if (!out) {
             std::remove(tmp.c_str());
-            return false;
+            return give_up();
         }
     }
-    if (std::rename(tmp.c_str(), path_.c_str()) != 0) {
+
+    // Records written while we were rewriting. Copied here, with nothing
+    // locked, so that the pass that has to happen under the lock is left with
+    // only what arrives during this one.
+    std::size_t tail = 0;
+    if (!splice_tail(path_, consumed, tmp, tail)) {
         std::remove(tmp.c_str());
-        return false;
+        return give_up();
     }
 
-    // The rename put a new inode at this path. The fd we hold still points at
-    // the old one, so every record from here would go into a file nothing can
-    // open — the trim would look like it worked and the journal would stop
-    // growing. Drop it; the next record opens the file that is actually there.
-    if (fd_ >= 0) {
-        ::close(fd_);
-        fd_ = -1;
+    // ---- and only now, for one short read and two syscalls -----------------
+    // A writer holds `mu_` for exactly one `write`, so this is the whole of
+    // what a decision can ever wait on for a trim.
+    std::size_t total = kept.size();
+    {
+        std::unique_lock lock(mu_);
+        if (!splice_tail(path_, consumed, tmp, tail)) {
+            std::remove(tmp.c_str());
+            return give_up();
+        }
+        if (std::rename(tmp.c_str(), path_.c_str()) != 0) {
+            std::remove(tmp.c_str());
+            return give_up();
+        }
+        total += tail;
+
+        // The rename put a new inode at this path. The fd we hold still points
+        // at the old one, so every record from here would go into a file
+        // nothing can open — the trim would look like it worked and the journal
+        // would stop growing. Drop it; the next record opens the file that is
+        // actually there.
+        if (fd_ >= 0) {
+            ::close(fd_);
+            fd_ = -1;
+        }
     }
 
-    lines_ = kept.size();
+    lines_.store(total, std::memory_order_relaxed);
+    gate_.store(kJournalMaxLines, std::memory_order_relaxed);
     return true;
 }
 

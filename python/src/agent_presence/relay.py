@@ -360,6 +360,12 @@ class _PublishingRegistry(LeaseRegistry):
         self._publish(before)
         return result
 
+    def release_everywhere(self, *args, **kwargs):
+        before = self._before()
+        result = super().release_everywhere(*args, **kwargs)
+        self._publish(before)
+        return result
+
 
 class Relay:
     """Sole authority on leases and the only place protocol decisions are made.
@@ -390,7 +396,29 @@ class Relay:
         # What the room was last told the floor was. Live reload is only useful
         # if the change reaches the daemons, and they learn about it here.
         self._policy_digest = self._policy.current().digest
+        # Resolved once, here, and never again: the roster decides who outranks
+        # whom for the life of the process, and re-reading it per connection
+        # would make a tier depend on when a client happened to join.
+        #
+        # And said out loud, because the failure mode is silence. A relay
+        # started outside a checkout — or above one, or by a service manager
+        # with no working directory worth the name — finds no roster and grants
+        # every connection `normal`. That is a defensible default and an
+        # indefensible surprise: the exec who put themselves at `critical`,
+        # minted a token and installed it gets `normal` with nothing anywhere
+        # saying why. One line at startup, next to "relay listening on".
         self._roster = roster if roster is not None else Roster.discover()
+        if self._roster.present:
+            log.info(
+                "roster %s: %d principal(s), default %s",
+                self._roster.source, len(self._roster.principals()),
+                name_of(self._roster.default_tier),
+            )
+        else:
+            log.info(
+                "no principals roster (%s); every connection joins at %s",
+                self._roster.source, name_of(PRIORITY_NORMAL),
+            )
         # Grant per connection, latched at join. Keyed on the object, so it dies
         # with the connection — same mechanism as `_identity`, and deliberately
         # not an attribute on Conn: nothing a client can write to may decide
@@ -516,17 +544,40 @@ class Relay:
         composes with whatever the client resolved locally by taking the louder
         of the two, which is well defined without knowing what the other side
         said. `cpp/daemon/policy_cache.cpp` is what reads this.
+
+        Two fields, because a floor is not one table. `floor` is the blanket
+        one, five names, exactly as it always was. `floors` carries the
+        `[[floor.path]]` lines, which used to be resolved away here against the
+        empty path and so never left the building: an org that wrote
+
+            [[floor.path]]
+            match  = "**/pay.py"
+            rung3  = "deny"
+
+        had that floor enforced on the relay's own answers and never on any
+        daemon's, because the frame said `notify` — the blanket answer for a
+        path no glob matches. Path floors are most of what an org writes, and
+        the org floor is the one control an org actually enforces.
+
+        `floors` is omitted when there is nothing to say, so a relay whose org
+        file is all blanket rules puts the same bytes on the wire it always
+        did. `policy.floor_from_frame` is the reading of this frame both sides
+        are meant to agree on.
         """
         policy = self._policy.current()
         org = policy.layer("org")
         if org is None:
             return None
-        return {
+        frame = {
             "type": "policy",
             "floor": policy.floor_table("").names(),
             "source": f"org:{org.source}",
             "digest": policy.digest,
         }
+        floors = policy.floor_rules()
+        if floors:
+            frame["floors"] = floors
+        return frame
 
     def _publish_policy_change(self) -> bool:
         """Push a new org floor to every room, if there is one.
@@ -631,6 +682,7 @@ class Relay:
         """
         agent, grant = conn.agent, self.grant_of(conn)
         tier = self.priority_of(conn)
+        held_by_a_peer = False
 
         for other in list(self._identity):
             mine = self._identity.get(other)
@@ -638,6 +690,9 @@ class Relay:
                 continue
             theirs = self.grant_of(other)
             if (theirs.principal, self.priority_of(other)) == (grant.principal, tier):
+                # The ordinary shared-id case: same principal, same tier. That
+                # connection's claims are somebody's live work, not leftovers.
+                held_by_a_peer = True
                 continue
             if theirs.authenticated:
                 log.warning(
@@ -657,7 +712,42 @@ class Relay:
                 agent, grant.principal,
             )
             self.leave(other)
+
+        if not held_by_a_peer:
+            self._drop_stranded_claims(agent, tier)
         return None
+
+    def _drop_stranded_claims(self, agent: str, tier: int) -> None:
+        """The other half of the binding, and the half that outlives a socket.
+
+        Binding an id to one grant covers the ids that are *held*. A claim can
+        outlive the connection that took it: ``leave`` releases the leases of
+        the room the connection was in when it hung up, and a connection that
+        moved rooms — one daemon, one repo switch — leaves the first room's
+        leases behind to age out over a TTL.
+
+        For that TTL the id is unheld and its claims still carry the tier they
+        were taken at, and ``acquire`` reads an agent's tier off that agent's
+        live claims. So an unauthenticated client that took the name in the gap
+        inherited ``critical`` from a session that had already gone home, which
+        is exactly the laundering the binding exists to stop, ninety seconds
+        late.
+
+        Nobody is being interrupted here: no connection holds this id, so the
+        claims belong to no live session. They are only dropped when the tier
+        they carry disagrees with the tier the new holder was granted — a
+        reconnect after a dropped socket comes back at the same tier and keeps
+        its leases, which is the case worth protecting.
+        """
+        stranded = self.registry.priority_of(agent, default=tier)
+        if stranded == tier:
+            return
+        log.warning(
+            "agent id %s changed hands at %s while claims taken at %s were "
+            "still live; dropping them",
+            agent, name_of(tier), name_of(stranded),
+        )
+        self.registry.release_everywhere(agent)
 
     def authenticate(
         self, principal: str | None, token: str, room: str

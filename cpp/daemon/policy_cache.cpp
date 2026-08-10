@@ -8,10 +8,10 @@
 #include <cstring>
 #include <string>
 
+#include "daemon/json.hpp"
+
 namespace ap {
 namespace {
-
-constexpr const char* kNames[kRungs] = {"silent", "notify", "context", "ask", "deny"};
 
 bool is_space(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
 
@@ -59,20 +59,19 @@ bool read_all(const std::string& path, std::size_t cap, std::string& out) {
     return true;
 }
 
+/// `"key":true`. Only true is a hit — a missing key, `false`, `null` and
+/// anything unparseable all mean "not flagged", which is the reading that
+/// cannot invent a degradation out of a file we half understood.
+bool json_true(std::string_view json, std::string_view key) {
+    std::string needle = "\"";
+    needle.append(key);
+    needle += "\":";
+    const auto pos = json.find(needle);
+    if (pos == std::string_view::npos) return false;
+    return json.compare(skip_space(json, pos + needle.size()), 4, "true") == 0;
+}
+
 }  // namespace
-
-const char* effect_name(Effect e) {
-    const int i = static_cast<int>(e);
-    if (i < 0 || i >= kRungs) return kNames[0];
-    return kNames[i];
-}
-
-std::optional<Effect> parse_effect(std::string_view s) {
-    for (int i = 0; i < kRungs; ++i) {
-        if (s == kNames[i]) return static_cast<Effect>(i);
-    }
-    return std::nullopt;
-}
 
 bool parse_effect_list(std::string_view array, PolicyTable& out, std::string* problem) {
     std::size_t i = skip_space(array, 0);
@@ -159,6 +158,19 @@ bool PolicyCache::refresh(const std::string& path, long long now_ms) {
     const long long size = static_cast<long long>(st.st_size);
     if (loaded_ && mtime == mtime_ns_ && size == size_) return false;
 
+    // Too big to be our file. Say which failure this is — "could not be read"
+    // sends you looking at permissions — and remember the stamp, because
+    // re-reading a file we already know is over the cap on every tick is how a
+    // policy nobody can use also becomes a busy loop.
+    if (size > static_cast<long long>(kMaxBytes)) {
+        mtime_ns_ = mtime;
+        size_ = size;
+        note("policy cache " + path + " is too large (" + std::to_string(size) +
+             " bytes, limit " + std::to_string(kMaxBytes) +
+             "); keeping the last table");
+        return false;
+    }
+
     std::string text;
     if (!read_all(path, kMaxBytes, text)) {
         mtime_ns_ = kNever;  // try again next tick rather than latching the failure
@@ -178,6 +190,22 @@ bool PolicyCache::refresh(const std::string& path, long long now_ms) {
 
     std::string problem;
     const bool ok = parse_effect_array(text, "table", next, &problem);
+
+    // What the *compiler* thought of the config it read, which is a different
+    // question from whether this file parsed. `ap policy compile` sets these
+    // when a layer had a bad key — `rung3 = "loud"` — and keeps the rest of the
+    // table, so the blob is perfectly well-formed and says so itself.
+    //
+    // Nothing read them. The one failure the design doc calls out by name,
+    // "degradation is loud", was silent for exactly the case it was written
+    // for: a typo in policy.toml resolved to the builtin table, `ap doctor`
+    // exited 0, and the statusline said nothing.
+    if (json_true(text, "degraded")) {
+        std::string said = json_field(text, "problem");
+        if (said.empty()) said = "policy cache " + path + " is marked degraded and says no why";
+        if (!problem.empty()) said += "; " + problem;
+        problem = std::move(said);
+    }
 
     std::unique_lock lock(mu_);
     ++parses_;

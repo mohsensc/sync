@@ -445,9 +445,12 @@ def _cpp_header() -> str:
 
 
 def _cpp_effect_names() -> list[str]:
-    body = re.search(r"kNames\[kRungs\]\s*=\s*\{([^}]*)\}",
-                     (CPP / "daemon" / "policy_cache.cpp").read_text())
-    assert body is not None, "kNames moved; this test is the reason it matters"
+    # In hook/protocol.hpp and not policy_cache.cpp: the names go over the wire
+    # now that the hook reads `"effect"`, so they live with the rest of the
+    # protocol both halves have to spell the same way.
+    body = re.search(r"kEffectNames\[kEffects\]\s*=\s*\{([^}]*)\}",
+                     (CPP / "hook" / "protocol.hpp").read_text())
+    assert body is not None, "kEffectNames moved; this test is the reason it matters"
     return re.findall(r'"([a-z]+)"', body.group(1))
 
 

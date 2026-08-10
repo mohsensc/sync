@@ -7,6 +7,11 @@
 #include <string>
 #include <string_view>
 
+// Effect, effect_name, parse_effect, louder. They are wire vocabulary — the
+// daemon writes `"effect":"deny"` and the hook reads it — so they live with the
+// rest of the protocol both halves have to agree on letter for letter.
+#include "hook/protocol.hpp"
+
 namespace ap {
 
 // ===========================================================================
@@ -38,25 +43,7 @@ namespace ap {
 // set, which is what makes "a degraded policy never resolves below the builtin
 // floor" a structural property rather than a promise.
 
-enum class Effect : int {
-    Silent = 0,
-    Notify = 1,
-    Context = 2,
-    Ask = 3,
-    Deny = 4,
-};
-
 constexpr int kRungs = 5;
-
-/// The wire name. Never null; an out-of-range value reads as "silent".
-const char* effect_name(Effect e);
-
-/// The inverse. Empty for anything not one of the five.
-std::optional<Effect> parse_effect(std::string_view s);
-
-/// Louder of the two. The lattice is totally ordered by attention spent, so
-/// this is the whole of "apply a floor".
-inline Effect louder(Effect a, Effect b) { return a >= b ? a : b; }
 
 struct PolicyTable {
     std::array<Effect, kRungs> rung;
@@ -140,13 +127,22 @@ public:
     /// mtime gate is that this stays flat while nothing changes.
     std::size_t parses() const;
 
+    /// The largest compiled cache this daemon will read. Public so a test can
+    /// stand on the edge of it without hard-coding the number twice.
+    static constexpr std::size_t max_bytes() { return kMaxBytes; }
+
 private:
     static constexpr long long kRecheckMs = 100;
     static constexpr long long kNever = -1;
-    /// The compiled cache is one line of five-name arrays. Anything larger than
-    /// this is not that file, and reading it into the daemon would be somebody
-    /// else's idea rather than ours.
-    static constexpr std::size_t kMaxBytes = 64 * 1024;
+    /// The cache stopped being one line of five-name arrays when `ap policy
+    /// compile` started carrying the [[path]] globs instead of resolving them
+    /// away: it now grows with the policy, and a 1200-rule repo policy weighs
+    /// about 100KB. The old 64KB cap silently turned that into an unreadable
+    /// file — the daemon kept the builtin table, `ap doctor` read the same file
+    /// in Python and said ok, and nobody found out until a rung 3 went quiet.
+    /// Still a cap: a file this far past any policy anyone writes is not our
+    /// file, and it is bounded work on a tick.
+    static constexpr std::size_t kMaxBytes = 4 * 1024 * 1024;
 
     void note(const std::string& problem);
 

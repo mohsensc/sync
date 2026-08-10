@@ -14,7 +14,9 @@ agreement.
 
 from __future__ import annotations
 
-from agent_presence.journal import parse_record, read_journal
+from pathlib import Path
+
+from agent_presence.journal import journal_path, parse_record, read_journal
 
 # One line, exactly as cpp/daemon/journal.cpp emitted it.
 FROM_THE_DAEMON = (
@@ -58,3 +60,29 @@ def test_a_record_with_no_reason_is_still_readable():
     assert record is not None
     assert record.reason == ""
     assert record.holder == ""
+
+
+# --- where the file is ------------------------------------------------------
+#
+# cpp/daemon/main.cpp derives this the same way and reads the same override.
+# Two presenced on one box with distinct AGENT_PRESENCE_SOCK used to share one
+# journal, so `ap why` in one repo answered with the other repo's blocks.
+
+
+def test_journal_path_falls_back_to_the_runtime_directory():
+    assert journal_path({"XDG_RUNTIME_DIR": "/run/user/501"}) == Path(
+        "/run/user/501/agent-presence.decisions.jsonl"
+    )
+
+
+def test_agent_presence_journal_moves_the_file():
+    env = {"XDG_RUNTIME_DIR": "/run/user/501",
+           "AGENT_PRESENCE_JOURNAL": "/run/user/501/repo-a.jsonl"}
+    assert journal_path(env) == Path("/run/user/501/repo-a.jsonl")
+
+
+def test_two_daemons_sharing_a_runtime_dir_read_two_journals():
+    shared = "/run/user/501"
+    a = journal_path({"XDG_RUNTIME_DIR": shared, "AGENT_PRESENCE_JOURNAL": shared + "/a.jsonl"})
+    b = journal_path({"XDG_RUNTIME_DIR": shared, "AGENT_PRESENCE_JOURNAL": shared + "/b.jsonl"})
+    assert a != b
