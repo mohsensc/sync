@@ -148,9 +148,9 @@ class LeaseRegistry:
         that ended some other way — released, finished, aborted, or gone quiet
         for a whole TTL — leaves the region open to whoever asks first, because
         in none of those cases is the holder being forced off and about to grab
-        it back. Reserving there too puts a 30 second queue in front of every
-        region anybody ever glanced at, which is not fairness, it is a room
-        where nothing moves. (Measured: it deadlocked the contention simulation
+        it back. Reserving there too puts a timer in front of every region
+        anybody ever glanced at, which is not fairness, it is a room where
+        nothing moves. (Measured: it deadlocked the contention simulation
         outright — see tests/test_invariants.py.) The one way a holder could
         still dodge its deadline by letting go and re-taking the region is
         closed by ``_carry``, which costs nobody anything.
@@ -167,15 +167,15 @@ class LeaseRegistry:
         if winner is None:
             return None
         if claim.handover_at is None or claim.handover_at > now:
-            # Ended early. Nothing is reserved, but the asks are remembered, so
+            # Ended early. Nothing is reserved, but the ask is remembered, so
             # letting go one second before the deadline and taking the region
             # straight back does not buy the holder a fresh fifteen minutes.
-            # The winner and the deadline, not the whole queue. Everyone else is
-            # polling and will re-register against the next claim on their own,
-            # so keeping them here buys nothing and costs one live dict per
-            # (region, agent) that ever let go of a contended lease — at 200
-            # agents on 5 regions that was 200k objects the collector had to
-            # walk.
+            #
+            # The winner and the deadline, not the whole queue: everyone else is
+            # polling and re-registers against the next claim on its own, so
+            # keeping them here buys nothing and costs one live dict per
+            # (region, agent) that ever let go of a contended lease — 200k
+            # objects for the collector to walk, at 200 agents on 5 regions.
             self._carry[(claim.room, claim.scope, claim.agent)] = (
                 winner, claim.handover_at,
             )

@@ -102,11 +102,13 @@ def _lease_entry(claim: Claim, now: float) -> dict:
     the holder and never say they outrank you. Always spelled out, `normal`
     included, so no reader needs a special case for a missing field.
 
-    The handover fields travel for one reader: the holder itself. Its own lease
-    comes back to it in every snapshot, and these are what let its daemon warn
-    it — while it still has the region and can act — that the clock is running
-    and who the region goes to. They are omitted entirely when nobody is
-    waiting, which is the common case and the quiet one.
+    The handover fields have two readers and go only to those two. The holder
+    gets them so its daemon can warn it — while it still has the region and can
+    act — that the clock is running and who the region goes to. Whoever asked
+    gets them so it can be told when rather than only no. Nobody else does: see
+    `_PublishingRegistry._publish`, where a change to these alone is routed
+    rather than broadcast. Omitted entirely when nobody is waiting, which is the
+    common case and the quiet one.
     """
     entry = {
         "agent": claim.agent,
@@ -164,14 +166,15 @@ class Refusal:
 # A tuple and not a dataclass. One is built per live claim on both sides of
 # every registry call — the hottest allocation in the relay — and a frozen
 # dataclass costs about four times as much to construct for no reader benefit
-# at this size. The two indices anybody reads by hand are named below.
+# at this size. The indices anybody reads by hand are named below.
 _Snapshot = tuple[str, str, str, float, float | None, "Contender | None"]
 
 _SNAP_ROOM = 0
 _SNAP_HUMAN = 1
-# Everything the rest of the room caches. Past this index the fields are the
-# handover deadline and the queue, which are the holder's own business — see
-# `_publish`.
+_SNAP_EXPIRES = 3
+_SNAP_WINNER = 5
+# Everything the rest of the room caches. Past this the fields are the handover
+# deadline and the queue, which are the holder's own business — see `_publish`.
 _SNAP_SHARED = slice(0, 4)
 
 
@@ -258,7 +261,7 @@ class _PublishingRegistry(LeaseRegistry):
                 "type": "lease",
                 # All three erase the entry daemon-side. The distinction is for
                 # whoever is reading the wire, not for the cache.
-                "state": "expired" if prev[3] <= now else "released",
+                "state": "expired" if prev[_SNAP_EXPIRES] <= now else "released",
                 "agent": agent,
                 "region": _region_payload(scope),
             }
@@ -283,7 +286,7 @@ class _PublishingRegistry(LeaseRegistry):
                     "from": agent,
                     "from_human": prev[_SNAP_HUMAN],
                 })
-                winner = prev[5]
+                winner = prev[_SNAP_WINNER]
                 if winner is not None:
                     frame["waited_s"] = max(0.0, now - winner.first_asked_at)
             self._relay.publish(prev[_SNAP_ROOM], frame)
