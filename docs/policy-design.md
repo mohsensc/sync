@@ -26,9 +26,14 @@ Two consequences worth stating up front:
   change to one ordering key, argued separately in §5.
 
 Corollary for rung 4: a `silent` effect at rung 4 also short-circuits the similarity
-computation. That is the on/off switch for semantic detection — one concept, not a flag
-plus an effect. Rung 4 is unimplemented today and `silent` is its default, so this ships
-as "still off".
+computation, so the volume knob doubles as a way to stop paying for the comparison.
+
+Rung 4 landed while this branch was open (`feat/rung-4`, merged in), so the original
+plan of "ships as still off, `silent` by default" no longer holds. It has its own off
+switch — `AGENT_PRESENCE_RUNG4`, down unless you set it — and a `silent` default behind
+that flag would mean turning the feature on and getting nothing. So the default is
+`context`: the flag decides whether rung 4 runs, the effect decides how loudly a hit is
+reported.
 
 ---
 
@@ -341,7 +346,7 @@ so a second join frame cannot re-rate a live connection.
 ## 6. Defaults
 
 ```
-BUILTIN         rung0 = silent   rung1 = notify   rung2 = context   rung3 = deny    rung4 = silent
+BUILTIN         rung0 = silent   rung1 = notify   rung2 = context   rung3 = deny    rung4 = context
 BUILTIN_FLOOR   rung0 = silent   rung1 = silent   rung2 = silent    rung3 = notify  rung4 = silent
 HOOK_FLOOR      rung0 = silent   rung1 = silent   rung2 = silent    rung3 = notify  rung4 = silent
 PRIORITY        everyone normal, roster absent
@@ -410,7 +415,7 @@ rung0 = "silent"
 rung1 = "notify"
 rung2 = "context"
 rung3 = "deny"
-rung4 = "silent"             # silent also skips the rung-4 similarity computation
+rung4 = "context"            # silent here also skips the rung-4 similarity computation
 
 [[path]]                     # selector inside this layer; longest literal prefix wins
 match = "src/generated/**"
