@@ -804,3 +804,84 @@ rung2 = "silent"
 """))
     assert policy.resolve(2, "src/generated/api.py").effect == "silent"
     assert policy.resolve(2, "src/app.py").effect == "deny"
+
+
+# -- the shape a path arrives in ---------------------------------------------
+#
+# Every glob anybody writes is repo-relative, and only one of the three shapes a
+# path arrives in is. The other two matched nothing at all, so a `[[path]]` rule
+# and a `[[floor.path]]` rule quietly stopped existing for the file the hook was
+# actually asking about.
+
+
+def path_policy() -> Policy:
+    return layers(("repo", """
+[[path]]
+match = "src/payments/**"
+rung2 = "deny"
+"""))
+
+
+def test_the_absolute_path_the_hook_sends_matches_a_repo_relative_glob():
+    # PreToolUse carries `file_path` absolute — cpp/hook/hook.cpp build_event —
+    # and nothing between there and here makes it relative. The repo-relative
+    # rule matched the spelling in the docs and missed the spelling on the wire.
+    policy = path_policy()
+    assert policy.resolve(2, "src/payments/charge.py").effect == "deny"
+    assert policy.resolve(
+        2, "/Users/sara/work/myrepo/src/payments/charge.py"
+    ).effect == "deny"
+
+
+def test_an_absolute_path_outside_the_rule_is_still_untouched():
+    policy = path_policy()
+    assert policy.resolve(2, "/Users/sara/work/myrepo/src/api.py").effect == \
+        BUILTIN[2]
+
+
+def test_a_caller_that_knows_the_checkout_root_can_say_so():
+    from agent_presence.policy import normalize_path
+
+    assert normalize_path(
+        "/Users/sara/work/myrepo/src/pay.py", root="/Users/sara/work/myrepo"
+    ) == "src/pay.py"
+    assert normalize_path("./src//pay.py/") == "src/pay.py"
+    assert normalize_path("") == ""
+
+
+def test_an_opaque_path_cannot_match_a_glob_so_the_strictest_rule_stands():
+    # `redact.opaque_region` hashes the path before the relay ever sees it, and
+    # no glob matches a hash. Reading that as "no rule applies" made opaque mode
+    # a way to turn off every path rule in the file, for every file, silently.
+    policy = path_policy()
+    hashed = "de56cd6b6439220c"
+    resolution = policy.resolve(2, hashed)
+    assert resolution.effect == "deny"
+    assert any("opaque" in p for p in resolution.problems), resolution.problems
+
+
+def test_an_opaque_path_still_gets_the_blanket_answer_when_no_rule_is_louder():
+    policy = layers(("repo", """
+[[path]]
+match = "docs/**"
+rung2 = "silent"
+"""))
+    # Quieter rules never win this way: the strictest reading is taken, so a
+    # hashed path lands on the blanket answer and not on the quiet line.
+    assert policy.resolve(2, "de56cd6b6439220c").effect == BUILTIN[2]
+
+
+def test_an_org_floor_survives_both_shapes():
+    policy = layers(("org", """
+[[floor.path]]
+match = "src/pay.py"
+rung3 = "deny"
+"""))
+    assert policy.floor_table("src/pay.py").names()[3] == "deny"
+    assert policy.floor_table("/Users/sara/work/myrepo/src/pay.py").names()[3] \
+        == "deny"
+    assert policy.floor_table("de56cd6b6439220c").names()[3] == "deny"
+    # And a file the floor does not name keeps the builtin floor, in every
+    # shape but the hashed one — which cannot be told apart from pay.py.
+    assert policy.floor_table("/Users/sara/work/myrepo/src/api.py").names()[3] \
+        == BUILTIN_FLOOR[3]
