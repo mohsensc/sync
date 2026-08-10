@@ -10,6 +10,8 @@
 // `at_ms` in wall clock milliseconds, capped so it cannot grow without bound.
 
 #include <catch2/catch_test_macros.hpp>
+#include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -310,4 +312,122 @@ TEST_CASE("a journal deleted under the daemon comes back on the next tick") {
     REQUIRE(lines.size() == 1);
     REQUIRE(lines[0].find(R"("at_ms":2)") != std::string::npos);
     REQUIRE(journal.written() == 2);
+}
+
+// ===========================================================================
+// The trim and the hot path
+// ===========================================================================
+//
+// `record` is called on DecisionServer's thread pool inside the hook's budget.
+// `maybe_trim` is called on the daemon's tick. They share one file and one
+// lock, and for a while the trim held that lock exclusively across a read, a
+// rewrite and a rename — so every decision on the box stopped for the length of
+// a file rewrite. On a full journal that measured 3.8ms against a 2ms socket
+// budget: the hook timed out and allowed the edit with nothing said, which is
+// the one failure mode the whole design is meant to rule out.
+//
+// It is not a deadlock. `std::shared_mutex`, no nesting, no cycle — every
+// writer does come back. It is a stall, and a stall past the budget is
+// indistinguishable from a hang to the thing on the other end of the socket.
+
+TEST_CASE("a trim does not stall the decisions running alongside it") {
+    const std::string path = scratch("trim-concurrency");
+    ap::PolicyCache policy;
+    const auto leases = held_at("normal");
+    ap::DecisionJournal journal(path);
+    const std::string reply = ap::decide_response(kRequest, leases, policy, 0);
+
+    // Big enough that the rewrite is unambiguously expensive on any machine.
+    constexpr long long kPrefill = 20'000;
+    for (long long i = 1; i <= kPrefill; ++i) journal.record(i, kRequest, reply, policy);
+
+    std::atomic<long long> done{0};
+    std::atomic<bool> stop{false};
+    std::thread writer([&] {
+        while (!stop.load(std::memory_order_relaxed)) {
+            journal.record(kPrefill + done.load(std::memory_order_relaxed) + 1, kRequest, reply,
+                           policy);
+            done.fetch_add(1, std::memory_order_relaxed);
+        }
+    });
+
+    // The writer's rate with nothing in its way, measured rather than assumed:
+    // this runs on whatever CI is feeling like today, so the only honest
+    // baseline is the same loop on the same machine seconds earlier. No sleep
+    // anywhere — both windows are defined by work completed.
+    const auto warm_start = std::chrono::steady_clock::now();
+    while (done.load(std::memory_order_relaxed) < 2000) std::this_thread::yield();
+    const auto warm_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                             std::chrono::steady_clock::now() - warm_start)
+                             .count();
+    const long long warm_done = done.load(std::memory_order_relaxed);
+
+    const auto trim_start = std::chrono::steady_clock::now();
+    const bool trimmed = journal.maybe_trim();
+    const auto trim_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                             std::chrono::steady_clock::now() - trim_start)
+                             .count();
+    const long long during = done.load(std::memory_order_relaxed) - warm_done;
+
+    stop.store(true, std::memory_order_relaxed);
+    writer.join();
+
+    REQUIRE(trimmed);
+    REQUIRE(warm_ns > 0);
+    REQUIRE(trim_ns > 0);
+
+    // Rates, not durations, so the assertion means the same thing on a laptop
+    // and on a loaded runner. A trim that holds the writers' lock takes this to
+    // zero; one that does not leaves it at roughly parity.
+    const double warm_rate = static_cast<double>(warm_done) / static_cast<double>(warm_ns);
+    const double trim_rate = static_cast<double>(during) / static_cast<double>(trim_ns);
+    INFO("warm " << warm_done << " records in " << warm_ns / 1000 << "us, during trim "
+                 << during << " in " << trim_ns / 1000 << "us");
+    REQUIRE(trim_rate * 4.0 > warm_rate);
+
+    // And nothing written alongside the rewrite was thrown away by the rename.
+    const auto lines = lines_of(path);
+    REQUIRE(lines.size() >= ap::kJournalKeepLines);
+    REQUIRE(lines.back().find(R"("at_ms":)" + std::to_string(kPrefill + done.load())) !=
+            std::string::npos);
+}
+
+TEST_CASE("a trim that cannot write backs off instead of re-reading every tick") {
+    // A read-only runtime directory is the usual way in. Every failure path
+    // after the read used to leave the count above the cap untouched, so the
+    // next tick re-read the whole file to fail in exactly the same place —
+    // 850us of pointless work, ten times a second, until the daemon restarted.
+    const std::string path = scratch("trim-latch");
+    ap::PolicyCache policy;
+    const auto leases = held_at("normal");
+    ap::DecisionJournal journal(path);
+    const std::string reply = ap::decide_response(kRequest, leases, policy, 0);
+
+    for (long long i = 1; i <= ap::kJournalMaxLines + 1; ++i) {
+        journal.record(i, kRequest, reply, policy);
+    }
+
+    // A directory where the temp file wants to be. Same failure as an unwritable
+    // runtime dir, and unlike chmod it fails for root too, so it means the same
+    // thing in a container as it does on a laptop.
+    std::filesystem::create_directories(path + ".tmp");
+
+    for (int tick = 0; tick < 5; ++tick) REQUIRE_FALSE(journal.maybe_trim());
+    REQUIRE(journal.scans() == 1);  // it looked once and then stopped looking
+
+    // Records keep landing while it is stuck. Nothing is lost.
+    REQUIRE(lines_of(path).size() == ap::kJournalMaxLines + 1);
+
+    // The directory becomes writable again. The backoff is a count, so it comes
+    // back on its own once the journal has moved on — no restart, no clock.
+    std::error_code ec;
+    std::filesystem::remove(path + ".tmp", ec);
+    REQUIRE_FALSE(ec);
+
+    for (std::size_t i = 0; i <= ap::kJournalTrimRetryLines; ++i) {
+        journal.record(9'000'000 + static_cast<long long>(i), kRequest, reply, policy);
+    }
+    REQUIRE(journal.maybe_trim());
+    REQUIRE(journal.scans() == 2);
+    REQUIRE(lines_of(path).size() == ap::kJournalKeepLines);
 }

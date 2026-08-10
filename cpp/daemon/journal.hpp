@@ -1,6 +1,7 @@
 #pragma once
 #include <atomic>
 #include <cstddef>
+#include <mutex>
 #include <shared_mutex>
 #include <string>
 
@@ -36,6 +37,15 @@ namespace ap {
 // The trim is the only expensive thing here and it does not happen on this
 // path — `maybe_trim` runs on the daemon's 100ms tick.
 //
+// It also does not happen *under the lock the hot path takes*, which is a
+// different claim and the one that matters. A trim that held `mu_` exclusively
+// while it read, rewrote and renamed a 2000-record file stopped every decision
+// thread for the length of that rewrite — measured at 3.8ms against a 2ms
+// socket budget, so the hook timed out and silently allowed. The read and the
+// rewrite now happen with no lock a decision can want; `mu_` is taken
+// exclusively only to carry over whatever was appended in the meantime and
+// rename, which is a couple of syscalls.
+//
 // Every failure is silent and open. A read-only runtime directory costs the
 // machine `ap why` and costs it nothing else; a daemon that refused to answer
 // a hook because it could not write a log would be strictly worse than one
@@ -46,6 +56,15 @@ inline constexpr std::size_t kJournalMaxLines = 2000;
 /// How many survive it. Trimming to the cap would mean a rewrite per record
 /// from then on; halving it buys a thousand records of quiet.
 inline constexpr std::size_t kJournalKeepLines = 1000;
+/// How many more records have to arrive before a *failed* trim is tried again.
+///
+/// A trim that cannot write — a read-only runtime directory is the usual way —
+/// leaves the count over the cap, so every tick from then on re-read the whole
+/// file to reach the same failure. Ten full-file reads a second, forever, for a
+/// thing that is not going to work this time either. Backing off by a count
+/// rather than a clock keeps it deterministic and keeps `maybe_trim` free of a
+/// clock it has no other use for.
+inline constexpr std::size_t kJournalTrimRetryLines = 200;
 
 class DecisionJournal {
 public:
@@ -79,11 +98,19 @@ public:
     /// Called from the daemon's tick and never from `record`, so no hook ever
     /// waits on a file rewrite. Nearly free when there is nothing to do: an
     /// atomic read, and one stat once the journal has anything in it.
+    ///
+    /// A trim that fails backs off by `kJournalTrimRetryLines` records rather
+    /// than retrying on every tick — see that constant.
     bool maybe_trim();
 
     /// How many records this process has written. The daemon logs nothing, so
     /// this is the only way to tell a working journal from a decorative one.
     std::size_t written() const { return written_.load(std::memory_order_relaxed); }
+
+    /// How many times a trim has read the file. The point of the backoff is
+    /// that a trim which cannot succeed stops paying for a full read, so the
+    /// only way to hold that claim down is to count the reads.
+    std::size_t scans() const { return scans_.load(std::memory_order_relaxed); }
 
     ~DecisionJournal();
 
@@ -92,12 +119,26 @@ private:
     /// there is a usable fd afterwards.
     bool open_locked();
 
+    /// Give up on this trim and wait for `kJournalTrimRetryLines` more records
+    /// before paying for another full read. Always false, so failure paths can
+    /// `return give_up();`.
+    bool give_up();
+
     std::string path_;
-    /// Shared by every writer, exclusive only for the trim and for opening.
+    /// Shared by every writer, exclusive only to swap `fd_` — opening one, and
+    /// the last two syscalls of a trim. Never held across a file rewrite.
     mutable std::shared_mutex mu_;
+    /// Serialises trims against each other. `record` never touches it, which is
+    /// what lets the expensive half of a trim run outside `mu_` without two
+    /// ticks rewriting the same file at once.
+    std::mutex trim_mu_;
     int fd_ = -1;
     std::atomic<std::size_t> lines_{0};    // as far as this process knows
     std::atomic<std::size_t> written_{0};
+    std::atomic<std::size_t> scans_{0};
+    /// Records above which a trim is worth attempting. `kJournalMaxLines` while
+    /// things are working, higher while they are not.
+    std::atomic<std::size_t> gate_{kJournalMaxLines};
 };
 
 /// The one line `record` would write, or empty when there is nothing to record.
