@@ -2,7 +2,12 @@
   "name": "agent-presence-web",
   "private": true,
   "type": "module",
-  "scripts": { "test": "vitest run", "dev": "vite" },
+  "scripts": {
+    "verify-toolchain": "bash scripts/verify-toolchain.sh",
+    "test": "bash scripts/verify-toolchain.sh && vitest run",
+    "typecheck": "bash scripts/verify-toolchain.sh && tsc --noEmit",
+    "dev": "vite"
+  },
   "dependencies": { "three": "^0.170.0" },
   "devDependencies": {
     "vite": "^5.4.0", "vitest": "^2.1.0",
