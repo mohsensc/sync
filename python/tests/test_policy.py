@@ -663,3 +663,135 @@ def test_the_relay_stack_is_builtin_plus_org_only(tmp_path):
     )
     assert {layer.name for layer in policy.layers} == {"builtin", "org"}
     assert policy.floor_table(ANY)[2] == "context"
+
+
+# -- specificity reads the filename first ------------------------------------
+#
+# It used to be the length of the literal prefix, full stop, which read a glob
+# backwards: `**/pay.py` has a wildcard at index 0, so it scored 0 and lost to
+# every directory glob there is. A hard floor written as "payments always
+# blocks" was switched off for any subtree with a broader-looking line under it,
+# silently — ties only warn on *equal* scores, and 0 != 7.
+
+
+def test_an_exact_filename_glob_beats_a_directory_glob():
+    policy = layers(("user", """
+[[path]]
+match = "**/pay.py"
+rung3 = "deny"
+
+[[path]]
+match = "vendor/**"
+rung3 = "silent"
+"""))
+    assert policy.resolve(3, "vendor/pay.py").effect == "deny"
+    # `silent` at rung 3 is raised to the builtin floor, which is the point of
+    # having one. What matters here is that pay.py did not get that treatment.
+    assert policy.resolve(3, "vendor/other.py").effect == BUILTIN_FLOOR[3]
+
+
+def test_a_leading_double_star_is_not_a_penalty():
+    # `**/pay.py` and `pay.py` are equally specific about the only thing that
+    # decides a match here, so they tie and warn rather than one silently losing.
+    from agent_presence.policy import Rule
+
+    def rule(match: str) -> Rule:
+        return Rule(match=match, effects={}, is_floor=False, order=0)
+
+    assert rule("**/pay.py").specificity() == rule("pay.py").specificity()
+    assert rule("**/pay.py").specificity() > rule("vendor/**").specificity()
+    assert rule("vendor/**").specificity() > rule("**").specificity()
+
+
+def test_a_named_file_beats_a_named_directory_on_the_same_tree():
+    policy = layers(("user", """
+[[path]]
+match = "src/**"
+rung3 = "silent"
+
+[[path]]
+match = "**/pay.py"
+rung3 = "deny"
+"""))
+    assert policy.resolve(3, "src/pay.py").effect == "deny"
+    assert policy.resolve(3, "lib/pay.py").effect == "deny"
+    assert policy.resolve(3, "src/other.py").effect == BUILTIN_FLOOR[3]
+
+
+def test_a_narrower_filename_pattern_beats_a_broader_one():
+    policy = layers(("user", """
+[[path]]
+match = "src/*"
+rung2 = "silent"
+
+[[path]]
+match = "src/*.py"
+rung2 = "deny"
+"""))
+    assert policy.resolve(2, "src/app.py").effect == "deny"
+    assert policy.resolve(2, "src/README").effect == "silent"
+
+
+def test_a_deeper_directory_still_beats_a_shallower_one():
+    # Component 3. The old behaviour for the case it did get right.
+    policy = layers(("user", """
+[[path]]
+match = "src/**"
+rung2 = "ask"
+
+[[path]]
+match = "src/payments/**"
+rung2 = "deny"
+"""))
+    assert policy.resolve(2, "src/payments/charge.py").effect == "deny"
+
+
+def test_a_quieter_line_cannot_switch_off_a_hard_floor():
+    # The reported case, at the floor. `vendor/**` silencing rung 3 used to
+    # discard the `**/pay.py` deny floor entirely and fall back to BUILTIN_FLOOR
+    # — with no problem recorded and degraded still false, so `ap policy check`
+    # printed "every layer parses".
+    policy = layers(("org", """
+[[floor.path]]
+match = "**/pay.py"
+rung3 = "deny"
+
+[[floor.path]]
+match = "vendor/**"
+rung3 = "silent"
+"""))
+    assert policy.floor_table("lib/pay.py").names()[3] == "deny"
+    assert policy.floor_table("vendor/pay.py").names()[3] == "deny"
+    assert policy.floor_table("vendor/other.py").names()[3] == "notify"
+
+
+def test_a_floor_line_can_only_ever_raise_another_floor_line():
+    # Strictest wins inside a layer, not most specific. A floor you can carve
+    # holes in is a default with extra steps, and it does not look like one in
+    # the file.
+    policy = layers(("org", """
+[[floor.path]]
+match = "src/**"
+rung3 = "deny"
+
+[[floor.path]]
+match = "src/generated/**"
+rung3 = "silent"
+"""))
+    assert policy.floor_table("src/generated/api.py").names()[3] == "deny"
+
+
+def test_the_same_rule_ordering_still_applies_to_effects_not_floors():
+    # Effects are "what happens here", so the narrower line really does replace
+    # the broader one. Only floors are monotone.
+    policy = layers(("user", """
+[[path]]
+match = "src/**"
+rung2 = "deny"
+
+[[path]]
+match = "src/generated/**"
+rung2 = "silent"
+"""))
+    assert policy.resolve(2, "src/generated/api.py").effect == "silent"
+    assert policy.resolve(2, "src/app.py").effect == "deny"

@@ -223,6 +223,49 @@ def valid_glob(pattern: str) -> bool:
 
 _WILDCARD = re.compile(r"[*?\[]")
 
+# What `specificity` returns. Compared componentwise, bigger is narrower.
+Specificity = tuple[int, int, int, int]
+
+
+def _literal_chars(pattern: str) -> int:
+    """How many characters of the glob only ever match themselves.
+
+    Wildcard tokens contribute nothing: ``**``, ``*``, ``?`` and a whole
+    ``[...]`` class are each skipped, so ``src/*.py`` counts 7 and ``src/**``
+    counts 4.
+
+    ``**/`` is one token, separator included, because that is what it means and
+    what ``_compile_glob`` compiles it to — it has to be able to match nothing
+    at all, so ``**/pay.py`` matches ``pay.py``. Counting the slash would make
+    ``**/pay.py`` narrower than ``pay.py``, which is backwards: it is the same
+    pattern with a wider reach.
+    """
+    count = 0
+    i, n = 0, len(pattern)
+    while i < n:
+        ch = pattern[i]
+        if ch == "*":
+            if pattern.startswith("**/", i):
+                i += 3
+                continue
+            i += 2 if pattern.startswith("**", i) else 1
+            continue
+        if ch == "?":
+            i += 1
+            continue
+        if ch == "[":
+            close = pattern.find("]", i + 1)
+            i = i + 1 if close == -1 else close + 1
+            continue
+        count += 1
+        i += 1
+    return count
+
+
+def _literal_prefix(pattern: str) -> int:
+    found = _WILDCARD.search(pattern)
+    return len(pattern) if found is None else found.start()
+
 
 @dataclass(frozen=True)
 class Rule:
@@ -242,13 +285,55 @@ class Rule:
         compiled = _compile_glob(self.match)
         return compiled is not None and compiled.match(path) is not None
 
-    def specificity(self) -> int:
-        """Length of the literal prefix. -1 for the blanket rule, so any path
-        rule beats it without a special case."""
+    def specificity(self) -> Specificity:
+        """How narrow this glob is. Bigger wins. ``(-1,)*4`` for the blanket
+        rule, so any path rule beats it without a special case.
+
+        Filename first, then directory. This used to be the length of the
+        literal prefix and that read the file backwards: ``**/pay.py`` has a
+        wildcard at index 0, so it scored 0 and lost to *every* directory glob.
+        Someone writing
+
+            [[floor.path]]
+            match = "**/pay.py"
+            rung3 = "deny"
+
+            [[floor.path]]
+            match  = "vendor/**"
+            rung3  = "silent"
+
+        got a silent rung 3 on ``vendor/pay.py``, with no tie warning, because
+        ties only fire on *equal* scores and 0 != 7. A narrow-looking line
+        turned off a broad-looking hard floor and nothing said so.
+
+        The four components, in order:
+
+        1. whether the last segment is pinned exactly — ``**/pay.py`` names one
+           filename, ``vendor/**`` names none;
+        2. how much of that last segment is literal, so ``*.py`` beats ``*``;
+        3. the literal prefix of the directory part, so ``src/payments/**``
+           beats ``src/**``;
+        4. literal characters overall, as the final tiebreak.
+
+        Pinning a filename beats pinning a directory because that is how people
+        read these files: "payments always blocks" is a statement about the
+        file, and the directory line is the background it is written against.
+
+        ``**/pay.py`` and ``pay.py`` score the same and that is deliberate: they
+        are equally specific about the only thing that decides a match here, so
+        it goes to the file-order tiebreak *and warns*, which is the outcome the
+        old code should have produced for the case above.
+        """
         if self.match is None:
-            return -1
-        found = _WILDCARD.search(self.match)
-        return len(self.match) if found is None else found.start()
+            return (-1, -1, -1, -1)
+        head, _, base = self.match.rpartition("/")
+        pinned = 0 if _WILDCARD.search(base) else 1
+        return (
+            pinned,
+            _literal_chars(base),
+            _literal_prefix(head),
+            _literal_chars(self.match),
+        )
 
     def describe(self) -> str:
         return "blanket" if self.match is None else self.match
@@ -284,6 +369,28 @@ class Layer:
                 best.specificity(), best.order
             ):
                 best = rule
+        return best
+
+    def floor_for(self, rung: int, path: str) -> tuple[Effect, Rule] | None:
+        """The strictest floor this layer sets for the path, and which line set
+        it. None when the layer floors this rung nowhere.
+
+        Strictest, not most specific, and that is the whole difference between a
+        floor and an effect. An effect is "what happens here", so a narrower line
+        replaces a broader one. A floor is "this never goes below", so a second
+        line can only ever raise it — the same rule floors already follow across
+        layers (``_floor_for``), applied inside one layer too.
+
+        Without this, one quiet line could switch off a hard floor written three
+        lines above it, and nothing in the file looked like it did that. Now
+        lowering a floor for a subtree is not expressible, which is correct: a
+        floor you can carve holes in is a default with extra steps.
+        """
+        best: tuple[Effect, Rule] | None = None
+        for rule in self._candidates(rung, path, floors=True):
+            candidate = rule.effects[_rung_index(rung)]
+            if best is None or RANK[candidate] > RANK[best[0]]:
+                best = (candidate, rule)
         return best
 
     def tie_for(self, rung: int, path: str, *, floors: bool) -> Rule | None:
@@ -385,10 +492,10 @@ class Policy:
         for layer in self._ordered():
             if layer.name not in FLOOR_LAYERS:
                 continue
-            rule = layer.rule_for(rung, path, floors=True)
-            if rule is None:
+            found = layer.floor_for(rung, path)
+            if found is None:
                 continue
-            candidate = rule.effects[_rung_index(rung)]
+            candidate, _rule = found
             if RANK[candidate] > RANK[floor]:
                 floor, source = candidate, layer.name
         return floor, source
