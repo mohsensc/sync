@@ -10,68 +10,104 @@ from agent_presence.principals import Principal, Roster, hash_token
 from agent_presence.relay import Relay
 from agent_presence.serve import serve
 
-PORT = 8801
-PRIORITY_PORT = 8802
 REGION = {"path": "src/auth.py", "symbol": "sign_in", "lines": None}
 
 BOT_TOKEN = "release-bot-token"
 
 
+class _Running:
+    """A relay served on an ephemeral port, with what it takes to stop it."""
+
+    def __init__(self, task: asyncio.Task, stop: asyncio.Event, url: str) -> None:
+        self.task, self.stop, self.url = task, stop, url
+
+    async def close(self) -> None:
+        self.stop.set()
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.wait_for(self.task, timeout=5)
+
+
+async def _start(relay) -> _Running:
+    """Bind an ephemeral port and hand back its URL once it is actually bound.
+
+    Fixed ports collide the instant two test suites run at once — that has
+    already produced false failures for two different agents. Port 0 plus
+    `on_ready` is the only way to learn the real port (see serve()'s own
+    docstring), and it means there is no bind to race in the first place.
+    """
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    ready: asyncio.Future = loop.create_future()
+
+    def on_ready(srv) -> None:
+        if not ready.done():
+            ready.set_result(srv.sockets[0].getsockname()[1])
+
+    task = asyncio.create_task(
+        serve("127.0.0.1", 0, relay, stop=stop, on_ready=on_ready)
+    )
+    port = await asyncio.wait_for(ready, timeout=5)
+    return _Running(task, stop, f"ws://127.0.0.1:{port}")
+
+
 @pytest.fixture
 async def server():
     relay = Relay(RealClock(), roster=Roster.inert())
-    task = asyncio.create_task(serve("127.0.0.1", PORT, relay))
-    await asyncio.sleep(0.2)
-    yield relay
-    task.cancel()
-    # Awaiting the cancelled task is what actually closes the listening socket.
-    # Without it the next test binds a port the old server is still holding and
-    # its connections hang in the handshake.
-    with contextlib.suppress(asyncio.CancelledError):
-        await task
+    running = await _start(relay)
+    yield relay, running.url
+    await running.close()
 
 
 @pytest.fixture
 async def roster_server():
     """A relay with a roster, so the join frame's principal and token mean
-    something. Its own port: the other fixture's socket may not be down yet."""
+    something. Its own ephemeral port, independent of any other fixture's."""
     roster = Roster(
         (Principal("release-bot", "Bot", 3, 3, hash_token(BOT_TOKEN)),),
         source="<test>", present=True,
     )
     relay = Relay(RealClock(), roster=roster)
-    task = asyncio.create_task(serve("127.0.0.1", PRIORITY_PORT, relay))
-    await asyncio.sleep(0.2)
-    yield relay
-    task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await task
+    running = await _start(relay)
+    yield relay, running.url
+    await running.close()
+
+
+async def recv(ws, kind, timeout=2, state=None):
+    """The next frame of `kind` (and `state`, if given). A join is answered
+    with a lease snapshot and a claim fans out to the room, so the socket
+    carries more than one thing."""
+    for _ in range(10):
+        msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=timeout))
+        if msg.get("type") != kind:
+            continue
+        if state is None or msg.get("state") == state:
+            return msg
+    raise AssertionError(f"no {kind!r} frame arrived")
 
 
 async def join(ws, agent, human, **extra):
+    """Join and wait out the lease snapshot the relay answers it with.
+
+    That snapshot is sent synchronously as part of the relay processing the
+    join frame, so seeing it is proof the join has landed — the connection is
+    a room member and reachable by fan-out. A fixed sleep here was standing in
+    for that proof and guessing how long it takes; under real CPU pressure the
+    guess is sometimes wrong and a fan-out assertion looks for a frame nobody
+    was registered to receive yet.
+    """
     frame = {"type": "join", "room": "r1", "agent": agent, "human": human}
     frame.update(extra)
     await ws.send(json.dumps(frame))
-
-
-async def recv(ws, kind, timeout=2):
-    """The next frame of `kind`. A join is answered with a lease snapshot and a
-    claim fans out to the room, so the socket carries more than one thing."""
-    for _ in range(10):
-        msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=timeout))
-        if msg.get("type") == kind:
-            return msg
-    raise AssertionError(f"no {kind!r} frame arrived")
+    return await recv(ws, "leases")
 
 
 async def test_second_agent_learns_the_first_agents_intent_before_editing(server):
     """The whole product in one test: two agents, one region, and the second
     one is told who is there and what they are doing before it writes."""
-    url = f"ws://127.0.0.1:{PORT}"
+    _, url = server
     async with websockets.connect(url) as sara, websockets.connect(url) as dev:
         await join(sara, "a1", "sara")
         await join(dev, "a2", "dev")
-        await asyncio.sleep(0.1)
 
         # Sara's agent declares intent and takes the lease.
         await sara.send(json.dumps({"type": "claim", "agent": "a1", "human": "sara",
@@ -91,11 +127,10 @@ async def test_second_agent_learns_the_first_agents_intent_before_editing(server
 
 
 async def test_no_double_edit_occurs_on_the_same_symbol(server):
-    url = f"ws://127.0.0.1:{PORT}"
+    _, url = server
     async with websockets.connect(url) as sara, websockets.connect(url) as dev:
         await join(sara, "a1", "sara")
         await join(dev, "a2", "dev")
-        await asyncio.sleep(0.1)
 
         for ws, agent in ((sara, "a1"), (dev, "a2")):
             await ws.send(json.dumps({"type": "claim", "agent": agent,
@@ -116,11 +151,10 @@ async def test_no_double_edit_occurs_on_the_same_symbol(server):
 async def test_an_authenticated_principal_gets_its_roster_tier(roster_server):
     """The join frame's principal and token are read, hashed and compared, and
     the resulting tier reaches the lease table."""
-    url = f"ws://127.0.0.1:{PRIORITY_PORT}"
+    _, url = roster_server
     async with websockets.connect(url) as junior, websockets.connect(url) as bot:
         await join(junior, "a1", "dev")
         await join(bot, "a2", "ci", principal="release-bot", token=BOT_TOKEN)
-        await asyncio.sleep(0.1)
 
         await junior.send(json.dumps({"type": "claim", "region": REGION,
                                       "intent": "tidy up"}))
@@ -141,12 +175,11 @@ async def test_an_authenticated_principal_gets_its_roster_tier(roster_server):
 async def test_a_join_frame_naming_a_principal_it_cannot_prove_gets_normal(
     roster_server,
 ):
-    url = f"ws://127.0.0.1:{PRIORITY_PORT}"
+    _, url = roster_server
     async with websockets.connect(url) as junior, websockets.connect(url) as liar:
         await join(junior, "a1", "dev")
         await join(liar, "a2", "mallory", principal="release-bot",
                    token="not-the-token")
-        await asyncio.sleep(0.1)
 
         await junior.send(json.dumps({"type": "claim", "region": REGION,
                                       "intent": "tidy up"}))
@@ -163,11 +196,10 @@ async def test_a_join_frame_naming_a_principal_it_cannot_prove_gets_normal(
 
 
 async def test_a_claim_frame_cannot_carry_its_own_priority(roster_server):
-    url = f"ws://127.0.0.1:{PRIORITY_PORT}"
+    _, url = roster_server
     async with websockets.connect(url) as junior, websockets.connect(url) as liar:
         await join(junior, "a1", "dev")
         await join(liar, "a2", "mallory")
-        await asyncio.sleep(0.1)
 
         await junior.send(json.dumps({"type": "claim", "region": REGION,
                                       "intent": "tidy up"}))
@@ -185,7 +217,7 @@ async def test_a_claim_frame_cannot_carry_its_own_priority(roster_server):
 
 
 async def test_the_token_never_comes_back_out_on_the_wire(roster_server):
-    url = f"ws://127.0.0.1:{PRIORITY_PORT}"
+    _, url = roster_server
     async with websockets.connect(url) as bot:
         await join(bot, "a1", "ci", principal="release-bot", token=BOT_TOKEN)
         await bot.send(json.dumps({"type": "claim", "region": REGION,
@@ -215,7 +247,7 @@ async def test_the_senior_agent_holds_its_place_and_the_junior_one_backs_off(
     Nothing was ever taken off a live holder: there is no preemption here and
     priority did not add any.
     """
-    url = f"ws://127.0.0.1:{PRIORITY_PORT}"
+    _, url = roster_server
     region = {"path": "src/pay.py", "symbol": "charge", "lines": None}
 
     async with (
@@ -224,7 +256,6 @@ async def test_the_senior_agent_holds_its_place_and_the_junior_one_backs_off(
         websockets.connect(url) as junior,
     ):
         await join(holder, "a1", "nora")
-        await asyncio.sleep(0.1)
 
         await holder.send(json.dumps({"type": "claim", "region": region,
                                       "intent": "rewriting the retry path"}))
@@ -234,7 +265,6 @@ async def test_the_senior_agent_holds_its_place_and_the_junior_one_backs_off(
         await join(senior, "a2", "sara", principal="release-bot", token=BOT_TOKEN,
                    unattended=True)
         await join(junior, "a3", "dev")
-        await asyncio.sleep(0.1)
 
         for ws in (senior, junior):
             await ws.send(json.dumps({"type": "claim", "region": region,
@@ -253,9 +283,13 @@ async def test_the_senior_agent_holds_its_place_and_the_junior_one_backs_off(
         assert junior_reply["decision"] == "abort"
 
         # The holder finishes. Whoever waited is still in the room and still
-        # holds whatever it held; whoever aborted dropped everything.
+        # holds whatever it held; whoever aborted dropped everything. `release`
+        # answers nothing on the holder's own socket — the room hears about it,
+        # not the releaser — so what a test can wait on is the fan-out itself,
+        # on whichever member is about to act on it.
         await holder.send(json.dumps({"type": "release", "region": region}))
-        await asyncio.sleep(0.1)
+        released = await recv(senior, "lease", state="released")
+        assert released["agent"] == "a1"
 
         await senior.send(json.dumps({"type": "claim", "region": region,
                                       "intent": "hotfixing the outage"}))
@@ -281,7 +315,7 @@ async def test_the_room_is_told_which_tier_a_lease_was_taken_at(roster_server):
     you — which is the one thing that tells a blocked agent to wait rather than
     retry.
     """
-    url = f"ws://127.0.0.1:{PRIORITY_PORT}"
+    _, url = roster_server
     region = {"path": "src/pay.py", "symbol": "refund", "lines": None}
 
     async with (
@@ -290,7 +324,6 @@ async def test_the_room_is_told_which_tier_a_lease_was_taken_at(roster_server):
     ):
         await join(bot, "a1", "sara", principal="release-bot", token=BOT_TOKEN)
         await join(watcher, "a2", "dev")
-        await asyncio.sleep(0.1)
 
         await bot.send(json.dumps({"type": "claim", "region": region,
                                    "intent": "cutting the release"}))
@@ -306,6 +339,5 @@ async def test_the_room_is_told_which_tier_a_lease_was_taken_at(roster_server):
         # having to wait for the next change. Inside the holder's connection,
         # necessarily: hanging up releases what it held.
         async with websockets.connect(url) as latecomer:
-            await join(latecomer, "a3", "late")
-            snapshot = await recv(latecomer, "leases")
+            snapshot = await join(latecomer, "a3", "late")
             assert [e["priority"] for e in snapshot["leases"]] == ["critical"]

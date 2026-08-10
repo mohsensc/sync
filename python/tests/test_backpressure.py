@@ -180,8 +180,21 @@ class DeafPeer:
 
 
 async def _join(ws, agent: str) -> None:
+    """Join and wait out the lease snapshot the relay answers it with.
+
+    That snapshot is sent synchronously as part of the relay processing the
+    join frame, so seeing it is proof the join has landed — the connection is
+    a room member and reachable by fan-out. A fixed sleep here was standing in
+    for that proof and guessing how long it takes; under real CPU pressure the
+    guess is sometimes wrong and a healthy subscriber starts getting measured
+    before it is actually a member of the room.
+    """
     await ws.send(json.dumps({"type": "join", "room": ROOM,
                               "agent": agent, "human": agent}))
+    while True:
+        frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+        if frame.get("type") == "leases":
+            return
 
 
 def _event(n: int) -> str:
@@ -351,7 +364,6 @@ async def test_a_healthy_subscriber_is_never_shed(server):
                websockets.connect(server.url) as blaster:
         await _join(healthy, "healthy")
         await _join(blaster, "blaster")
-        await asyncio.sleep(0.1)
 
         seen: list[str] = []
         pump = asyncio.create_task(_reader(healthy, seen))
@@ -437,7 +449,18 @@ async def test_time_alone_sheds_nobody():
 
     for n in range(10):
         conn.send(_presence(n))
-    await _until(lambda: len(ws.sent) == 10, "the writer never drained")
+    # "Drained" means the writer task itself has finished, not merely that the
+    # fake socket's mailbox has 10 entries. `_write`'s `finally` is what clears
+    # `_sending_since`, and that runs as part of the writer task returning —
+    # `ws.sent` gets its last append one step earlier, inside the same task but
+    # before that return. Waiting on the mailbox instead of the task raced this
+    # test against its own writer under load: `ws.sent` could read 10 while
+    # `_sending_since` was still set from the last write, and the clock jump
+    # right after landed inside that gap and shed a peer that had, in fact,
+    # kept up.
+    await _until(lambda: conn._writer is not None and conn._writer.done(),
+                 "the writer never drained")
+    assert len(ws.sent) == 10
 
     # A peer that keeps up is not on any deadline, however much time passes.
     clock.advance(serve_mod.SEND_STALL_S * 100)
