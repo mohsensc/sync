@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Protocol
 
 from .clock import Clock
 from .ladder import Activity, classify, interrupts_at
-from .leases import PRESENCE_TTL_S, LeaseRegistry
+from .leases import PRESENCE_TTL_S, RESERVATION_S, LeaseRegistry
 from .negotiation import Negotiator
 from .policy import PolicyFile, Resolution
 from .principals import Grant, Roster
@@ -17,7 +18,7 @@ from .redact import (
     opaque_enabled,
     redact,
 )
-from .types import AgentEvent, Claim, Region
+from .types import AgentEvent, Claim, Contender, Region
 
 log = logging.getLogger("agent_presence.relay")
 
@@ -100,8 +101,14 @@ def _lease_entry(claim: Claim, now: float) -> dict:
     renders what the relay pushes; a body without it means `ap-hook` can name
     the holder and never say they outrank you. Always spelled out, `normal`
     included, so no reader needs a special case for a missing field.
+
+    The handover fields travel for one reader: the holder itself. Its own lease
+    comes back to it in every snapshot, and these are what let its daemon warn
+    it — while it still has the region and can act — that the clock is running
+    and who the region goes to. They are omitted entirely when nobody is
+    waiting, which is the common case and the quiet one.
     """
-    return {
+    entry = {
         "agent": claim.agent,
         "human": claim.human,
         "intent": claim.intent,
@@ -110,6 +117,64 @@ def _lease_entry(claim: Claim, now: float) -> dict:
         "expires_in_ms": max(0, int((claim.expires_at - now) * 1000)),
         "expires_at": claim.expires_at,
     }
+    winner = claim.handover_winner()
+    if claim.handover_at is not None and winner is not None:
+        entry.update({
+            "handover_in_ms": max(0, int((claim.handover_at - now) * 1000)),
+            "handover_at": claim.handover_at,
+            "handover_to": winner.agent,
+            "handover_to_human": winner.human,
+            "handover_to_priority": name_of(winner.priority),
+            "waiting": len(claim.contenders),
+        })
+    return entry
+
+
+@dataclass(frozen=True)
+class Refusal:
+    """Why a join was refused, in a shape the client can act on.
+
+    A refused join used to be silent: the relay logged a line on its own
+    machine and dropped the frame, and the client sat waiting for a lease
+    snapshot that was never coming until something else timed out. An agent
+    cannot fix a name collision nobody told it about. `reason` is the stable
+    slug to branch on; `detail` is the sentence to put in front of a person.
+
+    Sent from the relay rather than handed back to the transport because the
+    relay is where protocol decisions are made — it already writes the lease
+    snapshot and the policy frame to `conn.send`, and this is one more.
+    """
+
+    reason: str
+    detail: str
+
+    def frame(self, room: str) -> dict:
+        return {
+            "type": "join_refused",
+            "room": room,
+            "reason": self.reason,
+            "detail": self.detail,
+        }
+
+
+@dataclass(frozen=True)
+class _Snapshot:
+    """What a claim looked like before a registry call touched it."""
+
+    room: str
+    human: str
+    intent: str
+    expires_at: float
+    handover_at: float | None
+    winner: Contender | None
+
+    def same_as(self, claim: Claim) -> bool:
+        return (
+            self.intent == claim.intent
+            and self.expires_at == claim.expires_at
+            and self.handover_at == claim.handover_at
+            and self.winner == claim.handover_winner()
+        )
 
 
 class _PublishingRegistry(LeaseRegistry):
@@ -133,7 +198,7 @@ class _PublishingRegistry(LeaseRegistry):
         super().__init__(clock)
         self._relay = relay
 
-    def _before(self) -> dict[tuple[str, Region], tuple[str, str, str, float]]:
+    def _before(self) -> dict[tuple[str, Region], _Snapshot]:
         """Values, not Claim objects: `acquire` renews by mutating the claim in
         place, so holding a reference here would compare a claim against itself
         and a renewal would never look like a change.
@@ -141,20 +206,30 @@ class _PublishingRegistry(LeaseRegistry):
         Reads `_claims` raw rather than `_live()` on purpose. Pruning first
         would make an expiry indistinguishable from "was never there", and the
         room would never be told the region is free again.
+
+        `handover_at` and the winner are part of the compared value, not just
+        carried along. The first contention on a fresh lease usually leaves
+        `expires_at` exactly where it was — the deadline is a TTL away and so is
+        the expiry — so keying on expiry alone meant the holder learned it was
+        on the clock only at its next heartbeat. It should learn immediately;
+        that is most of the time it has.
         """
         return {
-            (c.agent, c.scope): (c.room, c.human, c.intent, c.expires_at)
+            (c.agent, c.scope): _Snapshot(
+                room=c.room, human=c.human, intent=c.intent,
+                expires_at=c.expires_at, handover_at=c.handover_at,
+                winner=c.handover_winner(),
+            )
             for c in self._claims
         }
 
-    def _publish(self, before: dict) -> None:
+    def _publish(self, before: dict[tuple[str, Region], _Snapshot]) -> None:
         now = self._clock.now()
         after = {(c.agent, c.scope): c for c in self._live()}
 
         for key, claim in after.items():
             prev = before.get(key)
-            if prev is not None and (prev[2], prev[3]) == (claim.intent,
-                                                           claim.expires_at):
+            if prev is not None and prev.same_as(claim):
                 continue
             # New, or renewed. A renewal has to go out too: the daemon expires
             # its copy on the TTL it was last given, and a heartbeat the room
@@ -163,17 +238,43 @@ class _PublishingRegistry(LeaseRegistry):
             frame.update(_lease_entry(claim, now))
             self._relay.publish(claim.room, frame)
 
-        for (agent, scope), (room, _human, _intent, expires_at) in before.items():
+        for (agent, scope), prev in before.items():
             if (agent, scope) in after:
                 continue
-            self._relay.publish(room, {
+            frame = {
                 "type": "lease",
-                # Both erase the entry daemon-side. The distinction is for
+                # All three erase the entry daemon-side. The distinction is for
                 # whoever is reading the wire, not for the cache.
-                "state": "expired" if expires_at <= now else "released",
+                "state": "expired" if prev.expires_at <= now else "released",
                 "agent": agent,
                 "region": _region_payload(scope),
-            })
+            }
+            kept = self.reservation_for(prev.room, scope)
+            if kept is not None and kept.from_agent == agent:
+                # This lease did not just run out, it was handed on: somebody
+                # asked for the region, the holder's renewals stopped at the
+                # deadline it was given, and the region is being kept for the
+                # agent that waited. Say so, and say to whom. A lease that
+                # vanishes with "expired" and nothing else is the one event in
+                # this system an agent cannot make sense of on its own — least
+                # of all the agent it was taken from, which is the one reader
+                # that has half-finished work sitting in that region.
+                frame.update({
+                    "state": "handover",
+                    "to": kept.agent,
+                    "to_human": kept.human,
+                    "to_priority": name_of(kept.priority),
+                    "reserved_for_ms": max(
+                        0, int((kept.expires_at - now) * 1000)
+                    ),
+                    "from": agent,
+                    "from_human": prev.human,
+                })
+                if prev.winner is not None:
+                    frame["waited_s"] = max(
+                        0.0, now - prev.winner.first_asked_at
+                    )
+            self._relay.publish(prev.room, frame)
 
     def acquire(self, *args, **kwargs):
         before = self._before()
@@ -184,6 +285,14 @@ class _PublishingRegistry(LeaseRegistry):
     def heartbeat(self, *args, **kwargs):
         before = self._before()
         result = super().heartbeat(*args, **kwargs)
+        self._publish(before)
+        return result
+
+    def contend(self, *args, **kwargs):
+        # An ask moves the holder's deadline, and the holder is the one reader
+        # that has to hear about that while it still has time to act on it.
+        before = self._before()
+        result = super().contend(*args, **kwargs)
         self._publish(before)
         return result
 
@@ -246,7 +355,8 @@ class Relay:
     # -- membership ---------------------------------------------------------
 
     def join(self, room: str, conn: Conn) -> bool:
-        """Put a connection in a room. False means the join was refused.
+        """Put a connection in a room. False means the join was refused, and the
+        connection is told which of the four rules refused it and what to do.
 
         Identity is latched here and never changes for the life of the
         connection. `handle` already refuses to read identity off a message
@@ -266,14 +376,23 @@ class Relay:
         an agent that could do that could hold two claims at two tiers — which
         is exactly the asymmetry ``LeaseRegistry.acquire`` latches ``priority``
         to prevent.
+
+        And the agent id itself is bound to that grant for as long as any
+        connection holds it — see ``_bind_agent``. Latching per connection is
+        not enough on its own, because the lease table is keyed on the agent id
+        and nothing else.
         """
         if not conn.agent:
             log.debug("join with no agent id; refused")
-            return False
+            return self._refuse(conn, room, Refusal(
+                "no-agent-id",
+                "the join frame carried no agent id; set one and join again",
+            ))
 
         declared = (conn.agent, conn.human)
         latched = self._identity.get(conn)
-        if latched is None:
+        fresh = latched is None
+        if fresh:
             self._identity[conn] = declared
         elif declared != latched:
             # Put the real identity back before returning: the caller has
@@ -283,10 +402,24 @@ class Relay:
                 "refused identity change on a live connection: %s -> %s",
                 latched[0], declared[0],
             )
-            return False
+            return self._refuse(conn, room, Refusal(
+                "identity-latched",
+                f"this connection is {latched[0]} and stays {latched[0]}; "
+                "open a second connection to join as somebody else",
+            ))
 
-        if not self._latch_grant(conn, room):
-            return False
+        refusal = self._latch_grant(conn, room)
+        if refusal is not None:
+            if fresh:
+                self._identity.pop(conn, None)
+            return self._refuse(conn, room, refusal)
+
+        refusal = self._bind_agent(conn)
+        if refusal is not None:
+            if fresh:
+                self._principal.pop(conn, None)
+                self._identity.pop(conn, None)
+            return self._refuse(conn, room, refusal)
 
         # One connection, one room membership. Without the sweep a connection
         # that moves rooms keeps receiving the old room's traffic forever,
@@ -312,6 +445,11 @@ class Relay:
         if frame is not None:
             conn.send(frame)
         return True
+
+    def _refuse(self, conn: Conn, room: str, refusal: Refusal) -> bool:
+        """Tell the client why, then refuse. Always returns False."""
+        conn.send(refusal.frame(room))
+        return False
 
     def _policy_frame(self) -> dict | None:
         """The org floor, as this relay currently reads it.
@@ -359,8 +497,9 @@ class Relay:
 
     # -- priority -----------------------------------------------------------
 
-    def _latch_grant(self, conn: Conn, room: str) -> bool:
-        """Authenticate once, remember forever. False means refuse the join."""
+    def _latch_grant(self, conn: Conn, room: str) -> Refusal | None:
+        """Authenticate once, remember forever. None means carry on; a Refusal
+        means refuse the join and tell the client why."""
         principal = _declared_str(conn, "principal")
         unattended = getattr(conn, "unattended", False) is True
 
@@ -375,7 +514,7 @@ class Relay:
                     "principal %s joined room %s at %s",
                     grant.principal, room, grant.tier_name(unattended=unattended),
                 )
-            return True
+            return None
 
         prev_principal, prev_unattended, _grant = latched
         if (principal, unattended) != (prev_principal, prev_unattended):
@@ -389,8 +528,93 @@ class Relay:
                 "refused principal change on a live connection: %s -> %s",
                 prev_principal, principal,
             )
-            return False
-        return True
+            return Refusal(
+                "principal-latched",
+                f"this connection authenticated as {prev_principal or 'nobody'} "
+                "and cannot re-rate itself; open a second connection",
+            )
+        return None
+
+    def _bind_agent(self, conn: Conn) -> Refusal | None:
+        """One agent id, one grant, for as long as anybody holds it.
+
+        This is the check that closes priority laundering, and it is worth
+        knowing exactly what it closes. The lease table is keyed on the agent id
+        alone — it has to be, because ``age_of`` and ``priority_of`` are what
+        make the wait-for relation a strict total order, and a room-scoped or
+        connection-scoped version of either one reintroduces the asymmetry that
+        lets a wait cycle open (``wait_die`` §deadlock, ``leases.priority_of``).
+        So ``acquire`` reads an agent's tier off that agent's live claims.
+
+        Which meant the agent id *was* the credential. An unauthenticated client
+        that declared ``presenced@sara-mbp`` — a string the relay broadcasts on
+        every presence frame and hands out in the join snapshot, and the stock
+        default of ``presenced@<hostname>`` — inherited sara's ``critical`` in
+        whatever room it liked, beat older normal-tier agents in wait-die, and
+        forced them to abort and drop live leases. It kept the tier after sara
+        disconnected, laundered out of its own claims.
+
+        Both halves are needed and this is the second one. A grant latched per
+        connection says nothing about a *different* connection wearing the same
+        name, and the lease table cannot tell them apart.
+
+        Two connections may share an id — that is the ordinary case, two
+        checkouts on one laptop under the default ``presenced@<hostname>`` — as
+        long as they present the same principal and land on the same tier.
+        Differ on either and one of them is refused.
+
+        Which one is refused is not arbitrary. An unauthenticated squatter that
+        got there first would otherwise lock a rostered principal out of its own
+        id, so the authenticated principal takes it and the squatter is dropped:
+        off its rooms, leases released, so nothing it laundered survives. Only
+        when *both* sides are authenticated as different principals does the
+        incumbent keep the id and the newcomer get refused — two rostered
+        principals sharing one agent id is a configuration mistake, and picking
+        a winner there would just make it silent.
+        """
+        agent, grant = conn.agent, self.grant_of(conn)
+        tier = self.priority_of(conn)
+
+        for other in list(self._identity):
+            mine = self._identity.get(other)
+            if other is conn or mine is None or mine[0] != agent:
+                continue
+            theirs = self.grant_of(other)
+            if (theirs.principal, self.priority_of(other)) == (grant.principal, tier):
+                continue
+            if theirs.authenticated:
+                log.warning(
+                    "refused join: agent id %s is principal %s's, at %s",
+                    agent, theirs.principal, name_of(self.priority_of(other)),
+                )
+                return Refusal(
+                    "agent-id-taken",
+                    f"agent id {agent!r} is already in use on this relay by "
+                    "another principal; pick a different one (set "
+                    "AGENT_PRESENCE_AGENT) and join again",
+                )
+            # Incumbent is unauthenticated and this one is not. Evict it.
+            log.warning(
+                "agent id %s reclaimed by principal %s; dropping the "
+                "unauthenticated connection holding it",
+                agent, grant.principal,
+            )
+            self.leave(other)
+        return None
+
+    def authenticate(
+        self, principal: str | None, token: str, room: str
+    ) -> Grant:
+        """Resolve a grant from the roster this relay read off disk.
+
+        For channels that are not websocket connections. The MCP tool surface is
+        one: it holds `relay.registry` directly, and until this existed it
+        claimed at `normal` no matter what the roster said — so an exec who put
+        themselves at `critical`, minted a token and installed it got seniority
+        on the hook path and not on the deliberate one. Configure once has to
+        mean once.
+        """
+        return self._roster.authenticate(principal, token, room=room)
 
     def grant_of(self, conn: Conn) -> Grant:
         latched = self._principal.get(conn)
@@ -601,10 +825,11 @@ class Relay:
         brief = self._negotiator.open(
             room, conn.agent, self.registry.age_of(conn.agent), region, "",
             requester_priority=self.priority_of(conn),
+            requester_human=conn.human,
         )
         if brief is None:
             return {"type": "ack", "rung": rung, "effect": effect}
-        return {
+        frame = {
             "type": "negotiate", "rung": rung,
             "holder_agent": brief.holder_agent, "holder_human": brief.holder_human,
             "holder_intent": brief.holder_intent, "moves": list(brief.moves),
@@ -614,6 +839,17 @@ class Relay:
             "priority": name_of(brief.requester_priority),
             "holder_priority": name_of(brief.holder_priority),
         }
+        if brief.handover_at is not None:
+            # How long DEFER actually costs. Without it DEFER and "give up" read
+            # the same to whoever is choosing between the four moves.
+            frame["handover_in_ms"] = max(
+                0, int((brief.handover_at - now) * 1000)
+            )
+            frame["handover_to"] = brief.handover_to
+            if brief.handover_to == conn.agent:
+                frame["retry_in_ms"] = frame["handover_in_ms"]
+                frame["reserved_for_ms"] = int(RESERVATION_S * 1000)
+        return frame
 
     def _on_claim(
         self, room: str, conn: Conn, message: dict, region: Region
@@ -644,7 +880,7 @@ class Relay:
         # off and the other dies, and the loser's leases in *this* room have to
         # actually go so it is not holding anything while it retries. Leases the
         # same agent id holds in another room are not part of this contest.
-        held = result.held_by
+        #
         # Read the tier before the abort sweep: release_all drops the claims
         # priority_of reads it off, and a loser told its own tier was `normal`
         # when it was `elevated` learns the wrong thing about why it lost.
@@ -661,23 +897,76 @@ class Relay:
         # surfaces render, so it travels.
         resolution = self.resolve_policy(conn, 3, region.path)
 
-        return {
+        reply = {
             "type": "claim_result", "granted": False,
-            "held_by": held.agent,
-            # `human` is the name decide.cpp renders to the blocked agent.
-            "human": held.human,
-            "intent": held.intent,
             "decision": result.decision,
             "effect": resolution.effect,
             "effect_source": resolution.winning_layer,
             # Both tiers by name, so a blocked agent can be told why it lost
             # rather than only that it did.
             "priority": name_of(requester_priority),
-            "holder_priority": name_of(held.priority),
             # The region asked for, not the holder's scope. A whole-file lease
             # refusing a symbol-level claim has to land under the key the hook
             # will look up, which is the one on the request.
             "region": _region_payload(region),
+        }
+
+        held = result.held_by
+        if held is None:
+            # Nobody holds it: a handover freed it seconds ago and it is being
+            # kept for the agent that waited it out. Answered in the same shape
+            # as a held region, with the reserved agent standing in as the
+            # holder, because that is the shape every reader already handles and
+            # the instruction — do not edit this yet, here is when — is the same
+            # one. `retry_in_ms` is the whole answer, and it is short.
+            kept = result.reserved_by
+            reply.update({
+                "held_by": kept.agent,
+                "human": kept.human,
+                "intent": "taking over this region",
+                "holder_priority": name_of(kept.priority),
+                "reserved": True,
+                "reserved_from": kept.from_agent,
+                "reserved_from_human": kept.from_human,
+                "expires_in_ms": max(0, int((kept.expires_at - now) * 1000)),
+                "expires_at": kept.expires_at,
+                "retry_in_ms": max(0, int((kept.expires_at - now) * 1000)),
+            })
+            return reply
+
+        reply.update({
+            "held_by": held.agent,
+            # `human` is the name decide.cpp renders to the blocked agent.
+            "human": held.human,
+            "intent": held.intent,
+            "holder_priority": name_of(held.priority),
             "expires_in_ms": max(0, int((held.expires_at - now) * 1000)),
             "expires_at": held.expires_at,
-        }
+        })
+
+        # When this agent is the one the region is queued for, say so and say
+        # when. A `wait` with no number is the verdict an agent cannot act on:
+        # it has no way to tell "try again shortly" from "this is never coming",
+        # so it either spins or gives up, and both used to be correct.
+        winner = held.handover_winner()
+        if held.handover_at is not None and winner is not None:
+            handover_in_ms = max(0, int((held.handover_at - now) * 1000))
+            reply["waiting"] = len(held.contenders)
+            if winner.agent == conn.agent:
+                reply.update({
+                    "handover_in_ms": handover_in_ms,
+                    "handover_at": held.handover_at,
+                    # The region is yours after this, and kept for you while you
+                    # come back for it. Retry once, not in a loop.
+                    "retry_in_ms": handover_in_ms,
+                    "reserved_for_ms": int(RESERVATION_S * 1000),
+                })
+            else:
+                reply.update({
+                    "handover_in_ms": handover_in_ms,
+                    "handover_at": held.handover_at,
+                    "handover_to": winner.agent,
+                    "handover_to_human": winner.human,
+                    "handover_to_priority": name_of(winner.priority),
+                })
+        return reply
