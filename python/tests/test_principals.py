@@ -500,3 +500,69 @@ def test_local_identity_on_a_machine_that_configured_nothing():
     assert who.principal is None
     assert who.token == ""
     assert who.unattended is False
+
+
+# -- finding the roster at all -----------------------------------------------
+#
+# It used to look in one directory: the one the process happened to start in.
+# A relay started in `repo/server/`, or by a service manager with no working
+# directory worth the name, read no roster and granted every connection
+# `normal` — the roster that decides who outranks whom, skipped, in silence.
+
+
+def write_roster(root, text: str = None):
+    target = root / ".agent-presence" / "principals.toml"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(roster_text() if text is None else text)
+    return target
+
+
+def test_the_roster_is_found_from_a_subdirectory_of_the_checkout(tmp_path):
+    (tmp_path / ".git").mkdir()
+    write_roster(tmp_path)
+    deep = tmp_path / "services" / "relay"
+    deep.mkdir(parents=True)
+    found = Roster.discover(str(deep), env={})
+    assert found.authenticate("sara", TOKEN).principal == "sara"
+
+
+def test_the_walk_stops_at_the_checkout(tmp_path):
+    # A roster above the repo is somebody else's, or nobody's. Picking it up
+    # would set tiers for every repo under that directory by accident, and the
+    # file that decides who outranks whom is not one to find by accident.
+    write_roster(tmp_path)
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    assert not Roster.discover(str(repo), env={}).present
+
+
+def test_the_env_override_still_wins_over_the_walk(tmp_path):
+    write_roster(tmp_path, roster_text())
+    (tmp_path / ".git").mkdir()
+    elsewhere = tmp_path / "explicit.toml"
+    elsewhere.write_text(roster_text().replace("sara", "morgan"))
+    found = Roster.discover(
+        str(tmp_path), env={"AGENT_PRESENCE_PRINCIPALS": str(elsewhere)}
+    )
+    assert found.authenticate("morgan", TOKEN).principal == "morgan"
+
+
+def test_a_relay_says_which_roster_it_is_enforcing(tmp_path, caplog):
+    from agent_presence.clock import VirtualClock
+    from agent_presence.relay import Relay
+
+    (tmp_path / ".git").mkdir()
+    target = write_roster(tmp_path)
+    with caplog.at_level("INFO", logger="agent_presence.relay"):
+        Relay(VirtualClock(0.0), roster=Roster.discover(str(tmp_path), env={}))
+    assert str(target) in caplog.text
+
+
+def test_a_relay_with_no_roster_says_that_too(tmp_path, caplog):
+    from agent_presence.clock import VirtualClock
+    from agent_presence.relay import Relay
+
+    with caplog.at_level("INFO", logger="agent_presence.relay"):
+        Relay(VirtualClock(0.0), roster=Roster.discover(str(tmp_path), env={}))
+    assert "no principals roster" in caplog.text
+    assert "normal" in caplog.text

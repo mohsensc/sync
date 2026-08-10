@@ -390,7 +390,29 @@ class Relay:
         # What the room was last told the floor was. Live reload is only useful
         # if the change reaches the daemons, and they learn about it here.
         self._policy_digest = self._policy.current().digest
+        # Resolved once, here, and never again: the roster decides who outranks
+        # whom for the life of the process, and re-reading it per connection
+        # would make a tier depend on when a client happened to join.
+        #
+        # And said out loud, because the failure mode is silence. A relay
+        # started outside a checkout — or above one, or by a service manager
+        # with no working directory worth the name — finds no roster and grants
+        # every connection `normal`. That is a defensible default and an
+        # indefensible surprise: the exec who put themselves at `critical`,
+        # minted a token and installed it gets `normal` with nothing anywhere
+        # saying why. One line at startup, next to "relay listening on".
         self._roster = roster if roster is not None else Roster.discover()
+        if self._roster.present:
+            log.info(
+                "roster %s: %d principal(s), default %s",
+                self._roster.source, len(self._roster.principals()),
+                name_of(self._roster.default_tier),
+            )
+        else:
+            log.info(
+                "no principals roster (%s); every connection joins at %s",
+                self._roster.source, name_of(PRIORITY_NORMAL),
+            )
         # Grant per connection, latched at join. Keyed on the object, so it dies
         # with the connection — same mechanism as `_identity`, and deliberately
         # not an attribute on Conn: nothing a client can write to may decide
