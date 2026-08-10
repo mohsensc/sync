@@ -378,12 +378,17 @@ TEST_CASE("a trim does not stall the decisions running alongside it") {
 
     // Rates, not durations, so the assertion means the same thing on a laptop
     // and on a loaded runner. A trim that holds the writers' lock takes this to
-    // zero; one that does not leaves it at roughly parity.
+    // zero; one that does not leaves it near parity.
+    //
+    // A tenth of the unobstructed rate is a deliberately soft bar. On one core
+    // the trim and the writer share it and parity is not on offer; the old
+    // behaviour measured at a *thousandth*, so there is no reading of "slow
+    // machine" that lands between the two.
     const double warm_rate = static_cast<double>(warm_done) / static_cast<double>(warm_ns);
     const double trim_rate = static_cast<double>(during) / static_cast<double>(trim_ns);
     INFO("warm " << warm_done << " records in " << warm_ns / 1000 << "us, during trim "
                  << during << " in " << trim_ns / 1000 << "us");
-    REQUIRE(trim_rate * 4.0 > warm_rate);
+    REQUIRE(trim_rate * 10.0 > warm_rate);
 
     // And nothing written alongside the rewrite was thrown away by the rename.
     const auto lines = lines_of(path);
