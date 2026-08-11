@@ -245,6 +245,82 @@ class _PublishingRegistry(LeaseRegistry):
         super().__init__(clock)
         self._relay = relay
 
+    def _live(self) -> list[Claim]:
+        """Lazy expiry is not exclusive to a write, and a diff around the
+        handful of mutating calls below only catches it there.
+
+        `holder_of`, `active_claims` and the rest prune here too, and every
+        one of them is reachable without going through `acquire`, `release`
+        or the others — a late joiner's own snapshot (`_send_lease_snapshot`)
+        is a read, and so is the `holder_of` call `Negotiator.open` makes on
+        every contested touch. Whichever of those happens to be the first
+        thing to notice a lease timed out used to notice it silently: the
+        claim vanished from `_claims` here, and the next mutating call's
+        before/after diff had nothing left to compare it against, because it
+        was already gone from *both* sides. The room's lease cache kept the
+        dead entry — the 90 second promise in the README — until something
+        else happened to correct it, which could be a long wait or, in a
+        quiet room, never.
+
+        Publishing from the one place all TTL-based pruning actually happens,
+        rather than from every caller that might trigger it, is what the
+        class docstring already says the diff approach is for. This is that,
+        one level down, for the case the diff cannot see. See `_publish`,
+        which skips the same departure so a claim that expires here is never
+        announced twice.
+        """
+        now = self._clock.now()
+        claims = self._claims
+        live = [c for c in claims if c.expires_at > now]
+        if len(live) == len(claims):
+            return claims
+        self._claims = live
+        for claim in claims:
+            if claim.expires_at <= now:
+                winner = claim.handover_winner()
+                self._hand_over(claim, now)
+                self._relay.publish(claim.room, self._departure_frame(
+                    claim.room, claim.human, claim.agent, claim.scope,
+                    now, "expired", winner,
+                ))
+        return live
+
+    def _departure_frame(
+        self, room: str, human: str, agent: str, scope: Region,
+        now: float, state: str, winner: Contender | None,
+    ) -> dict:
+        """The frame a claim's departure produces, plain or upgraded to a
+        handover if a reservation is waiting for it. Shared by the lazy-expiry
+        path above and the explicit-release path in `_publish`, so a lease
+        that leaves the table by either door is described the same way.
+        """
+        frame = {
+            "type": "lease", "state": state, "agent": agent,
+            "region": _region_payload(scope),
+        }
+        kept = self.reservation_for(room, scope)
+        if kept is not None and kept.from_agent == agent:
+            # This lease did not just run out, it was handed on: somebody
+            # asked for the region, the holder's renewals stopped at the
+            # deadline it was given, and the region is being kept for the
+            # agent that waited. Say so, and say to whom. A lease that
+            # vanishes with "expired" and nothing else is the one event in
+            # this system an agent cannot make sense of on its own — least of
+            # all the agent it was taken from, which is the one reader that
+            # has half-finished work sitting in that region.
+            frame.update({
+                "state": "handover",
+                "to": kept.agent,
+                "to_human": kept.human,
+                "to_priority": name_of(kept.priority),
+                "reserved_for_ms": max(0, int((kept.expires_at - now) * 1000)),
+                "from": agent,
+                "from_human": human,
+            })
+            if winner is not None:
+                frame["waited_s"] = max(0.0, now - winner.first_asked_at)
+        return frame
+
     def _before(self) -> dict[tuple[str, Region], _Snapshot]:
         """Values, not Claim objects: `acquire` renews by mutating the claim in
         place, so holding a reference here would compare a claim against itself
@@ -298,38 +374,18 @@ class _PublishingRegistry(LeaseRegistry):
         for (agent, scope), prev in before.items():
             if (agent, scope) in after:
                 continue
-            frame = {
-                "type": "lease",
-                # All three erase the entry daemon-side. The distinction is for
-                # whoever is reading the wire, not for the cache.
-                "state": "expired" if prev[_SNAP_EXPIRES] <= now else "released",
-                "agent": agent,
-                "region": _region_payload(scope),
-            }
-            kept = self.reservation_for(prev[_SNAP_ROOM], scope)
-            if kept is not None and kept.from_agent == agent:
-                # This lease did not just run out, it was handed on: somebody
-                # asked for the region, the holder's renewals stopped at the
-                # deadline it was given, and the region is being kept for the
-                # agent that waited. Say so, and say to whom. A lease that
-                # vanishes with "expired" and nothing else is the one event in
-                # this system an agent cannot make sense of on its own — least
-                # of all the agent it was taken from, which is the one reader
-                # that has half-finished work sitting in that region.
-                frame.update({
-                    "state": "handover",
-                    "to": kept.agent,
-                    "to_human": kept.human,
-                    "to_priority": name_of(kept.priority),
-                    "reserved_for_ms": max(
-                        0, int((kept.expires_at - now) * 1000)
-                    ),
-                    "from": agent,
-                    "from_human": prev[_SNAP_HUMAN],
-                })
-                winner = prev[_SNAP_WINNER]
-                if winner is not None:
-                    frame["waited_s"] = max(0.0, now - winner.first_asked_at)
+            if prev[_SNAP_EXPIRES] <= now:
+                # Already announced by `_live()` the instant it pruned this —
+                # see there. `_before()` reads `_claims` raw and every mutating
+                # call below runs `_live()` on its way through, so a claim that
+                # was overdue when this call started is gone, and told, before
+                # this diff ever sees it go. Publishing it again here would
+                # double the frame every reader gets.
+                continue
+            frame = self._departure_frame(
+                prev[_SNAP_ROOM], prev[_SNAP_HUMAN], agent, scope,
+                now, "released", prev[_SNAP_WINNER],
+            )
             self._relay.publish(prev[_SNAP_ROOM], frame)
 
     def acquire(self, *args, **kwargs):

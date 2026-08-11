@@ -118,6 +118,9 @@ class LeaseRegistry:
         self._carry: dict[
             tuple[str, Region, str], tuple[Contender, float | None]
         ] = {}
+        # agent -> the first moment `age_of` ever saw it holding nothing. See
+        # `age_of` and `release_everywhere`.
+        self._first_seen: dict[str, float] = {}
 
     def _live(self) -> list[Claim]:
         # One pass, and no allocation at all when nothing expired — which is
@@ -333,12 +336,27 @@ class LeaseRegistry:
         return [c for c in self._live() if c.room == room]
 
     def age_of(self, agent: str) -> float:
-        """The agent's wait-die age: when its oldest live claim was acquired.
+        """The agent's wait-die age: when its oldest live claim was acquired,
+        or when it was first seen if it holds nothing right now.
 
-        An agent holding nothing is brand new, so its age is now, which makes
-        it lose to every existing holder. Age is deliberately not room-scoped:
-        it stands in for the agent's whole session, and a wait-for cycle can
-        run through leases in more than one room.
+        Age is deliberately not room-scoped: it stands in for the agent's
+        whole session, and a wait-for cycle can run through leases in more
+        than one room. "The whole session" is the operative phrase — an agent
+        between claims (asked, was refused, released; about to ask again) is
+        not a brand new agent, and its age must not reset just because it is
+        not holding anything at the exact instant it asks. It used to: that
+        made a requester with no live lease always younger than any existing
+        holder, so the `wait` half of wait-die was unreachable for the
+        ordinary shape of contention, where an agent contests one region at a
+        time rather than holding an older one while it asks for another.
+
+        The first time an agent with nothing held is seen, its age latches
+        to that moment and is remembered in ``_first_seen`` — an agent that
+        has genuinely never been seen before really is the youngest possible,
+        so this changes nothing for a first-ever ask. ``release_everywhere``
+        clears the entry: that is the identity-handoff path, and an agent id
+        that changes hands must not hand the new holder the old one's
+        seniority any more than it hands it the old one's priority tier.
 
         Every live claim an agent holds carries this same value — see the note
         in ``acquire`` — so ``age_of(x)`` and ``claim.acquired_at`` for any of
@@ -346,7 +364,14 @@ class LeaseRegistry:
         the two sides at all.
         """
         held = [c.acquired_at for c in self._live() if c.agent == agent]
-        return min(held) if held else self._clock.now()
+        if held:
+            return min(held)
+        seen = self._first_seen.get(agent)
+        if seen is not None:
+            return seen
+        now = self._clock.now()
+        self._first_seen[agent] = now
+        return now
 
     def priority_of(self, agent: str, default: int = PRIORITY_NORMAL) -> int:
         """The tier stamped on this agent's live claims, or ``default``.
@@ -512,6 +537,22 @@ class LeaseRegistry:
         # next claim and the agent that waited gets nothing for waiting.
         for c in gone:
             self._hand_over(c, now)
+        # `release` is always voluntary in production — the wire "release"
+        # frame and HANDOFF are the only two callers, and both mean "this
+        # agent is done here", not "this agent was forced off". If letting go
+        # leaves it holding nothing anywhere, whatever it was doing is
+        # finished, and the next thing it asks for is new work, not a retry —
+        # so its age starts fresh next time `age_of` is asked. Contrast
+        # `release_all`, whose own docstring says its two uses are session end
+        # and a wait-die abort: neither is a transaction concluding on its own
+        # terms, so neither touches `_first_seen`. Losing this distinction
+        # either way breaks something: keep resetting on every empty-handed
+        # moment and an abort-retry never gets old enough to be told `wait`
+        # (see `age_of`); stop resetting here too and the first agent to ever
+        # connect outranks the whole room forever, deadlock-free schedule or
+        # not (see the ring simulation in test_invariants.py).
+        if gone and not any(c.agent == agent for c in self._claims):
+            self._first_seen.pop(agent, None)
 
     def release_everywhere(self, agent: str) -> None:
         """Drop every lease this agent id holds, in every room.
@@ -529,6 +570,11 @@ class LeaseRegistry:
         ``acquire`` reads an agent's tier off that agent's live claims, so a
         stranded ``critical`` claim hands ``critical`` to whoever takes the name
         next.
+
+        Same reasoning, one component to the left: forgetting ``_first_seen``
+        here is what stops the id handing its old *age* to whoever takes the
+        name next, the same way dropping the claims stops it handing over the
+        tier.
         """
         now = self._clock.now()
         keep, gone = [], []
@@ -537,6 +583,7 @@ class LeaseRegistry:
         self._claims = keep
         for c in gone:
             self._hand_over(c, now)
+        self._first_seen.pop(agent, None)
 
     def release_all(self, room: str, agent: str) -> None:
         """Drop every lease an agent holds *in one room*. Used on session end
