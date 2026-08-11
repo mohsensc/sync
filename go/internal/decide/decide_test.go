@@ -4,12 +4,13 @@ import (
 	"testing"
 
 	"github.com/mohsensc/sync/go/internal/leases"
+	"github.com/mohsensc/sync/go/internal/policy"
 )
 
 func TestDecideRung0WhenNoConflict(t *testing.T) {
 	c := leases.New()
-	resp := Decide(Request{Verb: "edit", Path: "a.py", Agent: "sess1"}, c, 0, "")
-	if resp.Rung != 0 || resp.Effect != EffectSilent {
+	resp := Decide(Request{Verb: "edit", Path: "a.py", Agent: "sess1"}, c, policy.New(), 0, "")
+	if resp.Rung != 0 || resp.Effect != "silent" {
 		t.Fatalf("got %+v", resp)
 	}
 	if BlockedByLease(resp) {
@@ -21,8 +22,8 @@ func TestDecideRung3OnConflict(t *testing.T) {
 	c := leases.New()
 	c.Upsert(leases.RegionKey("a.py", ""), leases.Lease{Agent: "other", Human: "sara", ExpiresAtMs: 90_000})
 
-	resp := Decide(Request{Verb: "edit", Path: "a.py", Agent: "sess1"}, c, 0, "")
-	if resp.Rung != 3 || resp.Effect != EffectDeny {
+	resp := Decide(Request{Verb: "edit", Path: "a.py", Agent: "sess1"}, c, policy.New(), 0, "")
+	if resp.Rung != 3 || resp.Effect != "deny" {
 		t.Fatalf("got %+v", resp)
 	}
 	if resp.Holder != "other" || resp.Human != "sara" {
@@ -36,7 +37,7 @@ func TestDecideRung3OnConflict(t *testing.T) {
 func TestDecideNonEditNeverBlocks(t *testing.T) {
 	c := leases.New()
 	c.Upsert(leases.RegionKey("a.py", ""), leases.Lease{Agent: "other", ExpiresAtMs: 90_000})
-	resp := Decide(Request{Verb: "read", Path: "a.py", Agent: "sess1"}, c, 0, "")
+	resp := Decide(Request{Verb: "read", Path: "a.py", Agent: "sess1"}, c, policy.New(), 0, "")
 	if resp.Rung != 0 {
 		t.Fatalf("got %+v", resp)
 	}
@@ -49,9 +50,55 @@ func TestDecideUsesSelfAgentOverRequestAgent(t *testing.T) {
 	c := leases.New()
 	c.Upsert(leases.RegionKey("a.py", ""), leases.Lease{Agent: "room-agent", ExpiresAtMs: 90_000})
 
-	resp := Decide(Request{Verb: "edit", Path: "a.py", Agent: "room-agent"}, c, 0, "room-agent")
+	resp := Decide(Request{Verb: "edit", Path: "a.py", Agent: "room-agent"}, c, policy.New(), 0, "room-agent")
 	if resp.Rung != 0 {
 		t.Fatalf("self agent's own lease must not block itself: %+v", resp)
+	}
+}
+
+func TestDecideOwnHandoverRidesOnRung0(t *testing.T) {
+	c := leases.New()
+	c.Upsert(leases.RegionKey("a.py", ""), leases.Lease{
+		Agent: "me", ExpiresAtMs: 90_000, HasHandover: true, HandoverAtMs: 5_000, HandoverTo: "other", Waiting: 1,
+	})
+	resp := Decide(Request{Verb: "edit", Path: "a.py", Agent: "me"}, c, policy.New(), 0, "me")
+	if resp.Rung != 0 {
+		t.Fatalf("own handover must not block: %+v", resp)
+	}
+	if resp.HandoverInMs != 5_000 || resp.HandoverTo != "other" || resp.Waiting != 1 {
+		t.Fatalf("got %+v", resp)
+	}
+}
+
+func TestDecideLostRegionNoteRidesOnRung0(t *testing.T) {
+	c := leases.New()
+	c.NoteHandover("a.py", leases.HandoverNote{To: "other", ToHuman: "sara", AtMs: 1_000})
+	resp := Decide(Request{Verb: "edit", Path: "a.py", Agent: "me"}, c, policy.New(), 2_000, "me")
+	if resp.Rung != 0 {
+		t.Fatalf("got %+v", resp)
+	}
+	if resp.LostTo != "sara" || resp.LostToAgent != "other" || resp.LostMsAgo != 1_000 {
+		t.Fatalf("got %+v", resp)
+	}
+}
+
+func TestDecideBlockedCarriesHandoverToMe(t *testing.T) {
+	c := leases.New()
+	c.Upsert(leases.RegionKey("a.py", ""), leases.Lease{
+		Agent: "other", ExpiresAtMs: 90_000, HasHandover: true, HandoverAtMs: 5_000, HandoverTo: "me",
+	})
+	resp := Decide(Request{Verb: "edit", Path: "a.py", Agent: "me"}, c, policy.New(), 0, "me")
+	if resp.Rung != 3 || !resp.HandoverToMe {
+		t.Fatalf("got %+v", resp)
+	}
+}
+
+func TestDecideRespectsPolicyFloor(t *testing.T) {
+	pol := policy.New()
+	pol.SetFloor(policy.Table{policy.Deny, policy.Deny, policy.Deny, policy.Deny, policy.Deny}, "org")
+	resp := Decide(Request{Verb: "edit", Path: "a.py", Agent: "sess1"}, leases.New(), pol, 0, "")
+	if resp.Effect != "deny" {
+		t.Fatalf("org floor must win: got %+v", resp)
 	}
 }
 
