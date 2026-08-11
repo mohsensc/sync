@@ -120,3 +120,20 @@ def test_an_unknown_backend_falls_back_instead_of_raising(monkeypatch):
 def test_the_default_is_lexical(monkeypatch):
     monkeypatch.delenv(BACKEND_ENV, raising=False)
     assert default_similarity().name == similarity.DEFAULT_BACKEND == "lexical"
+
+
+def test_selecting_embedding_without_the_extra_falls_back(monkeypatch):
+    """Exercises the real ImportError path, not a simulated one: this repo's
+    plain dev install does not pull in fastembed (see pyproject.toml), so
+    asking for AGENT_PRESENCE_SIMILARITY=embedding here must fall back to
+    lexical rather than handing back a backend that can only ever score 0.0.
+    Skips itself if the embedding extra happens to be installed - see
+    test_embedding_similarity.py for that case."""
+    try:
+        import fastembed  # noqa: F401
+    except ImportError:
+        pass
+    else:
+        pytest.skip("fastembed is installed; see test_embedding_similarity.py")
+    monkeypatch.setenv(BACKEND_ENV, "embedding")
+    assert default_similarity().name == "lexical"

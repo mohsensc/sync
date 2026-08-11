@@ -15,13 +15,24 @@ are the same idea because somebody typed that fact into a dict below. It has no
 idea that "harden the upload path" and "add checksum verification to uploads"
 are the same work, and it never will.
 
-The real backend is sentence embeddings. That is not buildable here: no
-external API can be provisioned, and a local transformer would put a
-several-hundred-megabyte dependency underneath a component that has to fail
-open in a hook's 5ms budget. So the interface is the deliverable and the
-lexical scorer is what fills it today.
+`embedding_similarity.py` is that answer, built: a local sentence-transformer
+run through ONNX (no torch, no network per query - the model downloads once,
+see that module's docstring and docs/threat-model.md), registered as
+"embedding" behind this same seam. It is not the default. Measured against
+the 23-pair corpus in `python/tools/tune_rung4.py`, it loses to
+`LexicalSimilarity` on the exact case rung 4 cares most about - telling a
+true duplicate from two intents that share a template and differ in one
+noun - and there is no threshold that fixes that on this evidence. Read
+`embedding_similarity.py`'s docstring for the numbers; the short version is
+the lexical scorer's synonym table turns out to encode something a generic
+sentence embedding's pooled cosine does not.
 
-An embedding backend drops in by registering a factory:
+None of that forecloses a *different* embedding-shaped backend doing better -
+see that module's docstring for what's untested. It does mean "swap in
+embeddings" was not, on its own, the fix this component's docstring used to
+assume it would be.
+
+A backend drops in by registering a factory:
 
     register_backend("embedding", lambda: MyEmbeddingSimilarity(...))
 
@@ -46,11 +57,15 @@ See `python/tools/tune_rung4.py` for the pairs these weights were tuned on.
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 import re
 from collections import Counter
+from functools import lru_cache
 from typing import Callable, Protocol, runtime_checkable
+
+log = logging.getLogger("agent_presence.similarity")
 
 # -- the interface ----------------------------------------------------------
 
@@ -275,12 +290,15 @@ def weight(token: str) -> float:
     return DOMAIN_WEIGHT
 
 
-def tokens(text: str) -> list[str]:
-    """Normalise, drop stopwords, fold bigrams, then fold and stem.
-
-    Returns a list rather than a set: repetition is mild evidence of emphasis
-    and the cosine below uses the counts.
-    """
+# redundant_peer (ladder.py) calls score(intent, o.intent) once per peer, and
+# `intent` - the incoming side - is the same string on every one of those
+# calls. Cache the tokenizer so that constant side costs one regex pass per
+# room, not one per peer: ~0.34ms -> ~0.06ms at 5 peers, ~8.4ms -> ~0.4ms at
+# 200 peers, measured with tools/bench_redundant_peer.py. Bounded so a relay
+# that lives for days doesn't grow this without limit; 4096 is generously
+# above any plausible room's worth of distinct declared intents.
+@lru_cache(maxsize=4096)
+def _tokens_cached(text: str) -> tuple[str, ...]:
     raw = _TOKEN_RE.findall(text.lower())
 
     folded: list[str] = []
@@ -302,7 +320,18 @@ def tokens(text: str) -> list[str]:
         stemmed = _stem(token)
         if stemmed and stemmed not in STOPWORDS:
             out.append(stemmed)
-    return out
+    return tuple(out)
+
+
+def tokens(text: str) -> list[str]:
+    """Normalise, drop stopwords, fold bigrams, then fold and stem.
+
+    Returns a list rather than a set: repetition is mild evidence of emphasis
+    and the cosine below uses the counts. Backed by a cache keyed on the raw
+    text - see `_tokens_cached` - so callers should feel free to call this
+    more than once on the same string.
+    """
+    return list(_tokens_cached(text))
 
 
 # Floors, checked before the cosine. They exist because cosine on a two-token
@@ -328,7 +357,7 @@ class LexicalSimilarity:
 
     def score(self, a: str, b: str) -> float:
         try:
-            ta, tb = tokens(a), tokens(b)
+            ta, tb = _tokens_cached(a), _tokens_cached(b)
         except Exception:  # pragma: no cover - fail open, never raise
             return 0.0
         if len(ta) < MIN_TOKENS or len(tb) < MIN_TOKENS:
@@ -380,6 +409,21 @@ def default_similarity() -> IntentSimilarity:
     the relay.
     """
     name = os.environ.get(BACKEND_ENV, "").strip().lower() or DEFAULT_BACKEND
+    if name == "embedding" and name not in _BACKENDS:
+        # The default install never imports embedding_similarity.py, so
+        # fastembed and its ~150MB of dependencies are never pulled in unless
+        # something actually asks for this backend. Importing it here, on
+        # first request, is what runs its register_backend("embedding", ...)
+        # call - see that module's docstring for what it does and doesn't buy
+        # over lexical.
+        try:
+            from . import embedding_similarity  # noqa: F401
+        except ImportError:
+            log.warning(
+                "%s=embedding was requested but the 'embedding' extra isn't "
+                "installed (pip install 'agent-presence[embedding]'); "
+                "falling back to lexical", BACKEND_ENV,
+            )
     if name not in _BACKENDS:
         name = DEFAULT_BACKEND
     instance = _INSTANCES.get(name)

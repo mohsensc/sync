@@ -11,6 +11,11 @@ ap = "agent_presence.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "hypothesis>=6.100", "pytest-asyncio>=0.24"]
+# Rung 4's embedding backend (agent_presence.embedding_similarity). Not
+# pulled in by a plain install - see that module's docstring for why it
+# isn't the default and similarity.py's default_similarity() for where the
+# lazy import lives.
+embedding = ["fastembed>=0.8"]
 
 [build-system]
 requires = ["hatchling"]
