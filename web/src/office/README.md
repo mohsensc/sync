@@ -38,6 +38,12 @@ measuring a clone with `Box3`; a stale skeleton reports a near-zero height, so a
   for that exact distance. Marks should replace the solver; keep IK only if a small
   corrective blend earns its place.
 - Wrist rotation was fixed in the clips but hasn't been reviewed frame by frame.
-- The office scene doesn't consume the corrected desk numbers yet.
 - Interactivity (click to select, click to send, zone routing, demo mode) was
   started and isn't in this branch.
+
+Desk height: fixed. desk-tripo-12k.glb has a raised back lip above the actual
+worksurface, so `office.html` scales off `DESK_SURFACE_RAW` (0.536, measured by
+raycasting the top face) instead of total bbox height. Surface lands at exactly
+0.74m for regular desks, 0.95m for the reception counter, against a 1.68m
+character — verified in-browser, screenshot in the PR. See `place()`'s
+`surfaceRaw` handling.

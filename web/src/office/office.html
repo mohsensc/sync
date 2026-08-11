@@ -201,6 +201,7 @@ function resize(){
     renderer.setSize(w,h,false); camera.aspect=w/h; camera.updateProjectionMatrix() }
 }
 window.__scene = scene; window.__cam = camera; window.__THREE = THREE; window.__meshes = meshes;
+window.__renderer = renderer; window.__PLAN = PLAN;
 function tick(){
   resize()
   if(spin){ yaw += 0.0016*spinDir
