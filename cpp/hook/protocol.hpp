@@ -4,11 +4,17 @@
 #include <string_view>
 
 // The parts of the hook <-> daemon protocol both halves have to agree on
-// letter for letter, header-only so neither side needs to link the other.
+// letter for letter. Header-only was true when the daemon was C++ and
+// decision_server.hpp/policy_cache.hpp #included this directly, so neither
+// side needed to link the other; the daemon is Go now (go/cmd/presenced)
+// and can't include a C++ header at all, so it hand-mirrors the Effect enum
+// in go/internal/policy/policy.go instead, cross-referencing this file in
+// its own doc comment. This header stays the source of truth for the C++
+// side (the hook) regardless.
 //
 // hook/hook.hpp documents the protocol; this file is the bit of it that is
-// code. It defines nothing that is not inline, so the daemon including it picks
-// up no dependency on the hook binary.
+// code. It defines nothing that is not inline, so anything still including
+// it in C++ picks up no dependency on the hook binary.
 
 namespace ap {
 
