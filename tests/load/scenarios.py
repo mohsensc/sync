@@ -24,11 +24,13 @@ from pathlib import Path
 
 from _lib import (
     AP_HOOK,
+    TLS_ENABLED,
     Client,
     DaemonProc,
     Latency,
     RelayProc,
     cpu_seconds,
+    dev_client_ssl_context,
     event_line,
     pct,
     probe_leases,
@@ -834,11 +836,19 @@ def _ws_frame(payload: bytes) -> bytes:
 
 
 class DeafSubscriber:
-    """Handshakes, joins, then never reads again."""
+    """Handshakes, joins, then never reads again.
+
+    Raw socket, not `websockets`, on purpose (see `_ws_frame`) — which means
+    it's this class's own job to speak TLS when the run is over `wss://`
+    (`AP_LOAD_TLS=1`, see `_lib.TLS_ENABLED`), the same cert every other
+    client in the run trusts.
+    """
 
     def __init__(self, url_host: str, port: int, room: str, agent: str) -> None:
-        self.s = socket.create_connection((url_host, port), 10)
-        self.s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2048)
+        raw = socket.create_connection((url_host, port), 10)
+        raw.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2048)
+        self.s = (dev_client_ssl_context().wrap_socket(raw, server_hostname=url_host)
+                  if TLS_ENABLED else raw)
         key = base64.b64encode(os.urandom(16)).decode()
         req = (f"GET / HTTP/1.1\r\nHost: {url_host}:{port}\r\nUpgrade: websocket\r\n"
                f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\n"

@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import signal
+import ssl
 import sys
 from collections import deque
 from collections.abc import Callable
@@ -411,6 +412,18 @@ async def _session(ws, relay: Relay) -> None:
             conn.shutdown()
 
 
+def build_tls_context(certfile: str, keyfile: str) -> ssl.SSLContext:
+    """One server-side context, cert and key loaded once at startup.
+
+    `PROTOCOL_TLS_SERVER` picks the modern default (TLS 1.2+, sane cipher
+    order) rather than pinning a version by hand — the same call a plain
+    `python -m http.server --tls` style server would make.
+    """
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(certfile=certfile, keyfile=keyfile)
+    return ctx
+
+
 async def serve(
     host: str,
     port: int,
@@ -418,14 +431,22 @@ async def serve(
     *,
     stop: asyncio.Event | None = None,
     on_ready: Callable[[Server], None] | None = None,
+    ssl_context: ssl.SSLContext | None = None,
 ) -> None:
     """Serve until `stop` is set, or forever if there's nothing to stop it.
 
     `on_ready` fires once the listening sockets are bound. Pass port 0 and read
     the real port off the server there — that's the only way to learn it.
+
+    `ssl_context` is None by default: plain `ws://`, the zero-config path
+    that keeps a local, single-machine setup working with nothing to
+    configure. Pass a server context (`build_tls_context`) to terminate
+    `wss://` instead — `websockets.serve` handles the handshake, this
+    function's own frame handling in `_session` is unaware either way.
     """
     async with websockets.serve(
-        lambda ws: _session(ws, relay), host, port, max_size=MAX_FRAME_BYTES,
+        lambda ws: _session(ws, relay), host, port,
+        max_size=MAX_FRAME_BYTES, ssl=ssl_context,
     ) as server:
         if on_ready is not None:
             on_ready(server)
@@ -459,17 +480,26 @@ def _install_stop_handlers(stop: asyncio.Event) -> None:
             signal.signal(sig, lambda *_: loop.call_soon_threadsafe(stop.set))
 
 
-async def run(host: str, port: int) -> None:
+async def run(
+    host: str, port: int, ssl_context: ssl.SSLContext | None = None,
+) -> None:
     """One relay, one process, shut down on a signal."""
     relay = Relay(RealClock())
     stop = asyncio.Event()
     _install_stop_handlers(stop)
 
+    # "relay listening on HOST:PORT", unchanged, on its own — a scheme
+    # prefix here would break test_entrypoints.py's LISTENING regex, which
+    # greps this exact line for the daemon's own boot sequence. TLS-ness is
+    # a separate line instead.
+    if ssl_context is not None:
+        log.info("TLS enabled: terminating wss://")
+
     def ready(server: Server) -> None:
         for bound_host, bound_port in _bound_ports(server):
             log.info("relay listening on %s:%d", bound_host, bound_port)
 
-    await serve(host, port, relay, stop=stop, on_ready=ready)
+    await serve(host, port, relay, stop=stop, on_ready=ready, ssl_context=ssl_context)
     log.info("shutting down")
 
 
@@ -492,8 +522,9 @@ def main(argv: list[str] | None = None) -> int:
         "--host",
         default=os.environ.get("AGENT_PRESENCE_HOST", DEFAULT_HOST),
         help="interface to bind (env AGENT_PRESENCE_HOST, default %(default)s). "
-             "Traffic is unencrypted and room membership needs no credential — "
-             "see docs/threat-model.md before binding anything but loopback.",
+             "Traffic is unencrypted unless --tls-cert/--tls-key are set, "
+             "and room membership needs no credential regardless — see "
+             "docs/threat-model.md before binding anything but loopback.",
     )
     parser.add_argument(
         "--port",
@@ -506,6 +537,19 @@ def main(argv: list[str] | None = None) -> int:
         "--log-level",
         default=os.environ.get("AGENT_PRESENCE_LOG_LEVEL", "INFO"),
         help="python logging level (env AGENT_PRESENCE_LOG_LEVEL, default INFO)",
+    )
+    parser.add_argument(
+        "--tls-cert",
+        default=os.environ.get("AGENT_PRESENCE_TLS_CERT"),
+        help="PEM certificate (env AGENT_PRESENCE_TLS_CERT). Terminates "
+             "wss:// instead of ws:// when set together with --tls-key. "
+             "Unset by default: plaintext ws:// on loopback needs nothing "
+             "here. See docs/tls-dev-cert.md for a self-signed dev cert.",
+    )
+    parser.add_argument(
+        "--tls-key",
+        default=os.environ.get("AGENT_PRESENCE_TLS_KEY"),
+        help="private key matching --tls-cert (env AGENT_PRESENCE_TLS_KEY)",
     )
     args = parser.parse_args(argv)
 
@@ -525,8 +569,29 @@ def main(argv: list[str] | None = None) -> int:
     if level != "DEBUG":
         logging.getLogger("websockets").setLevel(logging.WARNING)
 
+    if bool(args.tls_cert) != bool(args.tls_key):
+        raise SystemExit("--tls-cert and --tls-key must be given together")
+
+    ssl_context = None
+    if args.tls_cert and args.tls_key:
+        try:
+            ssl_context = build_tls_context(args.tls_cert, args.tls_key)
+        except (ssl.SSLError, OSError) as exc:
+            raise SystemExit(f"cannot load TLS cert/key: {exc}") from None
+    elif args.host not in (DEFAULT_HOST, "localhost", "::1"):
+        # Not fatal — a trusted-network deployment behind something else
+        # terminating TLS is a real, documented option (docs/threat-model.md)
+        # — but binding wide open in the clear is exactly the mistake the
+        # threat model warns about, so say so loudly rather than quietly.
+        log.warning(
+            "binding %s with no --tls-cert/--tls-key: traffic (including "
+            "the bearer token at join) crosses the wire in the clear. "
+            "See docs/threat-model.md before doing this on an untrusted "
+            "network.", args.host,
+        )
+
     try:
-        asyncio.run(run(args.host, args.port))
+        asyncio.run(run(args.host, args.port, ssl_context))
     except KeyboardInterrupt:
         # Only reachable if a signal lands outside the running loop.
         pass

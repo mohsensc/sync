@@ -43,8 +43,9 @@ type Options struct {
 	// which both the C++ hook and this daemon derive it with.
 	Sock string
 
-	// RelayURL is ws://host:port. Empty, or an empty Room, means no relay
-	// connection — same "no room, no relay" rule main.cpp applies.
+	// RelayURL is ws://host:port or wss://host:port. Empty, or an empty
+	// Room, means no relay connection — same "no room, no relay" rule
+	// main.cpp applies.
 	RelayURL string
 	Room     string
 	Agent    string
@@ -53,6 +54,12 @@ type Options struct {
 	Principal  string
 	Token      string
 	Unattended bool
+
+	// RelayTLSCAFile and RelayTLSInsecureSkipVerify are only consulted
+	// when RelayURL is wss://. See relay.Config's fields of the same
+	// name — this is a straight pass-through.
+	RelayTLSCAFile             string
+	RelayTLSInsecureSkipVerify bool
 
 	// Snapshot is the file the statusline reads. Empty disables writing
 	// it (and the daemon's tick loop keeps running regardless — a policy
@@ -122,6 +129,9 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 			Principal:  opts.Principal,
 			Token:      opts.Token,
 			Unattended: opts.Unattended,
+
+			TLSCAFile:             opts.RelayTLSCAFile,
+			TLSInsecureSkipVerify: opts.RelayTLSInsecureSkipVerify,
 		}, d.leases)
 		d.relay.OnPeer(func(p wire.Presence) {
 			if p.Agent == "" {

@@ -111,6 +111,13 @@ func main() {
 		Token:      discoverToken(os.Getenv("AGENT_PRESENCE_TOKEN"), os.Getenv("XDG_CONFIG_HOME"), os.Getenv("HOME")),
 		Unattended: envIsTrue(os.Getenv("AGENT_PRESENCE_UNATTENDED")),
 
+		// Only consulted when AGENT_PRESENCE_RELAY is wss:// — see
+		// docs/tls-dev-cert.md. RelayTLSCAFile trusts one extra PEM on
+		// top of the system pool; the skip-verify env var is deliberately
+		// not named anything an operator could set by accident.
+		RelayTLSCAFile:             trimASCII(os.Getenv("AGENT_PRESENCE_RELAY_CA")),
+		RelayTLSInsecureSkipVerify: envIsTrue(os.Getenv("AGENT_PRESENCE_RELAY_INSECURE_SKIP_VERIFY")),
+
 		Snapshot:    envOr("AGENT_PRESENCE_SNAPSHOT", runtime+"/agent-presence.json"),
 		PolicyCache: envOr("AGENT_PRESENCE_POLICY_CACHE", runtime+"/agent-presence.policy.json"),
 		Journal:     discoverJournalPath(os.Getenv("AGENT_PRESENCE_JOURNAL"), runtime),
