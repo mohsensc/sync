@@ -3,6 +3,8 @@ package relaysrv
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"log"
 	"os"
 	"strings"
 )
@@ -83,6 +85,23 @@ func cleanLines(v any) []int {
 // goes through this, not just the event path, so a claim reaches exactly
 // as far as a touch does.
 func CleanRegionDict(v any) (Region, bool) {
+	out, ok := cleanRegionRaw(v)
+	if !ok {
+		return Region{}, false
+	}
+	if OpaqueEnabled() {
+		out = OpaqueRegion(out)
+	}
+	return out, true
+}
+
+// cleanRegionRaw is CleanRegionDict without the opaque check — mirrors
+// redact.py's _clean_region, the un-hashing half clean_region_dict wraps.
+// RedactEvent uses this one and defers hashing to its own single trailing
+// pass, the same split python keeps: the event path reads
+// opaque_enabled() exactly once per frame, not once per field plus once
+// more for the whole frame.
+func cleanRegionRaw(v any) (Region, bool) {
 	d, ok := v.(map[string]any)
 	if !ok {
 		return Region{}, false
@@ -96,9 +115,6 @@ func CleanRegionDict(v any) (Region, bool) {
 		out.Symbol = &sym
 	}
 	out.Lines = cleanLines(d["lines"])
-	if OpaqueEnabled() {
-		out = OpaqueRegion(out)
-	}
 	return out, true
 }
 
@@ -145,8 +161,11 @@ func RedactEvent(msg map[string]any) map[string]any {
 		}
 		switch {
 		case key == "region":
-			if region, ok := CleanRegionDict(value); ok {
-				out["region"] = regionPayload(region)
+			if region, ok := cleanRegionRaw(value); ok {
+				// Unmarked on purpose — see regionPayloadUnmarked's doc
+				// comment. This dict is unhashed; the trailing
+				// applyOpaqueMap pass below is what hashes it, once.
+				out["region"] = regionPayloadUnmarked(region)
 			}
 		case key == "ts":
 			if n, ok := value.(float64); ok {
@@ -178,6 +197,29 @@ func ApplyOpaqueOutbound(payload Frame) Frame {
 		return payload
 	}
 	return applyOpaqueMap(map[string]any(payload)).(map[string]any)
+}
+
+// EncodeFrame is the one place a Frame becomes wire bytes: opaque mode,
+// then JSON. Called exactly once per distinct outbound payload — by
+// Relay.Broadcast/PublishTo for fan-out, and by the session loop for a
+// direct reply — never once per recipient. Getting that backwards (each
+// connection's own writer re-encoding the same frame) is the redundant
+// per-recipient serialization the whole point of this relay is to not
+// do; see docs/relay-parity.md.
+//
+// Every Frame this package builds is strings, bools, numbers, nil and
+// nested maps/slices of the same — nothing that can fail to marshal, so
+// an error here means a bug in a frame builder, not a runtime condition.
+// Returned as nil in that case rather than panicking a fan-out goroutine
+// mid-broadcast; WsConn.Send drops a nil payload.
+func EncodeFrame(payload Frame) []byte {
+	body := ApplyOpaqueOutbound(payload)
+	b, err := json.Marshal(body)
+	if err != nil {
+		log.Printf("BUG: frame %v failed to marshal: %s", payload["type"], err)
+		return nil
+	}
+	return b
 }
 
 func applyOpaqueMap(v any) any {

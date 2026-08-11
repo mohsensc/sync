@@ -27,7 +27,18 @@ func (r *recorder) SetRoom(rm string) { r.room = rm }
 func (r *recorder) Principal() string { return "" }
 func (r *recorder) Token() string     { return "" }
 func (r *recorder) Unattended() bool  { return false }
-func (r *recorder) Send(f Frame)      { r.sent = append(r.sent, f) }
+
+// Send decodes the wire bytes Relay.Broadcast/PublishTo hand it back into
+// a Frame, so this stays a faithful stand-in for a real connection (which
+// only ever sees bytes) while keeping the test assertions below able to
+// index into it like everything else here does.
+func (r *recorder) Send(b []byte) {
+	var f Frame
+	if err := json.Unmarshal(b, &f); err != nil {
+		panic(err)
+	}
+	r.sent = append(r.sent, f)
+}
 
 func goldenRegion(path string, symbol string) map[string]any {
 	return map[string]any{"path": path, "symbol": symbol, "lines": nil}

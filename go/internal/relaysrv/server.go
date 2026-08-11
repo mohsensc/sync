@@ -55,7 +55,7 @@ type WsConn struct {
 	token      string
 	unattended bool
 
-	out            chan Frame
+	out            chan []byte
 	closeOnce      sync.Once
 	closed         chan struct{}
 	dropped        int
@@ -75,7 +75,7 @@ func NewWsConn(ws *websocket.Conn, clock Clock) *WsConn {
 	c := &WsConn{
 		ws:      ws,
 		clock:   clock,
-		out:     make(chan Frame, SendQueueMax),
+		out:     make(chan []byte, SendQueueMax),
 		closed:  make(chan struct{}),
 		tokens:  InboundBurst,
 		tokenTs: now,
@@ -93,10 +93,16 @@ func (c *WsConn) Principal() string { c.mu.Lock(); defer c.mu.Unlock(); return c
 func (c *WsConn) Token() string     { c.mu.Lock(); defer c.mu.Unlock(); return c.token }
 func (c *WsConn) Unattended() bool  { c.mu.Lock(); defer c.mu.Unlock(); return c.unattended }
 
-// Send queues a frame. Never blocks, never panics, never waits on the
-// peer: a full channel drops the oldest queued frame to make room, the
-// same drop-oldest rule serve.py's deque enforces — a stale presence or
-// lease frame is worth nothing next to the newest one.
+// Send queues an already-encoded frame. Never blocks, never panics, never
+// waits on the peer: a full channel drops the oldest queued frame to make
+// room, the same drop-oldest rule serve.py's deque enforces — a stale
+// presence or lease frame is worth nothing next to the newest one.
+//
+// Takes bytes, not a Frame, on purpose: the caller (Relay.Broadcast et al)
+// encodes once per distinct payload and fans the same bytes out to every
+// recipient, so there is nothing left for this method to marshal — see
+// EncodeFrame. A nil payload (an encode failure upstream) is dropped
+// rather than queued.
 //
 // Go has no built-in bounded-channel-with-drop-oldest, so this is a
 // non-blocking send that, on EAGAIN, drains exactly one queued frame and
@@ -104,7 +110,10 @@ func (c *WsConn) Unattended() bool  { c.mu.Lock(); defer c.mu.Unlock(); return c
 // this can never park the caller (the relay's own goroutine, mid-fan-out)
 // waiting on this connection's reader — the one property that has to
 // hold, or one slow subscriber stalls every claim in the room.
-func (c *WsConn) Send(payload Frame) {
+func (c *WsConn) Send(payload []byte) {
+	if payload == nil {
+		return
+	}
 	select {
 	case <-c.closed:
 		return
@@ -174,17 +183,12 @@ func (c *WsConn) writeLoop() {
 	}
 }
 
-func (c *WsConn) write(payload Frame) bool {
-	body := ApplyOpaqueOutbound(payload)
-	b, err := json.Marshal(body)
-	if err != nil {
-		return true
-	}
+func (c *WsConn) write(payload []byte) bool {
 	now := c.clock.Now()
 	c.mu.Lock()
 	c.sendingSince = &now
 	c.mu.Unlock()
-	err = c.ws.WriteMessage(websocket.TextMessage, b)
+	err := c.ws.WriteMessage(websocket.TextMessage, payload)
 	c.mu.Lock()
 	c.sendingSince = nil
 	c.mu.Unlock()
@@ -320,7 +324,7 @@ func session(ws *websocket.Conn, relay *Relay) {
 			return relay.Handle(conn, msg)
 		}()
 		if reply != nil {
-			conn.Send(reply)
+			conn.Send(EncodeFrame(reply))
 		}
 	}
 }

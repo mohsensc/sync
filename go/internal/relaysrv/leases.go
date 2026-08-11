@@ -3,6 +3,7 @@ package relaysrv
 import (
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 )
 
@@ -74,8 +75,30 @@ type Publisher interface {
 	PublishTo(room, agent string, frame Frame, actor Conn)
 }
 
+// carryKey identifies a claim's identity for the dodge-the-deadline check
+// in handOver/resumeCarry. Mirrors leases.py's `_carry` dict key exactly:
+// python keys on the full frozen Region (path, symbol *and* lines), not
+// same_region()'s coarser path+symbol contention unit — same_region()
+// deliberately ignores lines for conflict detection, but the carry dict is
+// a different question ("is this the literal same claim reappearing"),
+// and python answers it with plain dataclass equality. Dropping lines
+// here would make Go's carry match in cases Python's wouldn't (a release
+// and re-claim of the same symbol with a different line range would
+// still reattach the remembered deadline in Go but not Python) — a real,
+// if narrow, wire-behavior divergence, not just an internal difference.
 type carryKey struct {
-	room, path, symbol, agent string
+	room, path, symbol, lines, agent string
+}
+
+func linesKey(r Region) string {
+	if len(r.Lines) == 0 {
+		return ""
+	}
+	parts := make([]string, len(r.Lines))
+	for i, v := range r.Lines {
+		parts[i] = strconv.Itoa(v)
+	}
+	return strings.Join(parts, ",")
 }
 
 type carryEntry struct {
@@ -339,7 +362,7 @@ func (r *Registry) handOver(s *shard, c *Claim, now float64) *Reservation {
 		return nil
 	}
 	if c.HandoverAt == nil || *c.HandoverAt > now {
-		key := carryKey{c.Room, c.Scope.Path, symbolKey(c.Scope), c.Agent}
+		key := carryKey{c.Room, c.Scope.Path, symbolKey(c.Scope), linesKey(c.Scope), c.Agent}
 		s.carry[key] = carryEntry{winner: *winner, deadline: c.HandoverAt}
 		if len(s.carry) > carryMax {
 			for k, v := range s.carry {
@@ -363,7 +386,7 @@ func (r *Registry) resumeCarry(s *shard, c *Claim, now float64) {
 	if len(s.carry) == 0 {
 		return
 	}
-	key := carryKey{c.Room, c.Scope.Path, symbolKey(c.Scope), c.Agent}
+	key := carryKey{c.Room, c.Scope.Path, symbolKey(c.Scope), linesKey(c.Scope), c.Agent}
 	carried, ok := s.carry[key]
 	if !ok {
 		return
@@ -647,15 +670,19 @@ func (r *Registry) ReleaseAll(room, agent string, actor Conn) {
 // ReleaseEverywhere drops every lease this agent id holds, in every room —
 // the identity-handoff path (Relay._bind_agent's drop_stranded_claims).
 func (r *Registry) ReleaseEverywhere(agent string, actor Conn) {
+	// Held for the whole sweep, not just to snapshot the room list: this is
+	// rare (identity reclaim only, see relay.go's dropStrandedClaims), so
+	// blocking a concurrent room *creation* for its duration is cheap, and
+	// it is what closes a real gap a snapshot-then-release-then-iterate
+	// pattern would leave — a room created in that window would silently
+	// never be swept by this call. Existing rooms are untouched by this
+	// lock (roomOf's read path only needs RLock too), so ordinary traffic
+	// in rooms that already exist is not blocked.
 	r.roomsMu.RLock()
-	rooms := make(map[string]*roomShards, len(r.rooms))
-	for name, rs := range r.rooms {
-		rooms[name] = rs
-	}
-	r.roomsMu.RUnlock()
+	defer r.roomsMu.RUnlock()
 
 	now := r.clock.Now()
-	for room, rs := range rooms {
+	for room, rs := range r.rooms {
 		for _, s := range rs.shards {
 			s.mu.Lock()
 			r.pruneExpired(room, s, now, actor)

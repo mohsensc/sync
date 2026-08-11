@@ -9,7 +9,13 @@ import (
 // Conn is one connection to the relay: a websocket in the running server,
 // or a fake in a test. Mirrors relay.py's Conn protocol. Send must never
 // block and never panic — the transport owns backpressure, the relay just
-// hands frames to it.
+// hands it bytes.
+//
+// Send takes pre-encoded bytes, not a Frame: the relay calls EncodeFrame
+// exactly once per distinct payload (see Broadcast/PublishTo/reply below)
+// and hands every recipient the same []byte, rather than each
+// connection's own writer re-marshaling (and, under opaque mode,
+// re-hashing) an identical frame. See EncodeFrame's doc comment.
 type Conn interface {
 	Agent() string
 	SetAgent(string)
@@ -20,7 +26,7 @@ type Conn interface {
 	Principal() string
 	Token() string
 	Unattended() bool
-	Send(Frame)
+	Send([]byte)
 }
 
 // Refusal is why a join was refused, in a shape the client can act on.
@@ -195,7 +201,7 @@ func removeConn(members []Conn, conn Conn) []Conn {
 }
 
 func (r *Relay) refuse(conn Conn, room string, refusal Refusal) bool {
-	conn.Send(refusal.frame(room))
+	conn.Send(EncodeFrame(refusal.frame(room)))
 	return false
 }
 
@@ -322,7 +328,7 @@ func (r *Relay) sendLeaseSnapshot(conn Conn, room string) {
 		f := leaseFrame(c, now)
 		leases = append(leases, f)
 	}
-	conn.Send(Frame{"type": "leases", "leases": leases, "presence": r.presenceSnapshot(room)})
+	conn.Send(EncodeFrame(Frame{"type": "leases", "leases": leases, "presence": r.presenceSnapshot(room)}))
 }
 
 // presenceSnapshot is recent hook-observed activity, for a joiner that
@@ -387,8 +393,14 @@ func (r *Relay) Broadcast(room string, payload Frame, exclude Conn) []Conn {
 		}
 	}
 	ri.mu.Unlock()
+	if len(targets) == 0 {
+		return targets
+	}
+	// Encoded once for every recipient in this call, not once per
+	// recipient — see EncodeFrame's doc comment.
+	encoded := EncodeFrame(payload)
 	for _, c := range targets {
-		c.Send(payload)
+		c.Send(encoded)
 	}
 	return targets
 }
@@ -426,8 +438,15 @@ func (r *Relay) PublishTo(room, agent string, frame Frame, actor Conn) {
 		}
 	}
 	ri.mu.Unlock()
+	if len(targets) == 0 {
+		return
+	}
+	// Usually one target (one agent, one connection), but two checkouts on
+	// one laptop can share an id — encoded once regardless, same rule as
+	// Broadcast.
+	encoded := EncodeFrame(frame)
 	for _, c := range targets {
-		c.Send(frame)
+		c.Send(encoded)
 	}
 }
 
@@ -574,7 +593,7 @@ func (r *Relay) onEvent(room string, conn Conn, msg map[string]any) Frame {
 			lf := leaseFrame(held, now)
 			lf["type"] = "lease"
 			lf["state"] = "held"
-			conn.Send(lf)
+			conn.Send(EncodeFrame(lf))
 		}
 	}
 	return frame
@@ -598,7 +617,7 @@ func (r *Relay) onContend(room string, conn Conn, region Region) {
 	f := leaseFrame(held, r.clock.Now())
 	f["type"] = "lease"
 	f["state"] = "held"
-	conn.Send(f)
+	conn.Send(EncodeFrame(f))
 }
 
 func (r *Relay) onClaim(room string, conn Conn, msg map[string]any, region Region) Frame {

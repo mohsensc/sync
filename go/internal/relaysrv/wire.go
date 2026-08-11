@@ -7,6 +7,27 @@ package relaysrv
 // _region_payload, including the opaque mark so a region that arrived
 // already hashed doesn't get hashed a second time by the outbound pass.
 func regionPayload(r Region) Frame {
+	f := regionPayloadUnmarked(r)
+	if OpaqueEnabled() {
+		f[OpaqueMark] = true
+	}
+	return f
+}
+
+// regionPayloadUnmarked builds the path/symbol/lines body with no opaque
+// mark, whatever the region's contents are. Every caller of regionPayload
+// hands it an already-hashed Region when opaque mode is on (see
+// CleanRegionDict, called at ingest) and wants the mark set so the
+// outbound blanket pass in redact.go doesn't hash it a second time — that
+// is what regionPayload above does. RedactEvent is the one exception: it
+// defers all hashing to that same blanket pass (see its own comment) and
+// builds this dict from an *unhashed* Region, so marking it here would be
+// a real bug — the blanket pass would see the mark, skip it, and a
+// cleartext path would reach the wire under opaque mode. Kept as a
+// separate function rather than a bool parameter so that mistake can't
+// be made by passing the wrong argument at a call site that forgot which
+// case it's in.
+func regionPayloadUnmarked(r Region) Frame {
 	var symbol any
 	if r.Symbol != nil {
 		symbol = *r.Symbol
@@ -19,11 +40,7 @@ func regionPayload(r Region) Frame {
 		}
 		lines = arr
 	}
-	f := Frame{"path": r.Path, "symbol": symbol, "lines": lines}
-	if OpaqueEnabled() {
-		f[OpaqueMark] = true
-	}
-	return f
+	return Frame{"path": r.Path, "symbol": symbol, "lines": lines}
 }
 
 // leaseFrame is the body shared by "lease" (state=held), the elements of

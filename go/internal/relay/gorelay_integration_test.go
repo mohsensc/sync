@@ -61,10 +61,11 @@ func waitForListenLine(stderr interface{ Read([]byte) (int, error) }, timeout ti
 }
 
 // TestClientAgainstRealGoRelay builds the real gorelay binary (issue #40)
-// and points this package's Client — the same one go/cmd/godaemon uses — at
-// it, over a real socket. This is the hard constraint from issue #40: the
-// Go relay's wire protocol has to work against the Go daemon's existing
-// client unchanged, not just against hand-rolled test frames.
+// and points this package's Client — the same one go/cmd/presenced (the Go
+// daemon) uses — at it, over a real socket. This is the hard constraint
+// from issue #40: the Go relay's wire protocol has to work against the Go
+// daemon's existing client unchanged, not just against hand-rolled test
+// frames.
 func TestClientAgainstRealGoRelay(t *testing.T) {
 	bin, err := buildGoRelay(t)
 	if err != nil {
