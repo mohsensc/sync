@@ -128,10 +128,9 @@ async def test_who_else_is_here_is_empty_when_alone(setup):
 
 
 async def test_who_else_is_here_reports_other_agents(setup):
-    # Forces the tool's connection to join before the event fires — a
-    # presence frame only reaches whoever is already a room member, and an
-    # MCP session genuinely can't know about activity from before it
-    # connected (the relay's join snapshot only carries leases, not presence).
+    # Forces the tool's connection to join before the event fires, so this
+    # exercises the live `presence` frame path rather than the join
+    # snapshot — see the test below for the snapshot.
     await setup.tools.who_else_is_here()
     setup.relay.handle(setup.peer, {
         "type": "event", "verb": "edit", "source": "hook",
@@ -145,6 +144,20 @@ async def test_who_else_is_here_reports_other_agents(setup):
         return bool(peers)
 
     assert await _wait_until_async(_seen)
+    assert peers[0]["human"] == "sara"
+    assert peers[0]["path"] == "src/auth.py"
+
+
+async def test_who_else_is_here_reports_activity_from_before_it_connected(setup):
+    # The activity happens, and only then does the MCP session join. Before
+    # the join snapshot carried `presence`, this session had no way to ever
+    # learn about it — it starts after the one live `presence` frame this
+    # event produced.
+    setup.relay.handle(setup.peer, {
+        "type": "event", "verb": "edit", "source": "hook",
+        "region": {"path": "src/auth.py", "symbol": "sign_in", "lines": None},
+    })
+    peers = await setup.tools.who_else_is_here()
     assert peers[0]["human"] == "sara"
     assert peers[0]["path"] == "src/auth.py"
 
