@@ -1,0 +1,166 @@
+[
+  {
+    "relay": "python-stock",
+    "agents": 200,
+    "hot_regions": 8,
+    "rounds_each": 15,
+    "shards": 4,
+    "ops": 3000,
+    "elapsed_s": 1.44,
+    "claims_per_s": 2089.3,
+    "granted": 130,
+    "refused": 2870,
+    "stalls": 0,
+    "relay_alive": true,
+    "dead_conns": 0,
+    "frames_delivered": 53587,
+    "fanout_per_op": 17.9,
+    "claim_latency": {
+      "n": 3000,
+      "p50_ms": 74.195,
+      "p95_ms": 108.846,
+      "p99_ms": 132.03,
+      "max_ms": 133.434
+    },
+    "relay_cpu_s": 1.25,
+    "relay_cpu_ms_per_op": 0.4167,
+    "relay_rss_kb": {
+      "after_join": 32880,
+      "peak": 43344
+    },
+    "relay_rss_kb_per_agent": 52.32,
+    "loadavg_before": [
+      5.91650390625,
+      6.9912109375,
+      8.6318359375
+    ],
+    "loadavg_after": [
+      5.91650390625,
+      6.9912109375,
+      8.6318359375
+    ]
+  },
+  {
+    "relay": "python-stock",
+    "agents": 400,
+    "hot_regions": 8,
+    "rounds_each": 15,
+    "shards": 4,
+    "ops": 6000,
+    "elapsed_s": 2.63,
+    "claims_per_s": 2281.2,
+    "granted": 129,
+    "refused": 5871,
+    "stalls": 0,
+    "relay_alive": true,
+    "dead_conns": 0,
+    "frames_delivered": 106661,
+    "fanout_per_op": 17.8,
+    "claim_latency": {
+      "n": 6000,
+      "p50_ms": 152.515,
+      "p95_ms": 227.826,
+      "p99_ms": 267.312,
+      "max_ms": 267.521
+    },
+    "relay_cpu_s": 2.44,
+    "relay_cpu_ms_per_op": 0.4067,
+    "relay_rss_kb": {
+      "after_join": 43344,
+      "peak": 66576
+    },
+    "relay_rss_kb_per_agent": 58.08,
+    "loadavg_before": [
+      5.91650390625,
+      6.9912109375,
+      8.6318359375
+    ],
+    "loadavg_after": [
+      6.0830078125,
+      7.0078125,
+      8.6279296875
+    ]
+  },
+  {
+    "relay": "python-stock",
+    "agents": 800,
+    "hot_regions": 8,
+    "rounds_each": 15,
+    "shards": 4,
+    "ops": 12000,
+    "elapsed_s": 5.98,
+    "claims_per_s": 2006.9,
+    "granted": 136,
+    "refused": 11864,
+    "stalls": 0,
+    "relay_alive": true,
+    "dead_conns": 0,
+    "frames_delivered": 222674,
+    "fanout_per_op": 18.6,
+    "claim_latency": {
+      "n": 12000,
+      "p50_ms": 350.94,
+      "p95_ms": 488.133,
+      "p99_ms": 535.933,
+      "max_ms": 536.429
+    },
+    "relay_cpu_s": 5.52,
+    "relay_cpu_ms_per_op": 0.46,
+    "relay_rss_kb": {
+      "after_join": 66576,
+      "peak": 106352
+    },
+    "relay_rss_kb_per_agent": 49.72,
+    "loadavg_before": [
+      6.0830078125,
+      7.0078125,
+      8.6279296875
+    ],
+    "loadavg_after": [
+      6.076171875,
+      6.99072265625,
+      8.6123046875
+    ]
+  },
+  {
+    "relay": "python-stock",
+    "agents": 1600,
+    "hot_regions": 8,
+    "rounds_each": 15,
+    "shards": 4,
+    "ops": 24000,
+    "elapsed_s": 15.0,
+    "claims_per_s": 1600.5,
+    "granted": 134,
+    "refused": 23866,
+    "stalls": 0,
+    "relay_alive": true,
+    "dead_conns": 0,
+    "frames_delivered": 433867,
+    "fanout_per_op": 18.1,
+    "claim_latency": {
+      "n": 24000,
+      "p50_ms": 939.283,
+      "p95_ms": 1353.144,
+      "p99_ms": 1376.305,
+      "max_ms": 1722.203
+    },
+    "relay_cpu_s": 12.63,
+    "relay_cpu_ms_per_op": 0.5262,
+    "relay_rss_kb": {
+      "after_join": 106352,
+      "peak": 142320
+    },
+    "relay_rss_kb_per_agent": 22.48,
+    "loadavg_before": [
+      6.076171875,
+      6.99072265625,
+      8.6123046875
+    ],
+    "loadavg_after": [
+      6.6728515625,
+      7.08642578125,
+      8.6181640625
+    ]
+  }
+]
