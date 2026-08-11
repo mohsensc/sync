@@ -68,18 +68,45 @@ esac
 # the repo's "latest" release currently is.
 RELEASE_TAG="${AGENT_PRESENCE_VERSION:-latest}"
 
+# This repo is private, so a plain unauthenticated `curl` against
+# github.com/.../releases/.../download/... 404s — GitHub only serves that
+# redirect anonymously for a public repo. `gh` (already this repo's own
+# tool of choice, and a reasonable thing for anyone spreading this inside a
+# company to already have) hits the authenticated API instead. A bare curl
+# is still tried after, for the day this repo is public or a GITHUB_TOKEN
+# is already in the environment — it costs nothing to try.
+# No arrays for the optional bits below: macOS still ships bash 3.2 as
+# /bin/bash, and `"${arr[@]}"` on an empty array trips `set -u` there
+# (fixed in 4.4) even though it's fine everywhere else this runs.
 fetch_release_binary() {
-  local name="$1" dest="$2"
+  local name="$1" dest="$2" asset="$name-$GOOS-$GOARCH"
+
+  if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+    if [[ "$RELEASE_TAG" == "latest" ]]; then
+      gh release download --repo "$REPO" --pattern "$asset" \
+        --output "$dest" --clobber >/dev/null 2>&1 && return 0
+    else
+      gh release download "$RELEASE_TAG" --repo "$REPO" --pattern "$asset" \
+        --output "$dest" --clobber >/dev/null 2>&1 && return 0
+    fi
+  fi
+
   command -v curl >/dev/null 2>&1 || return 1
   local url
   if [[ "$RELEASE_TAG" == "latest" ]]; then
-    url="https://github.com/$REPO/releases/latest/download/$name-$GOOS-$GOARCH"
+    url="https://github.com/$REPO/releases/latest/download/$asset"
   else
-    url="https://github.com/$REPO/releases/download/$RELEASE_TAG/$name-$GOOS-$GOARCH"
+    url="https://github.com/$REPO/releases/download/$RELEASE_TAG/$asset"
   fi
   local tmp
   tmp="$(mktemp)"
-  if curl -fsSL "$url" -o "$tmp" 2>/dev/null; then
+  local ok=1
+  if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" "$url" -o "$tmp" 2>/dev/null && ok=0
+  else
+    curl -fsSL "$url" -o "$tmp" 2>/dev/null && ok=0
+  fi
+  if [[ "$ok" == 0 ]]; then
     mv "$tmp" "$dest"
     return 0
   fi

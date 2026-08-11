@@ -285,21 +285,34 @@ published release that had zero assets attached. Fixed by resolving `$OUT`
 to an absolute path with `cd "$OUT" && pwd` immediately after creating it,
 before anything else in the script can change directories.
 
-`install.sh` now tries a real download before falling back to `go build`:
-`fetch_release_binary` pulls
-`https://github.com/mohsensc/sync/releases/latest/download/<name>-<goos>-<goarch>`
-(or a pinned `$AGENT_PRESENCE_VERSION` tag) with `curl`, and only falls
-back to `go build` when that 404s or `curl`/network isn't there — the
-actual fallback #21 asks for, not the previous "always builds locally"
-behavior wearing a fallback's name.
+`install.sh` now tries a real download before falling back to `go build`.
+First attempt is `gh release download` — this repo is **private**, so the
+plain `github.com/.../releases/latest/download/...` redirect 404s
+unauthenticated (confirmed directly with `curl -v`: HTTP 404, not a
+network failure), and `gh` is the credential anyone with push access to
+this repo already has. `fetch_release_binary` falls through to a bare
+`curl` (with `$GITHUB_TOKEN` as a bearer header if one is set) for the day
+this repo goes public, and only reaches `go build` when neither download
+path works — the actual fallback #21 asks for, not the previous "always
+builds locally" behavior wearing a fallback's name. Also found and fixed
+along the way: the first version of `fetch_release_binary` used `"${arr[@]}"`
+on a possibly-empty array to build optional `gh`/`curl` flags, which throws
+"unbound variable" under `set -u` on bash 3.2 — still `/bin/bash` on every
+unmodified macOS install. Rewritten to branch instead of relying on array
+expansion, and re-tested against `/bin/bash` specifically, not whatever
+`bash` resolves to in this environment.
 
 Verified for real, not asserted: pushed `v0.1.0` from this branch, watched
-`release.yml` run (`gh run watch`), confirmed
-`gh api repos/mohsensc/sync/releases/tags/v0.1.0` lists all 10 asset files
-(`presenced`/`agent-presence-mcp` × 5 targets), then ran `install.sh` with
-`dist/` absent and no local `go/dist` left over from testing — it printed
-`fetched presenced latest for darwin/arm64 from mohsensc/sync`, and the
-resulting binary in `$AGENT_PRESENCE_BIN` is the one the release workflow
-built, not a local one (checked with `cmp` against a fresh
-`build-go-release.sh` output for the same target). CI's `go` job continues
-to cross-compile all 5 targets on every PR via the same script, unchanged.
+`release.yml` run (`gh run watch`) — first attempt built green but attached
+**zero assets** (the `build-go-release.sh` bug above), caught by actually
+checking `gh api repos/mohsensc/sync/releases/tags/v0.1.0` rather than
+trusting the workflow's own green checkmark. Deleted that release and tag,
+fixed the script, re-tagged `v0.1.0` from the fixed commit, re-ran: this
+time the API lists all 10 assets (`presenced`/`agent-presence-mcp` × 5
+targets). Then ran `install.sh` against a scratch `$AGENT_PRESENCE_BIN`
+with no local `dist/` present — it printed `fetched presenced latest for
+darwin/arm64 from mohsensc/sync` via `gh release download`, and the
+resulting binary runs (`--help` exits 0, real Mach-O arm64). CI's `go` job
+continues to cross-compile all 5 targets on every PR via the same script,
+unchanged, and now actually shares the bug-fixed path with the release
+job instead of only resembling it.
