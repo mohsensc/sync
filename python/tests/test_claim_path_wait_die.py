@@ -9,11 +9,16 @@ must be told to abort and actually lose what it holds.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+
 import pytest
 
 from agent_presence.clock import VirtualClock
 from agent_presence.mcp_server import Tools, dispatch
 from agent_presence.relay import Relay
+from agent_presence.relay_client import RelayConnection
+from agent_presence.serve import serve
 from agent_presence.types import Region
 
 OTHER = {"path": "src/db.py", "symbol": "query", "lines": None}
@@ -41,6 +46,30 @@ def _opaque_off(monkeypatch):
 @pytest.fixture
 def relay():
     return Relay(VirtualClock(1000.0))
+
+
+@contextlib.asynccontextmanager
+async def running_relay(relay: Relay):
+    """Serve `relay` on an ephemeral localhost port for the block, and hand
+    back its ws:// url."""
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    ready: asyncio.Future = loop.create_future()
+
+    def on_ready(srv) -> None:
+        if not ready.done():
+            ready.set_result(srv.sockets[0].getsockname()[1])
+
+    task = asyncio.create_task(
+        serve("127.0.0.1", 0, relay, stop=stop, on_ready=on_ready)
+    )
+    port = await asyncio.wait_for(ready, timeout=5)
+    try:
+        yield f"ws://127.0.0.1:{port}"
+    finally:
+        stop.set()
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=5)
 
 
 def holds(relay: Relay, agent: str) -> list[str]:
@@ -90,33 +119,40 @@ def test_the_wire_path_tells_the_younger_claimant_to_abort(relay):
 # -- the tool path -----------------------------------------------------------
 
 
-def _tools(relay: Relay, agent: str, human: str) -> Tools:
-    conn = FakeConn(agent, human)
-    relay.join("r1", conn)
-    return Tools(relay, "r1", agent, human)
+@contextlib.asynccontextmanager
+async def _tools(url: str, agent: str, human: str):
+    conn = RelayConnection(url, "r1", agent, human)
+    try:
+        yield Tools(conn, "r1", agent, human)
+    finally:
+        await conn.close()
 
 
-def test_the_tool_path_tells_the_older_claimant_to_wait(relay):
+async def test_the_tool_path_tells_the_older_claimant_to_wait(relay):
     relay.registry.acquire("r1", "dev", "a2", region(OTHER), "old work")
     relay._clock.advance(5)
     relay.registry.acquire("r1", "sara", "a1", region(CONTESTED), "refactor")
 
-    tools = _tools(relay, "a2", "dev")
-    result = tools.claim_work(CONTESTED["path"], CONTESTED["symbol"], "rename")
+    async with running_relay(relay) as url, _tools(url, "a2", "dev") as tools:
+        result = await tools.claim_work(CONTESTED["path"], CONTESTED["symbol"], "rename")
+        # Read before the connection closes: closing releases everything it
+        # held (`Relay.leave`), the same way a dropped connection always
+        # does, which would make this assert pass for the wrong reason.
+        still_held = holds(relay, "a2")
 
     assert result["granted"] is False
     assert result["held_by"] == "a1"
     assert result["decision"] == "wait"
-    assert holds(relay, "a2") == ["src/db.py"]
+    assert still_held == ["src/db.py"]
 
 
-def test_the_tool_path_tells_the_younger_claimant_to_abort(relay):
+async def test_the_tool_path_tells_the_younger_claimant_to_abort(relay):
     relay.registry.acquire("r1", "sara", "a1", region(CONTESTED), "refactor")
     relay._clock.advance(5)
     relay.registry.acquire("r1", "dev", "a2", region(OTHER), "side work")
 
-    tools = _tools(relay, "a2", "dev")
-    result = tools.claim_work(CONTESTED["path"], CONTESTED["symbol"], "rename")
+    async with running_relay(relay) as url, _tools(url, "a2", "dev") as tools:
+        result = await tools.claim_work(CONTESTED["path"], CONTESTED["symbol"], "rename")
 
     assert result["granted"] is False
     assert result["decision"] == "abort"
@@ -124,19 +160,21 @@ def test_the_tool_path_tells_the_younger_claimant_to_abort(relay):
     assert holds(relay, "a1") == ["src/auth.py"]
 
 
-def test_a_granted_tool_claim_carries_no_instruction(relay):
-    tools = _tools(relay, "a2", "dev")
-    assert tools.claim_work("src/db.py", "query", "add index") == {"granted": True}
+async def test_a_granted_tool_claim_carries_no_instruction(relay):
+    async with running_relay(relay) as url, _tools(url, "a2", "dev") as tools:
+        result = await tools.claim_work("src/db.py", "query", "add index")
+    assert result == {"granted": True}
 
 
-def test_the_instruction_survives_the_dispatch_boundary(relay):
+async def test_the_instruction_survives_the_dispatch_boundary(relay):
     # The model never calls claim_work directly; it comes in through dispatch.
     relay.registry.acquire("r1", "sara", "a1", region(CONTESTED), "refactor")
     relay._clock.advance(5)
-    tools = _tools(relay, "a2", "dev")
-    result = dispatch(tools, "claim_work", {
-        "path": CONTESTED["path"], "symbol": CONTESTED["symbol"], "intent": "rename",
-    })
+
+    async with running_relay(relay) as url, _tools(url, "a2", "dev") as tools:
+        result = await dispatch(tools, "claim_work", {
+            "path": CONTESTED["path"], "symbol": CONTESTED["symbol"], "intent": "rename",
+        })
     assert result["decision"] == "abort"
 
 
@@ -152,7 +190,7 @@ def _younger_claimant_setup() -> Relay:
     return r
 
 
-def test_both_channels_give_the_same_claimant_the_same_instruction():
+async def test_both_channels_give_the_same_claimant_the_same_instruction():
     # An agent that claims over the wire and one that claims through the tool
     # must not get different answers to the same question, or wait-die orders
     # the two channels differently and the cycle comes back.
@@ -162,9 +200,8 @@ def test_both_channels_give_the_same_claimant_the_same_instruction():
     wire = claim(over_wire, conn, CONTESTED)
 
     over_tool = _younger_claimant_setup()
-    tool = _tools(over_tool, "a2", "dev").claim_work(
-        CONTESTED["path"], CONTESTED["symbol"], "rename"
-    )
+    async with running_relay(over_tool) as url, _tools(url, "a2", "dev") as tools:
+        tool = await tools.claim_work(CONTESTED["path"], CONTESTED["symbol"], "rename")
 
     assert wire["decision"] == tool["decision"] == "abort"
     assert holds(over_wire, "a2") == holds(over_tool, "a2") == []

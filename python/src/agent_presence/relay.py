@@ -227,10 +227,14 @@ class _PublishingRegistry(LeaseRegistry):
     daemon's LeaseCache stayed empty, so every hook lookup missed and no agent
     was ever told to stop — the ladder was live and had nothing to act on.
 
-    This sits under the registry rather than in the handlers because the MCP
-    tools hold `relay.registry` and mutate it directly. Publishing from
-    `handle` alone would leave the tool channel silent, which is the same bug
-    with a smaller blast radius.
+    This sits under the registry rather than in the handlers so it catches
+    every path into the lease table, not just `handle`'s. That used to matter
+    twice over: the MCP tools held `relay.registry` and mutated it directly,
+    bypassing `handle` entirely, so publishing from `handle` alone left the
+    tool channel silent — the same bug this whole module exists to fix, with
+    a smaller blast radius. `Tools` goes over a `RelayConnection` now (see
+    `mcp_server.py`), so that path is gone, but the second reason stands on
+    its own:
 
     Diffing rather than announcing at each call site: SPLIT and HANDOFF change
     leases from inside Negotiator, and lazy expiry drops them with nobody
@@ -748,20 +752,6 @@ class Relay:
             agent, name_of(tier), name_of(stranded),
         )
         self.registry.release_everywhere(agent)
-
-    def authenticate(
-        self, principal: str | None, token: str, room: str
-    ) -> Grant:
-        """Resolve a grant from the roster this relay read off disk.
-
-        For channels that are not websocket connections. The MCP tool surface is
-        one: it holds `relay.registry` directly, and until this existed it
-        claimed at `normal` no matter what the roster said — so an exec who put
-        themselves at `critical`, minted a token and installed it got seniority
-        on the hook path and not on the deliberate one. Configure once has to
-        mean once.
-        """
-        return self._roster.authenticate(principal, token, room=room)
 
     def grant_of(self, conn: Conn) -> Grant:
         latched = self._principal.get(conn)

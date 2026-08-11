@@ -6,11 +6,14 @@ so it gets tested against real `git` repos on disk rather than mocks.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import os
 import subprocess
 
 import pytest
 
+from agent_presence.clock import RealClock
 from agent_presence.mcp_server import (
     Tools,
     agent_id,
@@ -20,7 +23,33 @@ from agent_presence.mcp_server import (
     repo_root,
     room_for,
 )
+from agent_presence.relay import Relay
 from agent_presence.room_key import room_id_from_remote
+from agent_presence.serve import serve
+
+
+@contextlib.asynccontextmanager
+async def running_relay(relay: Relay):
+    """Serve `relay` on an ephemeral localhost port for the block, and hand
+    back its ws:// url."""
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    ready: asyncio.Future = loop.create_future()
+
+    def on_ready(srv) -> None:
+        if not ready.done():
+            ready.set_result(srv.sockets[0].getsockname()[1])
+
+    task = asyncio.create_task(
+        serve("127.0.0.1", 0, relay, stop=stop, on_ready=on_ready)
+    )
+    port = await asyncio.wait_for(ready, timeout=5)
+    try:
+        yield f"ws://127.0.0.1:{port}"
+    finally:
+        stop.set()
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=5)
 
 
 @pytest.fixture(autouse=True)
@@ -174,16 +203,28 @@ def test_build_tools_wires_all_three_from_the_repo(repo, monkeypatch):
     assert tools.human == "sara"
 
 
-def test_build_tools_produces_a_working_tool_surface(repo):
-    tools = build_tools(str(repo))
-    assert tools.who_else_is_here() == []
-    assert tools.claim_work("src/db.py", "query", "add index")["granted"]
-    # The second claim from a different session must be refused, which only
-    # works if build_tools gave the registry a real room and agent.
-    other = build_tools(str(repo), relay=tools._relay)
-    refused = other.claim_work("src/db.py", "query", "add index")
-    assert not refused["granted"]
-    assert refused["held_by"] == tools.agent
+async def test_build_tools_produces_a_working_tool_surface(repo):
+    relay = Relay(RealClock())
+    async with running_relay(relay) as url:
+        tools = build_tools(str(repo), url=url)
+        try:
+            assert await tools.who_else_is_here() == []
+            assert (await tools.claim_work("src/db.py", "query", "add index"))["granted"]
+
+            # The second claim from a different session must be refused,
+            # which only works if build_tools gave each Tools a real
+            # connection to the same room — agent_id() mints a fresh random
+            # id per call when nothing pins one, so this is a genuinely
+            # different session.
+            other = build_tools(str(repo), url=url)
+            try:
+                refused = await other.claim_work("src/db.py", "query", "add index")
+                assert not refused["granted"]
+                assert refused["held_by"] == tools.agent
+            finally:
+                await other._conn.close()
+        finally:
+            await tools._conn.close()
 
 
 def test_identity_is_read_only_once_tools_exist(repo):

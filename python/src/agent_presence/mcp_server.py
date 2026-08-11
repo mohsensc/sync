@@ -9,55 +9,87 @@ import subprocess
 import sys
 import uuid
 
-from .clock import RealClock
-from .negotiation import MOVES, Negotiator
+from .negotiation import MOVES, normalize_move
 from .principals import LocalIdentity, local_identity
-from .redact import opaque_region_if_enabled
-from .relay import Relay, redundancy_payload
+from .relay_client import (
+    DEFAULT_RELAY_URL,
+    RELAY_ENV,
+    RelayConnection,
+    RelayUnavailable,
+    relay_url,
+)
 from .room_key import room_id_from_remote
-from .types import Region
 
 log = logging.getLogger("agent_presence.mcp_server")
 
 
-def _scope(path: str, symbol: str | None) -> Region:
-    """Regions from the tool channel have to key the same way regions from the
-    hook channel do, or opaque mode would split the lease table in two."""
-    return opaque_region_if_enabled(Region(path=path, symbol=symbol, lines=None))
+def _region_dict(path: str, symbol: str | None) -> dict:
+    """A region in wire shape. Hashing for opaque mode happens relay-side, in
+    `clean_region_dict` — the same place it happens for a hook's `event` frame
+    and a daemon's `claim` frame — so this channel keys the lease table the
+    same way theirs do without doing anything special here."""
+    return {"path": path, "symbol": symbol, "lines": None}
+
+
+def _claim_reply(reply: dict, agent: str) -> dict:
+    """The wire's `claim_result` frame, reshaped into what this tool has
+    always returned: seconds instead of milliseconds, `held_by_human` instead
+    of the wire's `human`, and the move list spelled out — that list is a
+    tool-surface convenience, not a lease fact, so the wire doesn't carry it."""
+    if reply.get("granted"):
+        result = {"granted": True}
+        if reply.get("rung") == 4:
+            result["rung"] = 4
+            result["redundant"] = reply["redundant"]
+        return result
+
+    result = {
+        "granted": False,
+        "held_by": reply.get("held_by"),
+        "held_by_human": reply.get("human"),
+        "intent": reply.get("intent", ""),
+        "decision": reply.get("decision", "abort"),
+    }
+
+    if reply.get("reserved"):
+        # Not held, kept: a handover freed this region for somebody else a
+        # moment ago. Short and self-clearing, so the answer is a number of
+        # seconds rather than a negotiation.
+        result["reserved"] = True
+        result["moves"] = ["DEFER"]
+        if "retry_in_ms" in reply:
+            result["retry_in_s"] = reply["retry_in_ms"] / 1000.0
+        return result
+
+    result["moves"] = list(MOVES)
+    if "handover_in_ms" in reply:
+        result["handover_in_s"] = reply["handover_in_ms"] / 1000.0
+        result["waiting"] = reply.get("waiting", 0)
+        if reply.get("handover_to") == agent:
+            # DEFER with a number on it. This is the region's queue, and this
+            # agent is at the front of it.
+            result["retry_in_s"] = result["handover_in_s"]
+        else:
+            result["handover_to"] = reply.get("handover_to")
+    return result
 
 
 class Tools:
     """The deliberate channel. Hooks report what an agent *did*; these tools
-    let it declare what it *intends*, which hooks can never infer."""
+    let it declare what it *intends*, which hooks can never infer.
 
-    def __init__(
-        self, relay: Relay, room: str, agent: str, human: str,
-        identity: LocalIdentity | None = None,
-    ) -> None:
-        self._relay = relay
+    Talks to the relay the same way any other client does: over a
+    `RelayConnection`, never by touching a `Relay` object's tables directly.
+    A claim made here is a claim the relay actually holds, and every other
+    connection in the room hears about it the same way it hears about a claim
+    made by a daemon or a scripted client.
+    """
+
+    def __init__(self, conn: RelayConnection, room: str, agent: str, human: str) -> None:
+        self._conn = conn
         self._room = room
         self._agent = agent
         self._human = human
-        self._negotiator = Negotiator(relay.registry, relay._clock)
-        # Latched once at construction, exactly as the relay latches a grant at
-        # join, and for the same reason: an agent that could re-rate itself
-        # mid-session could hold two claims at two tiers.
-        #
-        # Before this the tool channel simply did not authenticate. It claimed
-        # at `normal` whatever the roster said, so an exec who added themselves
-        # at `critical`, minted a token and installed it won contention through
-        # the hook and lost it through the tools, on the same machine, in the
-        # same session. That is not a tier you configured, it is a tier that
-        # depends on which code path the model happened to take.
-        who = local_identity() if identity is None else identity
-        self._unattended = who.unattended
-        self._grant = relay.authenticate(who.principal, who.token, room)
-
-    @property
-    def priority(self) -> int:
-        """The tier this tool session claims at. Same grant, same band, same
-        one client-supplied bit as the wire path."""
-        return self._grant.priority(unattended=self._unattended)
 
     # Read-only, because identity is decided once at construction for the same
     # reason the relay latches it at join: a tool that could rename itself
@@ -74,116 +106,63 @@ class Tools:
     def human(self) -> str:
         return self._human
 
-    def who_else_is_here(self) -> list[dict]:
-        return [
-            {
-                "human": a.human,
-                "agent": a.agent,
-                "verb": a.verb,
-                "path": a.region.path,
-                "symbol": a.region.symbol,
-                "intent": a.intent,
-            }
-            for a in self._relay.presence(self._room)
-            if a.agent != self._agent
-        ]
+    async def who_else_is_here(self) -> list[dict]:
+        try:
+            return await self._conn.presence(exclude=self._agent)
+        except RelayUnavailable:
+            # Fail open: "no news of peers" is not the same claim as "nobody
+            # is here", but a dead relay must not turn this tool into a hang.
+            return []
 
-    def claim_work(self, path: str, symbol: str | None, intent: str) -> dict:
-        region = _scope(path, symbol)
-        result = self._relay.registry.acquire(
-            self._room, self._human, self._agent, region, intent,
-            priority=self.priority,
-        )
-        if result.ok:
-            granted = {"granted": True}
-            # Rung 4. The claim stands - different files never contend - but
-            # if somebody else declared the same work somewhere else in the
-            # tree, this is the moment to say so, while the agent has not
-            # written anything yet. Off unless AGENT_PRESENCE_RUNG4 is set.
-            red = self._relay.check_redundancy(
-                self._room, self._agent, self._human, region, intent
-            )
-            if red is not None:
-                granted["rung"] = 4
-                granted["redundant"] = redundancy_payload(red)
-            return granted
+    async def claim_work(self, path: str, symbol: str | None, intent: str) -> dict:
+        region = _region_dict(path, symbol)
+        try:
+            reply = await self._conn.claim(region, intent)
+        except RelayUnavailable as exc:
+            # Fail closed here, deliberately: granting locally when the relay
+            # cannot be told is exactly the bug this class exists to not have
+            # anymore. An error the agent can see beats a claim nobody else
+            # ever learns about.
+            return {"granted": False, "error": str(exc)}
+        return _claim_reply(reply, self._agent)
 
-        # Same wait-die handling the wire path does, for the same reason: a
-        # refusal with no instruction leaves both agents retrying at each other,
-        # and the loser's leases have to actually go or the wait-for cycle
-        # survives. Two channels ordering claims differently would be a cycle
-        # the relay cannot see.
-        if result.decision == "abort":
-            self._relay.registry.release_all(self._room, self._agent)
-
-        now = self._relay._clock.now()
-        if result.held_by is None:
-            # Not held, kept: a handover freed this region for somebody else a
-            # moment ago. Short and self-clearing, so the answer is a number of
-            # seconds rather than a negotiation.
-            kept = result.reserved_by
-            return {
-                "granted": False,
-                "held_by": kept.agent,
-                "held_by_human": kept.human,
-                "intent": "taking over this region",
-                "decision": result.decision,
-                "reserved": True,
-                "retry_in_s": max(0.0, kept.expires_at - now),
-                "moves": ["DEFER"],
-            }
-
-        held = result.held_by
-        answer = {
-            "granted": False,
-            "held_by": held.agent,
-            "held_by_human": held.human,
-            "intent": held.intent,
-            "decision": result.decision,
-            "moves": ["DEFER", "SPLIT", "HANDOFF", "PROCEED"],
-        }
-        winner = held.handover_winner()
-        if held.handover_at is not None and winner is not None:
-            answer["handover_in_s"] = max(0.0, held.handover_at - now)
-            answer["waiting"] = len(held.contenders)
-            if winner.agent == self._agent:
-                # DEFER with a number on it. This is the region's queue, and
-                # this agent is at the front of it.
-                answer["retry_in_s"] = answer["handover_in_s"]
-            else:
-                answer["handover_to"] = winner.agent
-        return answer
-
-    def release(self, path: str, symbol: str | None) -> dict:
-        self._relay.registry.release(self._room, self._agent, _scope(path, symbol))
+    async def release(self, path: str, symbol: str | None) -> dict:
+        region = _region_dict(path, symbol)
+        try:
+            await self._conn.release(region)
+        except RelayUnavailable as exc:
+            return {"released": False, "error": str(exc)}
         return {"released": True}
 
-    def respond(
+    async def respond(
         self, path: str, symbol: str | None, move: str, reason: str = ""
     ) -> dict:
-        region = _scope(path, symbol)
-        outcome = self._negotiator.apply(
-            self._room, self._agent, region, move, reason,
-            requester_priority=self.priority,
-        )
-        error = getattr(outcome, "error", None)
-        if outcome.action == "invalid_move":
-            # Hand the valid options back in the result. That is more
-            # actionable than an exception string, and it keeps the MCP
-            # surface total: respond never throws. Same fail-open principle
-            # the rest of this system runs on.
+        canonical = normalize_move(move)
+        if canonical is None:
+            # Checked locally rather than round-tripped: an invented move is
+            # never valid no matter what the relay says, and this keeps the
+            # tool surface total — respond never throws — without a network
+            # call to learn something already known.
             return {
                 "granted": False,
                 "error": f"unknown move: {move}",
                 "valid_moves": list(MOVES),
             }
+        region = _region_dict(path, symbol)
+        try:
+            reply = await self._conn.move(region, canonical, reason)
+        except RelayUnavailable as exc:
+            return {"granted": False, "error": str(exc)}
         result = {
-            "granted": outcome.granted,
-            "action": outcome.action,
-            "override": outcome.logged_override,
+            "granted": bool(reply.get("granted")),
+            "action": reply.get("action", ""),
+            # PROCEED is the only move `Negotiator.apply` ever logs as an
+            # override, so the action name alone is enough to reconstruct the
+            # flag the wire's `move_result` frame doesn't carry.
+            "override": reply.get("action") == "proceed",
         }
-        if error:
-            result["error"] = error
+        if "error" in reply:
+            result["error"] = reply["error"]
         return result
 
 
@@ -239,20 +218,20 @@ def tool_descriptors() -> list[dict]:
     ]
 
 
-def dispatch(tools: Tools, name: str, arguments: dict) -> dict | list:
+async def dispatch(tools: Tools, name: str, arguments: dict) -> dict | list:
     """Route a tool call to the matching method. Raises KeyError on an
     unknown tool name. Tool calls themselves never raise: an invented
     negotiation move comes back as a refusal carrying the valid moves."""
     if name == "who_else_is_here":
-        return tools.who_else_is_here()
+        return await tools.who_else_is_here()
     if name == "claim_work":
-        return tools.claim_work(
+        return await tools.claim_work(
             arguments["path"], arguments.get("symbol"), arguments["intent"]
         )
     if name == "release":
-        return tools.release(arguments["path"], arguments.get("symbol"))
+        return await tools.release(arguments["path"], arguments.get("symbol"))
     if name == "respond":
-        return tools.respond(
+        return await tools.respond(
             arguments["path"],
             arguments.get("symbol"),
             arguments["move"],
@@ -278,7 +257,7 @@ def build_server(tools: Tools):
         return ListToolsResult(tools=tool_list)
 
     async def on_call_tool(ctx, params) -> CallToolResult:
-        result = dispatch(tools, params.name, params.arguments or {})
+        result = await dispatch(tools, params.name, params.arguments or {})
         return CallToolResult(
             content=[TextContent(type="text", text=json.dumps(result))]
         )
@@ -388,14 +367,29 @@ def human_id(cwd: str | None = None) -> str:
     return os.environ.get("USER", "").strip() or "someone"
 
 
-def build_tools(cwd: str | None = None, relay: Relay | None = None) -> Tools:
-    """Assemble the tool surface for this working directory."""
-    return Tools(
-        relay if relay is not None else Relay(RealClock()),
-        room_for(cwd),
-        agent_id(),
-        human_id(cwd),
-    )
+def build_tools(
+    cwd: str | None = None, *,
+    conn: RelayConnection | None = None,
+    url: str | None = None,
+    identity: LocalIdentity | None = None,
+) -> Tools:
+    """Assemble the tool surface for this working directory.
+
+    `conn` is the seam a test uses to hand `Tools` a connection pointed at an
+    in-process relay on an ephemeral port. Without one, a real
+    `RelayConnection` is built against `url` (default: `relay_url()`, i.e.
+    `$AGENT_PRESENCE_RELAY` or `ws://127.0.0.1:8799`) — it doesn't dial out
+    until the first tool call, so building `Tools` never blocks on a relay
+    that isn't running yet.
+    """
+    room, agent, human = room_for(cwd), agent_id(), human_id(cwd)
+    if conn is None:
+        who = local_identity() if identity is None else identity
+        conn = RelayConnection(
+            url if url is not None else relay_url(), room, agent, human,
+            principal=who.principal, token=who.token, unattended=who.unattended,
+        )
+    return Tools(conn, room, agent, human)
 
 
 # -- stdio transport --------------------------------------------------------
@@ -410,10 +404,16 @@ async def run_stdio(tools: Tools) -> None:
     from mcp.server.stdio import stdio_server
 
     server = build_server(tools)
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream, write_stream, server.create_initialization_options()
-        )
+    try:
+        async with stdio_server() as (read_stream, write_stream):
+            await server.run(
+                read_stream, write_stream, server.create_initialization_options()
+            )
+    finally:
+        # The client hanging up is the common way this coroutine ends, and a
+        # relay connection outliving the session it was joined for is a leak
+        # on the relay's side too — it holds the room open until the TTL.
+        await tools._conn.close()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -438,6 +438,10 @@ def main(argv: list[str] | None = None) -> int:
         help=f"override the name from git config user.email (env {HUMAN_ENV})",
     )
     parser.add_argument(
+        "--relay", default=None,
+        help=f"relay url to connect to (env {RELAY_ENV}, default {DEFAULT_RELAY_URL})",
+    )
+    parser.add_argument(
         "--log-level",
         default=os.environ.get("AGENT_PRESENCE_LOG_LEVEL", "INFO"),
         help="python logging level (env AGENT_PRESENCE_LOG_LEVEL, default INFO)",
@@ -460,7 +464,7 @@ def main(argv: list[str] | None = None) -> int:
     # how the flag reaches the derivation helpers, which is also how a nested
     # call sees the same answer.
     for value, env in ((args.room, ROOM_ENV), (args.agent, AGENT_ENV),
-                       (args.human, HUMAN_ENV)):
+                       (args.human, HUMAN_ENV), (args.relay, RELAY_ENV)):
         if value:
             os.environ[env] = value
 
