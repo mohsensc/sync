@@ -135,6 +135,73 @@ def test_age_of_an_agent_holding_nothing_is_now(reg):
     assert registry.age_of("nobody") == 7.0
 
 
+def test_a_voluntary_release_lets_the_next_ask_start_fresh(reg):
+    """`release` is always voluntary in production -- the wire "release"
+    frame and HANDOFF are its only two callers, and both mean this agent is
+    done here, not that it was forced off. Letting go of the last thing it
+    held closes out whatever it was doing, so the next ask is new work and
+    gets a new age -- otherwise the first agent to ever connect would
+    outrank the whole room forever (see the ring simulation in
+    test_invariants.py, which is exactly what a permanently-latched age
+    breaks).
+    """
+    clock, registry = reg
+    registry.acquire("r1", "sara", "a1", R, "refactor")   # a1's age is 0.0
+    registry.release("r1", "a1", R)                         # a clean finish
+    clock.advance(100)
+    assert registry.age_of("a1") == 100.0
+
+
+def test_age_survives_a_wait_die_abort(reg):
+    """The other half of the rule. `release_all`'s own docstring: used on
+    session end and on a wait-die abort -- neither is a transaction
+    concluding on its own terms, so unlike `release`, it must not reset
+    `_first_seen`. Wait-die's whole progress guarantee is that a loser keeps
+    its place in line and retries with the *same* age; resetting it here is
+    what made a requester with no live lease always read as brand new, no
+    matter how many times it had already been refused.
+    """
+    clock, registry = reg
+    registry.acquire("r1", "sara", "a1", R, "refactor")   # a1's age is 0.0
+    registry.release_all("r1", "a1")                        # a forced sweep
+    clock.advance(100)
+    assert registry.age_of("a1") == 0.0
+
+
+def test_a_repeatedly_aborted_requester_eventually_waits(reg):
+    """The real shape the swarm harness hits: an agent contests a region,
+    loses, and the relay's own abort path drops its leases via
+    `release_all` -- not a release it chose. If that reset its age, the
+    requester would look freshly arrived on every single retry and could
+    never accumulate enough seniority to be told `wait` instead of `abort`,
+    which is exactly how `decision:wait` stayed at zero under load.
+    """
+    clock, registry = reg
+    other = Region(path="src/db.py", symbol="query", lines=None)
+    registry.acquire("r1", "dev", "a2", other, "old work")   # a2's age: 0.0
+    registry.release_all("r1", "a2")                          # a loss, not a finish
+    clock.advance(5)
+    registry.acquire("r1", "sara", "a1", R, "refactor")       # a1's age: 5.0
+    clock.advance(5)
+    # a2 is still, in truth, the older of the two; wait-die tells it to wait
+    # rather than die again.
+    assert registry.acquire("r1", "dev", "a2", R, "rename").decision == "wait"
+
+
+def test_an_agent_id_that_changes_hands_does_not_inherit_the_old_age(reg):
+    """`release_everywhere` is the identity-handoff path -- the same one that
+    already strips a stale tier off a reused agent id (see
+    `Relay._drop_stranded_claims`). Age has to be stripped there too, or a
+    fresh connection that reuses an old id inherits seniority nobody granted
+    it, the same laundering the tier fix closed on the other axis.
+    """
+    clock, registry = reg
+    registry.acquire("r1", "sara", "a1", R, "refactor")  # a1's age latches to 0.0
+    registry.release_everywhere("a1")
+    clock.advance(50)
+    assert registry.age_of("a1") == 50.0
+
+
 def test_a_granted_claim_carries_no_decision(reg):
     _, registry = reg
     assert registry.acquire("r1", "sara", "a1", R, "refactor").decision is None

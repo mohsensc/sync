@@ -2,17 +2,19 @@
 // push. It is the Go mirror of cpp/daemon/lease_cache.{hpp,cpp} — same
 // question, same answer, no protocol logic of its own: "is there a live
 // lease on this region held by somebody else?"
-//
-// Wave 1 scope: replace/conflict lookup only. HandoverNote (own_handover,
-// handover_note) is not ported yet — see docs/go-daemon.md — so an agent
-// that loses a region here gets no "lost_to" note on its next edit. That is
-// a real, known behavior gap, not an oversight.
 package leases
 
 import (
 	"strings"
 	"sync"
 )
+
+// HandoverNoteMs is how long a lost region stays worth mentioning — long
+// enough to cover the agent noticing and coming back to the file, short
+// enough that it is news rather than history. Also the horizon Cache prunes
+// on, so the lost-region map is bounded by the last half hour rather than
+// by uptime. Matches lease_cache.hpp's kHandoverNoteMs.
+const HandoverNoteMs = 30 * 60 * 1000
 
 // Lease is the Go shape of cpp/daemon/lease_cache.hpp's CachedLease.
 type Lease struct {
@@ -22,6 +24,26 @@ type Lease struct {
 	Priority    string
 	ExpiresAtMs int64 // monotonic instant, this process's clock
 	Waiting     int
+
+	// When this lease stops being renewable. HasHandover false means nobody
+	// has asked for the region — the common case, and one that renews
+	// forever; HandoverAtMs is meaningless until it is true. A Go zero
+	// value has no spare sentinel the way C++'s handover_at_ms = -1 does,
+	// so the presence bit is explicit instead.
+	HasHandover        bool
+	HandoverAtMs       int64
+	HandoverTo         string
+	HandoverToHuman    string
+	HandoverToPriority string
+}
+
+// HandoverNote is a region this agent used to hold and no longer does, and
+// who has it now — lease_cache.hpp's HandoverNote struct.
+type HandoverNote struct {
+	To         string
+	ToHuman    string
+	ToPriority string
+	AtMs       int64 // monotonic; stale notes are dropped on read
 }
 
 // RegionKey is how the cache is keyed: a path plus an optional symbol,
@@ -36,10 +58,11 @@ func RegionKey(path, symbol string) string {
 type Cache struct {
 	mu       sync.RWMutex
 	byRegion map[string]Lease
+	lost     map[string]HandoverNote // keyed on path, not region — see NoteHandover
 }
 
 func New() *Cache {
-	return &Cache{byRegion: make(map[string]Lease)}
+	return &Cache{byRegion: make(map[string]Lease), lost: make(map[string]HandoverNote)}
 }
 
 // Replace swaps the whole table. Called for a "leases" snapshot frame — join
@@ -104,4 +127,75 @@ func (c *Cache) ConflictForFile(path, myAgent string, nowMs int64) (Lease, bool)
 		return l, true
 	}
 	return Lease{}, false
+}
+
+// OwnHandover is this agent's own live lease on the file, when somebody is
+// waiting on it — the mirror image of ConflictForFile: same prefix match,
+// opposite agent test, and only ever answers when there is a deadline to
+// report. This is how a holder finds out it is on the clock; there is no
+// push channel to an agent, so the warning rides on its next edit.
+func (c *Cache) OwnHandover(path, myAgent string, nowMs int64) (Lease, bool) {
+	if path == "" || myAgent == "" {
+		return Lease{}, false
+	}
+	prefix := path + "|"
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	var soonest Lease
+	found := false
+	for key, l := range c.byRegion {
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		if l.Agent != myAgent {
+			continue
+		}
+		if l.ExpiresAtMs <= nowMs {
+			continue
+		}
+		if !l.HasHandover {
+			continue
+		}
+		if !found || l.HandoverAtMs < soonest.HandoverAtMs {
+			soonest = l
+			found = true
+		}
+	}
+	return soonest, found
+}
+
+// NoteHandover remembers that this agent's region went to somebody else.
+func (c *Cache) NoteHandover(path string, note HandoverNote) {
+	if path == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.lost == nil {
+		c.lost = make(map[string]HandoverNote)
+	}
+	// Prune on write, so the map is bounded by the last half hour of
+	// handovers rather than by how long the daemon has been up.
+	cutoff := note.AtMs - HandoverNoteMs
+	for p, n := range c.lost {
+		if n.AtMs < cutoff {
+			delete(c.lost, p)
+		}
+	}
+	c.lost[path] = note
+}
+
+// HandoverNoteFor is a handover of this file recorded within withinMs, if
+// any.
+func (c *Cache) HandoverNoteFor(path string, nowMs, withinMs int64) (HandoverNote, bool) {
+	if path == "" {
+		return HandoverNote{}, false
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	n, ok := c.lost[path]
+	if !ok || nowMs-n.AtMs > withinMs {
+		return HandoverNote{}, false
+	}
+	return n, true
 }

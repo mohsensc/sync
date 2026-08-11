@@ -11,6 +11,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/mohsensc/sync/go/internal/leases"
+	"github.com/mohsensc/sync/go/internal/policy"
 	"github.com/mohsensc/sync/go/internal/wire"
 )
 
@@ -236,5 +237,111 @@ func TestOutboundSurvivesBeforeConnect(t *testing.T) {
 			t.Fatalf("queued event was never sent, sent=%d", c.SentMessages())
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestDispatchLeaseCarriesHandoverDeadlineOntoTheLease(t *testing.T) {
+	lc := leases.New()
+	c := New(Config{URL: "ws://x", Room: "r", Agent: "me"}, lc)
+
+	handoverInMs := 5000.0
+	frame, _ := json.Marshal(map[string]any{
+		"type": "lease", "agent": "other", "region": map[string]any{"path": "a.py"},
+		"handover_in_ms": handoverInMs, "handover_to": "third",
+	})
+	if err := c.dispatch(frame); err != nil {
+		t.Fatal(err)
+	}
+	held, ok := lc.ConflictForFile("a.py", "me", 0)
+	if !ok || !held.HasHandover || held.HandoverTo != "third" {
+		t.Fatalf("got %+v, ok=%v", held, ok)
+	}
+}
+
+func TestDispatchLeaseHandoverOfOwnRegionRecordsLostNote(t *testing.T) {
+	lc := leases.New()
+	c := New(Config{URL: "ws://x", Room: "r", Agent: "me"}, lc)
+	// This agent held the region first.
+	lc.Upsert(leases.RegionKey("a.py", ""), leases.Lease{Agent: "me", ExpiresAtMs: 10_000})
+
+	frame, _ := json.Marshal(map[string]any{
+		"type": "lease", "state": "handover", "agent": "me",
+		"region": map[string]any{"path": "a.py"},
+		"to":     "other", "to_human": "sara",
+	})
+	if err := c.dispatch(frame); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := lc.ConflictForFile("a.py", "someone-else", 0); ok {
+		t.Fatal("the erased lease must be gone")
+	}
+	note, ok := lc.HandoverNoteFor("a.py", 0, leases.HandoverNoteMs)
+	if !ok || note.To != "other" || note.ToHuman != "sara" {
+		t.Fatalf("got %+v, ok=%v", note, ok)
+	}
+}
+
+func TestDispatchLeaseHandoverOfSomeoneElsesRegionRecordsNoNote(t *testing.T) {
+	lc := leases.New()
+	c := New(Config{URL: "ws://x", Room: "r", Agent: "me"}, lc)
+
+	frame, _ := json.Marshal(map[string]any{
+		"type": "lease", "state": "handover", "agent": "other-agent",
+		"region": map[string]any{"path": "a.py"},
+		"to":     "third", "to_human": "sara",
+	})
+	if err := c.dispatch(frame); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := lc.HandoverNoteFor("a.py", 0, leases.HandoverNoteMs); ok {
+		t.Fatal("a handover of a region this agent never held must not record a lost note")
+	}
+}
+
+func TestDispatchPolicyFrameClampsUnknownRungToBuiltinFloor(t *testing.T) {
+	lc := leases.New()
+	c := New(Config{URL: "ws://x", Room: "r", Agent: "me"}, lc)
+
+	var got policy.Table
+	var gotSource string
+	called := false
+	c.OnPolicy(func(floor policy.Table, source string) {
+		got = floor
+		gotSource = source
+		called = true
+	})
+
+	frame, _ := json.Marshal(map[string]any{
+		"type": "policy", "source": "org.toml",
+		"floor": []string{"silent", "loud", "context", "deny", "silent"},
+	})
+	if err := c.dispatch(frame); err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("OnPolicy callback never fired")
+	}
+	want := policy.Table{policy.Silent, policy.BuiltinFloor[1], policy.Context, policy.Deny, policy.Silent}
+	if got != want {
+		t.Fatalf("got %v, want %v (unknown name at rung1 falls back to BuiltinFloor there)", got, want)
+	}
+	if gotSource != "org.toml" {
+		t.Fatalf("got source %q", gotSource)
+	}
+}
+
+func TestDispatchPolicyFrameWrongLengthIsIgnored(t *testing.T) {
+	lc := leases.New()
+	c := New(Config{URL: "ws://x", Room: "r", Agent: "me"}, lc)
+	called := false
+	c.OnPolicy(func(policy.Table, string) { called = true })
+
+	frame, _ := json.Marshal(map[string]any{"type": "policy", "floor": []string{"silent", "deny"}})
+	if err := c.dispatch(frame); err != nil {
+		t.Fatal(err)
+	}
+	if called {
+		t.Fatal("a malformed policy frame must leave the floor untouched")
 	}
 }

@@ -10,16 +10,20 @@ existed. It is a recording, not an expectation somebody typed out, so it cannot
 drift into agreeing with the code by accident. Regenerate it only by checking
 out that branch and running the script again.
 
-Four keys are allowed to be new, and no others:
+Five keys are allowed to be new, and no others:
 
     effect            how loudly this rung is told
     effect_source     which layer said so
     priority          the requester's tier, by name
     holder_priority   the holder's tier, by name
+    presence          recent activity, riding along on the join snapshot
 
-With no policy.toml and no principals.toml on the search path all four sit at
-their defaults — `silent`/`context`/`deny` straight off BUILTIN, `builtin` as
-the source, `normal` at both ends of every contest.
+With no policy.toml and no principals.toml on the search path the first four
+sit at their defaults — `silent`/`context`/`deny` straight off BUILTIN,
+`builtin` as the source, `normal` at both ends of every contest. `presence`
+is unconditional: every `leases` frame carries it, policy configured or not
+(relay.py, `_presence_snapshot`), because the gap it closes — a joiner blind
+to activity that started before it connected — has nothing to do with policy.
 
 One class of *frame* is allowed to be new, and it is not a policy frame. A
 contended lease now carries a deadline (leases.py, HANDOVER_GRACE_S), and the
@@ -50,7 +54,7 @@ sys.path.insert(0, str(HELPERS))
 from golden_scenario import run  # noqa: E402
 
 ALLOWED_ADDITIONS = frozenset(
-    {"effect", "effect_source", "priority", "holder_priority"}
+    {"effect", "effect_source", "priority", "holder_priority", "presence"}
 )
 
 # The fields a handover notice carries, and the only fields whose presence makes

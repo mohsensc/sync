@@ -6,12 +6,20 @@ processes, hammers them, kills things, and prints numbers.
 
 It only measures. It fixes nothing and patches nothing in the product.
 
+`presenced` is the Go daemon (`go/cmd/presenced`) — the hook stays C++, see
+docs/gohook-spike.md. Every scenario here drives the real, unmodified
+`ap-hook` binary against it, so this harness is also the proof that the
+unix-socket protocol between the two is unchanged.
+
 ## Run it
 
 ```
-cmake -S cpp -B cpp/build && cmake --build cpp/build   # once
+cmake -S cpp -B cpp/build && cmake --build cpp/build   # once, builds ap-hook
 python/.venv/bin/python tests/load/run.py --all
 ```
+
+`run.py` builds `presenced` itself on every run (`go build` is fast enough not
+to bother tracking staleness by hand) — nothing to do on the Go side first.
 
 `--all` takes about two minutes. One scenario at a time works too, and every
 count is tunable:
@@ -49,17 +57,20 @@ buries it under process setup. `daemon-kill` also runs the real binary a few
 times to check the exit code, which is the part that needs a real process.
 
 It compiles itself into `tests/load/build/` on first run. `cpp/CMakeLists.txt`
-is the product's and the harness has no business editing it.
+is the product's and the harness has no business editing it. `presenced`
+(the Go binary) lands in the same directory, built fresh by `run.py`.
 
 `_relay_boot.py` starts the shipped relay with `LEASE_TTL_S` optionally patched.
 Nothing else about the relay is changed, and with `AP_LOAD_LEASE_TTL_S` unset it
 runs exactly as installed. Scenarios that watch a lease expire need it: 90
 seconds per lease is not a thing you can churn.
 
-Two shapes of input are load-bearing and easy to get wrong. `event_line` and
-`hook_payload` emit compact JSON, because `hook/hook.cpp` and `daemon/json.cpp`
-search for the literal `"key":"` — a space after the colon is valid JSON and
-extracts nothing at all.
+`hook_payload`'s compact JSON is still load-bearing: `hook/hook.cpp`'s own
+extractor (unaffected by the daemon's port to Go) searches for the literal
+`"key":"` in the payload it reads from stdin, and a space after the colon
+extracts nothing. `event_line` no longer has that constraint on the daemon
+side — the Go daemon parses with `encoding/json`, so any valid JSON works —
+but it stays compact anyway, to match what the real hook actually emits.
 
 ## Known gaps
 

@@ -257,6 +257,38 @@ def test_an_expired_lease_is_announced_as_well_as_timed_out(relay):
     assert region_key(gone[0]) == "src/auth.py|sign_in"
 
 
+def test_an_expiry_discovered_by_a_read_is_still_announced(relay):
+    """The room's 90s promise: 'leases expire, so a dead agent never wedges a
+    teammate.' That only holds if the room is told when one dies.
+
+    Pruning is not exclusive to writes. `_live()` runs underneath read-only
+    registry calls too -- `holder_of`, `active_claims` -- and a late joiner's
+    snapshot (`_send_lease_snapshot`) is exactly that: a read. If a lease ages
+    out and the next thing that happens to touch the table is a joiner
+    building its own snapshot rather than a claim/heartbeat/release, the
+    expired claim vanishes from `_claims` silently and no 'expired' frame ever
+    reaches the room. b's cache is left holding a lease the relay already
+    dropped, for up to the next write it happens to see.
+    """
+    a, b = FakeConn("a1", "sara"), FakeConn("a2", "dev")
+    relay.join("r1", a)
+    relay.join("r1", b)
+    claim(relay, a, intent="refactor")
+
+    relay._clock.advance(LEASE_TTL_S + 1)
+    # A third daemon joining only reads the table to build its snapshot.
+    c = FakeConn("a3", "kim")
+    relay.join("r1", c)
+
+    gone = frames(b, "lease", "expired")
+    assert gone, (
+        "a1's lease expired but only a read touched the table, so b's cache "
+        "was never told -- it still thinks a1 holds src/auth.py:sign_in"
+    )
+    assert gone[0]["agent"] == "a1"
+    assert region_key(gone[0]) == "src/auth.py|sign_in"
+
+
 # -- a late joiner ------------------------------------------------------------
 
 

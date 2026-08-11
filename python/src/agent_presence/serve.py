@@ -129,7 +129,7 @@ class WsConn:
         self._saturated_s = SEND_SATURATED_S
         self._poll_s = SEND_POLL_S
 
-        self._queue: deque[dict] = deque()
+        self._queue: deque[dict | str] = deque()
         self._writer: asyncio.Task | None = None
         self._closed = False
         self._saturated_since: float | None = None
@@ -187,9 +187,23 @@ class WsConn:
 
     def send(self, payload: dict) -> None:
         """Queue a frame. Never blocks, never raises, never waits on the peer."""
+        self._enqueue(payload)
+
+    def send_encoded(self, text: str) -> None:
+        """Queue a frame whose wire text was already computed.
+
+        `Relay.broadcast` calls this once per fan-out event with one shared
+        string instead of handing every recipient the same dict and making
+        each connection's `_drain` run `json.dumps` (and redaction) on it
+        separately — see the docstring on `broadcast` for why that's safe to
+        share and docs/relay-spike.md for why it's worth doing.
+        """
+        self._enqueue(text)
+
+    def _enqueue(self, item: dict | str) -> None:
         if self._closed:
             return
-        self._queue.append(payload)
+        self._queue.append(item)
         while len(self._queue) > self._max:
             self._queue.popleft()
             self.dropped += 1
@@ -216,11 +230,16 @@ class WsConn:
 
     async def _drain(self) -> None:
         while self._queue and not self._closed:
-            payload = self._queue.popleft()
+            item = self._queue.popleft()
             if not self._queue:
                 # Caught up. Whatever saturation there was is over.
                 self._saturated_since = None
-            if not await self._write(json.dumps(opaque_outbound(payload))):
+            # A str already went through opaque_outbound + json.dumps once,
+            # room-wide, in Relay.broadcast — a dict is a direct/unicast send
+            # (claim_result, leases, ...) that never shared an encode with
+            # anyone, so it's still done here, per connection, as before.
+            text = item if isinstance(item, str) else json.dumps(opaque_outbound(item))
+            if not await self._write(text):
                 return
 
     async def _write(self, text: str) -> bool:
@@ -428,6 +447,17 @@ async def serve(
     """
     async with websockets.serve(
         lambda ws: _session(ws, relay), host, port, max_size=MAX_FRAME_BYTES,
+        # permessage-deflate is on by default and, per docs/relay-spike.md's
+        # profiler, cost more CPU than every other part of a broadcast
+        # combined -- more than json encoding, more than the lease diff.
+        # These frames run a couple hundred bytes; deflating each one, per
+        # connection, per send, buys back little wire size for real CPU.
+        # That trade only holds because today every deployment is loopback
+        # (relay_client.py, cpp/daemon, go/internal/relay all dial
+        # 127.0.0.1) — bandwidth is free and latency is a memcpy. #22 is the
+        # relay's first network-reachable hop; whoever picks that up should
+        # re-cost this against a real link before assuming "off" still wins.
+        compression=None,
     ) as server:
         if on_ready is not None:
             on_ready(server)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from typing import Protocol
@@ -13,6 +14,7 @@ from .principals import Grant, Roster
 from .priority import PRIORITY_NORMAL, name_of
 from .redact import (
     OPAQUE_MARK,
+    apply_opaque,
     clean_intent,
     clean_region_dict,
     opaque_enabled,
@@ -29,6 +31,10 @@ class Conn(Protocol):
     room: str | None
 
     def send(self, payload: dict) -> None: ...
+
+    # send_encoded is deliberately not part of this Protocol: it's an
+    # optional fast path `broadcast` reaches for with getattr, so a Conn
+    # (test doubles included) that only implements `send` still works.
 
 
 def _declared_str(conn: Conn, attr: str) -> str | None:
@@ -245,6 +251,82 @@ class _PublishingRegistry(LeaseRegistry):
         super().__init__(clock)
         self._relay = relay
 
+    def _live(self) -> list[Claim]:
+        """Lazy expiry is not exclusive to a write, and a diff around the
+        handful of mutating calls below only catches it there.
+
+        `holder_of`, `active_claims` and the rest prune here too, and every
+        one of them is reachable without going through `acquire`, `release`
+        or the others — a late joiner's own snapshot (`_send_lease_snapshot`)
+        is a read, and so is the `holder_of` call `Negotiator.open` makes on
+        every contested touch. Whichever of those happens to be the first
+        thing to notice a lease timed out used to notice it silently: the
+        claim vanished from `_claims` here, and the next mutating call's
+        before/after diff had nothing left to compare it against, because it
+        was already gone from *both* sides. The room's lease cache kept the
+        dead entry — the 90 second promise in the README — until something
+        else happened to correct it, which could be a long wait or, in a
+        quiet room, never.
+
+        Publishing from the one place all TTL-based pruning actually happens,
+        rather than from every caller that might trigger it, is what the
+        class docstring already says the diff approach is for. This is that,
+        one level down, for the case the diff cannot see. See `_publish`,
+        which skips the same departure so a claim that expires here is never
+        announced twice.
+        """
+        now = self._clock.now()
+        claims = self._claims
+        live = [c for c in claims if c.expires_at > now]
+        if len(live) == len(claims):
+            return claims
+        self._claims = live
+        for claim in claims:
+            if claim.expires_at <= now:
+                winner = claim.handover_winner()
+                self._hand_over(claim, now)
+                self._relay.publish(claim.room, self._departure_frame(
+                    claim.room, claim.human, claim.agent, claim.scope,
+                    now, "expired", winner,
+                ))
+        return live
+
+    def _departure_frame(
+        self, room: str, human: str, agent: str, scope: Region,
+        now: float, state: str, winner: Contender | None,
+    ) -> dict:
+        """The frame a claim's departure produces, plain or upgraded to a
+        handover if a reservation is waiting for it. Shared by the lazy-expiry
+        path above and the explicit-release path in `_publish`, so a lease
+        that leaves the table by either door is described the same way.
+        """
+        frame = {
+            "type": "lease", "state": state, "agent": agent,
+            "region": _region_payload(scope),
+        }
+        kept = self.reservation_for(room, scope)
+        if kept is not None and kept.from_agent == agent:
+            # This lease did not just run out, it was handed on: somebody
+            # asked for the region, the holder's renewals stopped at the
+            # deadline it was given, and the region is being kept for the
+            # agent that waited. Say so, and say to whom. A lease that
+            # vanishes with "expired" and nothing else is the one event in
+            # this system an agent cannot make sense of on its own — least of
+            # all the agent it was taken from, which is the one reader that
+            # has half-finished work sitting in that region.
+            frame.update({
+                "state": "handover",
+                "to": kept.agent,
+                "to_human": kept.human,
+                "to_priority": name_of(kept.priority),
+                "reserved_for_ms": max(0, int((kept.expires_at - now) * 1000)),
+                "from": agent,
+                "from_human": human,
+            })
+            if winner is not None:
+                frame["waited_s"] = max(0.0, now - winner.first_asked_at)
+        return frame
+
     def _before(self) -> dict[tuple[str, Region], _Snapshot]:
         """Values, not Claim objects: `acquire` renews by mutating the claim in
         place, so holding a reference here would compare a claim against itself
@@ -298,38 +380,18 @@ class _PublishingRegistry(LeaseRegistry):
         for (agent, scope), prev in before.items():
             if (agent, scope) in after:
                 continue
-            frame = {
-                "type": "lease",
-                # All three erase the entry daemon-side. The distinction is for
-                # whoever is reading the wire, not for the cache.
-                "state": "expired" if prev[_SNAP_EXPIRES] <= now else "released",
-                "agent": agent,
-                "region": _region_payload(scope),
-            }
-            kept = self.reservation_for(prev[_SNAP_ROOM], scope)
-            if kept is not None and kept.from_agent == agent:
-                # This lease did not just run out, it was handed on: somebody
-                # asked for the region, the holder's renewals stopped at the
-                # deadline it was given, and the region is being kept for the
-                # agent that waited. Say so, and say to whom. A lease that
-                # vanishes with "expired" and nothing else is the one event in
-                # this system an agent cannot make sense of on its own — least
-                # of all the agent it was taken from, which is the one reader
-                # that has half-finished work sitting in that region.
-                frame.update({
-                    "state": "handover",
-                    "to": kept.agent,
-                    "to_human": kept.human,
-                    "to_priority": name_of(kept.priority),
-                    "reserved_for_ms": max(
-                        0, int((kept.expires_at - now) * 1000)
-                    ),
-                    "from": agent,
-                    "from_human": prev[_SNAP_HUMAN],
-                })
-                winner = prev[_SNAP_WINNER]
-                if winner is not None:
-                    frame["waited_s"] = max(0.0, now - winner.first_asked_at)
+            if prev[_SNAP_EXPIRES] <= now:
+                # Already announced by `_live()` the instant it pruned this —
+                # see there. `_before()` reads `_claims` raw and every mutating
+                # call below runs `_live()` on its way through, so a claim that
+                # was overdue when this call started is gone, and told, before
+                # this diff ever sees it go. Publishing it again here would
+                # double the frame every reader gets.
+                continue
+            frame = self._departure_frame(
+                prev[_SNAP_ROOM], prev[_SNAP_HUMAN], agent, scope,
+                now, "released", prev[_SNAP_WINNER],
+            )
             self._relay.publish(prev[_SNAP_ROOM], frame)
 
     def acquire(self, *args, **kwargs):
@@ -803,7 +865,36 @@ class Relay:
         now = self._clock.now()
         held = self.registry.active_claims(room)
         conn.send({"type": "leases",
-                   "leases": [_lease_entry(c, now) for c in held]})
+                   "leases": [_lease_entry(c, now) for c in held],
+                   "presence": self._presence_snapshot(room)})
+
+    def _presence_snapshot(self, room: str) -> list[dict]:
+        """Recent hook-observed activity, for a joiner that missed it live.
+
+        Presence only ever reached the room it happened in, live, as it
+        happened — a connection that joins after the fact had no way to learn
+        that a path was already being edited, since only the lease table rode
+        along on `join`. That made `who_else_is_here` and the office scene
+        blind to anything that started before they connected, forever, even
+        though the relay was holding the activity the whole time.
+
+        Same store `presence()` reads and prunes, same cutoff: nothing here
+        is older than `PRESENCE_TTL_S`, so a joiner never learns about an
+        agent that a subscriber who'd been there the whole time would already
+        have aged out. Additive on the `leases` frame rather than a frame of
+        its own, so a reader that only ever looked for `leases` there — the
+        C++ daemon included — keeps working exactly as it did.
+        """
+        cutoff = self._clock.now() - PRESENCE_TTL_S
+        kept = [(t, a) for (t, a) in self._activity.get(room, []) if t > cutoff]
+        self._activity[room] = kept
+        return [
+            {
+                "agent": a.agent, "human": a.human, "verb": a.verb,
+                "region": _region_payload(a.region), "ts": t,
+            }
+            for (t, a) in kept
+        ]
 
     def leave(self, conn: Conn) -> None:
         room = conn.room
@@ -831,9 +922,39 @@ class Relay:
     def broadcast(
         self, room: str, payload: dict, exclude: Conn | None = None
     ) -> list[Conn]:
+        """Fan a single payload out to every member of a room.
+
+        One `payload` in, one room-wide answer out — nothing here branches on
+        *which* member is getting it, so there is exactly one wire frame for
+        the whole call. It used to be marshaled again per recipient: each
+        connection's own writer ran `json.dumps` (and, until recently,
+        per-connection permessage-deflate) on an identical dict. Under a
+        crowded room that redundant re-encode was the dominant cost, well
+        ahead of the lease-table diff — see docs/relay-spike.md. Now it is
+        marshaled once and every connection that can take pre-encoded text
+        (`send_encoded`, `serve.WsConn`) gets the same string.
+
+        Opaque hashing has to happen before that one encode, not after: it is
+        an all-or-nothing, relay-wide toggle (`opaque_enabled()`), never
+        something that differs between two members of the same room, so
+        applying it once here is equivalent to applying it per connection —
+        just not redundant. A `Conn` without `send_encoded` (a test double,
+        typically) gets the same already-hashed dict handed to `send`
+        instead, so it sees identical content either way.
+        """
         targets = [c for c in self._members.get(room, []) if c is not exclude]
+        if not targets:
+            return targets
+        outgoing = apply_opaque(payload) if opaque_enabled() else payload
+        text: str | None = None
         for c in targets:
-            c.send(payload)
+            send_encoded = getattr(c, "send_encoded", None)
+            if send_encoded is not None:
+                if text is None:
+                    text = json.dumps(outgoing)
+                send_encoded(text)
+            else:
+                c.send(outgoing)
         return targets
 
     def publish(self, room: str, payload: dict) -> None:

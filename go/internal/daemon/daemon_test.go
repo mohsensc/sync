@@ -122,6 +122,48 @@ func TestEndToEndJoinReceiveRoundTrip(t *testing.T) {
 	}
 }
 
+// TestDecideSocket proves the daemon serves decisions on Sock+".decide" —
+// the path hook/protocol.hpp's decision_sock_path derives, and the one the
+// real ap-hook binary dials first (see hook.cpp's run_hook). Wave 1 only
+// ever answered on the plain event socket; a hook built against the
+// documented protocol would have gotten no answer here at all and silently
+// fallen back.
+//
+// Named short on purpose: t.TempDir() folds the test name into the path it
+// hands back, and this test's own socket path plus the ".decide" suffix
+// leaves less margin under AF_UNIX's ~104-byte sun_path limit than a plain
+// socket test does — see #24 and internal/hooksock's sockPath helper.
+func TestDecideSocket(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "s")
+	if p := sock + ".decide"; len(p) > 100 {
+		t.Fatalf("socket path too long for AF_UNIX: %q (%d bytes)", p, len(p))
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if _, err := New(ctx, Options{Sock: sock}); err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Give the second listener a moment to bind.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := net.Dial("unix", sock+".decide"); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("decide socket never came up")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	resp := decideOverSocket(t, sock+".decide", `{"verb":"edit","path":"a.py","agent":"sess1","want":"decision"}`)
+	if resp["rung"] != float64(0) {
+		t.Fatalf("expected a real rung-0 answer on the decide socket, got %+v", resp)
+	}
+}
+
 func decideOverSocket(t *testing.T, sock, line string) map[string]any {
 	t.Helper()
 	conn, err := net.Dial("unix", sock)

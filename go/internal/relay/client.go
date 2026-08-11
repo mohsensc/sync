@@ -30,6 +30,7 @@ import (
 
 	"github.com/mohsensc/sync/go/internal/leases"
 	"github.com/mohsensc/sync/go/internal/outbound"
+	"github.com/mohsensc/sync/go/internal/policy"
 	"github.com/mohsensc/sync/go/internal/wire"
 )
 
@@ -100,7 +101,7 @@ type Client struct {
 	leases   *leases.Cache
 
 	onPeer   func(wire.Presence)
-	onPolicy func(wire.Policy)
+	onPolicy func(floor policy.Table, source string)
 
 	state atomic.Int32
 
@@ -123,15 +124,15 @@ func New(cfg Config, lc *leases.Cache) *Client {
 	}
 }
 
-func (c *Client) OnPeer(cb func(wire.Presence)) { c.onPeer = cb }
-func (c *Client) OnPolicy(cb func(wire.Policy)) { c.onPolicy = cb }
-func (c *Client) State() State                  { return State(c.state.Load()) }
-func (c *Client) Open() bool                    { return c.State() == StateOpen }
-func (c *Client) SentMessages() uint64          { return c.sent.Load() }
-func (c *Client) ReceivedMessages() uint64      { return c.received.Load() }
-func (c *Client) ConnectAttempts() uint64       { return c.connectAttempts.Load() }
-func (c *Client) ConnectionsLost() uint64       { return c.drops.Load() }
-func (c *Client) ProtocolErrors() uint64        { return c.protocolErrors.Load() }
+func (c *Client) OnPeer(cb func(wire.Presence))                       { c.onPeer = cb }
+func (c *Client) OnPolicy(cb func(floor policy.Table, source string)) { c.onPolicy = cb }
+func (c *Client) State() State                                        { return State(c.state.Load()) }
+func (c *Client) Open() bool                                          { return c.State() == StateOpen }
+func (c *Client) SentMessages() uint64                                { return c.sent.Load() }
+func (c *Client) ReceivedMessages() uint64                            { return c.received.Load() }
+func (c *Client) ConnectAttempts() uint64                             { return c.connectAttempts.Load() }
+func (c *Client) ConnectionsLost() uint64                             { return c.drops.Load() }
+func (c *Client) ProtocolErrors() uint64                              { return c.protocolErrors.Load() }
 
 func (c *Client) LastError() string {
 	c.mu.Lock()
@@ -429,8 +430,17 @@ func (c *Client) dispatch(data []byte) error {
 			// "policy" frame in relay_client.cpp.
 			return nil
 		}
+		// Starts from BuiltinFloor, same as on_text: an unknown effect
+		// name at one rung leaves that rung at the builtin floor rather
+		// than at whatever the previous "policy" frame set it to.
+		floor := policy.BuiltinFloor
+		for i, name := range p.Floor {
+			if e, ok := policy.ParseEffect(name); ok {
+				floor[i] = e
+			}
+		}
 		if c.onPolicy != nil {
-			c.onPolicy(p)
+			c.onPolicy(floor, p.Source)
 		}
 	case "join_refused":
 		var r wire.JoinRefused
@@ -442,9 +452,9 @@ func (c *Client) dispatch(data []byte) error {
 }
 
 // toLease turns one wire lease entry into a cache entry, or reports it
-// unusable. Mirrors upsert_lease's shape, minus the handover bookkeeping
-// (own_handover / lost-region notes) that leases.Cache does not carry in
-// wave 1 — see that package's doc comment.
+// unusable. Mirrors upsert_lease's shape, including the handover deadline
+// carried on the lease itself — see leases.Lease's HasHandover note for why
+// it holds a bit instead of C++'s -1 sentinel.
 func (c *Client) toLease(e wire.LeaseFrame) (string, leases.Lease, bool) {
 	if e.Region.Path == "" || e.Agent == "" {
 		return "", leases.Lease{}, false
@@ -468,6 +478,20 @@ func (c *Client) toLease(e wire.LeaseFrame) (string, leases.Lease, bool) {
 		ExpiresAtMs: nowMs() + ttl.Milliseconds(),
 		Waiting:     e.Waiting,
 	}
+	// A duration on the wire, an absolute monotonic-ish instant here —
+	// same rule as expires_in_ms above. Absent means nobody has asked for
+	// the region, the common case.
+	if e.HandoverInMs != nil {
+		left := int64(*e.HandoverInMs)
+		if left < 0 {
+			left = 0
+		}
+		lease.HasHandover = true
+		lease.HandoverAtMs = nowMs() + left
+		lease.HandoverTo = e.HandoverTo
+		lease.HandoverToHuman = e.HandoverToHuman
+		lease.HandoverToPriority = e.HandoverToPriority
+	}
 	return leases.RegionKey(e.Region.Path, symbol), lease, true
 }
 
@@ -489,6 +513,15 @@ func (c *Client) applyLease(e wire.LeaseFrame) {
 		// getting this wrong is the silent-loss bug this daemon exists to
 		// prevent.
 		c.leases.EraseIfHeldBy(key, e.Agent)
+		if e.State == "handover" && e.Agent == c.cfg.Agent {
+			// It was ours. Remember who has it now — this is the only
+			// frame that ever explains why a region stopped being this
+			// agent's, and the agent itself is not reading the socket;
+			// its hook is, on its next edit.
+			c.leases.NoteHandover(e.Region.Path, leases.HandoverNote{
+				To: e.To, ToHuman: e.ToHuman, ToPriority: e.ToPriority, AtMs: nowMs(),
+			})
+		}
 		return
 	}
 
