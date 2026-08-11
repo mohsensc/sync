@@ -308,6 +308,26 @@ export function attachInteraction(cfg) {
     pickAt, click, select, paint, pickable, desks,
     get selected() { return selected },
     hoverAt(x, y) { const h = pickAt(x, y); setHover(h ? h.pick : null); return h ? h.pick.label : null },
+    /** Register a click target for an agent added after attachInteraction()
+     *  ran — every live-spawned character, since the roster at setup time is
+     *  only ever the demo cast. */
+    addAgent(a) {
+      a.mats = ownMaterials(a.root)
+      capsuleProxy(a)
+    },
+    /** Undo addAgent()/the initial roster registration for an agent that is
+     *  about to be despawned. Clears selection/hover if it was pointing here. */
+    removeAgent(a) {
+      for (let i = pickable.length - 1; i >= 0; i--) {
+        const pick = pickable[i].userData.pick
+        if (pick && pick.kind === 'agent' && pick.ref === a) {
+          pickable[i].geometry.dispose()
+          pickable.splice(i, 1)
+        }
+      }
+      if (selected === a) select(null)
+      if (hovered && hovered.kind === 'agent' && hovered.ref === a) setHover(null)
+    },
     /** Screen position of a floor point, for scripted clicks. */
     project(x, z) {
       const v = new THREE.Vector3(x, 0.05, z).project(camera)

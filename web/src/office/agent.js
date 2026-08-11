@@ -35,6 +35,12 @@
 import * as THREE from 'three'
 import * as ANIM from './anim.js'
 import { highfiveMarks, spacingFor } from './highfive.js'
+import { argueMarks, spacingFor as argueSpacingFor, registry as ARGUE_CLIPS } from './clips/argue.js'
+
+// Fold the contested-write pair's clips into anim.js's own table, once, at
+// import time — before any agent has crossfaded into anything and cached the
+// clip list. See anim.js's CLIPS export and clips/argue.js's own header.
+Object.assign(ANIM.CLIPS, ARGUE_CLIPS)
 
 export const YAW_OFFSET = Math.PI
 
@@ -69,6 +75,12 @@ const ACTS = {
   drinking:   { clip: 'drink',    fade: 0.45 },
   waving:     { clip: 'wave',     fade: 0.30 },
   highfiving: { clip: 'highfive', fade: 0.20, oneShot: true, next: 'idle' },
+  // The contested-write pair. Not a one-shot: it loops until World.resolveContest()
+  // ends it, because unlike a high five a real collision has no fixed length —
+  // it lasts until the region is free. clips/argue.js supplies 'argue' and
+  // 'argueReact' once World.contest() folds them into ANIM.CLIPS.
+  arguing:    { clip: 'argue',      fade: 0.25 },
+  reacting:   { clip: 'argueReact', fade: 0.25 },
 }
 export const ACTIVITIES = Object.keys(ACTS)
 
@@ -78,14 +90,14 @@ export const ACTIVITIES = Object.keys(ACTS)
 const ACT_OF_CLIP = {
   idle: 'idle', walk: 'walking', sit: 'sitting', type: 'typing',
   read: 'reading', sleep: 'sleeping', drink: 'drinking', wave: 'waving',
-  highfive: 'highfiving',
+  highfive: 'highfiving', argue: 'arguing', argueReact: 'reacting',
 }
 
 const DOING = {
   idle: 'standing by', walking: 'walking', sitting: 'sitting down',
   standing: 'getting up', typing: 'typing', sleeping: 'asleep at the desk',
   reading: 'reading', drinking: 'on a break', waving: 'waving',
-  highfiving: 'high fiving',
+  highfiving: 'high fiving', arguing: 'arguing over it', reacting: 'not having it',
 }
 
 const TONE = {
@@ -448,6 +460,19 @@ export class World {
   byId(id) { return this.agents.find(a => a.id === id) }
   byName(n) { return this.agents.find(a => a.name === n) }
 
+  /** Drop an agent that has gone quiet (TTL expiry). Ends any encounter it
+   *  was in first, so the partner is not left mid-animation with nobody
+   *  there. Caller still owns the THREE side (root, meshes, pick proxy). */
+  remove(agent) {
+    for (const e of this.encounters) {
+      if (e.a === agent || e.b === agent) this.#end(e)
+    }
+    this.encounters = this.encounters.filter(e => e.phase !== 'done')
+    const i = this.agents.indexOf(agent)
+    if (i >= 0) this.agents.splice(i, 1)
+    agent.world = null
+  }
+
   update(dt) {
     this.time += dt
     for (const a of this.agents) a.update(dt)
@@ -493,9 +518,43 @@ export class World {
     a.goTo(ax, az, { yaw: yawToward(ax, az, bx, bz), label: 'meeting ' + b.name })
     b.goTo(bx, bz, { yaw: yawToward(bx, bz, ax, az), label: 'meeting ' + a.name })
 
-    const e = { a, b, phase: 'approach', t: 0, marks: { a:[ax, az], b:[bx, bz] } }
+    const e = { a, b, kind: 'highfive', phase: 'approach', t: 0, marks: { a:[ax, az], b:[bx, bz] } }
     this.encounters.push(e)
     return e
+  }
+
+  /**
+   * Walk two agents onto the argue marks (clips/argue.js's spacing, same
+   * geometry idea as highfive's) and start the contested-write pair: `a`
+   * points, `b` throws its hands up. Unlike highfive() this has no natural
+   * end — a rung 3 collision lasts until the region is free, not for a fixed
+   * clip length — so it loops until resolveContest() is called on the
+   * returned encounter.
+   */
+  contest(a, b) {
+    if (!a || !b || a === b || a.busy || b.busy) return null
+    const height = (a.height + b.height) / 2
+    const marks = argueMarks(
+      new THREE.Vector3(a.pos.x, 0, a.pos.z),
+      new THREE.Vector3(b.pos.x, 0, b.pos.z),
+      argueSpacingFor(height))
+    const ax = marks.a.pos.x, az = marks.a.pos.z
+    const bx = marks.b.pos.x, bz = marks.b.pos.z
+
+    a.busy = b.busy = true
+    a.goTo(ax, az, { yaw: yawToward(ax, az, bx, bz), label: 'contesting with ' + b.name })
+    b.goTo(bx, bz, { yaw: yawToward(bx, bz, ax, az), label: 'contesting with ' + a.name })
+
+    const e = { a, b, kind: 'contest', phase: 'approach', t: 0, marks: { a:[ax, az], b:[bx, bz] } }
+    this.encounters.push(e)
+    return e
+  }
+
+  /** End a contest before it would end on its own — the region freed up, or
+   *  one side went quiet. No-op on anything else (already done, or a plain
+   *  highfive, which resolves itself). */
+  resolveContest(e) {
+    if (e && e.kind === 'contest' && e.phase !== 'done') this.#end(e)
   }
 
   #step(e, dt) {
@@ -506,7 +565,8 @@ export class World {
       if (!a.moving && !b.moving && !a._turn && !b._turn && !a.seated && !b.seated) {
         // Arrival has a tolerance, so each of them can stop up to 10cm short.
         // Two of those and the pair stands 20cm too far apart, which is enough
-        // to make the palms miss. Ease them onto the exact marks first.
+        // to make the palms (or, for a contest, the marks) miss. Ease them
+        // onto the exact marks first.
         e.phase = 'settle'; e.t = 0
         e.from = { a:[a.pos.x, a.pos.z], b:[b.pos.x, b.pos.z] }
       }
@@ -519,15 +579,27 @@ export class World {
         ag.pos.z = f[1] + (m[1] - f[1]) * s
       }
       if (k >= 1) {
-        e.phase = 'play'; e.t = 0
-        // Same frame, same fade, both from time zero, both the SAME clip —
-        // facing each other is already the mirror. That is the whole sync
-        // story; see highfive.js.
-        a.act('highfiving')
-        b.act('highfiving')
+        e.phase = 'active'; e.t = 0
+        if (e.kind === 'contest') {
+          // Different bodies doing different things — one points, the other
+          // throws its hands up — but started the same frame, the same sync
+          // story highfive's SAME clip trick tells; see clips/argue.js.
+          a.act('arguing')
+          b.act('reacting')
+        } else {
+          // Same frame, same fade, both from time zero, both the SAME clip —
+          // facing each other is already the mirror. That is the whole sync
+          // story; see highfive.js.
+          a.act('highfiving')
+          b.act('highfiving')
+        }
       }
-    } else if (e.phase === 'play') {
-      if (e.t >= ANIM.getClip('highfive').duration + 0.2) return this.#end(e)
+    } else if (e.phase === 'active') {
+      // A contest has no clip-length end: it lasts until resolveContest()
+      // says the region is free.
+      if (e.kind === 'highfive' && e.t >= ANIM.getClip('highfive').duration + 0.2) {
+        return this.#end(e)
+      }
     }
   }
 
