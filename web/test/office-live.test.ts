@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest'
-import { LiveDirector, PRESENCE_TTL_MS, hairFor } from '../src/office/live.js'
+import { describe, it, expect, afterEach } from 'vitest'
+import { LiveDirector, PRESENCE_TTL_MS, hairFor, connect } from '../src/office/live.js'
 import { HAIR_COLORS } from '../src/palette.js'
 
 function presence(agent: string, human: string, verb = 'edit', path = 'src/a.ts', rung = 0) {
@@ -105,5 +105,58 @@ describe('hairFor', () => {
     for (const human of ['sara', 'dev', 'ali', 'kim', '', 'a-very-long-human-name-here']) {
       expect(hairFor(human)).toBe(toHex(tsHairFor(human)))
     }
+  })
+})
+
+// Stands in for a browser WebSocket: `connect()` only ever calls `send` and
+// `close`, and only ever reads `onopen`/`onmessage`/`onerror`/`onclose`.
+class FakeSocket {
+  static last: FakeSocket | undefined
+  sent: string[] = []
+  onopen: (() => void) | null = null
+  onmessage: ((e: { data: string }) => void) | null = null
+  onerror: (() => void) | null = null
+  onclose: (() => void) | null = null
+  constructor(public url: string) { FakeSocket.last = this }
+  send(data: string) { this.sent.push(data) }
+  close() {}
+}
+
+describe('connect', () => {
+  const origWebSocket = globalThis.WebSocket
+  afterEach(() => { globalThis.WebSocket = origWebSocket })
+
+  it('feeds the join snapshot presence array through onPresence, entry by entry', () => {
+    globalThis.WebSocket = FakeSocket as unknown as typeof WebSocket
+    const seen: any[] = []
+    const conn = connect({ room: 'r1', human: 'sara', onPresence: (m) => seen.push(m) })
+    const sock = FakeSocket.last!
+    sock.onmessage!({
+      data: JSON.stringify({
+        type: 'leases',
+        leases: [],
+        presence: [
+          { agent: 'a1', human: 'sara', verb: 'edit', region: { path: 'src/a.ts' }, ts: 1000 },
+          { agent: 'a2', human: 'dev', verb: 'read', region: { path: 'src/b.ts' }, ts: 1001 },
+        ],
+      }),
+    })
+    expect(seen).toHaveLength(2)
+    expect(seen[0]).toMatchObject({ agent: 'a1', human: 'sara', verb: 'edit' })
+    expect(seen[1]).toMatchObject({ agent: 'a2', human: 'dev', verb: 'read' })
+    conn.close()
+  })
+
+  it('ignores a leases frame with no presence array, and a malformed entry inside one', () => {
+    globalThis.WebSocket = FakeSocket as unknown as typeof WebSocket
+    const seen: any[] = []
+    const conn = connect({ room: 'r1', human: 'sara', onPresence: (m) => seen.push(m) })
+    const sock = FakeSocket.last!
+    sock.onmessage!({ data: JSON.stringify({ type: 'leases', leases: [] }) })
+    sock.onmessage!({
+      data: JSON.stringify({ type: 'leases', leases: [], presence: [{ agent: 'a1' }] }),
+    })
+    expect(seen).toHaveLength(0)
+    conn.close()
   })
 })
