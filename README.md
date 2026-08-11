@@ -52,9 +52,8 @@ isn't the compiler. CI runs all three on every push.
 
 ## What's broken
 
-The MCP server keeps its own in-process registry instead of claiming over the
-wire, so a claim through the tool never reaches another machine. Ladder tuning is
-guesswork and the chain has only run against scripted clients, not real sessions.
+Ladder tuning is guesswork and the chain has only run against scripted clients,
+not real sessions.
 `ap policy compile` puts the `[[path]]` rules in the cache now, but the daemon
 still reads only the blanket table, so a path rule is right everywhere except
 where it's enforced.

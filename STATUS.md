@@ -66,9 +66,6 @@ and `· sess_demo here`.
 - No real Claude Code session has ever driven this. Every e2e, including the one
   above, is scripted websocket clients and a hand-piped hook payload. The settings.json
   integration is untested against an actual session.
-- The MCP server still claims in-process. `Tools` holds a `Relay` object and calls
-  `relay.registry.acquire` directly. A claim made through the tool never leaves the
-  process. This is unchanged by #1 and #4.
 - Rung 4 ships off. `AGENT_PRESENCE_RUNG4` defaults to unset. The backend is a
   lexical token-overlap scorer with a hand-typed synonym table, not embeddings.
   Threshold 0.82 was tuned against 23 hand-written pairs — 6 of 8 duplicates caught,

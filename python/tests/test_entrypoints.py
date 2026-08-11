@@ -337,21 +337,28 @@ def test_the_mcp_server_lists_its_four_tools_over_stdio():
 
 
 def test_a_tool_call_over_stdio_reaches_the_lease_registry():
-    with mcp_process() as client:
-        client.handshake()
-        args = {"path": "src/db.py", "symbol": "query", "intent": "add index"}
-        first = client.request("tools/call",
-                               {"name": "claim_work", "arguments": args})
-        assert json.loads(first["result"]["content"][0]["text"]) == {"granted": True}
+    """The whole point of this transport: a claim made over the MCP stdio
+    session has to reach an actual relay, not a table private to this
+    process. So a relay runs in its own process here too, and the MCP server
+    is pointed at it with `AGENT_PRESENCE_RELAY`."""
+    with relay_process(["--port", "0"]) as relay:
+        env = _clean_env(AGENT_PRESENCE_ROOM="r1", AGENT_PRESENCE_AGENT="a1",
+                         AGENT_PRESENCE_HUMAN="sara", AGENT_PRESENCE_RELAY=relay.url)
+        with mcp_process(env) as client:
+            client.handshake()
+            args = {"path": "src/db.py", "symbol": "query", "intent": "add index"}
+            first = client.request("tools/call",
+                                   {"name": "claim_work", "arguments": args})
+            assert json.loads(first["result"]["content"][0]["text"]) == {"granted": True}
 
-        # Same process, same registry: releasing has to make the region free
-        # again, which is only observable if the call really hit state.
-        client.request("tools/call", {
-            "name": "release", "arguments": {"path": "src/db.py", "symbol": "query"},
-        })
-        again = client.request("tools/call",
-                               {"name": "claim_work", "arguments": args})
-        assert json.loads(again["result"]["content"][0]["text"]) == {"granted": True}
+            # Same relay: releasing has to make the region free again, which
+            # is only observable if the call really reached the relay's state.
+            client.request("tools/call", {
+                "name": "release", "arguments": {"path": "src/db.py", "symbol": "query"},
+            })
+            again = client.request("tools/call",
+                                   {"name": "claim_work", "arguments": args})
+            assert json.loads(again["result"]["content"][0]["text"]) == {"granted": True}
 
 
 def test_the_mcp_server_exits_0_when_the_client_closes_stdin():
