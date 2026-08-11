@@ -94,3 +94,121 @@ under the C++ baseline's own historical numbers, 0 isolation violations.
 - 3D assets don't exist; the office scene is primitives.
 - Relay hosting and persistence are unaddressed — in-process asyncio, state
   in dicts, restart loses the lease table.
+
+## TLS (#22, on top of the above)
+
+The relay optionally terminates TLS (`--tls-cert`/`--tls-key`, plaintext
+`ws://` still the zero-config default); the Go daemon dials `wss://` with
+certificate verification on by default, `AGENT_PRESENCE_RELAY_CA` for a
+self-signed dev cert, and a loud `AGENT_PRESENCE_RELAY_INSECURE_SKIP_VERIFY`
+escape hatch. `docs/tls-dev-cert.md` is the how-to; `docs/threat-model.md` is
+updated to close out the "pending TLS" section it left open.
+
+Two-machine join, simulated honestly: no second machine available, so this
+ran as two `presenced` processes and one relay, all on one laptop, with the
+relay bound to the machine's real LAN IP (not loopback) and both daemons
+dialing that address over `wss://`. Confirmed with `openssl s_client` that
+the socket does a real TLS 1.3 handshake, and that a plain HTTP request to
+the same port gets nothing back. A daemon given the CA joined and saw the
+other's presence; a daemon given neither the CA nor skip-verify never
+connected (fail-open, no cross-talk) — proving verification is actually
+enforced, not just present. What this does *not* prove: two different
+physical machines, or a real router/NAT/firewall path between them.
+
+Suites: `python -m pytest` — 1100 passed (1094 plus 6 new). `go test ./...
+-race -count=1` — clean, `internal/relay` now covers trusted-CA, untrusted,
+skip-verify and unknown-scheme dialing. `ctest --test-dir cpp/build` — 1/1
+(hook untouched by this wave).
+
+`tests/load/run.py rooms` (20 rooms, 8 agents each, the same 160-agent
+config STATUS.md's last run used) — 5 runs each, this laptop, back to back,
+also running other agents' test suites at the time (load average 3.7–8):
+
+| | p99 (5 runs) | median |
+| --- | --- | --- |
+| plaintext | 39.2 / 39.9 / 40.3 / 55.9 / 69.6 ms | 40.3ms |
+| TLS | 41.9 / 42.9 / 43.9 / 45.3 / 66.5 ms | 43.9ms |
+
+Median-to-median, TLS costs about 3.6ms (~9%) at p99 on this box. The spread
+within each set (39ms to 70ms) is bigger than that difference, which is the
+shared, contended machine talking, not the harness — noted rather than
+smoothed over. #11's issue text cites an older "200 agents / p99 35ms"
+figure; that predates both the Go daemon and #27's rate limiting and isn't
+directly reproducible against this run (this harness's own default is 160
+agents in the `rooms` scenario, 20 rooms × 8), but it's the same order of
+magnitude.
+
+`relay-restart` and `slow-subscriber` pass over TLS unchanged. One real fix
+needed to get there: `tests/load/scenarios.py`'s `DeafSubscriber` opens a
+raw socket on purpose (to get a peer that never reads, which every
+websocket library reads in the background for) and had to learn to wrap
+that socket in TLS itself when the run is TLS — see the `_lib.TLS_ENABLED`
+plumbing. `lease-churn` and `daemon-kill` still fail/flake the exact same
+way over TLS that STATUS.md already had them failing/flaking over plaintext
+— unrelated to this wave, not a new regression.
+
+## MCP server in Go (#32), venv step dropped (#33)
+
+`agent-presence-mcp` (`go/cmd/agent-presence-mcp`) replaces
+`python/src/agent_presence/mcp_server.py` and `relay_client.py`, both
+deleted. Same four tools, same schemas, same reply shapes and error
+strings — ported field by field against the Python source, not
+reimplemented from the issue text. `go/internal/mcprelay` is its own
+request/response connection to the relay (`internal/relay` stays the
+daemon's fire-and-forget pump; the two don't share client code, only
+`internal/wire`'s frame shapes, which gained `Claim`/`MoveRequest`/
+`ReleaseRequest`/`PresenceSnapshotEntry` for this). `internal/negotiation`
+is the four-line `MOVES`/`normalize_move` slice; `internal/mcptools/identity.go`
+is `room_for`/`agent_id`/`human_id`/`local_identity`, byte-identical rules,
+reusing `internal/repo`'s already-proven `RoomIDFromRemote` for the hash
+itself.
+
+Ported the join reply's presence snapshot (#31) into the Go client too,
+though this checkout's own `relay.py` predates that PR (it's on `main`,
+not `feat/go-daemon-complete`) — verified against a scripted fake relay
+that sends the `presence` array on join, since the local relay can't
+produce one to test against live.
+
+Verified against a real `agent-presence-relay`, not just fakes: a
+`claim_work` through the Go MCP server refuses a second, independent
+websocket connection's `claim` on the same region and names the holder and
+intent — the exact shape issue #12 fixed in Python — in both plaintext and
+opaque mode. A relay kill mid-session followed by a claim errors in the
+request timeout window (not a hang), and the next call reconnects clean
+once the relay comes back. wait-die's `decision` field reaches
+`claim_work`'s reply for a real younger-claimant contest.
+
+Test files with Python MCP coverage (`test_mcp_tools.py`,
+`test_mcp_identity.py`) are deleted; `test_claim_path_wait_die.py`,
+`test_rung4.py` and `test_privacy_boundary.py` lost their MCP-tool-path
+tests but kept their relay-wire-path ones, with a note pointing at the Go
+equivalent. `test_entrypoints.py` lost the stdio-transport section; its
+claims (handshake, tool list, a claim reaching a real relay, exit 0 on
+stdin close, only protocol on stdout) are re-proven in
+`go/cmd/agent-presence-mcp/main_test.go`, which builds and execs the real
+binary rather than testing against the package.
+
+`install.sh` now builds and installs all three binaries;
+`scripts/build-go-release.sh` cross-compiles `agent-presence-mcp` alongside
+`presenced`. README's "Run it" is three binaries and no venv; the relay's
+own venv step is still there, honestly labeled as one person's server, not
+every teammate's machine.
+
+Suites: `python -m pytest` — 1035 passed (no `mcp` package installed at
+all: dropped from `pyproject.toml`). `go test ./... -race -count=1` — 156
+tests, clean, `mcprelay`/`mcptools`/`negotiation`/`agent-presence-mcp` new.
+`ctest --test-dir cpp/build` — 1/1 (cpp untouched; the hook-storm latency
+case flakes under load on this shared box, pre-existing and unrelated).
+Walked a from-scratch install with `AGENT_PRESENCE_BIN` pointed at an empty
+dir and `python3` off `PATH` entirely: `cmake --build` + `./install.sh`
+produced three working Mach-O binaries, no Python anywhere in the path.
+
+Review caught a real gap: `Dispatch` read required arguments with a loose
+coercion (`strOf(args["path"])`) that silently returned `""` for a missing
+key, where Python's `arguments["path"]` raised `KeyError`. Nothing upstream
+enforces the schema's `required` list — go-sdk's `AddTool` leaves that to
+the caller — so a `claim_work` call missing `path` was granting a phantom
+lease on an empty-string region instead of failing visibly. `Dispatch` now
+checks each required string argument explicitly and errors before it
+reaches the relay; new tests cover the missing-key and wrong-type cases and
+assert the call never reaches the relay at all.

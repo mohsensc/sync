@@ -100,9 +100,54 @@ type LeaseFrame struct {
 }
 
 // Leases is the full-table snapshot sent on join and after a relay restart.
+// Presence rides along on the same frame — see relay.py's
+// _send_lease_snapshot (#31) — additive, so a reader that only ever looked
+// for "leases" there (the daemon included) keeps working unchanged.
 type Leases struct {
-	Type   string       `json:"type"`
-	Leases []LeaseFrame `json:"leases"`
+	Type     string                  `json:"type"`
+	Leases   []LeaseFrame            `json:"leases"`
+	Presence []PresenceSnapshotEntry `json:"presence,omitempty"`
+}
+
+// PresenceSnapshotEntry is one entry of the join reply's presence array:
+// recent hook-observed activity a joiner missed because it wasn't in the
+// room yet. Same shape a live Presence frame carries, plus the relay's own
+// wall-clock timestamp — see relay.py's _presence_snapshot.
+type PresenceSnapshotEntry struct {
+	Agent  string  `json:"agent"`
+	Human  string  `json:"human"`
+	Verb   string  `json:"verb"`
+	Region Region  `json:"region"`
+	Ts     float64 `json:"ts"`
+}
+
+// Claim is a claim-capable client's request to hold a region — the frame
+// the MCP tool surface sends for claim_work. The daemon never sends this:
+// it observes leases, it doesn't take them.
+type Claim struct {
+	Type   string `json:"type"`
+	Region Region `json:"region"`
+	Intent string `json:"intent"`
+}
+
+// MoveRequest is a reply to a contested claim — DEFER, SPLIT, HANDOFF or
+// PROCEED — the frame the MCP tool surface's respond tool sends. Named
+// MoveRequest rather than Move to keep it apart from wire.Presence's Verb
+// vocabulary at a glance; the relay's own reply to this frame is
+// "move_result", read the same ad hoc way claim_result is.
+type MoveRequest struct {
+	Type   string `json:"type"`
+	Region Region `json:"region"`
+	Move   string `json:"move"`
+	Reason string `json:"reason"`
+}
+
+// ReleaseRequest gives up a previously claimed region. No reply travels for
+// this one — the room hears about it, not the releaser (relay.py's
+// Relay.publish never echoes back to the sender).
+type ReleaseRequest struct {
+	Type   string `json:"type"`
+	Region Region `json:"region"`
 }
 
 // Policy carries the org floor. floor is five effect names in rung order;

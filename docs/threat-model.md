@@ -1,9 +1,9 @@
 # Threat model: the relay off loopback
 
 **Date:** 2026-08-11
-**Status:** current as of the join authentication and rate limiting in #11.
-Supersedes §4.5 of `policy-design.md`, which described the pre-#11 relay
-(no join authentication of any kind).
+**Status:** current as of TLS in #22. Supersedes §4.5 of `policy-design.md`,
+which described the pre-#11 relay (no join authentication of any kind), and
+this file's own pre-#22 version, which had no transport encryption at all.
 
 Scope: the relay's network surface only. Hooks talk to `presenced` over a
 unix socket on the same machine; that boundary is a filesystem permission,
@@ -103,11 +103,16 @@ Concretely, once the relay is reachable from outside one machine:
   a connection's worth of resources.
 - It is *not* equivalent to being a teammate with push access to the repo.
   Room membership and roster membership are different gates, and only the
-  second one is currently authenticated. This is the residual gap #11 was
-  filed against and the reason to keep this relay on a trusted network — a
-  VPN or a mesh like Tailscale between the machines that are actually
-  supposed to be in the room — rather than a public interface, until the
-  transport itself is authenticated (see below).
+  second one is currently authenticated. **This is still true after #22.**
+  TLS (below) fixes who can *read* and *tamper with* the traffic; it says
+  nothing about who is allowed to send an anonymous `join` in the first
+  place. Knowing the room id — one sha256 of a git remote, cheap to
+  compute or guess — still gets an anonymous connection into the room at
+  `default_tier`, over an encrypted channel exactly as it did over a
+  plaintext one. Keep this relay on a trusted network — a VPN or a mesh
+  like Tailscale between the machines that are actually supposed to be in
+  the room — rather than a public interface. TLS makes that network safer
+  to use; it doesn't make a public interface safe.
 
 ## Rate limits and per-connection caps
 
@@ -140,34 +145,59 @@ Frame size is capped too — `MAX_FRAME_BYTES` (64 KiB) on the
 the relay allocate and parse something disproportionate to what any real
 join, claim or event ever needs.
 
-## What is still open, pending TLS (#22)
+## What #22 changed
 
-Everything below is unchanged by #11 and is exactly the gap #22 exists to
-close:
+The relay optionally terminates TLS (`--tls-cert`/`--tls-key` or
+`AGENT_PRESENCE_TLS_CERT`/`AGENT_PRESENCE_TLS_KEY`; `serve.py`,
+`build_tls_context`). The Go daemon dials `wss://` and verifies the relay's
+certificate by default against the system root pool — the same trust store
+any other TLS client on that machine uses — with two ways to point it at a
+cert nothing else signed: `AGENT_PRESENCE_RELAY_CA` trusts one specific PEM
+on top of the system pool (the documented dev path,
+`docs/tls-dev-cert.md`), and `AGENT_PRESENCE_RELAY_INSECURE_SKIP_VERIFY`
+turns verification off entirely, logging a loud, impossible-to-miss warning
+every time it does. Neither the C++ hook nor the unix-socket protocol to it
+changed; this is entirely the daemon-to-relay hop.
 
-- **No encryption.** Paths, symbols, intents and bearer tokens all cross the
-  wire as plaintext JSON. Off loopback, anyone who can observe the traffic —
-  on the same network segment, on a shared switch, anywhere between the two
-  machines — can read it and can read the bearer token specifically, which
-  is exactly the credential that authenticates a principal.
-- **No server authentication.** A daemon has no way to confirm the socket
-  it's talking to is actually the relay it means to join and not something
-  on-path answering in its place. An attacker in that position can read
-  everything and inject frames as if they were the relay — including, for
-  instance, telling every daemon a region is free when it isn't.
-- **Token replay.** Because the token crosses in the clear, capturing one
-  join frame is enough to impersonate that principal until it's rotated.
-  Nothing about #11 changes this; latching the grant to a connection
-  protects against a *live* connection being re-rated, not against a
-  captured token being used to open a new one.
+`ws://` on loopback is still the zero-config default — nobody's local setup
+breaks, and TLS is additive, not required, exactly as #22 asked for.
+
+This closes the two items #11 filed against transport encryption:
+
+- **Encryption in transit.** Paths, symbols, intents and bearer tokens no
+  longer cross the wire as plaintext JSON once TLS is configured. Off
+  loopback, run it — see `docs/tls-dev-cert.md`.
+- **Server authentication.** A daemon verifying the relay's certificate (the
+  default, once `AGENT_PRESENCE_RELAY` is `wss://`) has a real answer to "is
+  this actually the relay I mean to join": something on-path answering in
+  the relay's place fails the TLS handshake before any frame crosses,
+  unless verification was explicitly turned off with the loud flag above.
+- **Token replay, mostly.** A token can no longer be captured off the wire
+  by anyone merely observing the network — TLS closes that specific route.
+  It does not change what happens if a token leaks some other way (a
+  committed secret, a compromised machine): possession of a valid token
+  still authenticates as that principal until it's rotated, same as before
+  #22. Nothing about this issue changes credential rotation, which isn't
+  built yet.
+
+## What's still open after #22
+
+- **Room membership itself is still unauthenticated** — see the section
+  above. This was scoped out of both #11 and #22 on purpose: it's a design
+  decision about what a room *is*, not a transport property, and TLS
+  doesn't touch it either way.
 - **A compromised or malicious relay** sees everything and can be told
-  anything by any joined client. It always could; TLS between daemon and
-  relay doesn't change that the relay itself is a trust boundary, only that
-  the network in between isn't one it has to share with.
-
-None of this is a regression from #11 — it's the state #11 explicitly did
-not touch, scoped out to #22 because the cost of doing it right depends on
-whether the daemon stays C++ or moves to Go (`ap-hook`/`presenced`'s own
-issue #18). Until #22 lands: bind the relay to a real interface only on a
-network you already trust with the same things the traffic exposes, and
-treat `127.0.0.1` as the only default that needs no such judgment call.
+  anything by any joined client, same as always. TLS protects the network
+  between daemon and relay; it says nothing about the relay itself, which
+  remains a trust boundary of its own — unchanged from before #22.
+- **Certificate provisioning and rotation are entirely manual.** There's no
+  ACME integration, no cert expiry check, nothing that renews a cert before
+  it lapses. `docs/tls-dev-cert.md` covers a 30-day dev cert; a longer-lived
+  deployment needs its own operational answer to that, outside this repo's
+  scope so far.
+- **`AGENT_PRESENCE_RELAY_INSECURE_SKIP_VERIFY` exists.** It's meant to be
+  the loud, deliberately inconvenient path, not a normal way to run this —
+  see the warning it logs. A fleet that sets it as a default has quietly
+  put itself back at pre-#22 exposure to an on-path attacker, with the one
+  difference that the traffic is still opaque to a passive observer who
+  isn't on-path.

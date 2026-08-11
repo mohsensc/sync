@@ -1,55 +1,50 @@
 # Agent Presence
 
-A few people on a team run coding agents against the same repo. The agents can't
-see each other, so they duplicate work and overwrite each other and you find out
-at merge time. One event stream: ambient for humans, claims for agents.
+A team's coding agents can't see each other in a shared repo, so they duplicate
+work and clobber edits. One stream: ambient for humans, claims for agents.
 
-`ap-hook` is a C++ binary on Claude Code's tool calls — observe, write to a unix
-socket, exit. `presenced` (Go) coalesces and snapshots; the Python relay owns
-leases and arbitration. Leases expire in 90s, so a dead agent never wedges a
-teammate. The hook stays C++ (a Go hook misses the 5ms budget, see
-docs/gohook-spike.md); the daemon doesn't need that speed and ports cleanly.
+`ap-hook` (C++) sits on Claude Code's tool calls, `presenced` (Go) coalesces
+and snapshots, `agent-presence-mcp` (Go) is the
+`claim_work`/`respond`/`who_else_is_here` surface. 90s lease TTL: a dead agent
+never wedges a teammate.
 
 ## Run it
 
+Three binaries, no Python needed on a teammate's machine:
+
 ```
-cd python && python3 -m venv .venv && .venv/bin/pip install -e '.[dev]' && cd ..
-python/.venv/bin/agent-presence-relay              # 127.0.0.1:8799
-claude mcp add agent-presence -- "$PWD/python/.venv/bin/agent-presence-mcp"
 cmake -S cpp -B cpp/build && cmake --build cpp/build   # ap-hook
-./install.sh                                       # builds presenced, prints hooks
+./install.sh                                           # builds+installs all three, prints hooks
+claude mcp add agent-presence -- ~/.local/bin/agent-presence-mcp
 ```
 
-There's also a Go relay (`go/cmd/gorelay`), same wire protocol, faster under
-contention. Opt-in: `cd go && go build -o bin/gorelay ./cmd/gorelay`, then
-`agent-presence-relay --impl go`. See `docs/relay-parity.md` for what's
-verified and what isn't yet — the default is still the Python relay.
+Both Go binaries derive room/agent/human from the repo and dial
+`AGENT_PRESENCE_RELAY` (`ws://127.0.0.1:8799` by default), still Python:
 
-The relay takes `--host`/`--port`/`--log-level` or `AGENT_PRESENCE_*`; port 0
-picks a free one. MCP and `presenced` derive room/agent/human from the repo.
+```
+cd python && python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
+python/.venv/bin/agent-presence-relay   # --host/--port/--log-level or AGENT_PRESENCE_*
+```
+
+There's also a Go relay (`go/cmd/gorelay`), opt-in, faster under contention:
+build it, `agent-presence-relay --impl go` execs it (`docs/relay-parity.md`).
+`--tls-cert`/`--tls-key` (`docs/tls-dev-cert.md`) get `wss://` on the Python
+relay only, gorelay has no TLS yet.
 
 ## Policy
 
-How loudly a collision gets told is a TOML file and `ap` is the verb surface
-over it. Saved is applied, nothing restarts. MCP stays read-only.
-
-```
-ap policy show --effective     # what's in force, and which file said so
-ap policy set rung3=ask        # writes the TOML, then recompiles the cache
-ap why -n 20                   # the last decisions and why they went that way
-ap doctor                      # is any of this actually reaching the daemon
-```
-
-`$AGENT_PRESENCE_UNATTENDED` promotes `ask` to `deny`. Who outranks whom is
-`.agent-presence/principals.toml`, committed so it's reviewed in a PR;
-`presenced` presents the token on join.
+A TOML file sets how loudly a collision gets told; `ap` is the verb surface
+over it (`ap policy show --effective`, `ap policy set rung3=ask`, `ap why -n
+20`, `ap doctor`), applied live, no restart. MCP stays read-only,
+`$AGENT_PRESENCE_UNATTENDED` promotes `ask` to `deny`, and
+`.agent-presence/principals.toml` ranks who outranks whom.
 
 Tests: `cd python && .venv/bin/python -m pytest`; `cmake --build cpp/build &&
-ctest --test-dir cpp/build`; `cd go && go test ./... -race -count=1`; `cd web &&
-pnpm test && pnpm typecheck`. Bare `pytest` won't do. Not `npx`. CI runs all four.
+ctest --test-dir cpp/build`; `cd go && go test ./... -race -count=1`; `cd web
+&& pnpm test && pnpm typecheck`.
 
 ## What's broken
 
-Ladder tuning is guesswork, run only against scripted clients so far. `ap
-policy compile` puts `[[path]]` rules in the cache; the daemon still reads only
-the blanket table. Rung 4 is off unless `AGENT_PRESENCE_RUNG4=1`.
+Ladder tuning is guesswork, only run against scripted clients so far. `ap
+policy compile` puts `[[path]]` rules in the cache, but the daemon still reads
+only the blanket table. Rung 4 is off unless `AGENT_PRESENCE_RUNG4=1`.

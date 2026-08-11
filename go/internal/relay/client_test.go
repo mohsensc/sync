@@ -140,7 +140,7 @@ func TestClientJoinsRoomAndReceivesFrames(t *testing.T) {
 	// hook decision see a conflict a moment after the daemon joins.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if _, ok := lc.ConflictForFile("src/auth.py", "go-daemon-test", time.Now().UnixMilli()); ok {
+		if _, _, ok := lc.Conflict("src/auth.py", "go-daemon-test", time.Now().UnixMilli()); ok {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -194,7 +194,7 @@ func TestMalformedLeasesFrameLeavesTableUntouched(t *testing.T) {
 		if err := c.dispatch([]byte(frame)); err != nil {
 			t.Fatalf("dispatch(%s): %v", frame, err)
 		}
-		if _, ok := lc.ConflictForFile("a.py", "me", 0); !ok {
+		if _, _, ok := lc.Conflict("a.py", "me", 0); !ok {
 			t.Fatalf("frame %s wiped the lease table", frame)
 		}
 	}
@@ -203,7 +203,7 @@ func TestMalformedLeasesFrameLeavesTableUntouched(t *testing.T) {
 	if err := c.dispatch([]byte(`{"type":"leases","leases":[]}`)); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := lc.ConflictForFile("a.py", "me", 0); ok {
+	if _, _, ok := lc.Conflict("a.py", "me", 0); ok {
 		t.Fatal("an empty leases array must clear the table")
 	}
 }
@@ -252,7 +252,7 @@ func TestDispatchLeaseCarriesHandoverDeadlineOntoTheLease(t *testing.T) {
 	if err := c.dispatch(frame); err != nil {
 		t.Fatal(err)
 	}
-	held, ok := lc.ConflictForFile("a.py", "me", 0)
+	held, _, ok := lc.Conflict("a.py", "me", 0)
 	if !ok || !held.HasHandover || held.HandoverTo != "third" {
 		t.Fatalf("got %+v, ok=%v", held, ok)
 	}
@@ -273,7 +273,7 @@ func TestDispatchLeaseHandoverOfOwnRegionRecordsLostNote(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, ok := lc.ConflictForFile("a.py", "someone-else", 0); ok {
+	if _, _, ok := lc.Conflict("a.py", "someone-else", 0); ok {
 		t.Fatal("the erased lease must be gone")
 	}
 	note, ok := lc.HandoverNoteFor("a.py", 0, leases.HandoverNoteMs)
