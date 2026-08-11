@@ -40,14 +40,14 @@
 <div id="log">loading…</div>
 
 <script type="importmap">
-{"imports":{"three":"../../public/vendor/three.module.js","three/addons/":"../../public/vendor/addons/"}}
+{"imports":{"three":"./vendor/three.module.js","three/addons/":"./vendor/addons/"}}
 </script>
 <script type="module">
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 import { clone as skinnedClone } from 'three/addons/utils/SkeletonUtils.js'
-import * as ANIM from './anim.js'
-import * as HF from './highfive.js'
+// Cache-busted so an edit to anim.js always shows up on reload.
+const ANIM = await import('./anim.js?v=' + Date.now())
 
 const canvas = document.getElementById('c')
 const logEl = document.getElementById('log')
@@ -74,13 +74,15 @@ const floor = new THREE.Mesh(new THREE.BoxGeometry(14, 0.3, 14),
   new THREE.MeshStandardMaterial({ color:0xE9E0CE, roughness:1 }))
 floor.position.y = -0.15; floor.receiveShadow = true; scene.add(floor)
 // A seat block so the sit/type/sleep poses can be judged against something real.
-const stool = new THREE.Mesh(new THREE.BoxGeometry(0.44,0.45,0.44),
+// Seat top sits at the measured seated pelvis height; desk top just under the
+// typing hands. Both are only here to judge the seated poses against.
+const stool = new THREE.Mesh(new THREE.BoxGeometry(0.44,0.40,0.44),
   new THREE.MeshStandardMaterial({ color:0xC3B39B, roughness:1 }))
-stool.position.set(0,0.225,-0.16); stool.castShadow = true; stool.receiveShadow = true
+stool.position.set(0,0.20,-0.16); stool.castShadow = true; stool.receiveShadow = true
 stool.visible = false; scene.add(stool)
 const desk = new THREE.Mesh(new THREE.BoxGeometry(1.2,0.05,0.6),
   new THREE.MeshStandardMaterial({ color:0xD8BDB6, roughness:1 }))
-desk.position.set(0,0.74,0.42); desk.castShadow = true; desk.receiveShadow = true
+desk.position.set(0,0.655,0.55); desk.castShadow = true; desk.receiveShadow = true
 desk.visible = false; scene.add(desk)
 
 const CHAR_H = 1.68
@@ -106,94 +108,30 @@ function place(src, x, rotY) {
   return { group:g, root:o, scale:s }
 }
 
-// ---- wrist axis overlay -----------------------------------------------------
-// ?axes=1 draws, on each hand, the three vectors the wrist poses are written
-// against: where the fingers point, where the palm faces, and the forearm's own
-// long axis (the one a wrist may NOT rotate about).
-const axesOn = new URLSearchParams(location.search).has('axes')
-const arrows = []
-function buildAxes(root, scale) {
-  if (!axesOn) return
-  for (const side of ['Left', 'Right']) {
-    const hand = root.getObjectByName(side + 'Hand')
-    const fore = root.getObjectByName(side + 'ForeArm')
-    const L = 0.13
-    const mk = c => { const a = new THREE.ArrowHelper(new THREE.Vector3(0,1,0), new THREE.Vector3(), L, c, L*0.3, L*0.2); scene.add(a); return a }
-    arrows.push({ hand, fore, side,
-      fingers: mk(0x35455C), palm: mk(0xD9714F), twist: mk(0xD6B45C) })
-  }
-}
-const _p = new THREE.Vector3(), _q = new THREE.Quaternion(), _s = new THREE.Vector3(), _d = new THREE.Vector3()
-function updateAxes() {
-  for (const a of arrows) {
-    a.hand.matrixWorld.decompose(_p, _q, _s)
-    a.fingers.position.copy(_p); a.fingers.setDirection(_d.set(0,1,0).applyQuaternion(_q))
-    a.palm.position.copy(_p); a.palm.setDirection(_d.copy(ANIM.PALM_NORMAL[a.side + 'Hand']).applyQuaternion(_q))
-    a.fore.matrixWorld.decompose(_p, _q, _s)
-    a.twist.position.copy(_p); a.twist.setDirection(_d.set(0,1,0).applyQuaternion(_q))
-  }
-}
-
+let SRC = null
 const loader = new GLTFLoader()
-loader.load('../../public/glb/character.glb', gltf => {
+loader.load('glb/character.glb', gltf => {
+  SRC = gltf.scene
   chars.push(place(gltf.scene, 0, 0))
   chars.push(place(gltf.scene, 1.05, 0))
   chars[1].group.visible = false
-  buildAxes(chars[0].root, chars[0].scale)
   buildButtons()
   play('idle')
-  applyQuery()
   window.__ready = true
   report()
 }, undefined, e => { logEl.textContent = 'load failed: ' + e })
-
-// ?clip=wave&t=0.25&yaw=..&pitch=..&dist=..&tx=..&ty=..&tz=..&bind=1
-// t is a fraction of the clip, so a screenshot can be aimed at one frame.
-function applyQuery() {
-  const q = new URLSearchParams(location.search)
-  const num = (k, d) => q.has(k) ? parseFloat(q.get(k)) : d
-  if (q.has('bind')) {
-    const zero = {}; for (const b of ANIM.BONES) zero[b] = [0, 0, 0]
-    ANIM.dispose(chars[0].root)
-    ANIM.applyPose(chars[0].root, zero)
-    nowEl.textContent = 'bind'
-    window.__frozen = true
-  } else if (q.has('clip')) {
-    play(q.get('clip'))
-    if (q.has('t')) { freezeAt(num('t', 0)); window.__frozen = true }
-  }
-  yaw = num('yaw', yaw); pitch = num('pitch', pitch); dist = num('dist', dist)
-  target.set(num('tx', 0), num('ty', 0.85), num('tz', 0))
-  if (q.has('follow')) followBone = q.get('follow')
-}
-let followBone = null
-
-// Park the rig on one frame of the current clip. Stop everything first: play()
-// crossfades, so the outgoing action is still at full weight and pausing the
-// incoming one on its own renders a blend of the two, not the frame asked for.
-function freezeAt(frac) {
-  const root = chars[0].root
-  ANIM.getMixer(root).stopAllAction()
-  const a = ANIM.makeAction(root, currentName)
-  a.reset(); a.enabled = true; a.setEffectiveWeight(1); a.play(); a.paused = true
-  a.time = frac * a.getClip().duration
-  ANIM.update(root, 0)
-  root.updateMatrixWorld(true)
-  return a
-}
 
 function play(name) {
   currentName = name
   nowEl.textContent = name
   ANIM.crossfade(chars[0].root, name, 0.3)
   if (chars[1]) {
-    // Both play the SAME clip. Facing each other is the mirror; the mirrored
-    // clip would pair a right hand with a left one. See highfive.js.
-    ANIM.crossfade(chars[1].root, name, 0.3)
+    const partner = (name === 'highfive') ? 'highfiveMirror' : name
+    ANIM.crossfade(chars[1].root, partner, 0.3)
     // Restart both from zero so the paired contact frames line up.
     if (name === 'highfive') {
       ANIM.makeAction(chars[0].root,'highfive').time = 0
-      ANIM.makeAction(chars[1].root,'highfive').time = 0
+      ANIM.makeAction(chars[1].root,'highfiveMirror').time = 0
     }
   }
   const seated = ANIM.SEATED_CLIPS.has(name)
@@ -213,14 +151,20 @@ function buildButtons() {
   })
 }
 
+// Partners must be offset along the FACING axis (+z), not sideways. Offsetting
+// on x and rotating 180 leaves them side by side, and the palms then miss by
+// the full separation. Gap is 2 * HIGHFIVE_REACH, which is where the clip is
+// authored to make contact.
+const PAIR_GAP = 2 * ANIM.HIGHFIVE_REACH
+function setPair(on) {
+  chars[1].group.visible = on
+  chars[1].group.rotation.y = on ? Math.PI : 0
+  chars[1].group.position.set(on ? 0 : 1.05, 0, on ? PAIR_GAP : 0)
+}
 document.getElementById('bPair').onclick = e => {
   pairMode = !pairMode
   e.target.setAttribute('aria-pressed', String(pairMode))
-  chars[1].group.visible = pairMode
-  // Face them at each other for the high five.
-  // On the mark, not eyeballed: the clip only makes contact at this one gap.
-  chars[1].group.rotation.y = pairMode ? Math.PI : 0
-  chars[1].group.position.x = pairMode ? HF.HIGHFIVE_SPACING : 1.05
+  setPair(pairMode)
   play(currentName)
 }
 document.getElementById('bSlow').onclick = e => {
@@ -244,18 +188,74 @@ window.__probe = (name) => {
     o[n] = boneY(0, n).toArray().map(v => +v.toFixed(3))
   return o
 }
+// Contact sheet: N copies frozen at even phases of one clip, so a whole cycle
+// can be judged in a single frame instead of scrubbing.
+let strip = null
+window.__strip = (name, n = 8, spacing = 0.62, rotY = 0) => {
+  if (strip) { scene.remove(strip); strip = null }
+  chars.forEach(c => c.group.visible = false)
+  strip = new THREE.Group(); scene.add(strip)
+  const clip = ANIM.getClip(name)
+  for (let i = 0; i < n; i++) {
+    const c = place(SRC, 0, 0)
+    scene.remove(c.group); strip.add(c.group)
+    c.group.position.set((i - (n - 1) / 2) * spacing, 0, 0)
+    c.group.rotation.y = rotY
+    const a = ANIM.makeAction(c.root, name)
+    a.play(); a.paused = true
+    a.time = (i / n) * clip.duration
+    ANIM.update(c.root, 0)
+  }
+  nowEl.textContent = name + ' — cycle'
+  return n
+}
+window.__unstrip = () => {
+  if (strip) { scene.remove(strip); strip = null }
+  chars[0].group.visible = true
+}
+// Freeze an exact state and keep re-asserting it. This browser is shared, and
+// stray clicks kept knocking the page off the pose being inspected.
+let lockTimer = null
+window.__freeze = (clip0, clip1, t01, cam) => {
+  window.__unstrip()
+  const apply = () => {
+    const A = ANIM, C = chars
+    C[0].group.visible = true
+    setPair(!!clip1)
+    pairMode = !!clip1
+    const pairs = clip1 ? [[0, clip0], [1, clip1]] : [[0, clip0]]
+    for (const [i, name] of pairs) {
+      A.getMixer(C[i].root).stopAllAction()
+      const a = A.makeAction(C[i].root, name)
+      a.reset(); a.play(); a.setEffectiveWeight(1)
+      a.paused = true
+      a.time = t01 * A.getClip(name).duration
+      A.update(C[i].root, 0)
+    }
+    // Keep the readout honest — it reads currentName, not the label element.
+    currentName = clip0
+    const seated = ANIM.SEATED_CLIPS.has(clip0)
+    stool.visible = seated; desk.visible = seated
+    if (cam) window.__cam(cam[0], cam[1], cam[2])
+    nowEl.textContent = clip1 ? clip0 + ' + ' + clip1 : clip0
+  }
+  if (lockTimer) clearInterval(lockTimer)
+  apply()
+  lockTimer = setInterval(apply, 120)
+  return 'frozen'
+}
+window.__unfreeze = () => { if (lockTimer) clearInterval(lockTimer); lockTimer = null }
 window.__scene = scene
 window.__chars = chars
 window.__anim = ANIM
-window.__camera = camera
-window.__arrows = arrows
-window.__view = (o) => { if (o.yaw!=null) yaw=o.yaw; if (o.pitch!=null) pitch=o.pitch
-  if (o.dist!=null) dist=o.dist; if (o.follow!==undefined) followBone=o.follow
-  if (o.target) target.set(...o.target) }
 window.__play = play
 window.__clipName = () => currentName
-window.__setTime = (t) => freezeAt(t / ANIM.getClip(currentName).duration)
-window.__freezeAt = freezeAt
+window.__setTime = (t) => {
+  const a = ANIM.makeAction(chars[0].root, currentName)
+  a.paused = true; a.time = t
+  ANIM.update(chars[0].root, 0)
+  chars[0].root.updateMatrixWorld(true)
+}
 window.__resume = () => { ANIM.makeAction(chars[0].root, currentName).paused = false }
 
 function report() {
@@ -289,18 +289,12 @@ function resize(){
     renderer.setSize(w,h,false); camera.aspect=w/h; camera.updateProjectionMatrix() }
 }
 const target = new THREE.Vector3(0, 0.85, 0)
-const _t = new THREE.Vector3()
 function tick(){
   resize()
   const dt = clock.getDelta() * (slow ? 0.5 : 1)
-  if (!window.__frozen) for (const c of chars) ANIM.update(c.root, dt)
-  if (chars.length) chars[0].root.updateMatrixWorld(true)
-  updateAxes()
-  if (followBone && chars.length) {
-    const b = chars[0].root.getObjectByName(followBone)
-    if (b) target.copy(_t.setFromMatrixPosition(b.matrixWorld))
-  } else if (pairMode) target.x = HF.HIGHFIVE_SPACING * 0.5
+  for (const c of chars) ANIM.update(c.root, dt)
   const r = 4.2*dist, cp = Math.cos(pitch)
+  target.z = pairMode ? PAIR_GAP / 2 : 0
   camera.position.set(target.x + Math.sin(yaw)*r*cp, target.y + Math.sin(pitch)*r, target.z + Math.cos(yaw)*r*cp)
   camera.lookAt(target)
   renderer.render(scene,camera)

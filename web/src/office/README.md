@@ -38,13 +38,37 @@ lip, so `place()` scales off `DESK_SURFACE_RAW` (0.536), not total bbox height �
 that leaves the bbox top at 0.763. On a 1.68m character the hip is at 0.698, so
 the surface sits 4cm above it.
 
+## Interactivity
+
+`office.html` loads the room, then:
+
+- `zones.js` — 10 named floor regions anchored to real props, with standing slots
+  agents claim. `zoneFor(verb, path)` maps agent work to a zone.
+- `agent.js` — `Agent` (activity machine plus steering) and `World` (owns agents,
+  brokers paired actions). `createAgent()` is the contract everything else uses.
+- `interact.js` — click to select, click the floor to send, click a desk to sit and
+  type, hover to highlight.
+- `demo.js` — `runDemo(ctx)`, six captioned beats, cancellable and replayable.
+- `dressing.js` — set dressing for the zones with no generated prop.
+
+Yaw convention at the boundary is EXTERNAL (`atan2(-dx, -dz)`), not the rig's. The
+rig faces +Z; `agent.js` absorbs the difference with `YAW_OFFSET = PI`. If you touch
+yaw anywhere, use the external convention.
+
+The spine chain is inverted from what you would guess: `Hips > Spine02 > Spine01 >
+Spine > neck > Head`. Spine02 is the belly, Spine is the chest.
+
 ## What's broken
 
-- No chairs. `sit`, `type` and `sleep` only look right in `anim-test.html`, which
-  fakes a desk and a block to sit on. `office.html` uses standing clips only.
-- `coffee-cup-v2.glb` has never existed. `office.html` had four entries for it that
-  failed every load while the tally counted them as loaded. Both fixed.
-- Palm aiming takes the closest reachable direction, not always the one asked for.
-  `sit` settles about 25 degrees off palm-down — a forearm sloping down the thigh
-  cannot get there. `read` and `type` reach 18 at their extremes; the rest, 8.
-- Interactivity (select, send, zone routing, demo mode) isn't in this branch.
+- **The office high-five does not use the marks module.** `highfive.js` walks a pair
+  to fixed marks and lands palms 0.07mm apart, proven in `highfive-test.html`. But
+  `agent.js` implements its own `World.highfive` off the raw clip, and nothing except
+  that test page imports `highfive.js`. Two lineages that never fully converged. The
+  office should adopt the marks.
+- **Walk has foot slide.** Phasing is correct, but no IK pins the foot and the thigh
+  curve makes ankle travel sinusoidal instead of linear, so the planted foot slides
+  about 6cm at the ankle and 10cm at the toe per step. Invisible at office distance,
+  visible in close-up. The fix is shaping the thigh curve so ankle travel is linear
+  through stance.
+- **`drink`** reads as holding something near the face rather than drinking; the hand
+  stops short of the mouth.
