@@ -527,6 +527,40 @@ func (r *Registry) ActiveClaims(room string, actor Conn) []*Claim {
 	return out
 }
 
+// SweepAll walks every shard of every room and prunes+publishes expired
+// claims, regardless of whether anything touched that shard recently.
+// Mirrors python leases.py's _live(), which re-sweeps the whole table
+// (every room, every claim) on every single relay call. This registry
+// shards per room by path hash specifically so a hot region's traffic
+// doesn't serialize behind a cold one's (see the package doc comment on
+// shard), so pruneExpired alone only ever reaches the shard the call in
+// progress touched — an idle shard's expiry can otherwise sit
+// unbroadcast until something else touches that same region or a member
+// joins and runs ActiveClaims. Issue #47.
+//
+// Run from a background ticker (see server.go), never from a request
+// path: this takes and releases each shard's own mutex once, in turn,
+// which is the same lock discipline ActiveClaims already uses off the
+// hot path — it does not add one lock spanning every shard at once, which
+// would undo the sharding this throughput comes from.
+func (r *Registry) SweepAll() {
+	r.roomsMu.RLock()
+	rooms := make(map[string]*roomShards, len(r.rooms))
+	for name, rs := range r.rooms {
+		rooms[name] = rs
+	}
+	r.roomsMu.RUnlock()
+
+	now := r.clock.Now()
+	for room, rs := range rooms {
+		for _, s := range rs.shards {
+			s.mu.Lock()
+			r.pruneExpired(room, s, now, nil)
+			s.mu.Unlock()
+		}
+	}
+}
+
 // Contend registers an ask for a region somebody else holds, without
 // taking it. Mirrors leases.py's contend.
 func (r *Registry) Contend(room string, scope Region, agent, human string, tier int, requesterAcquiredAt *float64, actor Conn) *Claim {

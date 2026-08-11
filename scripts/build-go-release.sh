@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Cross-compiles presenced and agent-presence-mcp for every target platform
-# (#21, #32). No cgo, so no per-target toolchain: one machine with `go` on
-# PATH produces all ten.
+# Cross-compiles presenced, agent-presence-mcp and gorelay for every target
+# platform (#21, #32, #40). No cgo, so no per-target toolchain: one machine
+# with `go` on PATH produces all fifteen.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -16,7 +16,7 @@ TARGETS=(
   "windows amd64"
 )
 
-BINARIES=(presenced agent-presence-mcp)
+BINARIES=(presenced agent-presence-mcp gorelay)
 
 cd "$ROOT/go"
 for t in "${TARGETS[@]}"; do

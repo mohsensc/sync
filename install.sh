@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Installs the three agent-presence binaries: ap-hook, presenced,
-# agent-presence-mcp. Prints Claude Code hook settings with
+# Installs the agent-presence binaries: ap-hook, presenced,
+# agent-presence-mcp, gorelay. Prints Claude Code hook settings with
 # --print-settings.
 set -euo pipefail
 
@@ -46,11 +46,14 @@ mkdir -p "$BIN"
 cp "$ROOT/cpp/build/ap-hook" "$BIN/ap-hook"
 chmod +x "$BIN/ap-hook"
 
-# presenced and agent-presence-mcp: a release binary if one is already
-# sitting next to this script (scripts/build-go-release.sh's output, or
-# something CI attached to a tag), otherwise a local `go build` — the whole
-# point of #21 is that this is the only toolchain requirement left, no
-# compiler or headers.
+# presenced, agent-presence-mcp and gorelay: a release binary if one is
+# already sitting next to this script (scripts/build-go-release.sh's
+# output, or something CI attached to a tag), otherwise a local `go build`
+# — the whole point of #21 is that this is the only toolchain requirement
+# left, no compiler or headers. gorelay is the relay itself (#40) — one
+# operator runs it, everyone else's daemon just dials it, but it's built
+# and installed here like the others rather than living behind a separate
+# venv step now that there's no Python relay left to justify one.
 RELEASE_DIR="$ROOT/dist"
 GOOS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 GOARCH="$(uname -m)"
@@ -74,6 +77,7 @@ install_go_binary() {
 
 install_go_binary presenced
 install_go_binary agent-presence-mcp
+install_go_binary gorelay
 
 echo "Binaries installed to $BIN"
 echo "Add this to ~/.claude/settings.json:"

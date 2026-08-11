@@ -1,75 +1,51 @@
 import asyncio
-import contextlib
 import json
+import pathlib
+import sys
 
 import pytest
 import websockets
 
-from agent_presence.clock import RealClock
-from agent_presence.principals import Principal, Roster, hash_token
-from agent_presence.relay import Relay
-from agent_presence.serve import serve
+from agent_presence.principals import hash_token
+
+# Same convention test_golden_noop.py uses: tests/helpers/ is a plain
+# directory of scripts, not a package, so it's put on sys.path rather
+# than imported through tests/, which has no __init__.py.
+sys.path.insert(0, str(pathlib.Path(__file__).parent / "helpers"))
+from gorelay_proc import start_gorelay  # noqa: E402
 
 REGION = {"path": "src/auth.py", "symbol": "sign_in", "lines": None}
 
 BOT_TOKEN = "release-bot-token"
 
 
-class _Running:
-    """A relay served on an ephemeral port, with what it takes to stop it."""
-
-    def __init__(self, task: asyncio.Task, stop: asyncio.Event, url: str) -> None:
-        self.task, self.stop, self.url = task, stop, url
-
-    async def close(self) -> None:
-        self.stop.set()
-        with contextlib.suppress(asyncio.CancelledError):
-            await asyncio.wait_for(self.task, timeout=5)
-
-
-async def _start(relay) -> _Running:
-    """Bind an ephemeral port and hand back its URL once it is actually bound.
-
-    Fixed ports collide the instant two test suites run at once — that has
-    already produced false failures for two different agents. Port 0 plus
-    `on_ready` is the only way to learn the real port (see serve()'s own
-    docstring), and it means there is no bind to race in the first place.
-    """
-    stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    ready: asyncio.Future = loop.create_future()
-
-    def on_ready(srv) -> None:
-        if not ready.done():
-            ready.set_result(srv.sockets[0].getsockname()[1])
-
-    task = asyncio.create_task(
-        serve("127.0.0.1", 0, relay, stop=stop, on_ready=on_ready)
-    )
-    port = await asyncio.wait_for(ready, timeout=5)
-    return _Running(task, stop, f"ws://127.0.0.1:{port}")
-
-
 @pytest.fixture
 async def server():
-    relay = Relay(RealClock(), roster=Roster.inert())
-    running = await _start(relay)
-    yield relay, running.url
-    await running.close()
+    # relay is None: gorelay is a separate process, there is no Python
+    # object to hand back. Every test below only ever unpacked `_, url`
+    # from this fixture — see the module docstring in helpers/gorelay_proc.py.
+    proc = await start_gorelay()
+    yield None, proc.url
+    await proc.stop()
 
 
 @pytest.fixture
-async def roster_server():
+async def roster_server(tmp_path):
     """A relay with a roster, so the join frame's principal and token mean
     something. Its own ephemeral port, independent of any other fixture's."""
-    roster = Roster(
-        (Principal("release-bot", "Bot", 3, 3, hash_token(BOT_TOKEN)),),
-        source="<test>", present=True,
+    roster_path = tmp_path / "principals.toml"
+    roster_path.write_text(
+        "version = 1\n"
+        "[[principal]]\n"
+        'id = "release-bot"\n'
+        'display = "Bot"\n'
+        "attended = 3\n"
+        "unattended = 3\n"
+        f'token_sha256 = "{hash_token(BOT_TOKEN)}"\n'
     )
-    relay = Relay(RealClock(), roster=roster)
-    running = await _start(relay)
-    yield relay, running.url
-    await running.close()
+    proc = await start_gorelay(env={"AGENT_PRESENCE_PRINCIPALS": str(roster_path)})
+    yield None, proc.url
+    await proc.stop()
 
 
 async def recv(ws, kind, timeout=2, state=None):

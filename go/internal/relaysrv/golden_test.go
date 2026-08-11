@@ -105,13 +105,16 @@ func runGolden() map[string]any {
 
 // TestGoldenScenarioMatchesPython asserts the same frame shapes the
 // docs/relay-parity.md write-up confirmed by diffing this scenario's
-// output against python/tests/helpers/golden_scenario.py's directly:
-// zero differences once the two documented, deliberate gaps (no `effect`/
-// `effect_source` — no policy engine; an added `presence` array — PR #31)
-// are accounted for. That diff was run by hand once against a live
-// checkout of `main`; this is the pinned regression version of it, so a
-// change to the ladder, wait-die or handover logic that would have moved
-// that diff fails a test instead of needing a human to re-run it.
+// output against python/tests/helpers/golden_scenario.py directly, back
+// when both relays existed: zero differences. The org policy floor is
+// ported now (policy.go), so `effect`/`effect_source` are on every frame
+// that carries them here too — this scenario runs with no org policy file
+// configured, so those resolve to the builtin table on both sides and
+// there is nothing left to normalize away. That diff was run by hand once
+// against a live checkout of `main`; this is the pinned regression
+// version of it, so a change to the ladder, wait-die or handover logic
+// that would have moved that diff fails a test instead of needing a
+// human to re-run it.
 func TestGoldenScenarioMatchesPython(t *testing.T) {
 	out := runGolden()
 

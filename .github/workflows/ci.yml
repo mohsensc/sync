@@ -29,11 +29,30 @@ jobs:
         with:
           python-version: '3.12'   # the floor in pyproject; test what we claim
 
+      # The relay is gorelay now (#40) — the black-box suite
+      # (test_e2e.py, test_serve.py, test_relay_restart.py) spawns the
+      # real binary as a subprocess (python/tests/helpers/gorelay_proc.py)
+      # rather than driving a Python Relay object in-process, so this job
+      # needs a Go toolchain to build it. This is the "gap is process, not
+      # design" line from docs/languages.md's daemon<->relay seam note,
+      # closed: cross-language relay verification now runs in CI, not
+      # just by hand before a release.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go/go.mod
+
       - name: preflight
         run: |
           set -euo pipefail
           python -c 'import sys; assert sys.version_info >= (3, 12), sys.version'
           python --version
+          go version
+
+      - name: build gorelay
+        run: |
+          set -euo pipefail
+          cd go && go build -o bin/gorelay ./cmd/gorelay
+          echo "AGENT_PRESENCE_GORELAY_BIN=$PWD/bin/gorelay" >> "$GITHUB_ENV"
 
       - name: install with dev extras
         working-directory: python
@@ -41,12 +60,12 @@ jobs:
           set -euo pipefail
           python -m pip install --upgrade pip
           python -m pip install -e '.[dev]'
-          python -c 'import pytest, hypothesis'
+          python -c 'import pytest, hypothesis, websockets'
 
       - name: pytest
         working-directory: python
-        # -m pytest, not bare pytest: sim/ only imports with cwd on sys.path.
-        # pytest exits 5 when it collects nothing, so an empty run is still red.
+        # -m pytest, not bare pytest: pytest exits 5 when it collects
+        # nothing, so an empty run is still red.
         run: |
           set -euo pipefail
           python -m pytest -q

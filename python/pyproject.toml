@@ -2,15 +2,19 @@
 name = "agent-presence"
 version = "0.0.0"
 requires-python = ">=3.12"
-dependencies = ["websockets>=13.0"]
+dependencies = []
 
 [project.scripts]
-agent-presence-relay = "agent_presence.serve:main"
 # Short on purpose. It gets typed mid-session, next to git.
 ap = "agent_presence.cli:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "hypothesis>=6.100", "pytest-asyncio>=0.24"]
+# websockets is a test-only dependency now: the black-box suite
+# (test_e2e.py, test_serve.py, test_relay_restart.py) is a websockets
+# *client* talking to the real gorelay binary over the wire. Nothing left
+# in src/agent_presence imports it — the Python relay it served is gone
+# (#40).
+dev = ["pytest>=8.0", "hypothesis>=6.100", "pytest-asyncio>=0.24", "websockets>=13.0"]
 
 [build-system]
 requires = ["hatchling"]

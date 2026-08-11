@@ -1,5 +1,7 @@
 package relaysrv
 
+import "strings"
+
 // Activity is one hook- or MCP-observed touch, kept in the room's presence
 // buffer. Mirrors python's ladder.Activity.
 type Activity struct {
@@ -13,18 +15,59 @@ type Activity struct {
 
 var writeVerbs = map[string]bool{"edit": true}
 
+// Redundancy is who else is already doing this work, and how sure we are.
+// Mirrors ladder.py's Redundancy.
+type Redundancy struct {
+	Agent  string
+	Human  string
+	Intent string
+	Region Region
+	Score  float64
+}
+
+// redundantPeer is rung 4's match: the strongest declared-intent match
+// against the incoming agent's own declaration, in a *different* file.
+// Mirrors ladder.py's redundant_peer exactly, including all four gates —
+// see there for why each one is a refusal rather than a judgment call.
+// Ported as-is, off by default (AGENT_PRESENCE_RUNG4 unset); a separate
+// track (#15) owns improving the scorer, not this port.
+func redundantPeer(incoming AgentEvent, others []Activity, intent string) *Redundancy {
+	if !rung4Enabled() {
+		return nil
+	}
+	if incoming.Source != SourceMCP || strings.TrimSpace(intent) == "" {
+		return nil
+	}
+
+	threshold := rung4Threshold()
+	var best *Redundancy
+	for _, o := range others {
+		if o.Agent == incoming.Agent {
+			continue
+		}
+		if o.Source != SourceMCP || strings.TrimSpace(o.Intent) == "" {
+			continue
+		}
+		if o.Region.Path == incoming.Region.Path {
+			continue
+		}
+		score := lexicalScore(intent, o.Intent)
+		if score < threshold {
+			continue
+		}
+		if best == nil || score > best.Score {
+			best = &Redundancy{Agent: o.Agent, Human: o.Human, Intent: o.Intent, Region: o.Region, Score: score}
+		}
+	}
+	return best
+}
+
 // Classify returns the highest rung the incoming event reaches against
-// everyone else in `others`. Mirrors ladder.classify's rungs 0-3 exactly
-// (region overlap, always live).
-//
-// Rung 4 — declared-intent similarity across different paths — is NOT
-// ported. It ships off by default (AGENT_PRESENCE_RUNG4 unset) in the
-// Python relay and is advisory only: it never touches the lease table,
-// only whether a redundant_work frame is sent. This Go relay always
-// behaves as if the flag were unset, which is the shipped default and the
-// common case; see docs/relay-parity.md for the gap. redundantPeer below
-// always returns nil, so this function never reaches rung 4.
-func Classify(incoming AgentEvent, others []Activity) int {
+// everyone else in `others`. Mirrors ladder.classify: rungs 0-3 are
+// region overlap and always live; rung 4 is declared-intent similarity
+// across different paths, gated by AGENT_PRESENCE_RUNG4 (off by default,
+// see redundantPeer).
+func Classify(incoming AgentEvent, others []Activity, intent string) int {
 	highest := 0
 	for _, o := range others {
 		if o.Agent == incoming.Agent {
@@ -53,18 +96,18 @@ func Classify(incoming AgentEvent, others []Activity) int {
 			highest = rung
 		}
 	}
+	if redundantPeer(incoming, others, intent) != nil {
+		highest = max(highest, 4)
+	}
 	return highest
 }
 
-// redundantPeer is rung 4's match. Always nil — see Classify's doc comment.
-func redundantPeer(_ AgentEvent, _ []Activity, _ string) *struct{} {
-	return nil
-}
-
 // InterruptsAt: does this rung spend somebody's attention? With an effect
-// given, the effect decides (ladder.interrupts_at); this Go relay has no
-// policy engine (see docs/relay-parity.md), so it always uses the rung
-// default: rungs 0-2 ambient, rung 3+ interrupts.
-func InterruptsAt(rung int) bool {
+// given, the effect decides (ladder.interrupts_at's effect branch); with
+// none, rungs 0-2 are ambient and rung 3+ interrupts, the rung default.
+func InterruptsAt(rung int, effect *Effect) bool {
+	if effect != nil {
+		return opensNegotiation(*effect)
+	}
 	return rung >= 3
 }

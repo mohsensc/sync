@@ -547,22 +547,9 @@ def test_the_env_override_still_wins_over_the_walk(tmp_path):
     assert found.authenticate("morgan", TOKEN).principal == "morgan"
 
 
-def test_a_relay_says_which_roster_it_is_enforcing(tmp_path, caplog):
-    from agent_presence.clock import VirtualClock
-    from agent_presence.relay import Relay
 
-    (tmp_path / ".git").mkdir()
-    target = write_roster(tmp_path)
-    with caplog.at_level("INFO", logger="agent_presence.relay"):
-        Relay(VirtualClock(0.0), roster=Roster.discover(str(tmp_path), env={}))
-    assert str(target) in caplog.text
-
-
-def test_a_relay_with_no_roster_says_that_too(tmp_path, caplog):
-    from agent_presence.clock import VirtualClock
-    from agent_presence.relay import Relay
-
-    with caplog.at_level("INFO", logger="agent_presence.relay"):
-        Relay(VirtualClock(0.0), roster=Roster.discover(str(tmp_path), env={}))
-    assert "no principals roster" in caplog.text
-    assert "normal" in caplog.text
+# A relay saying which roster it's enforcing (or that it found none) used to
+# be pinned here against the Python Relay's logger. It's `NewRelay`'s job in
+# Go now (#40) — `relaysrv.NewRelay` logs the same two shapes
+# ("roster %s: %d principal(s)..." / "no principals roster...") off the same
+# `Roster.discover`-equivalent this file already covers on its own.

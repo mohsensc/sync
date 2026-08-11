@@ -44,9 +44,15 @@ from pathlib import Path
 from typing import Literal
 
 from .clock import Clock
-from .redact import OPAQUE_ENV
 
 log = logging.getLogger("agent_presence.policy")
+
+# Mirrors what redact.py used to export as OPAQUE_ENV, back when this
+# module imported it from there. redact.py existed to serve the Python
+# relay, which is gone (#40) — this is the one thing this file still
+# needs from it, so it's inlined here rather than keeping a whole module
+# alive for one constant.
+OPAQUE_ENV = "AGENT_PRESENCE_OPAQUE"
 
 SCHEMA_VERSION = 1
 # How often a PolicyFile is allowed to stat its inputs. Live reload is worth a

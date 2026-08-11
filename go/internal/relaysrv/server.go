@@ -2,7 +2,9 @@ package relaysrv
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"log"
 	"net"
 	"net/http"
@@ -11,6 +13,8 @@ import (
 
 	"github.com/gorilla/websocket"
 )
+
+var errTLSPairRequired = errors.New("TLSCert and TLSKey must be given together")
 
 // Backpressure tuning. Identical values to serve.py's module constants —
 // see there for the reasoning behind each number; these are not ours to
@@ -26,6 +30,23 @@ const (
 	InboundSaturatedS = 10.0
 
 	MaxFrameBytes = 65536
+
+	// How often a writer that is parked on a socket looks at the clock,
+	// in real wall time — not a threshold itself, SendStallS/SendSaturatedS
+	// are, and they're read off the injectable clock; this is only the
+	// resolution the writer notices them at. Matches serve.py's SEND_POLL_S.
+	SendPollInterval = 50 * time.Millisecond
+
+	// How often the background sweep walks every shard of every room to
+	// prune and broadcast expired leases, regardless of whether anything
+	// touched that shard. See leases.go's SweepAll and issue #47 — the
+	// per-call sweep in pruneExpired only ever reaches the shard a request
+	// touches, so an idle shard's expiry needs something off the hot path
+	// to notice it promptly. One second matches the granularity a human
+	// or a daemon actually cares about; it is not the hot-path lock this
+	// sharding exists to avoid, since each tick takes and releases one
+	// shard's own mutex in turn rather than one lock spanning all of them.
+	ExpirySweepInterval = 1 * time.Second
 )
 
 var upgrader = websocket.Upgrader{
@@ -37,13 +58,25 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin: func(*http.Request) bool { return true },
 }
 
+// wsWriter is the subset of *websocket.Conn the writer goroutine below
+// needs. An interface, not the concrete type, so a test can substitute a
+// peer whose write blocks until poked — the same role python's duck-typed
+// `_FakeWs` plays in test_backpressure.py's pure-VirtualClock tests (no
+// real socket, no wedge-budget blast) — see backpressure_test.go.
+// *websocket.Conn satisfies this with no wrapper needed.
+type wsWriter interface {
+	WriteMessage(messageType int, data []byte) error
+	WriteControl(messageType int, data []byte, deadline time.Time) error
+	Close() error
+}
+
 // WsConn is one connection: goroutine per connection, one bounded outbound
 // channel, one writer goroutine. Mirrors serve.py's WsConn — see there for
 // the full argument on why sends are non-blocking and why a saturated
 // peer gets disconnected rather than allowed to grow the relay's memory
 // without bound.
 type WsConn struct {
-	ws    *websocket.Conn
+	ws    wsWriter
 	clock Clock
 
 	mu    sync.Mutex
@@ -70,7 +103,7 @@ type WsConn struct {
 	inMu             sync.Mutex
 }
 
-func NewWsConn(ws *websocket.Conn, clock Clock) *WsConn {
+func NewWsConn(ws wsWriter, clock Clock) *WsConn {
 	now := clock.Now()
 	c := &WsConn{
 		ws:      ws,
@@ -183,29 +216,80 @@ func (c *WsConn) writeLoop() {
 	}
 }
 
+// write puts one frame on the socket. False means this writer is finished.
+//
+// The send runs in its own goroutine and this watches it on a real-time
+// poll ticker rather than just awaiting it directly, because SendStallS
+// is measured on the injectable clock (so a test reaches it with
+// clock.Advance, never a real wait) and a socket that has actually
+// stopped draining does not return from WriteMessage on its own —
+// nothing times it out. Without this, a genuinely wedged peer's writer
+// goroutine blocks inside WriteMessage forever: shedReason is never
+// reached, the connection is never shed, and the goroutine leaks for the
+// life of the process — the exact class of leak this design exists to
+// prevent, just moved from "one task per frame" (the pre-fix Python bug)
+// to "stuck inside the one send this connection will ever finish."
+// Mirrors serve.py's _write, including polling on wall time but deciding
+// on clock time — see SendPollInterval.
 func (c *WsConn) write(payload []byte) bool {
 	now := c.clock.Now()
 	c.mu.Lock()
 	c.sendingSince = &now
 	c.mu.Unlock()
-	err := c.ws.WriteMessage(websocket.TextMessage, payload)
-	c.mu.Lock()
-	c.sendingSince = nil
-	c.mu.Unlock()
-	if err != nil {
-		c.shutdown()
-		return false
+
+	done := make(chan error, 1)
+	go func() { done <- c.ws.WriteMessage(websocket.TextMessage, payload) }()
+
+	ticker := time.NewTicker(SendPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case err := <-done:
+			c.mu.Lock()
+			c.sendingSince = nil
+			c.mu.Unlock()
+			if err != nil {
+				c.shutdown()
+				return false
+			}
+			if why := c.shedReason(); why != "" {
+				c.shed(why)
+				return false
+			}
+			return true
+		case <-ticker.C:
+			if why := c.shedReason(); why == "" {
+				continue
+			} else {
+				c.mu.Lock()
+				c.sendingSince = nil
+				c.mu.Unlock()
+				// The send in `done` is abandoned, not cancelled — Go has
+				// no way to interrupt a goroutine mid-syscall. shed's
+				// ws.Close() below takes the underlying connection down,
+				// which is what makes that abandoned WriteMessage return
+				// (with an error nobody reads, since `done` is buffered
+				// 1): the goroutine still exits, it just does so once the
+				// close lands rather than on this call's own timeline.
+				c.shed(why)
+				return false
+			}
+		}
 	}
-	if why := c.shedReason(); why != "" {
-		log.Printf("dropping subscriber %q (room %q): %s, %d frames shed", c.Agent(), c.Room(), why, c.dropped)
-		c.shutdown()
-		_ = c.ws.WriteControl(websocket.CloseMessage,
-			websocket.FormatCloseMessage(1013, "subscriber too slow"),
-			time.Now().Add(2*time.Second))
-		_ = c.ws.Close()
-		return false
-	}
-	return true
+}
+
+// shed hangs up on a subscriber that is not keeping up: marks the
+// connection closed, best-effort tells the peer why over the socket, then
+// takes the transport down under it so a peer that will not even read a
+// close frame cannot keep this goroutine (or the one still blocked in
+// write's WriteMessage, if that's why shed was called) parked forever.
+func (c *WsConn) shed(why string) {
+	log.Printf("dropping subscriber %q (room %q): %s, %d frames shed", c.Agent(), c.Room(), why, c.dropped)
+	c.shutdown()
+	_ = c.ws.WriteControl(websocket.CloseMessage,
+		websocket.FormatCloseMessage(1013, "subscriber too slow"),
+		time.Now().Add(2*time.Second))
+	_ = c.ws.Close()
 }
 
 func (c *WsConn) shutdown() {
@@ -262,6 +346,19 @@ func session(ws *websocket.Conn, relay *Relay) {
 	defer func() {
 		relay.Leave(conn)
 		conn.shutdown()
+		// ReadMessage's default close handler already echoes a close
+		// frame back to a peer that initiated the handshake (that's
+		// gorilla's documented default behavior), but nothing closes the
+		// underlying TCP connection on this end once the read loop
+		// exits — not on a clean close, not on an error, not on a shed.
+		// A client's own close() waits out its close_timeout for the
+		// connection to actually go away at the transport level, not
+		// just for the frame exchange, so every disconnect paid that
+		// timeout instead of returning immediately. Confirmed directly:
+		// a client-initiated close against an unpatched gorelay took a
+		// consistent 10.0s (websockets' default close_timeout) instead
+		// of completing as soon as the close frames crossed.
+		_ = ws.Close()
 	}()
 
 	for {
@@ -334,6 +431,16 @@ type Server struct {
 	Addr  string
 	Relay *Relay
 
+	// TLSCert/TLSKey terminate wss:// instead of ws:// when both are set,
+	// mirroring serve.py's build_tls_context: same PEM cert-chain-plus-key
+	// shape, loaded once at Listen time. Unset by default — plaintext
+	// ws:// on loopback is still the zero-config path. See main.go for the
+	// flag/env names, which match the Python relay's exactly so an
+	// operator's existing invocation means the same thing against either
+	// binary.
+	TLSCert string
+	TLSKey  string
+
 	ln net.Listener
 }
 
@@ -341,6 +448,26 @@ type Server struct {
 // accept connections. Splitting bind from accept is what lets tests use
 // port 0 and read back the real port before any client tries to connect.
 func (s *Server) Listen() (string, error) {
+	if (s.TLSCert == "") != (s.TLSKey == "") {
+		return "", errTLSPairRequired
+	}
+	if s.TLSCert != "" {
+		cert, err := tls.LoadX509KeyPair(s.TLSCert, s.TLSKey)
+		if err != nil {
+			return "", err
+		}
+		// MinVersion pinned rather than left at the stdlib default for the
+		// same reason serve.py picks PROTOCOL_TLS_SERVER instead of a bare
+		// socket: TLS 1.2+ is the modern floor, not a version to leave to
+		// whatever this Go toolchain shipped with.
+		cfg := &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
+		ln, err := tls.Listen("tcp", s.Addr, cfg)
+		if err != nil {
+			return "", err
+		}
+		s.ln = ln
+		return ln.Addr().String(), nil
+	}
 	ln, err := net.Listen("tcp", s.Addr)
 	if err != nil {
 		return "", err
@@ -361,6 +488,20 @@ func (s *Server) Serve(ctx context.Context) error {
 	srv := &http.Server{Handler: mux}
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(s.ln) }()
+
+	sweep := time.NewTicker(ExpirySweepInterval)
+	defer sweep.Stop()
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-sweep.C:
+				s.Relay.registry.SweepAll()
+			}
+		}
+	}()
+
 	select {
 	case <-ctx.Done():
 		_ = srv.Close()
