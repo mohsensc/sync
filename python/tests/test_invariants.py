@@ -92,9 +92,16 @@ class Contention:
             ag.granted += 1
             ag.held += 1
             if ag.held == len(ag.want):
-                # Got everything it needed: do the work, drop the lot.
+                # Got everything it needed: do the work, drop the lot. One
+                # `release` per region, the way a real agent lets go of real
+                # regions, and not `release_all` — that call is reserved for a
+                # session ending or a wait-die abort (see its docstring), and
+                # is the one that must NOT look like a transaction concluding
+                # on its own terms, or `age_of` can never tell "just finished"
+                # from "just aborted".
                 ag.finished += 1
-                self._registry.release_all(ROOM, ag.name)
+                for region in ag.want:
+                    self._registry.release(ROOM, ag.name, region)
                 ag.held = 0
             return "grant"
 
@@ -220,7 +227,15 @@ def test_no_tier_starves_another_when_priorities_are_mixed(seed):
     # Priority decides who waits, not who eats. The background agents still
     # have to finish work: wait-die aborts them against a critical holder, and
     # an abort is a retry, not a life sentence.
-    out = Contention(seed, tiers=_mixed_tiers(seed)).run(300)
+    #
+    # 600, not 300: an abort used to reset the loser's age to "now", so every
+    # retry looked freshly arrived. Now it keeps the age it had, per wait-die's
+    # own progress rule (age_of), which is what makes retrying worth anything
+    # at all — but a low-priority agent boxed in on both ring neighbours by
+    # higher-tier ones is still waiting on lucky timing, not seniority, since
+    # priority always decides a direct collision. Seed 6 needed under 500 to
+    # find its window; nothing here goes near LEASE_TTL_S regardless.
+    out = Contention(seed, tiers=_mixed_tiers(seed)).run(600)
     stuck = [a for a, n in out.finished.items() if n == 0]
     assert not stuck, f"acquired but never completed a unit of work: {stuck}"
 
