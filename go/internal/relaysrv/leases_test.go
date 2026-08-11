@@ -1,0 +1,314 @@
+package relaysrv
+
+import (
+	"sync"
+	"testing"
+)
+
+// fakePublisher records every frame published, for tests that need to
+// assert on fan-out rather than just registry state.
+type fakePublisher struct {
+	mu        sync.Mutex
+	broadcast []Frame
+	targeted  []Frame
+}
+
+func (p *fakePublisher) Publish(room string, frame Frame, actor Conn) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.broadcast = append(p.broadcast, frame)
+}
+
+func (p *fakePublisher) PublishTo(room, agent string, frame Frame, actor Conn) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.targeted = append(p.targeted, frame)
+}
+
+func newTestRegistry() (*VirtualClock, *Registry, *fakePublisher) {
+	clock := NewVirtualClock(0)
+	pub := &fakePublisher{}
+	return clock, NewRegistry(clock, pub), pub
+}
+
+var authRegion = Region{Path: "src/auth.py", Symbol: strp("sign_in")}
+
+func strp(s string) *string { return &s }
+
+// Ported from python/tests/test_leases.py.
+
+func TestUncontestedLeaseIsGranted(t *testing.T) {
+	_, reg, _ := newTestRegistry()
+	res := reg.Acquire("r1", "sara", "a1", authRegion, "refactor", nil, PriorityNormal, nil)
+	if !res.Ok || res.Claim == nil {
+		t.Fatalf("expected a grant, got %+v", res)
+	}
+}
+
+func TestSecondLeaseOnSameRegionIsRefusedAndNamesTheHolder(t *testing.T) {
+	_, reg, _ := newTestRegistry()
+	reg.Acquire("r1", "sara", "a1", authRegion, "refactor", nil, PriorityNormal, nil)
+	res := reg.Acquire("r1", "dev", "a2", authRegion, "rename", nil, PriorityNormal, nil)
+	if res.Ok {
+		t.Fatalf("expected a refusal")
+	}
+	if res.HeldBy == nil || res.HeldBy.Agent != "a1" {
+		t.Fatalf("expected held_by a1, got %+v", res.HeldBy)
+	}
+}
+
+func TestLeaseExpiresAfterTTLWithNoManualCleanup(t *testing.T) {
+	clock, reg, _ := newTestRegistry()
+	reg.Acquire("r1", "sara", "a1", authRegion, "refactor", nil, PriorityNormal, nil)
+	clock.Advance(LeaseTTLS + 1)
+	res := reg.Acquire("r1", "dev", "a2", authRegion, "rename", nil, PriorityNormal, nil)
+	if !res.Ok {
+		t.Fatalf("expected the expired lease to have freed the region, got %+v", res)
+	}
+}
+
+func TestHeartbeatExtendsTheLease(t *testing.T) {
+	clock, reg, _ := newTestRegistry()
+	reg.Acquire("r1", "sara", "a1", authRegion, "refactor", nil, PriorityNormal, nil)
+	clock.Advance(LeaseTTLS - 1)
+	if !reg.Heartbeat("r1", "a1", authRegion, nil) {
+		t.Fatalf("expected heartbeat to renew")
+	}
+	clock.Advance(2) // would have expired without the heartbeat
+	res := reg.Acquire("r1", "dev", "a2", authRegion, "steal", nil, PriorityNormal, nil)
+	if res.Ok {
+		t.Fatalf("expected the renewed lease to still hold, got a grant")
+	}
+}
+
+func TestRoomsAreIsolatedEvenWithIdenticalPaths(t *testing.T) {
+	_, reg, _ := newTestRegistry()
+	reg.Acquire("room-a", "sara", "a1", authRegion, "x", nil, PriorityNormal, nil)
+	res := reg.Acquire("room-b", "dev", "a2", authRegion, "y", nil, PriorityNormal, nil)
+	if !res.Ok {
+		t.Fatalf("expected room-b's identical path to be free, got %+v", res)
+	}
+}
+
+func TestReleaseAllDropsEveryLeaseAnAgentHoldsInTheRoom(t *testing.T) {
+	_, reg, _ := newTestRegistry()
+	other := Region{Path: "src/db.py", Symbol: strp("query")}
+	reg.Acquire("r1", "sara", "a1", authRegion, "x", nil, PriorityNormal, nil)
+	reg.Acquire("r1", "sara", "a1", other, "y", nil, PriorityNormal, nil)
+	reg.ReleaseAll("r1", "a1", nil)
+	if reg.HolderOf("r1", authRegion, nil) != nil || reg.HolderOf("r1", other, nil) != nil {
+		t.Fatalf("expected both leases to be dropped")
+	}
+}
+
+func TestReleaseAllCannotReachAcrossRooms(t *testing.T) {
+	_, reg, _ := newTestRegistry()
+	reg.Acquire("room-a", "sara", "a1", authRegion, "x", nil, PriorityNormal, nil)
+	reg.Acquire("room-b", "sara", "a1", authRegion, "y", nil, PriorityNormal, nil)
+	reg.ReleaseAll("room-a", "a1", nil)
+	if reg.HolderOf("room-b", authRegion, nil) == nil {
+		t.Fatalf("release_all in room-a dropped a1's lease in room-b too")
+	}
+}
+
+func TestAWholeFileClaimBlocksASymbolClaimInThatFile(t *testing.T) {
+	_, reg, _ := newTestRegistry()
+	whole := Region{Path: "src/auth.py"}
+	reg.Acquire("r1", "sara", "a1", whole, "rewriting the file", nil, PriorityNormal, nil)
+	res := reg.Acquire("r1", "dev", "a2", authRegion, "rename", nil, PriorityNormal, nil)
+	if res.Ok || res.HeldBy == nil || res.HeldBy.Agent != "a1" {
+		t.Fatalf("expected the whole-file claim to block the symbol claim, got %+v", res)
+	}
+}
+
+func TestASymbolClaimBlocksAWholeFileClaim(t *testing.T) {
+	_, reg, _ := newTestRegistry()
+	whole := Region{Path: "src/auth.py"}
+	reg.Acquire("r1", "sara", "a1", authRegion, "refactor", nil, PriorityNormal, nil)
+	if reg.Acquire("r1", "dev", "a2", whole, "rewrite", nil, PriorityNormal, nil).Ok {
+		t.Fatalf("expected the symbol claim to block the whole-file claim")
+	}
+}
+
+// -- wait-die decisions on the claim path --------------------------------
+
+func TestABrandNewRequesterIsYoungerAndThereforeDies(t *testing.T) {
+	clock, reg, _ := newTestRegistry()
+	reg.Acquire("r1", "sara", "a1", authRegion, "x", nil, PriorityNormal, nil)
+	clock.Advance(10)
+	res := reg.Acquire("r1", "dev", "a2", authRegion, "y", nil, PriorityNormal, nil)
+	if res.Decision != decisionAbort {
+		t.Fatalf("expected abort, got %v", res.Decision)
+	}
+}
+
+func TestARequesterHoldingAnOlderLeaseWaitsInstead(t *testing.T) {
+	clock, reg, _ := newTestRegistry()
+	other := Region{Path: "src/db.py", Symbol: strp("query")}
+	// a2 becomes the elder by taking a lease first.
+	reg.Acquire("r1", "dev", "a2", other, "warm up", nil, PriorityNormal, nil)
+	clock.Advance(10)
+	reg.Acquire("r1", "sara", "a1", authRegion, "x", nil, PriorityNormal, nil)
+	res := reg.Acquire("r1", "dev", "a2", authRegion, "y", nil, PriorityNormal, nil)
+	if res.Decision != decisionWait {
+		t.Fatalf("expected wait, got %v", res.Decision)
+	}
+}
+
+func TestAgeIsTheOldestLiveClaimNotTheNewest(t *testing.T) {
+	clock, reg, _ := newTestRegistry()
+	other := Region{Path: "src/db.py", Symbol: strp("query")}
+	reg.Acquire("r1", "sara", "a1", authRegion, "first", nil, PriorityNormal, nil)
+	clock.Advance(10)
+	reg.Acquire("r1", "sara", "a1", other, "second", nil, PriorityNormal, nil)
+	if got := reg.AgeOf("a1"); got != 0.0 {
+		t.Fatalf("expected age 0.0 (the first claim), got %v", got)
+	}
+}
+
+func TestAgeOfAnAgentHoldingNothingIsNowOnFirstSight(t *testing.T) {
+	clock, reg, _ := newTestRegistry()
+	clock.Advance(7)
+	if got := reg.AgeOf("nobody"); got != 7.0 {
+		t.Fatalf("expected 7.0 on first sight, got %v", got)
+	}
+}
+
+// -- PR #37 / issue #35: requester age survives an abort -------------------
+//
+// Before the fix, age_of returned clock.now() for any agent holding
+// nothing, so a requester that had just been refused (and, on abort, had
+// its own leases dropped) always read as brand new on its very next ask —
+// the "wait" half of wait-die was unreachable for the ordinary shape of
+// contention. This is the behaviour the Go relay ships, not the bug.
+
+func TestRequesterAgeSurvivesAnAbortAndCanLaterWin(t *testing.T) {
+	clock, reg, _ := newTestRegistry()
+	// a1 is seen first (and holds nothing) — this is its "first_seen" age.
+	reg.AgeOf("a1")
+	clock.Advance(5)
+	// a2 takes the region and is therefore younger than a1's first_seen age.
+	reg.Acquire("r1", "dev", "a2", authRegion, "work", nil, PriorityNormal, nil)
+	clock.Advance(1)
+	// a1 asks, loses (it is older, so wait-die says *wait*, not abort —
+	// but to exercise the fix directly, drive age_of the way `contend`
+	// does and confirm it is NOT "now".
+	age := reg.AgeOf("a1")
+	if age != 0.0 {
+		t.Fatalf("expected a1's age to still be its first-seen time (0.0), got %v — "+
+			"age_of is resetting to now for an agent holding nothing, which is the "+
+			"bug PR #37/#35 fixed", age)
+	}
+}
+
+func TestReleaseToEmptyHandedResetsAgeForTheNextGenuinelyNewAsk(t *testing.T) {
+	// The other half of the fix: release() (a *voluntary* end, not an
+	// abort) does start the clock fresh, because the transaction actually
+	// concluded on its own terms. Mirrors leases.py's release() comment.
+	clock, reg, _ := newTestRegistry()
+	reg.Acquire("r1", "sara", "a1", authRegion, "x", nil, PriorityNormal, nil)
+	clock.Advance(3)
+	reg.Release("r1", "a1", authRegion, nil)
+	clock.Advance(4)
+	if got := reg.AgeOf("a1"); got != 7.0 {
+		t.Fatalf("expected age to reset to 7.0 after a voluntary release, got %v", got)
+	}
+}
+
+// -- PR #37 / issue #34: lazy expiry discovered by a read still broadcasts -
+
+func TestExpiryDiscoveredByAReadStillPublishes(t *testing.T) {
+	clock, reg, pub := newTestRegistry()
+	reg.Acquire("r1", "sara", "a1", authRegion, "x", nil, PriorityNormal, nil)
+	clock.Advance(LeaseTTLS + 1)
+
+	// HolderOf is a read, not a write — before the fix, only the mutating
+	// calls (acquire/release/...) diffed and published; a read-triggered
+	// expiry vanished from the table silently and the room never heard it
+	// timed out.
+	if reg.HolderOf("r1", authRegion, nil) != nil {
+		t.Fatalf("expected the lease to have expired")
+	}
+	pub.mu.Lock()
+	defer pub.mu.Unlock()
+	found := false
+	for _, f := range pub.broadcast {
+		if f["type"] == "lease" && f["state"] == "expired" && f["agent"] == "a1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected a lease/expired frame from the read-triggered expiry, got %+v", pub.broadcast)
+	}
+}
+
+// -- handover / reservation -------------------------------------------------
+
+func TestContentionCapsTheHoldersRenewal(t *testing.T) {
+	clock, reg, _ := newTestRegistry()
+	reg.Acquire("r1", "sara", "a1", authRegion, "x", nil, PriorityNormal, nil)
+	clock.Advance(1)
+	reg.Contend("r1", authRegion, "a2", "dev", PriorityNormal, nil, nil)
+
+	held := reg.HolderOf("r1", authRegion, nil)
+	if held.HandoverAt == nil {
+		t.Fatalf("expected a handover deadline after contention")
+	}
+	// a2 loses wait-die (younger) so the cap is the long fair-share grace,
+	// not the short handover grace.
+	want := 1.0 + FairShareGraceS
+	if *held.HandoverAt != want {
+		t.Fatalf("expected handover_at %v, got %v", want, *held.HandoverAt)
+	}
+}
+
+func TestRegionIsReservedForTheWinnerAfterHandoverDeadline(t *testing.T) {
+	clock, reg, _ := newTestRegistry()
+	other := Region{Path: "src/db.py", Symbol: strp("query")}
+	// a2 is elder (claims first), so when it contends for a1's region,
+	// wait-die says a1 (the younger holder) faces the short handover grace.
+	reg.Acquire("r1", "dev", "a2", other, "warm up", nil, PriorityNormal, nil)
+	clock.Advance(10)
+	reg.Acquire("r1", "sara", "a1", authRegion, "x", nil, PriorityNormal, nil)
+	reg.Contend("r1", authRegion, "a2", "dev", PriorityNormal, nil, nil)
+
+	held := reg.HolderOf("r1", authRegion, nil)
+	if held.HandoverAt == nil {
+		t.Fatalf("expected a handover deadline")
+	}
+	clock.Advance(*held.HandoverAt - clock.Now() + 0.001)
+
+	// The lease should now be gone (deadline passed) and the region
+	// reserved for a2.
+	if reg.HolderOf("r1", authRegion, nil) != nil {
+		t.Fatalf("expected the lease to have ended at its handover deadline")
+	}
+	res := reg.ReservationFor("r1", authRegion, nil)
+	if res == nil || res.Agent != "a2" {
+		t.Fatalf("expected the region reserved for a2, got %+v", res)
+	}
+
+	// a1 (the loser) cannot jump the reservation.
+	grab := reg.Acquire("r1", "sara", "a1", authRegion, "grab it back", nil, PriorityNormal, nil)
+	if grab.Ok {
+		t.Fatalf("expected the reservation to block anyone but a2")
+	}
+
+	// a2 claims it — inherits the reservation.
+	win := reg.Acquire("r1", "dev", "a2", authRegion, "mine now", nil, PriorityNormal, nil)
+	if !win.Ok {
+		t.Fatalf("expected a2 to be granted the reserved region, got %+v", win)
+	}
+}
+
+// -- priority -----------------------------------------------------------
+
+func TestHigherTierWaitsAgainstAnOlderLowerTierHolder(t *testing.T) {
+	clock, reg, _ := newTestRegistry()
+	reg.Acquire("r1", "sara", "a1", authRegion, "x", nil, PriorityNormal, nil)
+	clock.Advance(10)
+	res := reg.Acquire("r1", "ci", "a2", authRegion, "y", nil, PriorityCritical, nil)
+	if res.Decision != decisionWait {
+		t.Fatalf("expected a critical requester to wait against an older normal holder, got %v", res.Decision)
+	}
+}
