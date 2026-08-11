@@ -8,21 +8,62 @@ import (
 // Dispatch routes a tool call to the matching method. Returns an error on
 // an unknown tool name — the one case a Claude Code client can name a tool
 // this server never registered — mirroring mcp_server.py's dispatch, which
-// raises KeyError for the same case. Tool calls themselves never error:
-// an invented negotiation move comes back as a refusal carrying the valid
-// moves, not a Go error.
+// raises KeyError for the same case. A required argument that's missing
+// errors the same way: mcp.Server.AddTool leaves schema validation to the
+// caller (go-sdk mcp/server.go's AddTool doc comment), so this is the only
+// place a missing "path" or "intent" gets caught before it turns into a
+// real claim on an empty-string region. Tool calls themselves never error
+// once their required arguments are in hand: an invented negotiation move
+// comes back as a refusal carrying the valid moves, not a Go error.
 func Dispatch(ctx context.Context, tools *Tools, name string, args map[string]any) (any, error) {
 	switch name {
 	case "who_else_is_here":
 		return tools.WhoElseIsHere(ctx), nil
 	case "claim_work":
-		return tools.ClaimWork(ctx, strOf(args["path"]), symbolArg(args), strOf(args["intent"])), nil
+		path, err := requireStr(args, "path")
+		if err != nil {
+			return nil, err
+		}
+		intent, err := requireStr(args, "intent")
+		if err != nil {
+			return nil, err
+		}
+		return tools.ClaimWork(ctx, path, symbolArg(args), intent), nil
 	case "release":
-		return tools.Release(ctx, strOf(args["path"]), symbolArg(args)), nil
+		path, err := requireStr(args, "path")
+		if err != nil {
+			return nil, err
+		}
+		return tools.Release(ctx, path, symbolArg(args)), nil
 	case "respond":
-		return tools.Respond(ctx, strOf(args["path"]), symbolArg(args), strOf(args["move"]), strOf(args["reason"])), nil
+		path, err := requireStr(args, "path")
+		if err != nil {
+			return nil, err
+		}
+		move, err := requireStr(args, "move")
+		if err != nil {
+			return nil, err
+		}
+		return tools.Respond(ctx, path, symbolArg(args), move, strOf(args["reason"])), nil
 	}
 	return nil, fmt.Errorf("unknown tool: %q", name)
+}
+
+// requireStr reads a required string argument, erroring the way Python's
+// arguments["path"] raised KeyError on a missing key — except a Go map
+// index can't raise, so this is the explicit stand-in. A present-but-
+// wrong-typed value errors too: a schema-violating call, same as a
+// missing one, not a quiet fallback to "".
+func requireStr(args map[string]any, key string) (string, error) {
+	v, ok := args[key]
+	if !ok {
+		return "", fmt.Errorf("missing required argument %q", key)
+	}
+	s, ok := v.(string)
+	if !ok {
+		return "", fmt.Errorf("argument %q must be a string, got %T", key, v)
+	}
+	return s, nil
 }
 
 // symbolArg reads the optional "symbol" argument, nil when absent or not a

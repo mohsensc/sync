@@ -336,6 +336,51 @@ func TestDispatchRejectsAnUnknownTool(t *testing.T) {
 	}
 }
 
+// TestDispatchRejectsAMissingRequiredArgument guards against the schema's
+// "required" list being decorative: nothing upstream of Dispatch enforces
+// it (go-sdk's AddTool leaves that to the caller), so a claim_work call
+// missing "path" must error here, not fall through to a claim on "".
+func TestDispatchRejectsAMissingRequiredArgument(t *testing.T) {
+	url, relay, stop := startScriptedRelay(t)
+	defer stop()
+	tools := newTestTools(url, "r1", "a1", "sara")
+	defer tools.Close()
+
+	cases := []struct {
+		tool string
+		args map[string]any
+	}{
+		{"claim_work", map[string]any{"intent": "no path given"}},
+		{"claim_work", map[string]any{"path": "src/db.py"}},
+		{"release", map[string]any{}},
+		{"respond", map[string]any{"move": "DEFER"}},
+		{"respond", map[string]any{"path": "src/db.py"}},
+	}
+	for _, c := range cases {
+		if _, err := Dispatch(context.Background(), tools, c.tool, c.args); err == nil {
+			t.Fatalf("%s%+v: expected an error for a missing required argument", c.tool, c.args)
+		}
+	}
+
+	relay.mu.Lock()
+	defer relay.mu.Unlock()
+	if len(relay.held) != 0 {
+		t.Fatalf("a rejected call must never reach the relay, got held=%+v", relay.held)
+	}
+}
+
+func TestDispatchRejectsAWrongTypedRequiredArgument(t *testing.T) {
+	tools := newTestTools("ws://127.0.0.1:1", "r1", "a1", "sara")
+	defer tools.Close()
+
+	_, err := Dispatch(context.Background(), tools, "claim_work", map[string]any{
+		"path": 42, "intent": "x",
+	})
+	if err == nil {
+		t.Fatal("expected an error for a non-string required argument")
+	}
+}
+
 // -- crossing a real connection boundary --------------------------------
 //
 // The bug this suite exists to catch, structurally: a claim made through
