@@ -18,9 +18,13 @@ package relay
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -68,6 +72,22 @@ type Config struct {
 	// Outbound queue capacity, in messages. Bounded and drop-oldest — see
 	// internal/outbound.
 	OutboundCapacity int
+
+	// TLS, consulted only when URL has a wss:// scheme. The zero value
+	// verifies the relay's certificate against the system root pool —
+	// the same thing any other TLS client on this machine trusts.
+	//
+	// TLSCAFile adds one more trusted PEM (cert or bundle) on top of that
+	// pool — see #22's docs/tls-dev-cert.md — for a self-signed dev
+	// relay. It does not disable verification; a relay presenting
+	// anything else still fails the handshake.
+	TLSCAFile string
+	// TLSInsecureSkipVerify turns certificate verification off entirely.
+	// The connection is still encrypted; it's just no longer proof of
+	// which relay is on the other end, which is what verification is
+	// for. Logged loudly on every Run — this is not meant to be a quiet
+	// flag to flip and forget. Prefer TLSCAFile.
+	TLSInsecureSkipVerify bool
 }
 
 func (c Config) withDefaults() Config {
@@ -156,12 +176,28 @@ func (c *Client) SendText(msg []byte) {
 // Run drives the connect/backoff loop until ctx is cancelled. Intended to be
 // started in its own goroutine by the caller; see daemon.Run.
 func (c *Client) Run(ctx context.Context) {
-	if !strings.HasPrefix(c.cfg.URL, "ws://") {
-		// wss is rejected rather than silently downgraded — same rule as
-		// parse_relay_url in relay_client.cpp. TLS is #22, not this wave.
-		c.setError("only ws:// is supported (see #22 for wss)")
+	isWSS := strings.HasPrefix(c.cfg.URL, "wss://")
+	if !strings.HasPrefix(c.cfg.URL, "ws://") && !isWSS {
+		// Neither scheme silently downgraded nor silently upgraded — same
+		// rule parse_relay_url in relay_client.cpp applied to ws://.
+		c.setError(fmt.Sprintf("relay url must start with ws:// or wss://, got %q", c.cfg.URL))
 		c.state.Store(int32(StateBackoff))
 		return
+	}
+
+	dialer := websocket.DefaultDialer
+	if isWSS {
+		tlsConfig, err := c.buildTLSConfig()
+		if err != nil {
+			// Fail-open like every other error in this loop: a bad CA
+			// file means "never connects," not "crash the daemon."
+			c.setError(err.Error())
+			c.state.Store(int32(StateBackoff))
+			return
+		}
+		d := *websocket.DefaultDialer
+		d.TLSClientConfig = tlsConfig
+		dialer = &d
 	}
 
 	backoff := time.Duration(0)
@@ -172,7 +208,7 @@ func (c *Client) Run(ctx context.Context) {
 
 		c.state.Store(int32(StateConnecting))
 		c.connectAttempts.Add(1)
-		conn, resp, err := websocket.DefaultDialer.DialContext(ctx, c.cfg.URL, nil)
+		conn, resp, err := dialer.DialContext(ctx, c.cfg.URL, nil)
 		if err != nil {
 			if resp != nil {
 				resp.Body.Close()
@@ -198,6 +234,40 @@ func (c *Client) Run(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// buildTLSConfig turns the config's TLS options into what gorilla's dialer
+// wants. Called once per Run, not per reconnect attempt — the CA file (or
+// the skip-verify decision) doesn't change mid-process, and the loud
+// warning below belongs at startup, not on every backoff retry.
+func (c *Client) buildTLSConfig() (*tls.Config, error) {
+	if c.cfg.TLSInsecureSkipVerify {
+		// Deliberately not gated behind a log level: this is the one
+		// warning in the package meant to be impossible to miss.
+		log.Printf("relay: TLS CERTIFICATE VERIFICATION DISABLED — connecting to %s "+
+			"without checking who's on the other end. Traffic is still encrypted, "+
+			"but anyone who can intercept the connection can impersonate the relay. "+
+			"This is for local development only; see docs/tls-dev-cert.md for the "+
+			"non-insecure option (AGENT_PRESENCE_RELAY_CA).", c.cfg.URL)
+		return &tls.Config{InsecureSkipVerify: true}, nil
+	}
+	if c.cfg.TLSCAFile == "" {
+		// System root pool, same as any other TLS client on this
+		// machine — the default this issue asks for.
+		return nil, nil
+	}
+	pem, err := os.ReadFile(c.cfg.TLSCAFile)
+	if err != nil {
+		return nil, fmt.Errorf("relay: cannot read TLS CA file %s: %w", c.cfg.TLSCAFile, err)
+	}
+	pool, err := x509.SystemCertPool()
+	if err != nil || pool == nil {
+		pool = x509.NewCertPool()
+	}
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("relay: no PEM certificate found in %s", c.cfg.TLSCAFile)
+	}
+	return &tls.Config{RootCAs: pool}, nil
 }
 
 // nextBackoff mirrors RelayClient::drop's doubling: min on the first
@@ -477,6 +547,10 @@ func (c *Client) toLease(e wire.LeaseFrame) (string, leases.Lease, bool) {
 		Priority:    e.Priority,
 		ExpiresAtMs: nowMs() + ttl.Milliseconds(),
 		Waiting:     e.Waiting,
+		// The scope this lease was claimed at, so a later edit decision
+		// on this path can tell "same symbol" from "disjoint symbol"
+		// without re-deriving it from the key — see leases.Cache.Conflict.
+		Symbol: symbol,
 	}
 	// A duration on the wire, an absolute monotonic-ish instant here —
 	// same rule as expires_in_ms above. Absent means nobody has asked for

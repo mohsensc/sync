@@ -1,5 +1,4 @@
-"""The launchable surface: `python -m`, the console scripts, and the stdio MCP
-transport.
+"""The launchable surface: `python -m` and the console scripts.
 
 These all start real processes. Importing a module proves nothing about whether
 it runs — the whole reason this file exists is that `python -m
@@ -29,7 +28,7 @@ PYTHON_ROOT = Path(__file__).resolve().parents[1]
 PYPROJECT = PYTHON_ROOT / "pyproject.toml"
 BIN_DIR = Path(sys.executable).parent
 
-# Generous: a cold subprocess import of websockets and mcp is not fast.
+# Generous: a cold subprocess import of websockets is not fast.
 BOOT_TIMEOUT_S = 30.0
 LISTENING = re.compile(r"agent_presence\.serve relay listening on ([^\s:]+):(\d+)")
 
@@ -200,22 +199,15 @@ def test_bad_relay_arguments_are_refused_with_a_message(argv, env, expected):
     assert expected in proc.stderr
 
 
-def test_a_bad_mcp_log_level_is_refused_before_stdout_is_touched():
-    proc = subprocess.run(
-        [sys.executable, "-m", "agent_presence.mcp_server", "--log-level", "LOUD"],
-        cwd=PYTHON_ROOT, input="", capture_output=True, text=True,
-        timeout=BOOT_TIMEOUT_S, env=_clean_env(),
-    )
-    assert proc.returncode != 0
-    assert "unknown log level" in proc.stderr
-    assert proc.stdout == ""
-
-
 # -- the console scripts ----------------------------------------------------
+#
+# agent-presence-mcp used to be a console script here, checked the same way
+# the two below are. It's a Go binary now (#32) — go/cmd/agent-presence-mcp
+# has its own build-and-exec tests for the same claims (starts, speaks the
+# protocol, exits cleanly).
 
 EXPECTED_SCRIPTS = {
     "agent-presence-relay": "agent_presence.serve:main",
-    "agent-presence-mcp": "agent_presence.mcp_server:main",
     "ap": "agent_presence.cli:main",
 }
 
@@ -260,151 +252,12 @@ def test_the_relay_console_script_serves_the_same_way_the_module_does():
         proc.wait(timeout=BOOT_TIMEOUT_S)
 
 
-# -- the MCP server over stdio ----------------------------------------------
 
-
-class StdioClient:
-    """The smallest MCP client that can prove the transport works: JSON-RPC,
-    one object per line, on the process's own stdin and stdout."""
-
-    def __init__(self, proc: subprocess.Popen) -> None:
-        self.proc = proc
-        self._next_id = 0
-
-    def notify(self, method: str, params: dict | None = None) -> None:
-        self._write({"jsonrpc": "2.0", "method": method, "params": params or {}})
-
-    def request(self, method: str, params: dict | None = None) -> dict:
-        self._next_id += 1
-        self._write({"jsonrpc": "2.0", "id": self._next_id,
-                     "method": method, "params": params or {}})
-        line = self.proc.stdout.readline()
-        assert line, (
-            "mcp server closed stdout without replying. stderr:\n"
-            + (self.proc.stderr.read() or "")
-        )
-        return json.loads(line)
-
-    def _write(self, obj: dict) -> None:
-        self.proc.stdin.write(json.dumps(obj) + "\n")
-        self.proc.stdin.flush()
-
-    def handshake(self) -> dict:
-        reply = self.request("initialize", {
-            "protocolVersion": "2025-11-25",
-            "capabilities": {},
-            "clientInfo": {"name": "test", "version": "0"},
-        })
-        self.notify("notifications/initialized")
-        return reply
-
-
-@contextlib.contextmanager
-def mcp_process(env: dict[str, str] | None = None):
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "agent_presence.mcp_server"],
-        cwd=PYTHON_ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, text=True,
-        env=env or _clean_env(AGENT_PRESENCE_ROOM="r1",
-                              AGENT_PRESENCE_AGENT="a1",
-                              AGENT_PRESENCE_HUMAN="sara"),
-    )
-    try:
-        yield StdioClient(proc)
-    finally:
-        with contextlib.suppress(OSError, ValueError):
-            proc.stdin.close()
-        try:
-            proc.wait(timeout=BOOT_TIMEOUT_S)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=BOOT_TIMEOUT_S)
-
-
-def test_the_mcp_server_completes_a_stdio_handshake():
-    with mcp_process() as client:
-        reply = client.handshake()
-        assert reply["result"]["serverInfo"]["name"] == "agent-presence"
-
-
-def test_the_mcp_server_lists_its_four_tools_over_stdio():
-    with mcp_process() as client:
-        client.handshake()
-        listed = client.request("tools/list")
-        assert [t["name"] for t in listed["result"]["tools"]] == [
-            "who_else_is_here", "claim_work", "release", "respond",
-        ]
-
-
-def test_a_tool_call_over_stdio_reaches_the_lease_registry():
-    """The whole point of this transport: a claim made over the MCP stdio
-    session has to reach an actual relay, not a table private to this
-    process. So a relay runs in its own process here too, and the MCP server
-    is pointed at it with `AGENT_PRESENCE_RELAY`."""
-    with relay_process(["--port", "0"]) as relay:
-        env = _clean_env(AGENT_PRESENCE_ROOM="r1", AGENT_PRESENCE_AGENT="a1",
-                         AGENT_PRESENCE_HUMAN="sara", AGENT_PRESENCE_RELAY=relay.url)
-        with mcp_process(env) as client:
-            client.handshake()
-            args = {"path": "src/db.py", "symbol": "query", "intent": "add index"}
-            first = client.request("tools/call",
-                                   {"name": "claim_work", "arguments": args})
-            assert json.loads(first["result"]["content"][0]["text"]) == {"granted": True}
-
-            # Same relay: releasing has to make the region free again, which
-            # is only observable if the call really reached the relay's state.
-            client.request("tools/call", {
-                "name": "release", "arguments": {"path": "src/db.py", "symbol": "query"},
-            })
-            again = client.request("tools/call",
-                                   {"name": "claim_work", "arguments": args})
-            assert json.loads(again["result"]["content"][0]["text"]) == {"granted": True}
-
-
-def test_the_mcp_server_exits_0_when_the_client_closes_stdin():
-    with mcp_process() as client:
-        client.handshake()
-        client.proc.stdin.close()
-        assert client.proc.wait(timeout=BOOT_TIMEOUT_S) == 0
-
-
-def test_the_mcp_console_script_speaks_the_protocol_too():
-    proc = subprocess.Popen(
-        [str(BIN_DIR / "agent-presence-mcp")],
-        cwd=PYTHON_ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, text=True,
-        env=_clean_env(AGENT_PRESENCE_ROOM="r1", AGENT_PRESENCE_AGENT="a1"),
-    )
-    try:
-        client = StdioClient(proc)
-        assert client.handshake()["result"]["serverInfo"]["name"] == "agent-presence"
-    finally:
-        proc.stdin.close()
-        proc.wait(timeout=BOOT_TIMEOUT_S)
-
-
-def test_mcp_flags_pin_room_agent_and_human():
-    proc = subprocess.run(
-        [sys.executable, "-m", "agent_presence.mcp_server",
-         "--room", "r9", "--agent", "a9", "--human", "h9"],
-        cwd=PYTHON_ROOT, input="", capture_output=True, text=True,
-        timeout=BOOT_TIMEOUT_S,
-        # Env says something else, so this also pins the precedence.
-        env=_clean_env(AGENT_PRESENCE_ROOM="from-env"),
-    )
-    assert proc.returncode == 0, proc.stderr
-    assert "room=r9 agent=a9 human=h9" in proc.stderr
-
-
-def test_nothing_but_protocol_reaches_stdout():
-    """Logs on stdout would corrupt the transport, so the log line naming the
-    room has to be on stderr and stdout has to stay parseable."""
-    with mcp_process() as client:
-        client.handshake()
-        client.proc.stdin.close()
-        client.proc.wait(timeout=BOOT_TIMEOUT_S)
-        rest = client.proc.stdout.read()
-        for line in rest.splitlines():
-            if line.strip():
-                json.loads(line)
-        assert "room=r1" in client.proc.stderr.read()
+# The MCP server over stdio used to be covered here — a subprocess doing a
+# real JSON-RPC handshake, listing its tools, and reaching a real relay
+# over `claim_work`. It's a Go binary now (#32);
+# go/cmd/agent-presence-mcp/main_test.go builds and execs the real binary
+# the same way this file did, for the same claims: the stdio transport
+# works, the tool list is right, a claim reaches an actual relay, the
+# process exits 0 when its client closes stdin, and only protocol ever
+# reaches stdout.

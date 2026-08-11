@@ -13,6 +13,7 @@ import json
 import os
 import signal
 import socket
+import ssl
 import subprocess
 import time
 from collections import Counter
@@ -28,6 +29,49 @@ AP_HOOK = CPP_BUILD / "ap-hook"
 # The daemon is Go now (#18) — the hook stays C++, see docs/gohook-spike.md.
 # run.py's preflight builds this from go/cmd/presenced if it is stale.
 GO_BUILD = ROOT / "tests" / "load" / "build"
+
+# -- TLS (#22) ------------------------------------------------------------
+#
+# AP_LOAD_TLS=1 flips every RelayProc/Client/DaemonProc in this run onto a
+# self-signed dev cert over wss:// instead of ws:// — the same recipe
+# docs/tls-dev-cert.md documents, generated once and reused for the run
+# rather than per scenario. Nothing here changes what a scenario measures;
+# it changes the transport every scenario measures it over. Off by
+# default, so every existing invocation of run.py is unaffected.
+TLS_ENABLED = os.environ.get("AP_LOAD_TLS") == "1"
+_TLS_DIR = GO_BUILD / "tls"
+_TLS_CERT = _TLS_DIR / "relay-cert.pem"
+_TLS_KEY = _TLS_DIR / "relay-key.pem"
+_tls_client_ctx: ssl.SSLContext | None = None
+
+
+def ensure_dev_cert() -> tuple[Path, Path]:
+    """The cert/key pair every TLS-enabled process in this run shares.
+    Generated once; a run that only ever reads AP_LOAD_TLS through this
+    function never regenerates it mid-run."""
+    if not (_TLS_CERT.exists() and _TLS_KEY.exists()):
+        _TLS_DIR.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["openssl", "req", "-x509", "-newkey", "ec",
+             "-pkeyopt", "ec_paramgen_curve:prime256v1",
+             "-keyout", str(_TLS_KEY), "-out", str(_TLS_CERT),
+             "-days", "1", "-nodes", "-subj", "/CN=agent-presence-load-test",
+             "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1"],
+            check=True, capture_output=True,
+        )
+    return _TLS_CERT, _TLS_KEY
+
+
+def dev_client_ssl_context() -> ssl.SSLContext:
+    """A client context that trusts exactly the dev cert above — real
+    verification (not `CERT_NONE`), scoped to the one cert this run
+    generated, matching what an operator following docs/tls-dev-cert.md
+    would set up with AGENT_PRESENCE_RELAY_CA."""
+    global _tls_client_ctx
+    if _tls_client_ctx is None:
+        cert, _ = ensure_dev_cert()
+        _tls_client_ctx = ssl.create_default_context(cafile=str(cert))
+    return _tls_client_ctx
 PRESENCED = GO_BUILD / "presenced"
 BOOT = Path(__file__).resolve().parent / "_relay_boot.py"
 
@@ -126,7 +170,8 @@ class RelayProc:
 
     @property
     def url(self) -> str:
-        return f"ws://127.0.0.1:{self.port}"
+        scheme = "wss" if TLS_ENABLED else "ws"
+        return f"{scheme}://127.0.0.1:{self.port}"
 
     def start(self) -> None:
         env = dict(os.environ)
@@ -135,6 +180,10 @@ class RelayProc:
         env["PYTHONPATH"] = str(ROOT / "python" / "src")
         if self.lease_ttl_s is not None:
             env["AP_LOAD_LEASE_TTL_S"] = str(self.lease_ttl_s)
+        if TLS_ENABLED:
+            cert, key = ensure_dev_cert()
+            env["AGENT_PRESENCE_TLS_CERT"] = str(cert)
+            env["AGENT_PRESENCE_TLS_KEY"] = str(key)
         self.log.parent.mkdir(parents=True, exist_ok=True)
         fh = open(self.log, "wb")
         self.proc = subprocess.Popen(
@@ -222,6 +271,12 @@ class DaemonProc:
             "AGENT_PRESENCE_AGENT": self.name,
             "AGENT_PRESENCE_HUMAN": f"human-{self.name}",
         })
+        if TLS_ENABLED and self.relay_url.startswith("wss://"):
+            # Real verification against the run's dev cert, not skip-verify
+            # — this is what proves the Go client's default TLS dial path,
+            # not just that the flag exists.
+            cert, _ = ensure_dev_cert()
+            env["AGENT_PRESENCE_RELAY_CA"] = str(cert)
         fh = open(self.log, "wb")
         self.proc = subprocess.Popen([str(PRESENCED)], env=env, stdout=fh, stderr=fh)
         end = time.time() + 10
@@ -330,8 +385,10 @@ class Client:
         self.closed_early = False
 
     async def connect(self) -> None:
+        ssl_ctx = dev_client_ssl_context() if TLS_ENABLED else None
         self.ws = await websockets.connect(
             self.url, open_timeout=30, ping_interval=None, max_queue=None,
+            ssl=ssl_ctx,
         )
         self._reader = asyncio.create_task(self._read_loop())
         await self.ws.send(json.dumps({"type": "join", "room": self.room,

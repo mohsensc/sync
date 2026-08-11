@@ -6,9 +6,6 @@ every test here that asserts silence is doing more work than the ones that
 assert a hit.
 """
 
-import asyncio
-import contextlib
-
 import pytest
 
 from agent_presence.clock import VirtualClock
@@ -23,8 +20,6 @@ from agent_presence.ladder import (
     rung4_threshold,
 )
 from agent_presence.relay import Relay
-from agent_presence.relay_client import RelayConnection
-from agent_presence.serve import serve
 from agent_presence.types import AgentEvent, Region
 
 # The canonical pair: same work, no shared token that a hook could ever see,
@@ -42,30 +37,6 @@ def rung4_on(monkeypatch):
 @pytest.fixture
 def relay():
     return Relay(VirtualClock(1000.0))
-
-
-@contextlib.asynccontextmanager
-async def running_relay(relay: Relay):
-    """Serve `relay` on an ephemeral localhost port for the block, and hand
-    back its ws:// url."""
-    stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    ready: asyncio.Future = loop.create_future()
-
-    def on_ready(srv) -> None:
-        if not ready.done():
-            ready.set_result(srv.sockets[0].getsockname()[1])
-
-    task = asyncio.create_task(
-        serve("127.0.0.1", 0, relay, stop=stop, on_ready=on_ready)
-    )
-    port = await asyncio.wait_for(ready, timeout=5)
-    try:
-        yield f"ws://127.0.0.1:{port}"
-    finally:
-        stop.set()
-        with contextlib.suppress(asyncio.CancelledError):
-            await asyncio.wait_for(task, timeout=5)
 
 
 class FakeConn:
@@ -443,49 +414,11 @@ def test_a_lease_conflict_outranks_a_text_match(relay, rung4_on):
     assert reply["type"] == "negotiate"
 
 
-# -- the mcp tool -----------------------------------------------------------
-
-
-async def test_claim_work_reports_redundancy(relay, rung4_on):
-    from agent_presence.mcp_server import Tools
-
-    async with running_relay(relay) as url:
-        sara_conn, dev_conn = (
-            RelayConnection(url, "r1", "a1", "sara"),
-            RelayConnection(url, "r1", "a2", "dev"),
-        )
-        sara, dev = Tools(sara_conn, "r1", "a1", "sara"), Tools(dev_conn, "r1", "a2", "dev")
-        try:
-            await sara.claim_work("src/login/session.py", None, TOKEN)
-            out = await dev.claim_work("src/auth/jwt.py", None, JWT)
-        finally:
-            await sara_conn.close()
-            await dev_conn.close()
-
-    assert out["granted"] is True
-    assert out["rung"] == 4
-    assert out["redundant"]["human"] == "sara"
-    assert out["redundant"]["intent"] == TOKEN
-
-
-async def test_claim_work_is_unchanged_with_the_flag_off(relay, monkeypatch):
-    from agent_presence.mcp_server import Tools
-
-    monkeypatch.delenv(RUNG4_ENV, raising=False)
-    async with running_relay(relay) as url:
-        sara_conn, dev_conn = (
-            RelayConnection(url, "r1", "a1", "sara"),
-            RelayConnection(url, "r1", "a2", "dev"),
-        )
-        sara, dev = Tools(sara_conn, "r1", "a1", "sara"), Tools(dev_conn, "r1", "a2", "dev")
-        try:
-            await sara.claim_work("src/login/session.py", None, TOKEN)
-            out = await dev.claim_work("src/auth/jwt.py", None, JWT)
-        finally:
-            await sara_conn.close()
-            await dev_conn.close()
-
-    assert out == {"granted": True}
+# The mcp tool's claim_work used to be covered here, over a real
+# RelayConnection/Tools pair. That surface is Go now (#32); rung 4 gating
+# through claim_work is covered by go/internal/mcptools's own tests
+# instead, against the same relay wire protocol the rest of this file
+# exercises.
 
 
 # -- rung 4 under a policy ---------------------------------------------------

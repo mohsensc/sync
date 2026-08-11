@@ -2,13 +2,10 @@
 name = "agent-presence"
 version = "0.0.0"
 requires-python = ">=3.12"
-# mcp 2.0 replaced the decorator server API with on_* callbacks. mcp_server.py
-# targets the callback form, so 1.x won't work.
-dependencies = ["websockets>=13.0", "mcp>=2.0.0"]
+dependencies = ["websockets>=13.0"]
 
 [project.scripts]
 agent-presence-relay = "agent_presence.serve:main"
-agent-presence-mcp = "agent_presence.mcp_server:main"
 # Short on purpose. It gets typed mid-session, next to git.
 ap = "agent_presence.cli:main"
 

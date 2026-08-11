@@ -125,7 +125,7 @@ func TestClientAgainstRealGoRelay(t *testing.T) {
 
 	deadline = time.Now().Add(5 * time.Second)
 	for {
-		if l, ok := cache.ConflictForFile("src/auth.py", "godaemon-1", nowMs()); ok {
+		if l, _, ok := cache.Conflict("src/auth.py", "godaemon-1", nowMs()); ok {
 			if l.Agent != "other-agent" {
 				t.Fatalf("cache has the wrong holder: %+v", l)
 			}
