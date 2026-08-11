@@ -7,10 +7,12 @@ import errno
 import json
 import logging
 import os
+import shutil
 import signal
 import sys
 from collections import deque
 from collections.abc import Callable
+from pathlib import Path
 
 import websockets
 from websockets.asyncio.server import Server
@@ -483,6 +485,53 @@ def _env_port(name: str, default: int) -> int:
         raise SystemExit(f"{name} must be an integer, got {raw!r}") from None
 
 
+IMPL_ENV = "AGENT_PRESENCE_RELAY_IMPL"
+GORELAY_BIN_ENV = "AGENT_PRESENCE_GORELAY_BIN"
+
+
+def _find_gorelay_bin() -> str:
+    """Where the Go relay binary lives, checked in the order an operator
+    would expect: an explicit override, then the conventional build output
+    next to this checkout, then whatever `gorelay` resolves to on PATH.
+
+    Raises SystemExit with a build hint rather than a bare FileNotFoundError
+    two frames of traceback later — `--impl go` with nothing built is the
+    common way to hit this, not a bug.
+    """
+    override = os.environ.get(GORELAY_BIN_ENV, "").strip()
+    if override:
+        return override
+    # python/src/agent_presence/serve.py -> repo root is four parents up.
+    repo_root = Path(__file__).resolve().parents[3]
+    candidate = repo_root / "go" / "bin" / "gorelay"
+    if candidate.exists():
+        return str(candidate)
+    found = shutil.which("gorelay")
+    if found:
+        return found
+    raise SystemExit(
+        "AGENT_PRESENCE_RELAY_IMPL=go (or --impl go) but no gorelay binary "
+        f"was found. Build it: cd go && go build -o bin/gorelay ./cmd/gorelay "
+        f"— or set {GORELAY_BIN_ENV} to its path."
+    )
+
+
+def _exec_go_relay(host: str, port: int, log_level: str) -> int:
+    """Replace this process with the Go relay, opt-in per docs/relay-parity.md.
+
+    A real exec, not a subprocess: `agent-presence-relay --impl go` becomes
+    indistinguishable at the OS level from running `gorelay` directly, so
+    signal handling, port binding and exit codes are the Go binary's own —
+    nothing here is a second copy of that logic to keep in sync.
+    """
+    bin_path = _find_gorelay_bin()
+    argv = [bin_path, "--host", host, "--port", str(port)]
+    env = dict(os.environ)
+    env["AGENT_PRESENCE_LOG_LEVEL"] = log_level
+    os.execve(bin_path, argv, env)
+    raise AssertionError("os.execve returned, which never happens on success")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="agent-presence-relay",
@@ -507,7 +556,19 @@ def main(argv: list[str] | None = None) -> int:
         default=os.environ.get("AGENT_PRESENCE_LOG_LEVEL", "INFO"),
         help="python logging level (env AGENT_PRESENCE_LOG_LEVEL, default INFO)",
     )
+    parser.add_argument(
+        "--impl",
+        choices=("python", "go"),
+        default=os.environ.get(IMPL_ENV, "python"),
+        help="which relay implementation to run (env AGENT_PRESENCE_RELAY_IMPL, "
+             "default python). 'go' execs the Go relay from go/cmd/gorelay — "
+             "opt-in, see docs/relay-parity.md for what parity has and hasn't "
+             "been verified before switching a real room to it.",
+    )
     args = parser.parse_args(argv)
+
+    if args.impl == "go":
+        return _exec_go_relay(args.host, args.port, args.log_level)
 
     level = args.log_level.upper()
     if level not in logging.getLevelNamesMapping():

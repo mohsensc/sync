@@ -18,6 +18,11 @@ cmake -S cpp -B cpp/build && cmake --build cpp/build
 ./install.sh                                       # copy binaries, print hooks
 ```
 
+There's also a Go relay (`go/cmd/gorelay`), same wire protocol, faster under
+contention. Opt-in: `cd go && go build -o bin/gorelay ./cmd/gorelay`, then
+`agent-presence-relay --impl go`. See `docs/relay-parity.md` for what's
+verified and what isn't yet — the default is still the Python relay.
+
 The relay takes `--host`, `--port` and `--log-level`, or the same three under
 `AGENT_PRESENCE_*`; port 0 picks a free one. The MCP server and `presenced`
 derive room, agent and human from the repo, and `AGENT_PRESENCE_*` overrides them.
