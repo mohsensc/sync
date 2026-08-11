@@ -98,15 +98,71 @@ here, not patched:
   transfer: it's now belt-and-suspenders on top of a structural fix, not the
   fix itself.
 
-Where a plain `sync.Mutex`/`sync.RWMutex` stayed instead of a channel-owned
-goroutine — `leases.Cache`, `policy.Cache`, `contend.Queue`,
-`daemon.coalescer` — that's deliberate, not a shortcut: none of these were
-ever the bug. They're read-mostly caches or small dedup structures with one
-critical section each, exactly the shape `std::shared_mutex` already handled
-correctly in C++. Forcing every one of them through a request/response
-channel would add a goroutine and a round trip for no behavioral gain, and
-`go test ./... -race` is what proves the mutexes are actually sufficient
-rather than merely assumed to be.
+### Every remaining mutex, checked on merit (#20 follow-up)
+
+`leases.Cache`, `policy.Cache`, `contend.Queue`, `presence.Table`,
+`outbound.Queue`, `hooksock.Server` and `relay.Client` all still use a plain
+`sync.Mutex`/`sync.RWMutex`, and so does the daemon's own `coalesceMu`. #20's
+literal first criterion — "each shared resource owned by one goroutine,
+mutated only via channels" — is false read that way. What follows is why
+each one stayed a mutex, checked against the actual decision hot path
+(`onRequest` → `decide.Decide`, the `.decide` socket handler), not asserted.
+
+**Only two of these sit on the hot path at all**: `leases.Cache` and
+`policy.Cache`, both read from `decide.Decide`. Tracing every caller in
+`daemon.go` — `contend.Note` fires from `onRequest` too, but only on the
+branch where a decision was already blocked, not on every call;
+`presence.Touch`, `outbound.Push` (via `relay.SendText`) and `admitCoalesce`
+all fire from `onLine` (the event socket) or the 100ms tick, never from
+`onRequest`. A decision that finds no conflict — the overwhelmingly common
+case — touches only `leases.Cache` and `policy.Cache`.
+
+**leases.Cache and policy.Cache: measured, not assumed.** Both are
+read-mostly (many decision goroutines calling `Conflict`/`EffectFor`
+concurrently, one writer — the relay pump or a policy-file tick) — the shape
+`RWMutex` exists for. To check whether channel ownership would actually be
+better, `go/internal/leases` grew a throwaway prototype (`chanCache`, one
+goroutine owning the map, `Conflict` sent as a request/reply over a channel
+instead of `RLock`) and a p99 harness driving both implementations with 8
+and 16 concurrent callers plus a background writer, 3s per run, same box:
+
+| | lanes=8 p99 | lanes=8 throughput | lanes=16 p99 | lanes=16 throughput |
+| --- | --- | --- | --- | --- |
+| `RWMutex` (current) | 56µs | 368k calls/3s | 107µs | 384k calls/3s |
+| channel-owned (prototype) | 2.75ms | 182k calls/3s | 9.2ms | 126k calls/3s |
+
+Channel ownership is 49x worse at p99 at 8 lanes and 86x worse at 16, and
+throughput drops as concurrency rises instead of holding — the single owner
+goroutine is a serialization point that `RWMutex`'s concurrent readers don't
+have. This is the literal case #20 asks for: measure, and if the conversion
+makes the hot path worse, revert and say so. The prototype and its benchmark
+were deleted after the measurement (`go/internal/leases/bench_channel_test.go`,
+`bench_p99_test.go` in this branch's history) — a losing implementation
+doesn't stay in the tree as a comparison fixture; `BenchmarkConflictConcurrentReads`
+stays as the regression guard on the winner. `policy.Cache` has the
+identical shape (`EffectFor`/`Explain` are `RLock`-only reads on the hot
+path, `Refresh` is the one writer) and isn't separately benchmarked — the
+architectural reason channel ownership loses here (no true request needs a
+reply that blocks a concurrent reader behind a single goroutine) applies
+the same way.
+
+**Everything else is off the hot path, and small.** `contend.Queue` protects
+an append plus a dedup map, only written when a decision was already
+blocked (rare) and drained once a tick; `presence.Table` and `outbound.Queue`
+are touched from the event path, not the decision path, and each guards one
+map or one slice with no ordering requirement between callers;
+`hooksock.Server`'s mutex guards a single field (`ln`) across `Start`/`Stop`,
+lifecycle calls, not per-connection ones; `relay.Client`'s mutex guards one
+string (`lastError`) — everything else on `Client` is already an atomic.
+`daemon.coalesceMu` guards the coalescer, which sits on one-way relay
+traffic fed from `onLine` and the tick, never `onRequest`. None of these
+were the bug #20's audit found, none sit where a decision can be blocked by
+them, and converting any of them buys a goroutine and a channel round trip
+in exchange for nothing measurable — the same call `go test ./...
+-race` keeps proving isn't quietly wrong.
+
+Issue #20's own DoD line has been reworded to match this rather than left
+saying something the code doesn't do; see the issue for the current text.
 
 ## Clock source
 

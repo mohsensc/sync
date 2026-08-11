@@ -7,6 +7,12 @@ package outbound
 
 import "sync"
 
+// Queue stays a plain mutex, not a channel-owned goroutine (#20): Push is
+// called from the event path and the tick, never the decision path, and
+// drop-oldest needs to inspect and trim the slice on every push — a plain
+// channel send can't express "drop the oldest queued item," only "block or
+// drop the newest one." See docs/go-daemon.md's "every remaining mutex,
+// checked on merit" section.
 type Queue struct {
 	mu       sync.Mutex
 	cap      int

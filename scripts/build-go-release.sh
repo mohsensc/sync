@@ -7,6 +7,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${1:-$ROOT/dist}"
 mkdir -p "$OUT"
+# Canonicalize now, before the cd below: a relative $OUT (e.g. the plain
+# "dist" release.yml passes) would otherwise resolve against go/ instead of
+# the caller's cwd once this script changes directory, silently writing
+# binaries somewhere the release workflow's glob never looks.
+OUT="$(cd "$OUT" && pwd)"
 
 TARGETS=(
   "linux amd64"

@@ -14,7 +14,7 @@ Three binaries, no Python needed on a teammate's machine:
 
 ```
 cmake -S cpp -B cpp/build && cmake --build cpp/build   # ap-hook
-./install.sh                                           # builds+installs all three, prints hooks
+./install.sh                                           # fetches/builds, installs all three, prints hooks
 claude mcp add agent-presence -- ~/.local/bin/agent-presence-mcp
 ```
 

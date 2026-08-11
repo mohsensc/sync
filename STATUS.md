@@ -212,3 +212,107 @@ lease on an empty-string region instead of failing visibly. `Dispatch` now
 checks each required string argument explicitly and errors before it
 reaches the relay; new tests cover the missing-key and wrong-type cases and
 assert the call never reaches the relay at all.
+
+## #20 follow-up: every remaining mutex, checked not asserted
+
+PR #38 left `leases.Cache`, `policy.Cache`, `contend.Queue`,
+`presence.Table`, `outbound.Queue`, `hooksock.Server` and `relay.Client` on
+plain mutexes and said so in its own body. This wave went back and checked
+each one on merit instead of leaving that as a concession: traced every
+caller in `daemon.go` to find which mutexes actually sit on the decision
+hot path (`onRequest` → `decide.Decide`) versus the event path or a tick,
+then measured the two that do.
+
+Only `leases.Cache` and `policy.Cache` are read from `onRequest`. A
+throwaway channel-owned prototype for `leases.Cache` (one goroutine owning
+the map, `Conflict` as a request/reply over a channel) benchmarked against
+the current `RWMutex`, 8 and 16 concurrent callers plus a background
+writer, 3s per run:
+
+| | lanes=8 p99 | lanes=16 p99 |
+| --- | --- | --- |
+| `RWMutex` (current) | 56µs | 107µs |
+| channel-owned (prototype, deleted) | 2.75ms | 9.2ms |
+
+49x-86x worse, and throughput fell as concurrency rose instead of holding —
+a single owner goroutine is a serialization point `RWMutex` readers don't
+hit. Reverted the idea, kept the mutex, deleted the prototype (the losing
+implementation doesn't stay in the tree as a fixture); the winning
+benchmark (`BenchmarkConflictConcurrentReads`) stays in
+`go/internal/leases` as a regression guard. `policy.Cache` has the same
+read-mostly shape and wasn't separately benchmarked — same architectural
+reason applies. Every other mutex (`contend`, `presence`, `outbound`,
+`hooksock.Server`'s single-field lock, `relay.Client`'s single-field lock,
+`daemon.coalesceMu`) turned out to sit off the hot path entirely once
+traced, guarding one small map, slice or field with no ordering requirement
+between callers. Full resource-by-resource writeup in docs/go-daemon.md.
+
+`go test ./... -race -count=1` — clean, unchanged by any of this (nothing
+was converted).
+
+**Contention loss at 16 lanes, actually measured**: `python
+tests/load/run.py hook-latency --storm-lanes 16`, 3 runs, on this box while
+several other agents' sessions were also running (`uptime` load average
+33-59 on 12 cores, not a quiet machine) — "hook storm on the same socket"
+no-answer rate came back 8.6%, 19.8%, 15.75%. Not 0%, and issue #20 has
+been edited to say so rather than leave an unmet checkbox reading as met.
+Down from the pre-fix 83% the issue's own "why it matters" section cites,
+and the same scenario at the harness's own default of 6 lanes on this same
+loaded box still shows 5% loss, which is the tell that this tracks overall
+machine contention more than lane count specifically — the two mutexes
+actually on the hot path were just measured above and are not where the
+loss is coming from. Worth a clean re-run on a quiet box; not something
+this issue's code needed to change to earn, and not claimed as fixed here.
+
+## #21 follow-up: a real tag, a real release, a real download
+
+Everything #21 asked for was in place except the one thing that proves it:
+no tag had ever been cut, so `.github/workflows/release.yml` had never run,
+and `install.sh`'s "fetch a binary" only ever checked a local `dist/`
+directory — it never downloaded anything.
+
+Cutting `v0.1.0` and pushing it found a real bug on the way:
+`scripts/build-go-release.sh`'s output directory argument was used as-is
+without resolving it to an absolute path, so when `release.yml` called it
+with the plain relative `dist` (`ci.yml`'s own call already used
+`$RUNNER_TEMP/dist`, an absolute path, which is why the PR-time cross-compile
+check never caught this), the script's own `cd "$ROOT/go"` — needed so `go
+build`'s module resolution works — silently changed what `dist` resolved
+to. Binaries landed in `go/dist/`, the release step's glob
+(`dist/presenced-*`) matched nothing, `softprops/action-gh-release` doesn't
+fail on a non-matching glob by default, and the run went green with a
+published release that had zero assets attached. Fixed by resolving `$OUT`
+to an absolute path with `cd "$OUT" && pwd` immediately after creating it,
+before anything else in the script can change directories.
+
+`install.sh` now tries a real download before falling back to `go build`.
+First attempt is `gh release download` — this repo is **private**, so the
+plain `github.com/.../releases/latest/download/...` redirect 404s
+unauthenticated (confirmed directly with `curl -v`: HTTP 404, not a
+network failure), and `gh` is the credential anyone with push access to
+this repo already has. `fetch_release_binary` falls through to a bare
+`curl` (with `$GITHUB_TOKEN` as a bearer header if one is set) for the day
+this repo goes public, and only reaches `go build` when neither download
+path works — the actual fallback #21 asks for, not the previous "always
+builds locally" behavior wearing a fallback's name. Also found and fixed
+along the way: the first version of `fetch_release_binary` used `"${arr[@]}"`
+on a possibly-empty array to build optional `gh`/`curl` flags, which throws
+"unbound variable" under `set -u` on bash 3.2 — still `/bin/bash` on every
+unmodified macOS install. Rewritten to branch instead of relying on array
+expansion, and re-tested against `/bin/bash` specifically, not whatever
+`bash` resolves to in this environment.
+
+Verified for real, not asserted: pushed `v0.1.0` from this branch, watched
+`release.yml` run (`gh run watch`) — first attempt built green but attached
+**zero assets** (the `build-go-release.sh` bug above), caught by actually
+checking `gh api repos/mohsensc/sync/releases/tags/v0.1.0` rather than
+trusting the workflow's own green checkmark. Deleted that release and tag,
+fixed the script, re-tagged `v0.1.0` from the fixed commit, re-ran: this
+time the API lists all 10 assets (`presenced`/`agent-presence-mcp` × 5
+targets). Then ran `install.sh` against a scratch `$AGENT_PRESENCE_BIN`
+with no local `dist/` present — it printed `fetched presenced latest for
+darwin/arm64 from mohsensc/sync` via `gh release download`, and the
+resulting binary runs (`--help` exits 0, real Mach-O arm64). CI's `go` job
+continues to cross-compile all 5 targets on every PR via the same script,
+unchanged, and now actually shares the bug-fixed path with the release
+job instead of only resembling it.

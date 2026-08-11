@@ -38,7 +38,10 @@ type entry struct {
 }
 
 // Table tracks who is doing what, dropping an agent after ttlMs of
-// silence. Safe for concurrent use.
+// silence. Safe for concurrent use. Plain mutex, not a channel-owned
+// goroutine (#20): every caller is the event path (onLine, one goroutine
+// per accepted connection) or the tick, never the decision path — see
+// docs/go-daemon.md's "every remaining mutex, checked on merit" section.
 type Table struct {
 	ttlMs int64
 	mu    sync.Mutex
