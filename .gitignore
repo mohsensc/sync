@@ -9,3 +9,4 @@ __pycache__/
 scratchpad/
 shots/
 spike/gohook/gohook
+spike/relay/goprototype/gorelayd

@@ -1,0 +1,84 @@
+[
+  {
+    "relay": "python-stock",
+    "agents": 800,
+    "hot_regions": 8,
+    "rounds_each": 15,
+    "shards": 4,
+    "ops": 12000,
+    "elapsed_s": 7.5,
+    "claims_per_s": 1599.2,
+    "granted": 129,
+    "refused": 11871,
+    "stalls": 0,
+    "relay_alive": true,
+    "dead_conns": 0,
+    "frames_delivered": 213562,
+    "fanout_per_op": 17.8,
+    "claim_latency": {
+      "n": 12000,
+      "p50_ms": 455.054,
+      "p95_ms": 920.847,
+      "p99_ms": 924.323,
+      "max_ms": 961.011
+    },
+    "relay_cpu_s": 5.98,
+    "relay_cpu_ms_per_op": 0.4983,
+    "relay_rss_kb": {
+      "after_join": 32688,
+      "peak": 82864
+    },
+    "relay_rss_kb_per_agent": 62.72,
+    "loadavg_before": [
+      4.8203125,
+      6.36572265625,
+      8.21044921875
+    ],
+    "loadavg_after": [
+      4.76123046875,
+      6.30322265625,
+      8.16650390625
+    ]
+  },
+  {
+    "relay": "python-stock",
+    "agents": 1600,
+    "hot_regions": 8,
+    "rounds_each": 15,
+    "shards": 4,
+    "ops": 24000,
+    "elapsed_s": 13.89,
+    "claims_per_s": 1728.4,
+    "granted": 126,
+    "refused": 23874,
+    "stalls": 0,
+    "relay_alive": true,
+    "dead_conns": 0,
+    "frames_delivered": 415329,
+    "fanout_per_op": 17.3,
+    "claim_latency": {
+      "n": 24000,
+      "p50_ms": 886.352,
+      "p95_ms": 1201.983,
+      "p99_ms": 1353.775,
+      "max_ms": 1364.36
+    },
+    "relay_cpu_s": 11.85,
+    "relay_cpu_ms_per_op": 0.4937,
+    "relay_rss_kb": {
+      "after_join": 82864,
+      "peak": 140928
+    },
+    "relay_rss_kb_per_agent": 36.29,
+    "loadavg_before": [
+      4.76123046875,
+      6.30322265625,
+      8.16650390625
+    ],
+    "loadavg_after": [
+      5.23876953125,
+      6.32275390625,
+      8.14013671875
+    ]
+  }
+]

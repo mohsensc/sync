@@ -1,0 +1,174 @@
+[
+  {
+    "relay": "python-stock",
+    "agents": 200,
+    "hot_regions": 8,
+    "rounds_each": 15,
+    "connect_s": 0.12,
+    "ops": 3000,
+    "elapsed_s": 1.11,
+    "claims_per_s": 2712.7,
+    "granted": 121,
+    "refused": 2879,
+    "stalls": 0,
+    "relay_alive": true,
+    "dead_conns": 0,
+    "client_errors": 0,
+    "frames_delivered": 50152,
+    "fanout_per_op": 16.7,
+    "claim_latency": {
+      "n": 3000,
+      "p50_ms": 67.027,
+      "p95_ms": 98.116,
+      "p99_ms": 102.67,
+      "max_ms": 104.916
+    },
+    "relay_cpu_s": 1.08,
+    "relay_cpu_ms_per_op": 0.36,
+    "relay_rss_kb": {
+      "after_join": 47152,
+      "peak": 46304
+    },
+    "relay_rss_kb_per_agent": -4.24,
+    "harness_cpu_s": 0.775,
+    "loadavg_before": [
+      3.48681640625,
+      6.7802734375,
+      9.0439453125
+    ],
+    "loadavg_after": [
+      3.48681640625,
+      6.7802734375,
+      9.0439453125
+    ]
+  },
+  {
+    "relay": "python-stock",
+    "agents": 400,
+    "hot_regions": 8,
+    "rounds_each": 15,
+    "connect_s": 0.11,
+    "ops": 6000,
+    "elapsed_s": 2.32,
+    "claims_per_s": 2586.9,
+    "granted": 121,
+    "refused": 5879,
+    "stalls": 0,
+    "relay_alive": true,
+    "dead_conns": 0,
+    "client_errors": 0,
+    "frames_delivered": 99999,
+    "fanout_per_op": 16.7,
+    "claim_latency": {
+      "n": 6000,
+      "p50_ms": 145.564,
+      "p95_ms": 238.959,
+      "p99_ms": 241.24,
+      "max_ms": 243.126
+    },
+    "relay_cpu_s": 2.24,
+    "relay_cpu_ms_per_op": 0.3733,
+    "relay_rss_kb": {
+      "after_join": 65216,
+      "peak": 67648
+    },
+    "relay_rss_kb_per_agent": 6.08,
+    "harness_cpu_s": 1.478,
+    "loadavg_before": [
+      3.52783203125,
+      6.73388671875,
+      9.01416015625
+    ],
+    "loadavg_after": [
+      3.52783203125,
+      6.73388671875,
+      9.01416015625
+    ]
+  },
+  {
+    "relay": "python-stock",
+    "agents": 800,
+    "hot_regions": 8,
+    "rounds_each": 15,
+    "connect_s": 0.38,
+    "ops": 12000,
+    "elapsed_s": 4.97,
+    "claims_per_s": 2414.4,
+    "granted": 122,
+    "refused": 11878,
+    "stalls": 0,
+    "relay_alive": true,
+    "dead_conns": 0,
+    "client_errors": 0,
+    "frames_delivered": 201781,
+    "fanout_per_op": 16.8,
+    "claim_latency": {
+      "n": 12000,
+      "p50_ms": 317.636,
+      "p95_ms": 395.49,
+      "p99_ms": 400.557,
+      "max_ms": 401.885
+    },
+    "relay_cpu_s": 4.8,
+    "relay_cpu_ms_per_op": 0.4,
+    "relay_rss_kb": {
+      "after_join": 107520,
+      "peak": 86288
+    },
+    "relay_rss_kb_per_agent": -26.54,
+    "harness_cpu_s": 3.193,
+    "loadavg_before": [
+      3.52783203125,
+      6.73388671875,
+      9.01416015625
+    ],
+    "loadavg_after": [
+      3.8056640625,
+      6.73828125,
+      9.001953125
+    ]
+  },
+  {
+    "relay": "python-stock",
+    "agents": 1600,
+    "hot_regions": 8,
+    "rounds_each": 15,
+    "connect_s": 0.47,
+    "ops": 24000,
+    "elapsed_s": 10.81,
+    "claims_per_s": 2219.4,
+    "granted": 123,
+    "refused": 23877,
+    "stalls": 0,
+    "relay_alive": true,
+    "dead_conns": 0,
+    "client_errors": 0,
+    "frames_delivered": 406400,
+    "fanout_per_op": 16.9,
+    "claim_latency": {
+      "n": 24000,
+      "p50_ms": 707.945,
+      "p95_ms": 817.45,
+      "p99_ms": 841.206,
+      "max_ms": 859.03
+    },
+    "relay_cpu_s": 10.43,
+    "relay_cpu_ms_per_op": 0.4346,
+    "relay_rss_kb": {
+      "after_join": 167136,
+      "peak": 147056
+    },
+    "relay_rss_kb_per_agent": -12.55,
+    "harness_cpu_s": 6.523,
+    "loadavg_before": [
+      4.54150390625,
+      6.841796875,
+      9.02490234375
+    ],
+    "loadavg_after": [
+      4.2177734375,
+      6.69775390625,
+      8.9482421875
+    ]
+  }
+]
