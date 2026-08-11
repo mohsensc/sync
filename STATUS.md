@@ -202,3 +202,13 @@ case flakes under load on this shared box, pre-existing and unrelated).
 Walked a from-scratch install with `AGENT_PRESENCE_BIN` pointed at an empty
 dir and `python3` off `PATH` entirely: `cmake --build` + `./install.sh`
 produced three working Mach-O binaries, no Python anywhere in the path.
+
+Review caught a real gap: `Dispatch` read required arguments with a loose
+coercion (`strOf(args["path"])`) that silently returned `""` for a missing
+key, where Python's `arguments["path"]` raised `KeyError`. Nothing upstream
+enforces the schema's `required` list — go-sdk's `AddTool` leaves that to
+the caller — so a `claim_work` call missing `path` was granting a phantom
+lease on an empty-string region instead of failing visibly. `Dispatch` now
+checks each required string argument explicitly and errors before it
+reaches the relay; new tests cover the missing-key and wrong-type cases and
+assert the call never reaches the relay at all.
