@@ -94,3 +94,55 @@ under the C++ baseline's own historical numbers, 0 isolation violations.
 - 3D assets don't exist; the office scene is primitives.
 - Relay hosting and persistence are unaddressed — in-process asyncio, state
   in dicts, restart loses the lease table.
+
+## TLS (#22, on top of the above)
+
+The relay optionally terminates TLS (`--tls-cert`/`--tls-key`, plaintext
+`ws://` still the zero-config default); the Go daemon dials `wss://` with
+certificate verification on by default, `AGENT_PRESENCE_RELAY_CA` for a
+self-signed dev cert, and a loud `AGENT_PRESENCE_RELAY_INSECURE_SKIP_VERIFY`
+escape hatch. `docs/tls-dev-cert.md` is the how-to; `docs/threat-model.md` is
+updated to close out the "pending TLS" section it left open.
+
+Two-machine join, simulated honestly: no second machine available, so this
+ran as two `presenced` processes and one relay, all on one laptop, with the
+relay bound to the machine's real LAN IP (not loopback) and both daemons
+dialing that address over `wss://`. Confirmed with `openssl s_client` that
+the socket does a real TLS 1.3 handshake, and that a plain HTTP request to
+the same port gets nothing back. A daemon given the CA joined and saw the
+other's presence; a daemon given neither the CA nor skip-verify never
+connected (fail-open, no cross-talk) — proving verification is actually
+enforced, not just present. What this does *not* prove: two different
+physical machines, or a real router/NAT/firewall path between them.
+
+Suites: `python -m pytest` — 1100 passed (1094 plus 6 new). `go test ./...
+-race -count=1` — clean, `internal/relay` now covers trusted-CA, untrusted,
+skip-verify and unknown-scheme dialing. `ctest --test-dir cpp/build` — 1/1
+(hook untouched by this wave).
+
+`tests/load/run.py rooms` (20 rooms, 8 agents each, the same 160-agent
+config STATUS.md's last run used) — 5 runs each, this laptop, back to back,
+also running other agents' test suites at the time (load average 3.7–8):
+
+| | p99 (5 runs) | median |
+| --- | --- | --- |
+| plaintext | 39.2 / 39.9 / 40.3 / 55.9 / 69.6 ms | 40.3ms |
+| TLS | 41.9 / 42.9 / 43.9 / 45.3 / 66.5 ms | 43.9ms |
+
+Median-to-median, TLS costs about 3.6ms (~9%) at p99 on this box. The spread
+within each set (39ms to 70ms) is bigger than that difference, which is the
+shared, contended machine talking, not the harness — noted rather than
+smoothed over. #11's issue text cites an older "200 agents / p99 35ms"
+figure; that predates both the Go daemon and #27's rate limiting and isn't
+directly reproducible against this run (this harness's own default is 160
+agents in the `rooms` scenario, 20 rooms × 8), but it's the same order of
+magnitude.
+
+`relay-restart` and `slow-subscriber` pass over TLS unchanged. One real fix
+needed to get there: `tests/load/scenarios.py`'s `DeafSubscriber` opens a
+raw socket on purpose (to get a peer that never reads, which every
+websocket library reads in the background for) and had to learn to wrap
+that socket in TLS itself when the run is TLS — see the `_lib.TLS_ENABLED`
+plumbing. `lease-churn` and `daemon-kill` still fail/flake the exact same
+way over TLS that STATUS.md already had them failing/flaking over plaintext
+— unrelated to this wave, not a new regression.
