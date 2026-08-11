@@ -46,11 +46,17 @@ mkdir -p "$BIN"
 cp "$ROOT/cpp/build/ap-hook" "$BIN/ap-hook"
 chmod +x "$BIN/ap-hook"
 
-# presenced and agent-presence-mcp: a release binary if one is already
-# sitting next to this script (scripts/build-go-release.sh's output, or
-# something CI attached to a tag), otherwise a local `go build` — the whole
-# point of #21 is that this is the only toolchain requirement left, no
-# compiler or headers.
+# presenced and agent-presence-mcp: fetched from a GitHub release for the
+# running platform (#21) — no compiler, no CMake, no OpenSSL headers, just
+# a download. Three ways a binary can land in $BIN, tried in order:
+#   1. a release binary already sitting next to this script (dist/, either
+#      scripts/build-go-release.sh's own output or something unpacked by
+#      hand from a release download)
+#   2. a real download of that same file from the repo's GitHub releases
+#   3. `go build`, for a platform this repo hasn't cut a release for yet,
+#      or when there's no network — the fallback #21 asks for, not the
+#      normal path.
+REPO="mohsensc/sync"
 RELEASE_DIR="$ROOT/dist"
 GOOS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 GOARCH="$(uname -m)"
@@ -58,18 +64,43 @@ case "$GOARCH" in
   x86_64) GOARCH=amd64 ;;
   arm64|aarch64) GOARCH=arm64 ;;
 esac
+# AGENT_PRESENCE_VERSION pins a tag (e.g. v0.1.0); unset fetches whatever
+# the repo's "latest" release currently is.
+RELEASE_TAG="${AGENT_PRESENCE_VERSION:-latest}"
+
+fetch_release_binary() {
+  local name="$1" dest="$2"
+  command -v curl >/dev/null 2>&1 || return 1
+  local url
+  if [[ "$RELEASE_TAG" == "latest" ]]; then
+    url="https://github.com/$REPO/releases/latest/download/$name-$GOOS-$GOARCH"
+  else
+    url="https://github.com/$REPO/releases/download/$RELEASE_TAG/$name-$GOOS-$GOARCH"
+  fi
+  local tmp
+  tmp="$(mktemp)"
+  if curl -fsSL "$url" -o "$tmp" 2>/dev/null; then
+    mv "$tmp" "$dest"
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
 
 install_go_binary() {
-  local name="$1" release_bin="$RELEASE_DIR/$1-$GOOS-$GOARCH"
+  local name="$1" release_bin="$RELEASE_DIR/$1-$GOOS-$GOARCH" dest="$BIN/$1"
   if [[ -x "$release_bin" ]]; then
-    cp "$release_bin" "$BIN/$name"
+    cp "$release_bin" "$dest"
+  elif fetch_release_binary "$name" "$dest"; then
+    echo "fetched $name $RELEASE_TAG for $GOOS/$GOARCH from $REPO"
   elif command -v go >/dev/null 2>&1; then
-    ( cd "$ROOT/go" && CGO_ENABLED=0 go build -o "$BIN/$name" "./cmd/$name" )
+    echo "no release binary for $GOOS/$GOARCH ($name $RELEASE_TAG) — building locally" >&2
+    ( cd "$ROOT/go" && CGO_ENABLED=0 go build -o "$dest" "./cmd/$name" )
   else
-    echo "no $release_bin and no 'go' on PATH — install Go or fetch a release binary into $RELEASE_DIR" >&2
+    echo "no release binary for $GOOS/$GOARCH and no 'go' on PATH — install Go, or set AGENT_PRESENCE_VERSION to a released tag that covers this platform" >&2
     exit 1
   fi
-  chmod +x "$BIN/$name"
+  chmod +x "$dest"
 }
 
 install_go_binary presenced
