@@ -1,11 +1,20 @@
 package decide
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/mohsensc/sync/go/internal/leases"
 	"github.com/mohsensc/sync/go/internal/policy"
 )
+
+func deref(p *int64) int64 {
+	if p == nil {
+		return -1
+	}
+	return *p
+}
 
 func TestDecideRung0WhenNoConflict(t *testing.T) {
 	c := leases.New()
@@ -65,7 +74,7 @@ func TestDecideOwnHandoverRidesOnRung0(t *testing.T) {
 	if resp.Rung != 0 {
 		t.Fatalf("own handover must not block: %+v", resp)
 	}
-	if resp.HandoverInMs != 5_000 || resp.HandoverTo != "other" || resp.Waiting != 1 {
+	if deref(resp.HandoverInMs) != 5_000 || resp.HandoverTo != "other" || resp.Waiting != 1 {
 		t.Fatalf("got %+v", resp)
 	}
 }
@@ -77,7 +86,7 @@ func TestDecideLostRegionNoteRidesOnRung0(t *testing.T) {
 	if resp.Rung != 0 {
 		t.Fatalf("got %+v", resp)
 	}
-	if resp.LostTo != "sara" || resp.LostToAgent != "other" || resp.LostMsAgo != 1_000 {
+	if resp.LostTo != "sara" || resp.LostToAgent != "other" || deref(resp.LostMsAgo) != 1_000 {
 		t.Fatalf("got %+v", resp)
 	}
 }
@@ -126,5 +135,42 @@ func TestParseRequestNeverErrors(t *testing.T) {
 	r := ParseRequest([]byte("not json"))
 	if r.Verb != "" || r.Path != "" {
 		t.Fatalf("got %+v", r)
+	}
+}
+
+// A handover that happened this exact millisecond must still put
+// "lost_ms_ago":0 on the wire, not omit the field — decide.cpp's
+// append_number is unconditional whenever append_lost runs, and hook.cpp
+// reads a missing field as "the daemon didn't say" rather than "just now".
+// A plain int64 with `omitempty` would drop a genuine zero the same way it
+// drops an absent field; this pins that ExpiresInMs/HandoverInMs/LostMsAgo
+// stay *int64 so the two cases can't collapse into each other.
+func TestZeroLostMsAgoStillSerializes(t *testing.T) {
+	c := leases.New()
+	c.NoteHandover("a.py", leases.HandoverNote{To: "other", AtMs: 1_000})
+	resp := Decide(Request{Verb: "edit", Path: "a.py", Agent: "me"}, c, policy.New(), 1_000, "me")
+	if resp.Rung != 0 {
+		t.Fatalf("got %+v", resp)
+	}
+	if resp.LostMsAgo == nil || *resp.LostMsAgo != 0 {
+		t.Fatalf("lost_ms_ago must be a present zero, not nil: %+v", resp)
+	}
+	out, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(out); !strings.Contains(got, `"lost_ms_ago":0`) {
+		t.Fatalf("lost_ms_ago:0 missing from the wire: %s", got)
+	}
+}
+
+func TestAbsentExpiresInMsOmittedOnRung0(t *testing.T) {
+	resp := Decide(Request{Verb: "edit", Path: "a.py", Agent: "me"}, leases.New(), policy.New(), 0, "me")
+	if resp.ExpiresInMs != nil {
+		t.Fatalf("rung 0 must never carry expires_in_ms: %+v", resp)
+	}
+	out, _ := json.Marshal(resp)
+	if strings.Contains(string(out), `"expires_in_ms"`) {
+		t.Fatalf("expires_in_ms must be absent, not present: %s", out)
 	}
 }
