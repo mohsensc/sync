@@ -1,6 +1,7 @@
 package presence
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -51,7 +52,7 @@ func TestPeersPreservesFirstSeenOrder(t *testing.T) {
 	}
 }
 
-func TestWriteSnapshotEscapesOnlyQuoteAndBackslash(t *testing.T) {
+func TestWriteSnapshotEscapingMatchesWhatTheStatuslineUnescapes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "snap.json")
 	peers := []Peer{{Human: `sara "the fox" \work`, Verb: "edit", Path: "a.py"}}
 	if err := WriteSnapshot(path, peers, ""); err != nil {
@@ -66,8 +67,10 @@ func TestWriteSnapshotEscapesOnlyQuoteAndBackslash(t *testing.T) {
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		t.Fatalf("not valid json: %s: %v", data, err)
 	}
-	// ...and must use exactly the escaping scripts/statusline-presence.sh
-	// unescapes: backslash before " and before \, nothing else.
+	// ...and for input like this — no control bytes, nothing HTML-unsafe —
+	// encoding/json's escaping (backslash before " and before \) happens to
+	// be exactly what scripts/statusline-presence.sh unescapes, which is why
+	// that script needed no changes to go with this file switching writers.
 	want := `{"peers":[{"human":"sara \"the fox\" \\work","verb":"edit","path":"a.py"}]}`
 	if string(data) != want {
 		t.Fatalf("got  %s\nwant %s", data, want)
@@ -85,14 +88,20 @@ func TestWriteSnapshotProblemFieldOnlyWhenNonEmpty(t *testing.T) {
 		t.Fatalf("a healthy snapshot must carry no policy fields at all: %s", data)
 	}
 
+	// A newline in the problem text is escaped, not collapsed to a space:
+	// encoding/json keeps the file one line on its own, so there is no
+	// reason left to lose a byte of the original message doing it by hand.
 	degraded := filepath.Join(dir, "degraded.json")
 	if err := WriteSnapshot(degraded, nil, "cache is bad\nwith a newline"); err != nil {
 		t.Fatal(err)
 	}
 	data, _ = os.ReadFile(degraded)
-	want := `{"peers":[],"policy_degraded":true,"policy_problem":"cache is bad with a newline"}`
+	want := `{"peers":[],"policy_degraded":true,"policy_problem":"cache is bad\nwith a newline"}`
 	if string(data) != want {
 		t.Fatalf("got  %s\nwant %s", data, want)
+	}
+	if bytes.Contains(data, []byte{'\n'}) {
+		t.Fatalf("a raw newline broke the one-line contract: %s", data)
 	}
 }
 
