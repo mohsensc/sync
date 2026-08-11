@@ -145,6 +145,28 @@ def test_opaque_mode_keeps_cleartext_paths_out_of_negotiation_errors(monkeypatch
     assert "launch" not in wire
 
 
+def test_opaque_mode_hashes_the_join_snapshots_presence_paths_too(monkeypatch):
+    """The presence snapshot rides on the same `leases` frame the lease
+    table does, and has to be hashed the same way — a plaintext path in the
+    `presence` array would undo opaque mode for a joiner even though every
+    live `presence` frame already hashes it."""
+    monkeypatch.setenv("AGENT_PRESENCE_OPAQUE", "1")
+    relay = Relay(VirtualClock(1000.0))
+    a = FakeConn("a1", "sara")
+    relay.join("r1", a)
+    relay.handle(a, {"type": "event", "verb": "edit", "source": "hook",
+                     "region": {"path": "src/very_secret_product.py",
+                                "symbol": "launch", "lines": None}})
+
+    b = FakeConn("a2", "kai")
+    relay.join("r1", b)
+    snapshot = next(f for f in b.sent if f.get("type") == "leases")
+    wire = json.dumps(snapshot)
+    assert "very_secret_product" not in wire
+    assert "launch" not in wire
+    assert snapshot["presence"][0]["agent"] == "a1"
+
+
 def test_opaque_outbound_drops_a_container_parked_under_path(monkeypatch):
     """`path` holding a list is not a path the hasher can consume, and the old
     guard let the whole dict through untouched rather than dropping it."""

@@ -290,3 +290,77 @@ def test_a_disconnect_still_releases_that_rooms_leases(relay):
     _claim(relay, a)
     relay.leave(a)
     assert relay.registry.active_claims("r1") == []
+
+
+# -- join snapshot's presence array --------------------------------------
+
+
+def _leases_frame(conn):
+    return next(f for f in conn.sent if f.get("type") == "leases")
+
+
+def test_a_joiner_learns_about_activity_that_happened_before_it_connected(relay):
+    a = FakeConn("a1", "sara")
+    relay.join("r1", a)
+    relay.handle(a, touch("a1", path="src/auth.py"))
+
+    b = FakeConn("a2", "kai")
+    relay.join("r1", b)
+
+    entries = _leases_frame(b)["presence"]
+    assert len(entries) == 1
+    assert entries[0]["agent"] == "a1"
+    assert entries[0]["human"] == "sara"
+    assert entries[0]["region"]["path"] == "src/auth.py"
+
+
+def test_the_snapshot_is_empty_when_nobody_has_done_anything(relay):
+    a = FakeConn("a1", "sara")
+    relay.join("r1", a)
+    assert _leases_frame(a)["presence"] == []
+
+
+def test_the_snapshot_does_not_cross_rooms(relay):
+    a = FakeConn("a1", "sara")
+    relay.join("repo-a", a)
+    relay.handle(a, touch("a1", path="src/only-in-a.py"))
+
+    b = FakeConn("a2", "kai")
+    relay.join("repo-b", b)
+    assert _leases_frame(b)["presence"] == []
+
+
+def test_the_snapshot_does_not_resurrect_activity_past_the_presence_ttl(relay):
+    from agent_presence.leases import PRESENCE_TTL_S
+
+    a = FakeConn("a1", "sara")
+    relay.join("r1", a)
+    relay.handle(a, touch("a1", path="src/auth.py"))
+
+    relay._clock.advance(PRESENCE_TTL_S + 1)
+
+    b = FakeConn("a2", "kai")
+    relay.join("r1", b)
+    assert _leases_frame(b)["presence"] == []
+
+
+def test_the_snapshot_matches_what_a_subscriber_who_was_already_there_saw(relay):
+    # The privacy boundary here: a joiner must not learn more than a live
+    # subscriber in the same room would already have — not a different
+    # shape, not extra fields, not activity a live listener wouldn't get.
+    a = FakeConn("a1", "sara")
+    relay.join("r1", a)
+    b = FakeConn("a2", "kai")
+    relay.join("r1", b)
+
+    relay.handle(a, touch("a1", path="src/auth.py"))
+    live = next(f for f in b.sent if f.get("type") == "presence")
+
+    c = FakeConn("a3", "dev")
+    relay.join("r1", c)
+    snapshot_entry = _leases_frame(c)["presence"][0]
+
+    assert snapshot_entry["agent"] == live["agent"]
+    assert snapshot_entry["human"] == live["human"]
+    assert snapshot_entry["verb"] == live["verb"]
+    assert snapshot_entry["region"] == live["region"]

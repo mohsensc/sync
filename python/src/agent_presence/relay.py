@@ -859,7 +859,36 @@ class Relay:
         now = self._clock.now()
         held = self.registry.active_claims(room)
         conn.send({"type": "leases",
-                   "leases": [_lease_entry(c, now) for c in held]})
+                   "leases": [_lease_entry(c, now) for c in held],
+                   "presence": self._presence_snapshot(room)})
+
+    def _presence_snapshot(self, room: str) -> list[dict]:
+        """Recent hook-observed activity, for a joiner that missed it live.
+
+        Presence only ever reached the room it happened in, live, as it
+        happened — a connection that joins after the fact had no way to learn
+        that a path was already being edited, since only the lease table rode
+        along on `join`. That made `who_else_is_here` and the office scene
+        blind to anything that started before they connected, forever, even
+        though the relay was holding the activity the whole time.
+
+        Same store `presence()` reads and prunes, same cutoff: nothing here
+        is older than `PRESENCE_TTL_S`, so a joiner never learns about an
+        agent that a subscriber who'd been there the whole time would already
+        have aged out. Additive on the `leases` frame rather than a frame of
+        its own, so a reader that only ever looked for `leases` there — the
+        C++ daemon included — keeps working exactly as it did.
+        """
+        cutoff = self._clock.now() - PRESENCE_TTL_S
+        kept = [(t, a) for (t, a) in self._activity.get(room, []) if t > cutoff]
+        self._activity[room] = kept
+        return [
+            {
+                "agent": a.agent, "human": a.human, "verb": a.verb,
+                "region": _region_payload(a.region), "ts": t,
+            }
+            for (t, a) in kept
+        ]
 
     def leave(self, conn: Conn) -> None:
         room = conn.room

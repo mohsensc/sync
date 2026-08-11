@@ -102,12 +102,10 @@ class RelayConnection:
         # a reply to a specific request — but it's the seam a future
         # `who_holds` tool would use without touching the wire layer again.
         self._leases: dict[tuple[str, str | None], dict] = {}
-        # agent -> (received_at, frame). Only ever grows with what *this*
-        # connection has observed since it joined. The relay does not replay
-        # presence history to a joiner, only the lease table — so an MCP
-        # session that only just connected genuinely does not know about hook
-        # activity from before it did. That's a gap in the relay's join frame,
-        # not something a client can paper over.
+        # agent -> (received_at, frame). Seeded from the join snapshot's
+        # `presence` array (see `_apply_presence_snapshot`), then grown by
+        # every incremental `presence` frame after that — so this covers
+        # activity from before this connection joined too, not just after.
         self._presence: dict[str, tuple[float, dict]] = {}
 
     async def close(self) -> None:
@@ -230,6 +228,25 @@ class RelayConnection:
             if key is not None:
                 leases[key] = entry
         self._leases = leases
+        self._apply_presence_snapshot(msg)
+
+    def _apply_presence_snapshot(self, msg: dict) -> None:
+        """The join frame's `presence` array, folded into the same cache a
+        live `presence` frame would land in.
+
+        Stamped with this connection's own clock at arrival, same as
+        `_apply_presence` does for a live frame — the relay's `ts` is on its
+        clock, not this process's, and the two are not the same clock
+        (`_lease_entry` has the same split for `expires_at`). The relay has
+        already pruned this list to its own `PRESENCE_TTL_S` before sending
+        it, so treating it as freshly seen only ever gives an entry the rest
+        of its window, never more.
+        """
+        now = time.time()
+        for entry in msg.get("presence", []):
+            agent = entry.get("agent")
+            if isinstance(agent, str) and agent:
+                self._presence[agent] = (now, entry)
 
     def _apply_lease(self, msg: dict) -> None:
         key = self._region_key(msg.get("region"))

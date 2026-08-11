@@ -55,6 +55,17 @@ export function connect({ room, human, url = RELAY_URL, onPresence, onOpen, onCl
     try {
       const msg = JSON.parse(e.data)
       if (isPresence(msg) && onPresence) onPresence(msg)
+      else if (isLeasesSnapshot(msg) && onPresence) {
+        // The join reply. `presence` rides along on it now (see
+        // relay.py's `_send_lease_snapshot`) so a room that's already
+        // busy doesn't render empty until the next live event — feed each
+        // entry through the same path a live frame takes, so a joiner
+        // sees the room as it already is, not as it becomes from here.
+        for (const entry of msg.presence) {
+          const p = { type: 'presence', ...entry }
+          if (isPresence(p)) onPresence(p)
+        }
+      }
     } catch {
       // A bad frame must never blank the world.
     }
@@ -73,6 +84,10 @@ function isPresence(m) {
     typeof m.agent === 'string' && typeof m.human === 'string' &&
     typeof m.verb === 'string' &&
     !!m.region && typeof m.region === 'object' && typeof m.region.path === 'string'
+}
+
+function isLeasesSnapshot(m) {
+  return !!m && typeof m === 'object' && m.type === 'leases' && Array.isArray(m.presence)
 }
 
 /** Six-colour hash, kept identical to web/src/palette.ts's hairFor by hand —
