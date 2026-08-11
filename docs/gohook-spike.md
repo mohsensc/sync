@@ -37,7 +37,7 @@ analysis, which cancels shared noise, carries more weight than the raw
 percentiles.
 
 `ap-hook` is 73KB, dynamically linked against libc++/libSystem. `gohook` is
-3.3MB, statically linked — typical for Go. That size difference (45x) is part
+3.2MB, statically linked — typical for Go. That size difference (45x) is part
 of what fork+exec is paying for on every call.
 
 ## The numbers
@@ -50,7 +50,7 @@ fork+exec included, real `presenced` on the other end of the socket:
 | A (n=1200) | idle | cpp | 4.99ms | 17.59ms | 51.66ms | 142.94ms | 589/1200 |
 | A | idle | go | 5.03ms | 22.75ms | 61.58ms | 133.41ms | 624/1200 |
 | A | storm16 | cpp | 3.38ms | 7.77ms | 14.97ms | 70.62ms | 360/1200 |
-| A | storm16 | go | 5.72ms | 8.99ms | 14.79ms | 135.94ms | 1118/1200 |
+| A | storm16 | go | 5.71ms | 8.99ms | 14.79ms | 135.94ms | 1118/1200 |
 | B (n=1000) | idle | cpp | 2.90ms | 5.66ms | 7.13ms | 12.26ms | 122/1000 |
 | B | idle | go | 4.71ms | 5.91ms | 10.52ms | 13.65ms | 150/1000 |
 | B | storm16 | cpp | 3.47ms | 8.02ms | 16.14ms | 29.37ms | 311/1000 |
@@ -60,9 +60,13 @@ fork+exec included, real `presenced` on the other end of the socket:
 | C | storm16 | cpp | 3.22ms | 7.51ms | 11.56ms | 24.01ms | 217/1000 |
 | C | storm16 | go | 5.70ms | 8.61ms | 12.66ms | 15.85ms | 919/1000 |
 
-Run A happened while this machine's load average was highest (see raw
-`daemon.log`-adjacent timestamps); B and C are more representative and agree
-with each other. All three point the same direction.
+`uptime` load average (1-min) ranged 3.97–9.16 across the three runs and
+didn't correlate cleanly with which run came out worse — Run A was the
+outlier (`uptime` read ~4.8 around it) while Run C, measured under the
+highest load seen (~8.8–9.2), came out cleanest. Whatever made Run A worse
+wasn't sustained load; more likely a transient burst from another process on
+the box. B and C agree with each other closely regardless. All three point
+the same direction.
 
 ### The C++ baseline in the issue doesn't transfer here
 
@@ -120,8 +124,9 @@ runtime tax leaves it almost none.
 
 Applying the decision rule fixed in the issue: Go's p99 was never
 "comfortably under 5ms with margin" in any of three independent runs,
-2000+ samples each — it sat at 10.5–14.8ms, 2–3x over budget, in every
-condition tested. The paired-delta analysis, which is the part of this
+2000+ samples each — it sat at 10.5–14.8ms in runs B and C, and 61.6ms in
+run A, 2x to well over 10x the budget, in every condition tested. The
+paired-delta analysis, which is the part of this
 result least sensitive to this being a busy shared machine rather than a
 quiet CI box, shows a consistent ~2–2.5ms Go tax on top of whatever C++ pays,
 and under storm — the condition that actually matters, since that's
