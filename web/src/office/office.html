@@ -1,0 +1,645 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Agent Presence — the office</title>
+<style>
+  html,body{margin:0;height:100%;background:#F0ECE6;overflow:hidden;
+    font:14px/1.5 ui-sans-serif,-apple-system,Segoe UI,sans-serif;color:#35455C}
+  #c{display:block;width:100%;height:100%;cursor:grab}
+  #c:active{cursor:grabbing}
+  #hud{position:fixed;left:18px;top:16px;background:#fffdfaee;border:1px solid #C3B39B;
+    border-radius:10px;padding:12px 14px;max-width:290px;box-shadow:0 6px 24px #4a1f3d18}
+  #hud h1{font-size:15px;margin:0 0 3px;letter-spacing:-.01em}
+  #hud p{margin:0 0 10px;font-size:12px;color:#6b5f56}
+  .row{display:flex;gap:6px;flex-wrap:wrap}
+  .row+.row{margin-top:6px}
+  button{font:inherit;font-size:12px;padding:5px 10px;border-radius:6px;
+    border:1px solid #C3B39B;background:#fff;color:#35455C;cursor:pointer}
+  button:hover{background:#E9E0CE}
+  button[aria-pressed="true"]{background:#35455C;color:#F0ECE6;border-color:#35455C}
+  #bDemo{background:#35455C;color:#F0ECE6;border-color:#35455C;font-weight:600}
+  #bDemo:hover{background:#4A1F3D;border-color:#4A1F3D}
+  #log{position:fixed;left:18px;bottom:16px;font:11px ui-monospace,monospace;color:#6b5f56;
+    background:#fffdfacc;border-radius:8px;padding:7px 10px;max-width:36vw}
+  #caption{position:fixed;left:50%;transform:translateX(-50%);bottom:34px;
+    max-width:min(720px,86vw);text-align:center;
+    background:#35455Cf2;color:#F0ECE6;border-radius:10px;
+    padding:11px 20px;font-size:15px;line-height:1.45;letter-spacing:-.005em;
+    box-shadow:0 8px 30px #4a1f3d33;opacity:0;transition:opacity .35s;pointer-events:none}
+  #caption.on{opacity:1}
+  #beat{position:fixed;right:18px;top:16px;background:#fffdfaee;border:1px solid #C3B39B;
+    border-radius:10px;padding:9px 12px;font:11px ui-monospace,monospace;color:#6b5f56}
+  #beat b{color:#35455C}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">
+  <h1>The office</h1>
+  <p>Zones map to the kind of work an agent is doing. Click a figure to select
+     it, then click the floor, a desk or a prop to send it there.</p>
+  <div class="row">
+    <button id="bDemo">Play demo</button>
+    <button id="bZones" aria-pressed="true">Zones</button>
+  </div>
+  <div class="row">
+    <button id="bGreet" aria-pressed="true">Greetings</button>
+    <button id="bFive">High five</button>
+  </div>
+  <div class="row">
+    <button id="bSpin" aria-pressed="false">Auto-rotate</button>
+    <button id="bTop" aria-pressed="false">Top down</button>
+    <button id="bWire" aria-pressed="false">Wireframe</button>
+  </div>
+</div>
+<div id="beat">idle</div>
+<div id="caption"></div>
+<div id="log">loading…</div>
+
+<script type="importmap">
+{"imports":{"three":"./vendor/three.module.js","three/addons/":"./vendor/addons/"}}
+</script>
+<script type="module">
+import * as THREE from 'three'
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
+import { clone as skinnedClone } from 'three/addons/utils/SkeletonUtils.js'
+import * as ANIM from './anim.js'
+import * as Z from './zones.js'
+import { createAgent, World } from './agent.js'
+import { attachInteraction } from './interact.js'
+import { runDemo } from './demo.js'
+import { buildDressing } from './dressing.js'
+
+const P = { cream:0xF0ECE6, sand:0xE9E0CE, taupe:0xC3B39B, sage:0xE5E1D2, butter:0xF7DFAF,
+            mustard:0xD6B45C, caramel:0xC0762A, coffee:0xB0674F, terracotta:0xD9714F,
+            salmon:0xE8946C, rose:0xD8BDB6, mauve:0xA5738C, slate:0x8A94A3, navy:0x35455C }
+
+const canvas = document.getElementById('c')
+const logEl = document.getElementById('log')
+const capEl = document.getElementById('caption')
+const beatEl = document.getElementById('beat')
+const renderer = new THREE.WebGLRenderer({ canvas, antialias:true })
+renderer.setPixelRatio(Math.min(devicePixelRatio,2))
+renderer.shadowMap.enabled = true
+renderer.shadowMap.type = THREE.PCFSoftShadowMap
+
+const scene = new THREE.Scene()
+scene.background = new THREE.Color(P.cream)
+scene.fog = new THREE.Fog(P.cream, 30, 60)
+const camera = new THREE.PerspectiveCamera(34, 1, 0.1, 200)
+
+// ---- lighting ---------------------------------------------------------
+// Day-lit, warm key, and enough directional bias that a figure reads against
+// the floor instead of dissolving into it.
+//
+// The ambient used to sit at 0.95, which flattened everything and left the
+// shadows as faint grey smudges. The heavy lifting is now split between a warm
+// key and a hemisphere that stands in for sky-and-floor bounce; ambient is only
+// there to keep the shadow interiors from going black.
+scene.add(new THREE.AmbientLight(0xffffff, 0.34))
+scene.add(new THREE.HemisphereLight(0xFFF4E0, 0xC3B39B, 0.55))
+const key = new THREE.DirectionalLight(0xfff0d8, 2.35)
+key.position.set(8, 13.5, 7)
+key.castShadow = true
+key.shadow.mapSize.set(2048,2048)
+// The shadow frustum was 32 m across for an 18 m room, so every shadow was
+// sampled at a quarter of the texel density it could have had. Tightened to
+// just cover the floor plate.
+const S = 11.5
+Object.assign(key.shadow.camera, { left:-S, right:S, top:S, bottom:-S, near:1, far:44 })
+key.shadow.bias = -0.0004
+key.shadow.normalBias = 0.022
+key.shadow.radius = 1.6
+scene.add(key)
+// Cool counter-fill from the open side, so the shadow side isn't dead.
+const fill = new THREE.DirectionalLight(0xd6e0f0, 0.42); fill.position.set(-7,5,-6); scene.add(fill)
+
+// ---- room -------------------------------------------------------------
+// 18 x 13.6, down from 20 x 15. The old shell left ~2 m of dead floor past the
+// outermost zone on every closed side and the room read as evacuated.
+const W = 18, D = 13.6, WALL = 4
+const WALL_T = 0.35
+const WALL_Z = -D/2 + WALL_T/2   // inner face of the back wall, -6.625
+const WALL_X = -W/2 + WALL_T/2   // inner face of the left wall, -8.825
+const matFloor = new THREE.MeshStandardMaterial({ color:P.sand, roughness:1, metalness:0 })
+const matWall  = new THREE.MeshStandardMaterial({ color:P.cream, roughness:1, metalness:0 })
+const floor = new THREE.Mesh(new THREE.BoxGeometry(W, 0.4, D), matFloor)
+floor.position.set(0,-0.2,0); floor.receiveShadow = true; scene.add(floor)
+// The old rug was a 6.8 m dusty-rose disc under the desks that read as a lake.
+// Smaller, and moved to the lounge side where it actually bounds something.
+const rug = new THREE.Mesh(new THREE.CylinderGeometry(2.35,2.35,0.05,48),
+  new THREE.MeshStandardMaterial({ color:P.rose, roughness:1, metalness:0 }))
+rug.position.set(1.4,0.025,3.3); rug.receiveShadow = true; scene.add(rug)
+const back = new THREE.Mesh(new THREE.BoxGeometry(W,WALL,WALL_T), matWall)
+back.position.set(0,WALL/2,-D/2); back.receiveShadow = true; scene.add(back)
+const left = new THREE.Mesh(new THREE.BoxGeometry(WALL_T,WALL,D), matWall)
+left.position.set(-W/2,WALL/2,0); left.receiveShadow = true; scene.add(left)
+
+// ---- zone markers -----------------------------------------------------
+const zoneUI = Z.buildZoneMarkers()
+scene.add(zoneUI.group)
+
+// Two zones in the spec have no prop yet (crates, fire). Rather than fake a
+// mesh, they get a primitive stand-in so the zone is not an empty ring.
+;(function stubProps(){
+  const crate = new THREE.MeshStandardMaterial({ color:P.caramel, roughness:1 })
+  const cz = Z.ZONES.crates.at
+  ;[[0,0,0.55,0],[0.62,0.42,0.42,0.5],[-0.5,0.3,0.46,-0.3],[0.1,0.55,0.36,0.9]]
+    .forEach(([dx,dy,s,r]) => {
+      const m = new THREE.Mesh(new THREE.BoxGeometry(s,s,s), crate)
+      m.position.set(cz[0]+dx, s/2+dy, cz[1]+dx*0.6)
+      m.rotation.y = r; m.castShadow = m.receiveShadow = true; scene.add(m)
+    })
+  // "fire" is a cluster of terracotta cones. Deliberately abstract.
+  const fz = Z.ZONES.fire.at
+  const flame = new THREE.MeshStandardMaterial({ color:P.terracotta, roughness:0.8, emissive:0x3a1008 })
+  ;[[0,0.62,0],[0.34,0.4,0.2],[-0.3,0.44,-0.15]].forEach(([dx,h,dz]) => {
+    const m = new THREE.Mesh(new THREE.ConeGeometry(h*0.42, h, 10), flame)
+    m.position.set(fz[0]+dx, h/2, fz[1]+dz); m.castShadow = true; scene.add(m)
+  })
+  // ducks: three small mustard blobs.
+  const dz = Z.ZONES.ducks.at
+  const duck = new THREE.MeshStandardMaterial({ color:P.mustard, roughness:1 })
+  ;[[0,0],[0.45,0.22],[-0.42,0.16]].forEach(([dx,dzz]) => {
+    const b = new THREE.Mesh(new THREE.SphereGeometry(0.17,16,12), duck)
+    b.position.set(dz[0]+dx, 0.17, dz[1]+dzz); b.castShadow = true; scene.add(b)
+    const hd = new THREE.Mesh(new THREE.SphereGeometry(0.10,14,10), duck)
+    hd.position.set(dz[0]+dx, 0.38, dz[1]+dzz-0.06); hd.castShadow = true; scene.add(hd)
+  })
+  // whiteboard: a pale panel on the back wall, with a tray and some marks so
+  // it doesn't read as a blank grey rectangle.
+  const wz = Z.ZONES.whiteboard.at
+  const wb = new THREE.Mesh(new THREE.BoxGeometry(3.0,1.7,0.10),
+    new THREE.MeshStandardMaterial({ color:0xfffdfa, roughness:0.9, metalness:0 }))
+  wb.position.set(wz[0], 1.9, WALL_Z + 0.05); wb.castShadow = wb.receiveShadow = true; scene.add(wb)
+  const wbFrame = new THREE.Mesh(new THREE.BoxGeometry(3.16,1.86,0.06),
+    new THREE.MeshStandardMaterial({ color:P.taupe, roughness:0.9, metalness:0 }))
+  wbFrame.position.set(wz[0], 1.9, WALL_Z + 0.02); wbFrame.receiveShadow = true; scene.add(wbFrame)
+  const wbTray = new THREE.Mesh(new THREE.BoxGeometry(3.0,0.06,0.16),
+    new THREE.MeshStandardMaterial({ color:P.taupe, roughness:0.9, metalness:0 }))
+  wbTray.position.set(wz[0], 1.02, WALL_Z + 0.13); wbTray.castShadow = true; scene.add(wbTray)
+  // A few boxes-and-arrows in slate, drawn flat on the board.
+  const ink = new THREE.MeshStandardMaterial({ color:P.slate, roughness:1, metalness:0 })
+  ;[[-0.95,2.28,0.52,0.34],[0.05,2.28,0.52,0.34],[1.05,2.28,0.52,0.34],
+    [-0.45,2.28,0.44,0.04],[0.55,2.28,0.44,0.04],[-0.45,1.62,0.9,0.04]]
+    .forEach(([dx,y,w,h]) => {
+      const m = new THREE.Mesh(new THREE.BoxGeometry(w,h,0.02), ink)
+      m.position.set(wz[0]+dx, y, WALL_Z + 0.11); scene.add(m)
+    })
+  // hammock: two posts and a sagging sage strip.
+  const hz = Z.ZONES.hammock.at
+  const post = new THREE.MeshStandardMaterial({ color:P.taupe, roughness:1 })
+  ;[-1.1, 1.1].forEach(dx => {
+    const p2 = new THREE.Mesh(new THREE.CylinderGeometry(0.07,0.09,1.5,10), post)
+    p2.position.set(hz[0]+dx, 0.75, hz[1]); p2.castShadow = true; scene.add(p2)
+  })
+  const hm = new THREE.Mesh(new THREE.CylinderGeometry(0.34,0.34,2.1,14,1,false,0,Math.PI),
+    new THREE.MeshStandardMaterial({ color:P.sage, roughness:1, side:THREE.DoubleSide }))
+  hm.rotation.z = Math.PI/2; hm.rotation.y = Math.PI
+  hm.position.set(hz[0], 1.0, hz[1]); hm.castShadow = true; scene.add(hm)
+})()
+
+// ---- asset placement --------------------------------------------------
+// Desk top height. The mesh is a slab on four stubby legs — dimensionally a
+// desk (1.4 x 0.85 x 0.78) but it still read as a bench, because nothing on it
+// said "workstation". dressing.js puts a monitor, keyboard and chair at each
+// one; that, not the scale, is what fixes the read. The scale change here is
+// modest: 3 cm lower so the top lands just under the 0.70 m hip joint, and 15%
+// wider so the footprint carries a screen without looking crowded.
+const DESK_TOP = 0.76
+const DESK_SX = 1.15
+
+const PLAN = [
+  // The vault is deliberately half-buried in the back wall so it reads as set
+  // into it rather than parked in front of it. Front face lands near z = -5.2.
+  { id:'vault',   url:'glb/vault-door.glb',   h:2.6,  pos:[-6.0,0,-6.5], rot:0            },
+  { id:'phones',  url:'glb/phone-wall.glb',   h:2.0,  pos:[ 5.4,1.1,-6.35], rot:0, air:true },
+  { id:'cables',  url:'glb/cable-ball.glb',   h:1.1,  pos:[-7.3,0, 4.7], rot:0.6          },
+  { id:'tortoise',url:'glb/tortoise-v2.glb',  h:0.55, pos:[ 2.0,0, 4.3], rot:-0.9         },
+  // Desks are click targets. The seat is the zone slot in front of the desk,
+  // pulled SEAT_PULL closer so the knees end up under it: the sit clip walks
+  // the pelvis 22cm back on the way down (anim.js SEAT_SETBACK).
+  { url:'glb/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[-2.6,0,-2.4], rot:0, desk:'desk 1', slot:Z.ZONES.desks.slots[0] },
+  { url:'glb/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[ 0.4,0,-2.4], rot:0, desk:'desk 2', slot:Z.ZONES.desks.slots[1] },
+  { url:'glb/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[ 3.4,0,-2.4], rot:0, desk:'desk 3', slot:Z.ZONES.desks.slots[2] },
+  { url:'glb/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[-2.6,0, 1.4], rot:Math.PI, desk:'desk 4', slot:Z.ZONES.desks.slots[3] },
+  { url:'glb/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[ 0.4,0, 1.4], rot:Math.PI, desk:'desk 5', slot:Z.ZONES.desks.slots[4] },
+  { url:'glb/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[ 3.4,0, 1.4], rot:Math.PI, desk:'desk 6', slot:Z.ZONES.desks.slots[5] },
+  { url:'glb/desk-tripo-12k.glb', h:0.95, pos:[-6.9,0, 1.0], rot:Math.PI/2, sx:1.45,
+    desk:'reception', slot:Z.ZONES.reception.slots[0] },
+  // Cups were 0.14 m and read as specks. Up to 0.20 and cut from four to three,
+  // placed at the desks that actually have someone at them plus reception, near
+  // the front edge where they catch the key light.
+  { url:'glb/coffee-cup-v2.glb', h:0.20, pos:[ 0.95,DESK_TOP,-2.05], rot:1.1 },
+  { url:'glb/coffee-cup-v2.glb', h:0.20, pos:[ 0.95,DESK_TOP, 1.05], rot:2.2 },
+  { url:'glb/coffee-cup-v2.glb', h:0.20, pos:[-6.55,0.95, 1.55], rot:0.2 },
+]
+
+const loader = new GLTFLoader()
+const meshes = []
+const props = {}
+const desks = []                 // click targets: { label, group, seat:[x,z,yaw] }
+let pending = 0, done = 0
+
+// A zone slot stands 1.05 m off the desk. Sitting there leaves the character
+// marooned in the aisle, so pull the seat in. The sit clip then takes the
+// pelvis 22cm back and the knees land under the desk.
+const SEAT_PULL = 0.30
+function seatFor(slot, pos) {
+  const dx = pos[0] - slot[0], dz = pos[2] - slot[1]
+  const l = Math.hypot(dx, dz) || 1
+  return [ slot[0] + dx/l*SEAT_PULL, slot[1] + dz/l*SEAT_PULL, slot[2] ]
+}
+
+/**
+ * Every one of these GLBs ships metalness = 1, roughness = 1, and the character
+ * additionally carries an emissiveMap at full white emissive. That combination
+ * is effectively unlit: metalness 1 kills the diffuse term, so the only thing
+ * lighting the mesh is a rough specular lobe plus, on the character, its own
+ * baked emissive. It is why the figures looked like flat stickers and why the
+ * shadows read as muddy — there was barely any directional shading to shadow.
+ *
+ * Normalising to a dielectric puts the diffuse term back and lets the key light
+ * do the modelling. The emissive is kept at a low intensity because the clay
+ * look does live partly in that map; dropping it to zero makes the characters
+ * noticeably drabber than the reference renders.
+ */
+function fixMaterial(m) {
+  if (!m || !m.isMeshStandardMaterial) return m
+  m.metalness = 0
+  m.roughness = 0.9
+  m.emissiveIntensity = m.emissiveMap ? 0.18 : 0
+  m.needsUpdate = true
+  return m
+}
+function fixMaterials(o) {
+  o.traverse(n => {
+    if (!n.isMesh && !n.isSkinnedMesh) return
+    n.material = Array.isArray(n.material) ? n.material.map(fixMaterial) : fixMaterial(n.material)
+  })
+}
+
+function place(gltf, spec) {
+  const o = gltf.scene
+  fixMaterials(o)
+  // A freshly cloned skeleton has stale world matrices, so Box3 reads a
+  // degenerate height and h/size.y explodes. Update before measuring.
+  o.updateMatrixWorld(true)
+  const box = new THREE.Box3().setFromObject(o)
+  const size = box.getSize(new THREE.Vector3())
+  const c = box.getCenter(new THREE.Vector3())
+  const s = spec.h / Math.max(size.y, 1e-4)
+  const g = new THREE.Group()
+  o.position.set(-c.x, -box.min.y, -c.z)
+  o.scale.setScalar(1)
+  g.add(o); g.scale.setScalar(s)
+  if (spec.sx) o.scale.x = spec.sx
+  g.position.set(spec.pos[0], spec.pos[1], spec.pos[2])
+  g.rotation.y = spec.rot || 0
+  o.traverse(n => { if (n.isMesh) { n.castShadow = true; n.receiveShadow = true; meshes.push(n) } })
+  scene.add(g)
+  g.userData.scale = s
+  return g
+}
+
+function load(spec) {
+  pending++
+  loader.load(spec.url, gltf => {
+    const g = place(gltf, spec)
+    if (spec.id) props[spec.id] = g
+    if (spec.desk) desks.push({ label:spec.desk, group:g, seat:seatFor(spec.slot, spec.pos) })
+    done++; tally()
+  }, undefined, e => { done++; console.warn('failed', spec.url, e); tally() })
+}
+function tally(){
+  logEl.textContent = `${done}/${pending} objects loaded`
+  setupCast()
+}
+PLAN.forEach(load)
+
+// ---- agents -----------------------------------------------------------
+// Five demo agents plus three background characters that just idle so the
+// office does not look evacuated between beats.
+// Start marks moved in with the room. The old -8.6 column now sits inside the
+// left-wall shelving, and 8.2 clipped the crate stack; both put a figure half
+// buried in furniture on first paint. Kept identical to demo.js's park row so
+// a demo restart doesn't teleport anyone.
+const AGENT_CAST = [
+  { id:'a1', name:'agent-1', color:P.navy,       start:[-7.7,-3.4] },
+  { id:'a2', name:'agent-2', color:P.caramel,    start:[-7.7,-2.2] },
+  { id:'a3', name:'agent-3', color:P.mauve,      start:[-7.7,-1.0] },
+  { id:'a4', name:'agent-4', color:P.terracotta, start:[ 7.5,-0.4] },
+  { id:'a5', name:'agent-5', color:P.slate,      start:[ 7.5, 1.4] },
+]
+// Three more so the office is not empty between beats. They are full agents —
+// selectable, sendable — they just start with somewhere to be. The demo never
+// touches them: it only ever indexes `agents`.
+const BACKGROUND = [
+  { id:'b1', name:'reception', role:'taking incoming work', color:P.taupe,
+    pos:[-5.8, 0.8], yaw: Math.PI/2, act:'reading' },
+  { id:'b2', name:'indexer',   role:'walking the tree',     color:P.mustard,
+    seat:'desk 2', act:'typing' },
+  { id:'b3', name:'archivist', role:'nothing, for now',     color:P.rose,
+    seat:'desk 5', act:'sleeping' },
+]
+const deskNamed = l => desks.find(d => d.label === l)
+
+const world = new World()
+const agents = []                // demo cast, in AGENT_CAST order
+const extras = []                // background cast
+
+/**
+ * Height-normalised character in an UNSCALED outer group. agent.js hangs a
+ * badge sprite and a floor halo off this root, so it has to be world-scale;
+ * a scaled root would shrink them by the same factor.
+ */
+function makeCharacterRoot(gltfScene, height = 1.68, bodyColor = null) {
+  const o = gltfScene
+  // SkeletonUtils.clone shares materials with the source, so tinting one clone
+  // would repaint all eight. Clone the material per character first.
+  o.traverse(n => {
+    if (!n.isMesh && !n.isSkinnedMesh) return
+    n.material = n.material.clone()
+    fixMaterial(n.material)
+    if (bodyColor != null) {
+      // Multiply the baked clay texture rather than replace it.
+      //
+      // The lerp toward white is small on purpose. Colour maths here runs in
+      // linear space, where a half-way lerp to white comes out as a near-white
+      // pastel — at 0.5 all eight figures were still effectively cream and the
+      // whole point was lost. 0.18 keeps the palette hue legible while leaving
+      // enough range in the texture for the face to survive on the dark
+      // entries like navy.
+      n.material.color.set(bodyColor).lerp(new THREE.Color(0xffffff), 0.18)
+      n.material.needsUpdate = true
+    }
+  })
+  o.updateMatrixWorld(true)                       // never measure a stale clone
+  const box = new THREE.Box3().setFromObject(o)
+  const size = box.getSize(new THREE.Vector3())
+  const c = box.getCenter(new THREE.Vector3())
+  const s = height / Math.max(size.y, 1e-4)
+  const inner = new THREE.Group()
+  o.position.set(-c.x, -box.min.y, -c.z)
+  inner.add(o); inner.scale.setScalar(s)
+  const root = new THREE.Group()
+  root.add(inner)
+  o.traverse(n => { if (n.isMesh) { n.castShadow = true; n.receiveShadow = true; meshes.push(n) } })
+  root.userData.scale = s
+  return root
+}
+
+// The seated background characters need their desks placed first, and the
+// interaction layer needs every prop, so setup waits for the whole load.
+let charGLTF = null, interaction = null
+function setupCast() {
+  if (!charGLTF || interaction || done < pending) return
+  const gltf = charGLTF
+  for (const spec of AGENT_CAST) {
+    const root = makeCharacterRoot(skinnedClone(gltf.scene), 1.68, spec.color)
+    scene.add(root)
+    agents.push(world.add(createAgent({
+      root, id: spec.id, name: spec.name, color: spec.color,
+      pos: spec.start, yaw: Math.PI / 2, height: 1.68,
+      scale: root.userData.scale,
+    })))
+  }
+  for (const b of BACKGROUND) {
+    const root = makeCharacterRoot(skinnedClone(gltf.scene), 1.68, b.color)
+    scene.add(root)
+    // A seated one starts on its desk's seat, already facing the desk.
+    const d = b.seat ? deskNamed(b.seat) : null
+    const a = createAgent({
+      root, id:b.id, name:b.name, role:b.role, color:b.color, height:1.68,
+      pos: d ? [d.seat[0], d.seat[1]] : b.pos,
+      yaw: d ? d.seat[2] : b.yaw,
+      scale: root.userData.scale,
+    })
+    if (b.act) a.act(b.act, { fade:0 })
+    if (d) a.homeDesk = d
+    extras.push(world.add(a))
+  }
+
+  // Set dressing needs the real seat positions, so it waits for the desks.
+  // Built before attachInteraction so nothing here lands in the pick list —
+  // a chair that swallowed a floor click would break "send them there".
+  const dressing = buildDressing({
+    desks, wallZ: WALL_Z, wallX: WALL_X, deskTop: DESK_TOP,
+    // The desks the background cast actually sits at get their chairs pulled
+    // out; the rest tuck under. See buildDressing for why this isn't uniform.
+    occupied: BACKGROUND.filter(b => b.seat).map(b => b.seat),
+  })
+  scene.add(dressing.group)
+  dressing.meshes.forEach(m => meshes.push(m))
+  window.__dressing = dressing
+
+  interaction = attachInteraction({
+    canvas, camera, scene, world, floor, rug, props, desks,
+    log: s => { logEl.textContent = s },
+  })
+  window.__interact = interaction
+  window.__ready = true
+}
+
+pending++
+loader.load('glb/character.glb', gltf => {
+  charGLTF = gltf
+  done++; tally()
+}, undefined, (e) => { console.warn('character failed', e); done++; tally() })
+
+// ---- camera / interaction --------------------------------------------
+// Default framing shows the whole floor plate. At pitch 0.42 with the target on
+// the desk bank the open +z edge fell off the bottom of the frame.
+let yaw = 0.78, pitch = 0.46, dist = 1.14, spin = false, top = false, wire = false
+// The room is a cutaway, open on +x and +z only. Orbiting past these puts the
+// camera behind a wall and the view goes blank, so the arc is clamped.
+const YAW_MIN = 0.18, YAW_MAX = 1.39
+let spinDir = 1
+const target = new THREE.Vector3(0.2, 1.0, 0.7)
+const goal = { target: target.clone(), dist: 1.14, yaw: 0.78, active: false }
+// Down from 21 with the room. At the old radius the shrunken office sat in the
+// middle of the frame with a wide band of empty background around it.
+const RADIUS = 18
+
+/** Demo camera: ease toward a floor point at a given zoom and yaw. */
+function focus([x, z], d = 1, y = null) {
+  goal.target.set(x, 1.15, z)
+  goal.dist = d
+  if (y != null) goal.yaw = Math.max(YAW_MIN, Math.min(YAW_MAX, y))
+  goal.active = true
+}
+
+let drag=false, px=0, py=0
+canvas.addEventListener('pointerdown', e => { drag=true; px=e.clientX; py=e.clientY
+  spin=false; setB(bSpin,false); goal.active=false })
+addEventListener('pointerup', () => drag=false)
+addEventListener('pointermove', e => {
+  if(!drag) return
+  yaw = Math.max(YAW_MIN, Math.min(YAW_MAX, yaw - (e.clientX-px)*0.006))
+  pitch = Math.max(0.08, Math.min(1.45, pitch + (e.clientY-py)*0.005))
+  px=e.clientX; py=e.clientY
+})
+canvas.addEventListener('wheel', e => { e.preventDefault(); goal.active=false
+  dist = Math.max(0.35, Math.min(2.2, dist + e.deltaY*0.0012)) }, {passive:false})
+
+const bSpin=document.getElementById('bSpin'), bTop=document.getElementById('bTop')
+const bWire=document.getElementById('bWire'), bZones=document.getElementById('bZones')
+const bDemo=document.getElementById('bDemo')
+const setB=(b,v)=>b.setAttribute('aria-pressed',String(v))
+bSpin.onclick=()=>{spin=!spin; setB(bSpin,spin); if(spin) goal.active=false}
+bTop.onclick=()=>{top=!top; setB(bTop,top); pitch = top?1.35:0.42; dist = top?1.15:1; goal.active=false}
+bWire.onclick=()=>{wire=!wire; setB(bWire,wire); meshes.forEach(m=>{m.material.wireframe=wire})}
+let zonesOn = true
+bZones.onclick=()=>{zonesOn=!zonesOn; setB(bZones,zonesOn); zoneUI.setVisible(zonesOn)}
+
+// Two agents that end a walk near each other greet. The demo turns this off
+// while it runs, because it scripts its own encounters.
+const bGreet=document.getElementById('bGreet'), bFive=document.getElementById('bFive')
+bGreet.onclick=()=>{world.greetings=!world.greetings; setB(bGreet,world.greetings)}
+bFive.onclick=()=>{ pairUp() }
+
+/** Send the selection (or the first agent) to high five whoever is nearest. */
+function pairUp(a = interaction && interaction.selected) {
+  a = a || world.agents[0]
+  if (!a) return
+  const b = world.agents
+    .filter(x => x!==a && !x.busy && !x.seated && !x.moving)
+    .sort((p,q)=>dist2(p,a)-dist2(q,a))[0]
+  if (!b) { logEl.textContent = 'nobody free to high five'; return }
+  a.lastGreet = b.lastGreet = -99
+  world.highfive(a, b)
+  logEl.textContent = `${a.name} + ${b.name} → high five`
+  return [a.id, b.id]
+}
+const dist2 = (p,q) => (p.pos.x-q.pos.x)**2 + (p.pos.z-q.pos.z)**2
+
+// ---- demo -------------------------------------------------------------
+let demo = null
+function caption(text) {
+  capEl.textContent = text
+  capEl.classList.toggle('on', !!text)
+}
+function startDemo() {
+  if (demo) demo.cancel()
+  if (agents.length < 5 || !props.tortoise) { caption('still loading'); return }
+  spin = false; setB(bSpin, false)
+  bDemo.textContent = 'Restart demo'
+  world.greetings = false; setB(bGreet, false)   // the demo scripts its own
+  let n = 0
+  demo = runDemo({
+    agents, world, tortoise: props.tortoise, scene, caption, focus, zoneUI,
+    onBeat: (t) => { n++; beatEl.innerHTML = `beat <b>${n}</b> / 6` },
+  })
+  window.__demo = demo
+  // Capture the run. A cancelled run still settles, and without this check its
+  // handler switched greetings back on underneath the run that replaced it —
+  // which then hijacked the cast into spontaneous high fives mid-story.
+  const run = demo
+  demo.promise.then(r => {
+    if (demo !== run) return
+    beatEl.innerHTML = `demo <b>${r}</b>`
+    world.greetings = true; setB(bGreet, true)
+  })
+}
+bDemo.onclick = startDemo
+
+/**
+ * Slide each desk chair between its tucked and pulled-out marks.
+ *
+ * A desk's standing mark and its sitting position are nearly the same spot, so
+ * a chair cannot sit correctly under a seated figure AND stay clear of a
+ * standing one. Moving it is the only honest fix: tucked by default, and pulled
+ * out under whoever is actually sitting there.
+ */
+function updateChairs(dt) {
+  const dressing = window.__dressing
+  if (!dressing || !dressing.deskChairs) return
+  const k = 1 - Math.pow(0.002, dt)        // ~0.2 s to settle
+  for (const label in dressing.deskChairs) {
+    const c = dressing.deskChairs[label]
+    const d = desks.find(x => x.label === label)
+    if (!d) continue
+    // Someone counts as at this desk if they are seated and near its seat.
+    const taken = world.agents.some(a => a.seated &&
+      Math.hypot(a.pos.x - d.seat[0], a.pos.z - d.seat[1]) < 0.55)
+    const m = taken ? c.out : c.tuck
+    c.group.position.x += (m.x - c.group.position.x) * k
+    c.group.position.z += (m.z - c.group.position.z) * k
+  }
+}
+
+function resize(){
+  const w=canvas.clientWidth,h=canvas.clientHeight
+  if(canvas.width!==w||canvas.height!==h){
+    renderer.setSize(w,h,false); camera.aspect=w/h; camera.updateProjectionMatrix() }
+}
+
+const clock = new THREE.Clock()
+function tick(){
+  resize()
+  const dt = Math.min(clock.getDelta(), 0.05)
+
+  if(spin){ yaw += 0.0016*spinDir
+    if(yaw>YAW_MAX){ yaw=YAW_MAX; spinDir=-1 }
+    if(yaw<YAW_MIN){ yaw=YAW_MIN; spinDir=1 } }
+
+  if (goal.active) {
+    const k = 1 - Math.pow(0.0015, dt)
+    target.lerp(goal.target, k)
+    dist += (goal.dist - dist) * k
+    yaw += (goal.yaw - yaw) * k
+  }
+
+  world.update(dt)
+  updateChairs(dt)
+  if (demo) demo.update(dt)
+  if (interaction) interaction.paint()
+
+  const r = RADIUS*dist, cp = Math.cos(pitch)
+  camera.position.set(target.x + Math.sin(yaw)*r*cp,
+                      target.y + Math.sin(pitch)*r,
+                      target.z + Math.cos(yaw)*r*cp)
+  camera.lookAt(target)
+  renderer.render(scene,camera)
+  requestAnimationFrame(tick)
+}
+tick()
+
+// ---- test surface -----------------------------------------------------
+window.__scene = scene
+window.__cam = camera
+window.__renderer = renderer
+window.__THREE = THREE
+window.__world = world
+window.__agents = world.agents     // all eight
+window.__cast = agents             // the five the demo drives
+window.__extras = extras
+window.__desks = desks
+window.__props = props
+window.__pairUp = pairUp
+// Scripted clicking, so the raycast path itself is what gets tested.
+window.__clickAt = (x,y) => { const p = interaction.click(x,y); return p ? {kind:p.kind, label:p.label} : null }
+window.__clickFloor = (x,z) => { const [sx,sy] = interaction.project(x,z); return window.__clickAt(sx,sy) }
+window.__clickAgent = id => {
+  const a = world.byId(id); if (!a) return null
+  const [sx,sy] = interaction.project(a.pos.x, a.pos.z)
+  return window.__clickAt(sx, sy - 40)          // aim at the torso, not the feet
+}
+window.__hoverAt = (x,y) => interaction.hoverAt(x,y)
+window.__selected = () => interaction.selected ? interaction.selected.id : null
+window.__zones = Z
+window.__zoneUI = zoneUI
+window.__anim = ANIM
+window.__startDemo = startDemo
+window.__caption = () => capEl.textContent
+window.__focus = focus
+window.__setCam = (y,p,d) => { goal.active=false; yaw=y; pitch=p; dist=d }
+window.__agentState = () => world.agents.map(a => ({
+  ...a.describe(),
+  note: a.note || null,
+  zone: Z.zoneAt(a.pos.x, a.pos.z),
+}))
+</script>
+</body>
+</html>

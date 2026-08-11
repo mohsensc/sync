@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Argue test — clay rig</title>
+<style>
+  html,body{margin:0;height:100%;background:#F0ECE6;overflow:hidden;
+    font:14px/1.5 ui-sans-serif,-apple-system,Segoe UI,sans-serif;color:#35455C}
+  #c{display:block;width:100%;height:100%;cursor:grab}
+  #c:active{cursor:grabbing}
+  #hud{position:fixed;left:18px;top:16px;background:#fffdfaee;border:1px solid #C3B39B;
+    border-radius:10px;padding:12px 14px;max-width:340px;box-shadow:0 6px 24px #4a1f3d18}
+  #hud h1{font-size:15px;margin:0 0 3px;letter-spacing:-.01em}
+  #hud p{margin:0 0 10px;font-size:12px;color:#6b5f56}
+  .row{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}
+  button{font:inherit;font-size:12px;padding:5px 10px;border-radius:6px;
+    border:1px solid #C3B39B;background:#fff;color:#35455C;cursor:pointer}
+  button:hover{background:#E9E0CE}
+  button[aria-pressed="true"]{background:#35455C;color:#F0ECE6;border-color:#35455C}
+  #now{position:fixed;left:50%;top:18px;transform:translateX(-50%);
+    font:600 22px ui-monospace,monospace;color:#4A1F3D;background:#fffdfacc;
+    padding:6px 18px;border-radius:8px;letter-spacing:.02em}
+  #log{position:fixed;left:18px;bottom:16px;font:11px ui-monospace,monospace;color:#6b5f56;
+    background:#fffdfacc;border-radius:8px;padding:7px 10px;max-width:70vw;white-space:pre}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="now">loading</div>
+<div id="hud">
+  <h1>Argue test</h1>
+  <p>Paired action, own module (clips/argue.js — see its header for why not social.js).
+     Drag to orbit, scroll to zoom.</p>
+  <div class="row">
+    <button id="bPlay" aria-pressed="true">Playing</button>
+    <button id="bSlow" aria-pressed="false">Half speed</button>
+    <button id="bSwap">Swap roles</button>
+  </div>
+</div>
+<div id="log">loading…</div>
+
+<script type="importmap">
+{"imports":{"three":"../vendor/three.module.js","three/addons/":"../vendor/addons/"}}
+</script>
+<script type="module">
+import * as THREE from 'three'
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
+import { clone as skinnedClone } from 'three/addons/utils/SkeletonUtils.js'
+// Cache-busted so an edit to either module always shows up on reload.
+const ANIM = await import('../anim.js?v=' + Date.now())
+const ARGUE = await import('./argue.js?v=' + Date.now())
+const { CHARACTER_HEIGHT } = await import('../highfive.js?v=' + Date.now())
+
+const canvas = document.getElementById('c')
+const logEl = document.getElementById('log')
+const nowEl = document.getElementById('now')
+
+const renderer = new THREE.WebGLRenderer({ canvas, antialias:true })
+renderer.setPixelRatio(Math.min(devicePixelRatio,2))
+renderer.shadowMap.enabled = true
+renderer.shadowMap.type = THREE.PCFSoftShadowMap
+
+const scene = new THREE.Scene()
+scene.background = new THREE.Color(0xF0ECE6)
+const camera = new THREE.PerspectiveCamera(32, 1, 0.1, 100)
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.95))
+const key = new THREE.DirectionalLight(0xfff0d8, 2.0)
+key.position.set(4, 7, 6); key.castShadow = true
+key.shadow.mapSize.set(2048,2048)
+Object.assign(key.shadow.camera, { left:-4, right:4, top:5, bottom:-2, near:0.5, far:25 })
+scene.add(key)
+const fill = new THREE.DirectionalLight(0xd6e0f0, 0.5); fill.position.set(-5,4,-4); scene.add(fill)
+
+const floor = new THREE.Mesh(new THREE.BoxGeometry(14, 0.3, 14),
+  new THREE.MeshStandardMaterial({ color:0xE9E0CE, roughness:1 }))
+floor.position.y = -0.15; floor.receiveShadow = true; scene.add(floor)
+
+const CHAR_H = CHARACTER_HEIGHT
+let clock = new THREE.Clock()
+let slow = false, playing = true, swapped = false
+
+function place(src, x, z, rotY) {
+  const o = skinnedClone(src)
+  // Stale world matrices on a fresh clone read a degenerate Box3 height and
+  // blow the scale up to ~99x. Measure only after this.
+  o.updateMatrixWorld(true)
+  const box = new THREE.Box3().setFromObject(o)
+  const size = box.getSize(new THREE.Vector3())
+  const c = box.getCenter(new THREE.Vector3())
+  const s = CHAR_H / Math.max(size.y, 1e-4)
+  const g = new THREE.Group()
+  o.position.set(-c.x, -box.min.y, -c.z)
+  g.add(o); g.scale.setScalar(s)
+  g.position.set(x, 0, z); g.rotation.y = rotY
+  o.traverse(n => { if (n.isMesh) { n.castShadow = true; n.receiveShadow = true } })
+  scene.add(g)
+  return { group:g, root:o, scale:s, height: CHAR_H }
+}
+
+let chars = []
+let SRC = null
+const loader = new GLTFLoader()
+loader.load('../glb/character.glb', gltf => {
+  SRC = gltf.scene
+  // Marks first, so the two characters are placed exactly where argueRoutine
+  // would put them, not just "somewhere facing each other".
+  const marks = ARGUE.argueMarks([0,0,-ARGUE.ARGUE_SPACING/2], [0,0,ARGUE.ARGUE_SPACING/2])
+  const a = place(gltf.scene, marks.a.pos.x, marks.a.pos.z, marks.a.yaw)
+  const b = place(gltf.scene, marks.b.pos.x, marks.b.pos.z, marks.b.yaw)
+  chars.push(a, b)   // mutate in place — window.__chars was bound to this array before load
+  playRoles()
+  window.__ready = true
+  report()
+}, undefined, e => { logEl.textContent = 'load failed: ' + e })
+
+function startClip(root, name) {
+  const mixer = ANIM.getMixer(root)
+  const clip = ARGUE.getClip(name)
+  const action = mixer.clipAction(clip)
+  action.setLoop(THREE.LoopRepeat, Infinity)
+  action.reset(); action.enabled = true; action.setEffectiveWeight(1)
+  action.play()
+  return action
+}
+
+function playRoles() {
+  const [a, b] = chars
+  const roleA = swapped ? 'argueReact' : 'argue'
+  const roleB = swapped ? 'argue' : 'argueReact'
+  // Same frame, both of them — the whole point of the pattern.
+  const actA = startClip(a.root, roleA)
+  const actB = startClip(b.root, roleB)
+  actA.time = 0; actB.time = 0
+  nowEl.textContent = `${roleA} + ${roleB}`
+}
+
+document.getElementById('bPlay').onclick = e => {
+  playing = !playing
+  e.target.textContent = playing ? 'Playing' : 'Paused'
+  e.target.setAttribute('aria-pressed', String(playing))
+}
+document.getElementById('bSlow').onclick = e => {
+  slow = !slow; e.target.setAttribute('aria-pressed', String(slow))
+}
+document.getElementById('bSwap').onclick = () => { swapped = !swapped; playRoles() }
+
+// ---- measurement ----
+const _v = new THREE.Vector3()
+function boneWorldY(charIdx, name) {
+  const b = chars[charIdx].root.getObjectByName(name)
+  if (!b) return null
+  b.updateWorldMatrix(true, false)
+  return _v.setFromMatrixPosition(b.matrixWorld).clone()
+}
+window.__probe = () => {
+  const o = {}
+  for (const n of ['Hips','Head','LeftHand','RightHand','LeftToeBase','RightToeBase'])
+    o[n] = boneWorldY(0, n).toArray().map(v => +v.toFixed(3))
+  return o
+}
+
+/** Min toe height across a whole clip, sampled at N points, in WORLD metres
+ *  on the actually-placed/scaled character (not the scratch rig's own cm). */
+window.__minToe = (name, n = 240) => {
+  const dur = ARGUE.getClip(name).duration
+  const action = ANIM.getMixer(chars[0].root).clipAction(ARGUE.getClip(name))
+  action.play(); action.paused = true
+  let min = Infinity
+  for (let i = 0; i <= n; i++) {
+    action.time = (i / n) * dur
+    ANIM.update(chars[0].root, 0)
+    for (const side of ['Left','Right']) {
+      const y = boneWorldY(0, side + 'ToeBase').y
+      if (y < min) min = y
+    }
+  }
+  return min
+}
+
+/** Max loop-seam delta on the built clip's own tracks (Float32, same
+ *  precision the real integrated clip would carry). */
+window.__seamDelta = (name) => {
+  const clip = ARGUE.getClip(name)
+  let maxd = 0
+  for (const tr of clip.tracks) {
+    const n = tr.times.length
+    const width = tr.values.length / n
+    for (let k = 0; k < width; k++) {
+      const d = Math.abs(tr.values[k] - tr.values[(n - 1) * width + k])
+      if (d > maxd) maxd = d
+    }
+  }
+  return maxd
+}
+
+/** Closest approach between the two characters' RightHand/LeftHand bones
+ *  across one full loop, in world metres — the "nobody touches anybody"
+ *  check. Samples both clips together since they're meant to run paired. */
+window.__minHandGap = (nameA, nameB, n = 240) => {
+  const dur = ARGUE.getClip(nameA).duration
+  const aAct = ANIM.getMixer(chars[0].root).clipAction(ARGUE.getClip(nameA))
+  const bAct = ANIM.getMixer(chars[1].root).clipAction(ARGUE.getClip(nameB))
+  aAct.play(); aAct.paused = true
+  bAct.play(); bAct.paused = true
+  let min = Infinity
+  const hands = ['LeftHand', 'RightHand']
+  for (let i = 0; i <= n; i++) {
+    aAct.time = (i / n) * dur; bAct.time = (i / n) * dur
+    ANIM.update(chars[0].root, 0); ANIM.update(chars[1].root, 0)
+    for (const ha of hands) for (const hb of hands) {
+      const pa = boneWorldY(0, ha), pb = boneWorldY(1, hb)
+      const d = pa.distanceTo(pb)
+      if (d < min) min = d
+    }
+  }
+  return min
+}
+
+window.__scene = scene
+window.__chars = chars
+window.__anim = ANIM
+window.__argue = ARGUE
+window.__cam = (y,p,d) => { yaw=y; pitch=p; dist=d }
+
+function report() {
+  if (!chars.length) return
+  const p = window.__probe()
+  logEl.textContent =
+    `hips.y=${p.Hips[1].toFixed(3)}  head.y=${p.Head[1].toFixed(3)}\n` +
+    `Lhand=[${p.LeftHand.join(',')}]  Rhand=[${p.RightHand.join(',')}]\n` +
+    `Ltoe=[${p.LeftToeBase.join(',')}]  Rtoe=[${p.RightToeBase.join(',')}]`
+}
+setInterval(report, 250)
+
+// ---- camera ----
+let yaw = 0, pitch = 0.16, dist = 1
+let drag=false, px=0, py=0
+canvas.addEventListener('pointerdown', e => { drag=true; px=e.clientX; py=e.clientY })
+addEventListener('pointerup', () => drag=false)
+addEventListener('pointermove', e => {
+  if(!drag) return
+  yaw -= (e.clientX-px)*0.006
+  pitch = Math.max(-0.2, Math.min(1.2, pitch + (e.clientY-py)*0.005))
+  px=e.clientX; py=e.clientY
+})
+canvas.addEventListener('wheel', e => { e.preventDefault()
+  dist = Math.max(0.3, Math.min(2.5, dist + e.deltaY*0.0012)) }, {passive:false})
+window.__camera = camera
+window.__renderer = renderer
+
+function resize(){
+  const w=canvas.clientWidth,h=canvas.clientHeight
+  if(canvas.width!==w||canvas.height!==h){
+    renderer.setSize(w,h,false); camera.aspect=w/h; camera.updateProjectionMatrix() }
+}
+const target = new THREE.Vector3(0, 0.9, 0)
+function tick(){
+  resize()
+  const dt = playing ? clock.getDelta() * (slow ? 0.5 : 1) : (clock.getDelta(), 0)
+  for (const c of chars) ANIM.update(c.root, dt)
+  const r = 3.6*dist, cp = Math.cos(pitch)
+  camera.position.set(target.x + Math.sin(yaw)*r*cp, target.y + Math.sin(pitch)*r, target.z + Math.cos(yaw)*r*cp)
+  camera.lookAt(target)
+  renderer.render(scene,camera)
+  requestAnimationFrame(tick)
+}
+tick()
+</script>
+</body>
+</html>

@@ -1,0 +1,386 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>High five — marks, not IK</title>
+<style>
+  html,body{margin:0;height:100%;background:#F0ECE6;overflow:hidden;
+    font:14px/1.5 ui-sans-serif,-apple-system,Segoe UI,sans-serif;color:#35455C}
+  #c{display:block;width:100%;height:100%;cursor:grab}
+  #c:active{cursor:grabbing}
+  #hud{position:fixed;left:18px;top:16px;background:#fffdfaee;border:1px solid #C3B39B;
+    border-radius:10px;padding:12px 14px;max-width:330px;box-shadow:0 6px 24px #4a1f3d18}
+  #hud h1{font-size:15px;margin:0 0 3px;letter-spacing:-.01em}
+  #hud p{margin:0 0 10px;font-size:12px;color:#6b5f56}
+  .row{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}
+  button{font:inherit;font-size:12px;padding:5px 10px;border-radius:6px;
+    border:1px solid #C3B39B;background:#fff;color:#35455C;cursor:pointer}
+  button:hover{background:#E9E0CE}
+  button[aria-pressed="true"]{background:#35455C;color:#F0ECE6;border-color:#35455C}
+  #tab{position:fixed;right:18px;top:16px;background:#fffdfaee;border:1px solid #C3B39B;
+    border-radius:10px;padding:10px 12px;font:12px/1.5 ui-monospace,monospace;
+    box-shadow:0 6px 24px #4a1f3d18}
+  #tab table{border-collapse:collapse}
+  #tab th{text-align:left;font-weight:600;padding:0 12px 4px 0;color:#6b5f56;font-size:11px}
+  #tab td{padding:2px 12px 2px 0}
+  .ok{color:#3f7d4e;font-weight:700}
+  .bad{color:#D9714F;font-weight:700}
+  #now{position:fixed;left:50%;top:18px;transform:translateX(-50%);
+    font:600 15px ui-monospace,monospace;color:#4A1F3D;background:#fffdfacc;
+    padding:6px 18px;border-radius:8px}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="now">loading</div>
+<div id="hud">
+  <h1>High five, three spacings</h1>
+  <p>Three pairs start at different random distances, walk to marks
+     <span id="sp">…</span> apart, turn in, and five. Same clip every time,
+     because the spacing is always the same by the time it plays.</p>
+  <div class="row">
+    <button id="bRun">Run again</button>
+    <button id="bHold">Hold contact</button>
+    <button id="bMark" aria-pressed="false">Show marks</button>
+    <button id="bSlow" aria-pressed="false">Half speed</button>
+  </div>
+  <div class="row">
+    <button data-cam="0">All</button>
+    <button data-cam="1">Pair 1</button>
+    <button data-cam="2">Pair 2</button>
+    <button data-cam="3">Pair 3</button>
+  </div>
+</div>
+<div id="tab">loading…</div>
+
+<script type="importmap">
+{"imports":{"three":"../../public/vendor/three.module.js","three/addons/":"../../public/vendor/addons/"}}
+</script>
+<script type="module">
+import * as THREE from 'three'
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
+import { clone as skinnedClone } from 'three/addons/utils/SkeletonUtils.js'
+import * as ANIM from './anim.js'
+import * as HF from './highfive.js'
+
+const canvas = document.getElementById('c')
+const tabEl = document.getElementById('tab')
+const nowEl = document.getElementById('now')
+document.getElementById('sp').textContent = HF.HIGHFIVE_SPACING.toFixed(3) + ' m'
+
+const renderer = new THREE.WebGLRenderer({ canvas, antialias:true })
+renderer.setPixelRatio(Math.min(devicePixelRatio,2))
+renderer.shadowMap.enabled = true
+renderer.shadowMap.type = THREE.PCFSoftShadowMap
+
+const scene = new THREE.Scene()
+scene.background = new THREE.Color(0xF0ECE6)
+const camera = new THREE.PerspectiveCamera(30, 1, 0.1, 200)
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.92))
+const key = new THREE.DirectionalLight(0xfff0d8, 2.0)
+key.position.set(6, 10, 8); key.castShadow = true
+key.shadow.mapSize.set(2048,2048)
+Object.assign(key.shadow.camera, { left:-9, right:9, top:9, bottom:-6, near:0.5, far:40 })
+scene.add(key)
+const fill = new THREE.DirectionalLight(0xd6e0f0, 0.5); fill.position.set(-7,5,-5); scene.add(fill)
+
+const floor = new THREE.Mesh(new THREE.BoxGeometry(30, 0.3, 22),
+  new THREE.MeshStandardMaterial({ color:0xE9E0CE, roughness:1 }))
+floor.position.y = -0.15; floor.receiveShadow = true; scene.add(floor)
+
+const CHAR_H = 1.68
+// Three pairs, each on its own lane so the runs never interfere.
+const LANE_Z = [-4.2, 0, 4.2]
+
+function place(src, pos, rotY) {
+  const o = skinnedClone(src)
+  // Stale matrices on a fresh clone make Box3 report a near-zero height, and
+  // CHAR_H/size.y then blows the scale up to about 99x.
+  o.updateMatrixWorld(true)
+  const box = new THREE.Box3().setFromObject(o)
+  const size = box.getSize(new THREE.Vector3())
+  const c = box.getCenter(new THREE.Vector3())
+  const s = CHAR_H / Math.max(size.y, 1e-4)
+  const g = new THREE.Group()
+  o.position.set(-c.x, -box.min.y, -c.z)
+  g.add(o); g.scale.setScalar(s)
+  g.position.copy(pos); g.rotation.y = rotY
+  o.traverse(n => { if (n.isMesh) { n.castShadow = true; n.receiveShadow = true } })
+  scene.add(g)
+  return { group:g, root:o, scale:s, height:CHAR_H }
+}
+
+// deterministic per run index so a screenshot can be reproduced
+let runSeed = 7
+function rnd() {
+  runSeed |= 0; runSeed = (runSeed + 0x6D2B79F5) | 0
+  let t = Math.imul(runSeed ^ (runSeed >>> 15), 1 | runSeed)
+  t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+}
+
+let src = null
+const pairs = []
+const markDots = new THREE.Group(); markDots.visible = false; scene.add(markDots)
+
+function buildRun() {
+  for (const p of pairs) { scene.remove(p.a.group); scene.remove(p.b.group)
+    ANIM.dispose(p.a.root); ANIM.dispose(p.b.root) }
+  pairs.length = 0
+  markDots.clear()
+
+  LANE_Z.forEach((z, i) => {
+    // Start distance is random and deliberately nothing like the mark spacing:
+    // if the contact depended on where they happened to stand, this is what
+    // would show it.
+    const gap = 1.6 + rnd() * 3.2
+    const skew = (rnd() - 0.5) * 1.4          // and not squarely lined up either
+    const aPos = new THREE.Vector3(-gap / 2, 0, z + skew)
+    const bPos = new THREE.Vector3( gap / 2, 0, z - skew)
+    const a = place(src, aPos, rnd() * 6.28)
+    const b = place(src, bPos, rnd() * 6.28)
+    const routine = HF.highfiveRoutine(a, b, { height: CHAR_H })
+    pairs.push({ a, b, routine, startGap: gap, lane: z, dMin: Infinity, dAtContact: null, dHandAtContact: null, bestDt: Infinity, tFive: 0 })
+
+    for (const m of [routine.marks.a, routine.marks.b]) {
+      const dot = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.16, 0.01, 24),
+        new THREE.MeshBasicMaterial({ color:0xD6B45C }))
+      dot.position.copy(m.pos); dot.position.y = 0.006
+      markDots.add(dot)
+    }
+  })
+  window.__runReady = true
+  window.__contactDone = false
+}
+
+const loader = new GLTFLoader()
+loader.load('../../public/glb/character.glb', gltf => {
+  src = gltf.scene
+  buildRun()
+  window.__ready = true
+}, undefined, e => { tabEl.textContent = 'load failed: ' + e })
+
+// ---- measurement -----------------------------------------------------------
+// Two numbers per pair. The palm centres are the honest test of contact — the
+// hand bone sits at the WRIST, and two palms flush against each other leave
+// their wrists a palm's depth apart on either side, about 7cm at this scale.
+function measure(p) {
+  const pa = HF.palmPoint(p.a.root, 'Right', CHAR_H)
+  const pb = HF.palmPoint(p.b.root, 'Right', CHAR_H)
+  const ha = HF.handPoint(p.a.root, 'Right')
+  const hb = HF.handPoint(p.b.root, 'Right')
+  return { palm: pa.distanceTo(pb), hand: ha.distanceTo(hb), mid: pa.clone().lerp(pb, 0.5) }
+}
+
+function report() {
+  if (!pairs.length) return
+  const rows = pairs.map((p, i) => {
+    const m = measure(p)
+    const d = p.dAtContact
+    const cls = d == null ? '' : (d < 0.04 ? 'ok' : 'bad')
+    return `<tr><td>${i+1}</td><td>${p.startGap.toFixed(2)}</td>` +
+      `<td>${p.routine.spacing.toFixed(3)}</td>` +
+      `<td class="${cls}">${d == null ? '—' : (d*100).toFixed(1)}</td>` +
+      `<td>${p.dHandAtContact == null ? '—' : (p.dHandAtContact*100).toFixed(1)}</td>` +
+      `<td>${p.routine.phase}</td></tr>`
+  }).join('')
+  tabEl.innerHTML =
+    `<table><tr><th>pair</th><th>start&nbsp;gap</th><th>mark&nbsp;gap</th>` +
+    `<th>palm&nbsp;Δ&nbsp;cm</th><th>wrist&nbsp;Δ&nbsp;cm</th><th>phase</th></tr>${rows}</table>`
+}
+
+// ---- assertions exposed for the browser harness ----------------------------
+window.__state = () => pairs.map((p, i) => ({
+  pair: i + 1,
+  startGap: +p.startGap.toFixed(4),
+  markSpacing: +p.routine.spacing.toFixed(4),
+  phase: p.routine.phase,
+  palmGapAtContact: p.dAtContact == null ? null : +p.dAtContact.toFixed(4),
+  wristGapAtContact: p.dHandAtContact == null ? null : +p.dHandAtContact.toFixed(4),
+  minPalmGap: +p.dMin.toFixed(4),
+  markGapActual: +p.routine.marks.a.pos.distanceTo(p.routine.marks.b.pos).toFixed(4),
+  standGapActual: +p.a.group.position.distanceTo(p.b.group.position).toFixed(4),
+}))
+window.__spacing = HF.HIGHFIVE_SPACING
+window.__run = (seed) => { if (seed != null) runSeed = seed; buildRun() }
+window.__holdContact = holdContact
+window.__view = v => { if (v.yaw!=null) yaw=v.yaw; if (v.pitch!=null) pitch=v.pitch
+  if (v.dist!=null) dist=v.dist; if (v.target) target.set(...v.target) }
+window.__lookAtPair = i => camPreset(i)
+window.__pairs = pairs
+window.__ANIM = ANIM
+window.__HF = HF
+
+/** Render now and hand back a JPEG data URL with the run's numbers burned in.
+ *  A plain page screenshot grabs whatever tab is in front, which is not
+ *  necessarily this one. */
+window.__snap = (label = '', quality = 0.9) => {
+  renderer.render(scene, camera)
+  const w = canvas.width, h = canvas.height
+  const out = document.createElement('canvas')
+  out.width = w; out.height = h
+  const g = out.getContext('2d')
+  g.drawImage(canvas, 0, 0)
+  const S = w / 1440
+  g.font = `${Math.round(30*S)}px ui-monospace, monospace`
+  g.fillStyle = '#fffdfaee'
+  g.fillRect(20*S, 20*S, 760*S, (74 + pairs.length*34)*S)
+  g.strokeStyle = '#C3B39B'; g.lineWidth = 2*S
+  g.strokeRect(20*S, 20*S, 760*S, (74 + pairs.length*34)*S)
+  g.fillStyle = '#35455C'
+  g.fillText(label, 38*S, 58*S)
+  g.font = `${Math.round(25*S)}px ui-monospace, monospace`
+  g.fillStyle = '#6b5f56'
+  g.fillText('pair  start gap   mark gap   palm Δ   wrist Δ', 38*S, 94*S)
+  pairs.forEach((p, i) => {
+    const d = p.dAtContact, hgap = p.dHandAtContact
+    g.fillStyle = d != null && d < 0.04 ? '#3f7d4e' : '#D9714F'
+    g.fillText(
+      `  ${i+1}    ${p.startGap.toFixed(2)} m     ${p.routine.spacing.toFixed(3)} m   ` +
+      `${d == null ? '  —  ' : (d*100).toFixed(1).padStart(5)} cm  ` +
+      `${hgap == null ? '  —  ' : (hgap*100).toFixed(1).padStart(5)} cm`,
+      38*S, (128 + i*34)*S)
+  })
+  return out.toDataURL('image/jpeg', quality)
+}
+
+/** Park a pair on their marks and step the clip, reporting the contact
+ *  geometry frame by frame. The assertion the whole design rests on. */
+window.__scanClip = (idx = 0, steps = 40) => {
+  const p = pairs[idx]
+  const dur = ANIM.getClip('highfive').duration
+  const acts = [['a', p.a], ['b', p.b]].map(([k, c]) => {
+    c.group.position.copy(p.routine.marks[k].pos)
+    c.group.rotation.y = p.routine.marks[k].yaw
+    const a = ANIM.crossfade(c.root, 'highfive', 0)
+    a.reset(); a.play(); a.paused = true
+    return { c, a }
+  })
+  const bone = (root, n) => {
+    const b = root.getObjectByName(n); if (!b) return null
+    b.updateWorldMatrix(true, false)
+    return new THREE.Vector3().setFromMatrixPosition(b.matrixWorld)
+  }
+  const rows = []
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps
+    for (const { c, a } of acts) { a.time = t * dur; ANIM.update(c.root, 0)
+      c.root.updateMatrixWorld(true); c.group.updateMatrixWorld(true) }
+    const pa = HF.palmPoint(p.a.root, 'Right', CHAR_H), pb = HF.palmPoint(p.b.root, 'Right', CHAR_H)
+    const ea = bone(p.a.root, 'head_end'), eb = bone(p.b.root, 'head_end')
+    rows.push({
+      t: +t.toFixed(3),
+      palm: +pa.distanceTo(pb).toFixed(4),
+      wrist: +bone(p.a.root, 'RightHand').distanceTo(bone(p.b.root, 'RightHand')).toFixed(4),
+      head: ea && eb ? +ea.distanceTo(eb).toFixed(3) : null,
+      palmY: +pa.y.toFixed(3),
+      toeY: +bone(p.a.root, 'LeftToeBase').y.toFixed(4),
+    })
+  }
+  frozen = true
+  return rows
+}
+
+// ---- freeze every pair on its contact frame --------------------------------
+function holdContact() {
+  for (const p of pairs) {
+    for (const c of [p.a, p.b]) {
+      c.group.position.copy(p.routine.marks[c === p.a ? 'a' : 'b'].pos)
+      c.group.rotation.y = p.routine.marks[c === p.a ? 'a' : 'b'].yaw
+      const act = ANIM.crossfade(c.root, 'highfive', 0)
+      act.reset(); act.play(); act.paused = true
+      act.time = ANIM.getClip('highfive').duration * HF.CONTACT_T
+      ANIM.update(c.root, 0)
+      c.root.updateMatrixWorld(true)
+      c.group.updateMatrixWorld(true)
+    }
+    const m = measure(p)
+    p.dAtContact = m.palm; p.dHandAtContact = m.hand; p.dMin = Math.min(p.dMin, m.palm)
+  }
+  frozen = true
+  nowEl.textContent = 'held on the contact frame'
+  report()
+  window.__contactDone = true
+}
+
+// ---- run loop --------------------------------------------------------------
+let frozen = false, slow = false
+const clock = new THREE.Clock()
+
+function stepPairs(dt) {
+  let allDone = true
+  for (const p of pairs) {
+    const before = p.routine.phase
+    const phase = p.routine.step(dt)
+    if (phase !== 'done') allDone = false
+    if (phase === 'five') {
+      if (before !== 'five') p.tFive = 0
+      p.tFive += dt
+      p.a.group.updateMatrixWorld(true); p.b.group.updateMatrixWorld(true)
+      const m = measure(p)
+      if (m.palm < p.dMin) p.dMin = m.palm
+      // Take the sampled frame NEAREST the contact time, not the first one
+      // past it: at 60fps the first frame past can be 16ms late, which on a
+      // hand moving at 2 m/s is a few centimetres of honest travel and reads
+      // as a miss that is not there. __scanClip hits the frame exactly.
+      const dt2 = Math.abs(p.tFive - p.routine.contactAt)
+      if (dt2 < p.bestDt) { p.bestDt = dt2; p.dAtContact = m.palm; p.dHandAtContact = m.hand }
+    }
+  }
+  if (allDone && !window.__contactDone) window.__contactDone = true
+  nowEl.textContent = pairs.map((p,i) => `${i+1}: ${p.routine.phase}`).join('   ')
+}
+
+// ---- camera ----------------------------------------------------------------
+let yaw = 0.0, pitch = 0.16, dist = 1
+const target = new THREE.Vector3(0, 1.25, 0)
+function camPreset(i) {
+  if (i === 0) { yaw = 0.0; pitch = 0.30; dist = 1; target.set(0, 1.2, 0) }
+  else { const p = pairs[i-1]; if (!p) return
+    yaw = 0.0; pitch = 0.10; dist = 0.30
+    const m = p.a.group.position.clone().lerp(p.b.group.position, 0.5)
+    target.set(m.x, 1.45, m.z) }
+}
+let drag=false, px=0, py=0
+canvas.addEventListener('pointerdown', e => { drag=true; px=e.clientX; py=e.clientY })
+addEventListener('pointerup', () => drag=false)
+addEventListener('pointermove', e => {
+  if(!drag) return
+  yaw -= (e.clientX-px)*0.006
+  pitch = Math.max(-0.2, Math.min(1.3, pitch + (e.clientY-py)*0.005))
+  px=e.clientX; py=e.clientY
+})
+canvas.addEventListener('wheel', e => { e.preventDefault()
+  dist = Math.max(0.12, Math.min(2.5, dist + e.deltaY*0.0012)) }, {passive:false})
+
+document.getElementById('bRun').onclick = () => { frozen = false; buildRun(); nowEl.textContent = 'running' }
+document.getElementById('bHold').onclick = holdContact
+document.getElementById('bMark').onclick = e => {
+  markDots.visible = !markDots.visible; e.target.setAttribute('aria-pressed', String(markDots.visible)) }
+document.getElementById('bSlow').onclick = e => {
+  slow = !slow; e.target.setAttribute('aria-pressed', String(slow)) }
+document.querySelectorAll('[data-cam]').forEach(b => b.onclick = () => camPreset(+b.dataset.cam))
+
+function resize(){
+  const w=canvas.clientWidth,h=canvas.clientHeight
+  if(canvas.width!==w||canvas.height!==h){
+    renderer.setSize(w,h,false); camera.aspect=w/h; camera.updateProjectionMatrix() }
+}
+let acc = 0
+function tick(){
+  resize()
+  const dt = Math.min(clock.getDelta(), 0.05) * (slow ? 0.4 : 1)
+  if (!frozen && pairs.length) stepPairs(dt)
+  acc += dt
+  if (acc > 0.15) { acc = 0; report() }
+  const r = 13*dist, cp = Math.cos(pitch)
+  camera.position.set(target.x + Math.sin(yaw)*r*cp, target.y + Math.sin(pitch)*r, target.z + Math.cos(yaw)*r*cp)
+  camera.lookAt(target)
+  renderer.render(scene,camera)
+  requestAnimationFrame(tick)
+}
+tick()
+</script>
+</body>
+</html>
