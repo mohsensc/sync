@@ -1,6 +1,14 @@
 """Score the rung 4 tuning corpus and print the table the threshold came from.
 
     ./.venv/bin/python tools/tune_rung4.py
+    ./.venv/bin/python tools/tune_rung4.py --backend embedding
+
+The second form needs the optional extra: pip install -e '.[dev,embedding]'.
+It is how the numbers in embedding_similarity.py's docstring were produced -
+same corpus, same script, different backend, so the comparison is apples to
+apples rather than two ad hoc measurements. It has no pass/fail gate, because
+that backend does not clear this corpus at any threshold - see below and that
+module's docstring for why.
 
 Read the argument, not just the number. The corpus is three groups:
 
@@ -21,6 +29,7 @@ the honest consequence is that the weaker duplicates below it are missed.
 
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -91,7 +100,29 @@ NEAR_MISS: list[tuple[str, str]] = [
 
 
 def main() -> int:
-    sim = LexicalSimilarity()
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--backend", choices=["lexical", "embedding"],
+                         default="lexical")
+    args = parser.parse_args()
+
+    if args.backend == "lexical":
+        sim = LexicalSimilarity()
+        gate = True
+    else:
+        try:
+            from agent_presence.embedding_similarity import EmbeddingSimilarity
+        except ImportError:
+            print("embedding backend not installed: "
+                  "pip install -e '.[dev,embedding]'", file=sys.stderr)
+            return 2
+        sim = EmbeddingSimilarity()
+        gate = False
+
+    # DEFAULT_RUNG4_THRESHOLD is lexical's tuned value. Using it here for the
+    # embedding backend too isn't a claim it's right for that backend - see
+    # embedding_similarity.py's docstring - it just gives the sweep table
+    # below a shared reference point so the two backends' output is directly
+    # comparable rather than picking a different anchor for each.
     threshold = DEFAULT_RUNG4_THRESHOLD
 
     groups = [
@@ -135,17 +166,48 @@ def main() -> int:
               f"     {fn:>2}       {fp:>2}/{len(bad)}{here}")
     print()
 
-    print("-" * 96)
-    print(f"weakest firing duplicate: {min((s for s in (sim.score(a, b) for a, b in DUPLICATE) if s >= threshold), default=0.0):.3f}")
-    print(f"highest non-duplicate:    {best_bad:.3f}")
-    print(f"usable band:              ({best_bad:.3f}, "
-          f"{min((s for s in (sim.score(a, b) for a, b in DUPLICATE) if s >= threshold), default=1.0):.3f}]")
-    print(f"false positives at {threshold:.2f}:    "
-          f"{sum(1 for a, b in bad if sim.score(a, b) >= threshold)}")
-    print(f"missed duplicates:        {sum(1 for a, b in DUPLICATE if sim.score(a, b) < threshold)}")
+    dup_scores = [sim.score(a, b) for a, b in DUPLICATE]
+    firing_dups = [s for s in dup_scores if s >= threshold]
 
-    # The only failure that matters here. Missed duplicates are a cost we chose;
-    # a false positive at the shipped threshold is a regression.
+    print("-" * 96)
+    print(f"backend:                       {sim.name}")
+    print(f"weakest duplicate (any):       {worst_dup:.3f}")
+    print(f"strongest non-duplicate (any): {best_bad:.3f}")
+    print(f"weakest firing duplicate at {threshold:.2f}: "
+          f"{min(firing_dups):.3f}" if firing_dups else
+          f"weakest firing duplicate at {threshold:.2f}: none fire")
+    print(f"false positives at {threshold:.2f}:         "
+          f"{sum(1 for a, b in bad if sim.score(a, b) >= threshold)}")
+    print(f"missed duplicates at {threshold:.2f}:       "
+          f"{sum(1 for a, b in DUPLICATE if sim.score(a, b) < threshold)}")
+
+    # The tightest threshold that guarantees zero false positives on this
+    # corpus, and what it costs in recall to get there. Whether or not that
+    # is *this* backend's shipped default (it may not be), this is the
+    # honest ceiling: no threshold below best_bad can be FP-free, and this is
+    # what you get at the lowest one that is.
+    zero_fp_floor = best_bad
+    caught_at_floor = sum(1 for s in dup_scores if s > zero_fp_floor)
+    if worst_dup > best_bad:
+        print(f"usable band:                   ({best_bad:.3f}, "
+              f"{worst_dup:.3f}] catches every duplicate with zero false "
+              f"positives")
+    else:
+        print(f"usable band:                   the weakest duplicate "
+              f"({worst_dup:.3f}) scores BELOW the strongest non-duplicate "
+              f"({best_bad:.3f}) - no threshold catches every duplicate "
+              f"without a false positive. The best zero-FP floor "
+              f"({zero_fp_floor:.3f}) still catches {caught_at_floor}/"
+              f"{len(dup_scores)} duplicates.")
+
+    if not gate:
+        print("\nno pass/fail gate for this backend - informational only. "
+              "see embedding_similarity.py's docstring for the verdict.")
+        return 0
+
+    # The only failure that matters for the shipped backend. Missed
+    # duplicates are a cost we chose; a false positive at the shipped
+    # threshold is a regression.
     return 1 if any(sim.score(a, b) >= threshold for a, b in bad) else 0
 
 

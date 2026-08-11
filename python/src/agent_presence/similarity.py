@@ -15,13 +15,24 @@ are the same idea because somebody typed that fact into a dict below. It has no
 idea that "harden the upload path" and "add checksum verification to uploads"
 are the same work, and it never will.
 
-The real backend is sentence embeddings. That is not buildable here: no
-external API can be provisioned, and a local transformer would put a
-several-hundred-megabyte dependency underneath a component that has to fail
-open in a hook's 5ms budget. So the interface is the deliverable and the
-lexical scorer is what fills it today.
+`embedding_similarity.py` is that answer, built: a local sentence-transformer
+run through ONNX (no torch, no network per query - the model downloads once,
+see that module's docstring and docs/threat-model.md), registered as
+"embedding" behind this same seam. It is not the default. Measured against
+the 23-pair corpus in `python/tools/tune_rung4.py`, it loses to
+`LexicalSimilarity` on the exact case rung 4 cares most about - telling a
+true duplicate from two intents that share a template and differ in one
+noun - and there is no threshold that fixes that on this evidence. Read
+`embedding_similarity.py`'s docstring for the numbers; the short version is
+the lexical scorer's synonym table turns out to encode something a generic
+sentence embedding's pooled cosine does not.
 
-An embedding backend drops in by registering a factory:
+None of that forecloses a *different* embedding-shaped backend doing better -
+see that module's docstring for what's untested. It does mean "swap in
+embeddings" was not, on its own, the fix this component's docstring used to
+assume it would be.
+
+A backend drops in by registering a factory:
 
     register_backend("embedding", lambda: MyEmbeddingSimilarity(...))
 
@@ -46,12 +57,15 @@ See `python/tools/tune_rung4.py` for the pairs these weights were tuned on.
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 import re
 from collections import Counter
 from functools import lru_cache
 from typing import Callable, Protocol, runtime_checkable
+
+log = logging.getLogger("agent_presence.similarity")
 
 # -- the interface ----------------------------------------------------------
 
@@ -395,6 +409,21 @@ def default_similarity() -> IntentSimilarity:
     the relay.
     """
     name = os.environ.get(BACKEND_ENV, "").strip().lower() or DEFAULT_BACKEND
+    if name == "embedding" and name not in _BACKENDS:
+        # The default install never imports embedding_similarity.py, so
+        # fastembed and its ~150MB of dependencies are never pulled in unless
+        # something actually asks for this backend. Importing it here, on
+        # first request, is what runs its register_backend("embedding", ...)
+        # call - see that module's docstring for what it does and doesn't buy
+        # over lexical.
+        try:
+            from . import embedding_similarity  # noqa: F401
+        except ImportError:
+            log.warning(
+                "%s=embedding was requested but the 'embedding' extra isn't "
+                "installed (pip install 'agent-presence[embedding]'); "
+                "falling back to lexical", BACKEND_ENV,
+            )
     if name not in _BACKENDS:
         name = DEFAULT_BACKEND
     instance = _INSTANCES.get(name)

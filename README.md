@@ -47,4 +47,5 @@ ctest --test-dir cpp/build`; `cd go && go test ./... -race -count=1`; `cd web
 
 Ladder tuning is guesswork, only run against scripted clients so far. `ap
 policy compile` puts `[[path]]` rules in the cache, but the daemon still reads
-only the blanket table. Rung 4 is off unless `AGENT_PRESENCE_RUNG4=1`.
+only the blanket table. Rung 4 is off unless `AGENT_PRESENCE_RUNG4=1`, and
+its embedding backend loses to lexical (`embedding_similarity.py`).

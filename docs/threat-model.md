@@ -201,3 +201,38 @@ This closes the two items #11 filed against transport encryption:
   put itself back at pre-#22 exposure to an on-path attacker, with the one
   difference that the traffic is still opaque to a passive observer who
   isn't on-path.
+
+## Rung 4's embedding backend: the one network surface outside the relay
+
+Everything above is scoped to the relay, on purpose (see the top of this
+file). `agent_presence.embedding_similarity` — rung 4's opt-in sentence-
+embedding backend, `AGENT_PRESENCE_SIMILARITY=embedding` — is a different
+kind of surface: a Python process on the same machine as the relay making an
+outbound HTTPS call, so it earns a note here rather than being covered by
+implication.
+
+- **What it sends off-machine, and when:** the model weights
+  (`sentence-transformers/all-MiniLM-L6-v2`, ~90MB) download from Hugging
+  Face on first use and are cached locally after that. This is a fetch —
+  nothing about a room, an agent, a path, or a declared intent is sent. No
+  further network call happens on the query path: every `score()` call
+  after the first is local ONNX inference against the cached model, and the
+  cache directory itself never leaves the machine.
+- **What never leaves the machine:** the actual content this backend
+  exists to compare — declared intent strings, which can contain anything an
+  agent's session prompt does. Scoring is local inference, not an API call;
+  this was a deliberate design choice, not the only option (see
+  `embedding_similarity.py`'s docstring for the sentence-embedding backends
+  that were evaluated, all local).
+- **Off by default, same as rung 4 itself:** this backend is inert unless
+  both `AGENT_PRESENCE_RUNG4=1` and `AGENT_PRESENCE_SIMILARITY=embedding` are
+  set. The default install doesn't even have `fastembed` on disk — it's an
+  optional extra (`pip install -e '.[embedding]'`) that
+  `similarity.py`'s `default_similarity()` only imports when that env var
+  asks for it.
+- **What would change this note:** a hosted embedding backend (an API call
+  per query instead of local inference) would send declared intent text to
+  a third party on every score, which is a materially different posture —
+  opt-in, loud, and documented here specifically, not folded into this
+  entry. None exists in this repo today; if one is added, it needs its own
+  version of this section, not an edit to this one.
