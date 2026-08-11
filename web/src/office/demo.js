@@ -178,8 +178,8 @@ export function runDemo(ctx) {
     a5.say('takes the call sites', 'ok')
     a4.say('keeps Order.total', 'ok')
     lock.visible = false
-    // agent.js's World walks them onto marks 2 * HIGHFIVE_REACH apart and
-    // fires the paired clip on the same frame, so the palms actually meet.
+    // agent.js's World walks them onto highfive.js's marks and fires the
+    // same clip on both, same frame, so the palms actually meet.
     await race(waitForEncounter(world.highfive(a4, a5)), tok)
     a4.act('reading')
 

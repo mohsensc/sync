@@ -33,6 +33,13 @@ High five contacts wherever the pair start: they walk onto marks (0.908m at a
 1.68m character) and both play the same clip, and the palm centres land 0.07mm
 apart at contact from both a 2.0m and a 5.4m start. `ik.js` is gone.
 
+`agent.js`'s `World.highfive` now goes through `highfive.js`'s `highfiveMarks()`
+too — one lineage, not two. Checked in the office scene itself (not just the
+test page): two different starting positions both landed the palm centres
+under 1.1mm apart at the contact frame (0.5mm and 1.0mm), wrists about 5-6cm
+apart, which is the expected offset for a bone that sits at the wrist while the
+palm reaches past it.
+
 Desk surface at 0.74m, counter at 0.95m. `desk-tripo-12k.glb` has a raised back
 lip, so `place()` scales off `DESK_SURFACE_RAW` (0.536), not total bbox height —
 that leaves the bbox top at 0.763. On a 1.68m character the hip is at 0.698, so
@@ -60,11 +67,6 @@ Spine > neck > Head`. Spine02 is the belly, Spine is the chest.
 
 ## What's broken
 
-- **The office high-five does not use the marks module.** `highfive.js` walks a pair
-  to fixed marks and lands palms 0.07mm apart, proven in `highfive-test.html`. But
-  `agent.js` implements its own `World.highfive` off the raw clip, and nothing except
-  that test page imports `highfive.js`. Two lineages that never fully converged. The
-  office should adopt the marks.
 - **Walk has foot slide.** Phasing is correct, but no IK pins the foot and the thigh
   curve makes ankle travel sinusoidal instead of linear, so the planted foot slides
   about 6cm at the ankle and 10cm at the toe per step. Invisible at office distance,

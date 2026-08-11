@@ -34,19 +34,9 @@
 
 import * as THREE from 'three'
 import * as ANIM from './anim.js'
+import { highfiveMarks, spacingFor } from './highfive.js'
 
 export const YAW_OFFSET = Math.PI
-
-// Half the separation two partners need for the paired high five, in bind
-// metres. Multiply by the character's scale.
-//
-// This is measured in the office, not taken on faith. Freeze both partners on
-// the contact frame (t = 0.46) and sweep the separation: the palms coincide at
-// 0.79 m for a 1.68 m character — gap 0.0145 m, of which 4 mm is lateral and
-// 9 mm vertical. anim.js's HIGHFIVE_REACH says 0.32 each, i.e. 0.64 apart, and
-// at that separation the palms miss by 0.19 m. The clip is fine; the constant
-// is short. Trust the sweep.
-export const PAIR_REACH = 0.40
 
 const clamp = (v, a, b) => v < a ? a : v > b ? b : v
 const wrapPi = a => Math.atan2(Math.sin(a), Math.cos(a))
@@ -88,7 +78,7 @@ export const ACTIVITIES = Object.keys(ACTS)
 const ACT_OF_CLIP = {
   idle: 'idle', walk: 'walking', sit: 'sitting', type: 'typing',
   read: 'reading', sleep: 'sleeping', drink: 'drinking', wave: 'waving',
-  highfive: 'highfiving', highfiveMirror: 'highfiving',
+  highfive: 'highfiving',
 }
 
 const DOING = {
@@ -147,6 +137,7 @@ export class Agent {
     this.root = root
     this.color = color
     this.scale = scale
+    this.height = height                  // for highfive.js's marks/palm math
 
     this.pos = { x: pos[0], z: pos[1] }   // authoritative floor position
     this.yaw = yaw                        // external convention, see header
@@ -163,7 +154,6 @@ export class Agent {
     this.metersPerCycle = metersPerCycle
     this.walkDur = ANIM.getClip('walk').duration
     this.natSpeed = metersPerCycle / this.walkDur    // ~0.87 m/s at timeScale 1
-    this.reach = PAIR_REACH * scale
 
     this._move = null
     this._turn = null
@@ -234,7 +224,9 @@ export class Agent {
   act(name, opts = {}) {
     const st = ACTS[name]
     if (!st) throw new Error('agent: no activity ' + name)
-    const clip = opts.mirror && st.clip === 'highfive' ? 'highfiveMirror' : st.clip
+    // Both partners in a high five play the SAME clip: facing each other is
+    // already the mirror. See highfive.js.
+    const clip = st.clip
     const fade = opts.fade != null ? opts.fade : st.fade
 
     this.clip = clip
@@ -478,22 +470,26 @@ export class World {
   }
 
   /**
-   * Walk two agents onto their marks, turn them to face, then fire the paired
-   * clip on the same frame. The marks are 2 * HIGHFIVE_REACH apart, which is
-   * the separation the clip was solved for: further and the palms miss.
+   * Walk two agents onto the marks highfive.js computes, turn them to face,
+   * then fire the paired clip on the same frame. The marks are HIGHFIVE_SPACING
+   * apart (scaled to the pair's height), which is the separation the clip was
+   * solved for: further and the palms miss. See highfive.js for why this
+   * lands the contact — this is just the goTo/act plumbing around it.
    */
   highfive(a, b) {
     if (!a || !b || a === b || a.busy || b.busy) return null
-    const gap = a.reach + b.reach
-    const dx = b.pos.x - a.pos.x, dz = b.pos.z - a.pos.z
-    const len = Math.hypot(dx, dz) || 1
-    const ux = dx / len, uz = dz / len
-    const mx = (a.pos.x + b.pos.x) / 2, mz = (a.pos.z + b.pos.z) / 2
+    const height = (a.height + b.height) / 2
+    const marks = highfiveMarks(
+      new THREE.Vector3(a.pos.x, 0, a.pos.z),
+      new THREE.Vector3(b.pos.x, 0, b.pos.z),
+      spacingFor(height))
+    const ax = marks.a.pos.x, az = marks.a.pos.z
+    const bx = marks.b.pos.x, bz = marks.b.pos.z
 
     a.busy = b.busy = true
     a.lastGreet = b.lastGreet = this.time
-    const ax = mx - ux * gap / 2, az = mz - uz * gap / 2
-    const bx = mx + ux * gap / 2, bz = mz + uz * gap / 2
+    // marks.*.yaw is in highfive.js's own (rig-facing) convention; goTo wants
+    // the external one, so re-derive it from the mark positions.
     a.goTo(ax, az, { yaw: yawToward(ax, az, bx, bz), label: 'meeting ' + b.name })
     b.goTo(bx, bz, { yaw: yawToward(bx, bz, ax, az), label: 'meeting ' + a.name })
 
@@ -524,10 +520,11 @@ export class World {
       }
       if (k >= 1) {
         e.phase = 'play'; e.t = 0
-        // Same frame, same fade, both from time zero: the contact frames line
-        // up and the palms meet.
+        // Same frame, same fade, both from time zero, both the SAME clip —
+        // facing each other is already the mirror. That is the whole sync
+        // story; see highfive.js.
         a.act('highfiving')
-        b.act('highfiving', { mirror: true })
+        b.act('highfiving')
       }
     } else if (e.phase === 'play') {
       if (e.t >= ANIM.getClip('highfive').duration + 0.2) return this.#end(e)
