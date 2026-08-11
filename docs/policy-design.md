@@ -220,6 +220,12 @@ right punishment.
 
 ### 4.5 The trust assumption that remains — stated plainly
 
+Describes the relay as it was before #11. `docs/threat-model.md` is the
+current version: join is now authenticated once and latched per connection,
+which closes the per-message re-declaration gap below, but room membership
+itself is still unauthenticated — see that doc for what changed and what
+didn't.
+
 The relay has no transport authentication and this does not add any.
 
 - Anyone who can reach the relay port can join any room whose id they can guess or
