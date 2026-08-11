@@ -159,19 +159,27 @@ function applyQuery() {
     window.__frozen = true
   } else if (q.has('clip')) {
     play(q.get('clip'))
-    if (q.has('t')) {
-      const a = ANIM.makeAction(chars[0].root, currentName)
-      a.reset(); a.play(); a.paused = true
-      a.time = num('t', 0) * a.getClip().duration
-      ANIM.update(chars[0].root, 0)
-      window.__frozen = true
-    }
+    if (q.has('t')) { freezeAt(num('t', 0)); window.__frozen = true }
   }
   yaw = num('yaw', yaw); pitch = num('pitch', pitch); dist = num('dist', dist)
   target.set(num('tx', 0), num('ty', 0.85), num('tz', 0))
   if (q.has('follow')) followBone = q.get('follow')
 }
 let followBone = null
+
+// Park the rig on one frame of the current clip. Stop everything first: play()
+// crossfades, so the outgoing action is still at full weight and pausing the
+// incoming one on its own renders a blend of the two, not the frame asked for.
+function freezeAt(frac) {
+  const root = chars[0].root
+  ANIM.getMixer(root).stopAllAction()
+  const a = ANIM.makeAction(root, currentName)
+  a.reset(); a.enabled = true; a.setEffectiveWeight(1); a.play(); a.paused = true
+  a.time = frac * a.getClip().duration
+  ANIM.update(root, 0)
+  root.updateMatrixWorld(true)
+  return a
+}
 
 function play(name) {
   currentName = name
@@ -243,12 +251,8 @@ window.__view = (o) => { if (o.yaw!=null) yaw=o.yaw; if (o.pitch!=null) pitch=o.
   if (o.target) target.set(...o.target) }
 window.__play = play
 window.__clipName = () => currentName
-window.__setTime = (t) => {
-  const a = ANIM.makeAction(chars[0].root, currentName)
-  a.paused = true; a.time = t
-  ANIM.update(chars[0].root, 0)
-  chars[0].root.updateMatrixWorld(true)
-}
+window.__setTime = (t) => freezeAt(t / ANIM.getClip(currentName).duration)
+window.__freezeAt = freezeAt
 window.__resume = () => { ANIM.makeAction(chars[0].root, currentName).paused = false }
 
 function report() {

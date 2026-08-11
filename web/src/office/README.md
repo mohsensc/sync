@@ -37,7 +37,12 @@ measuring a clone with `Box3`; a stale skeleton reports a near-zero height, so a
   pathing, so both characters can just walk to fixed marks and play a clip authored
   for that exact distance. Marks should replace the solver; keep IK only if a small
   corrective blend earns its place.
-- Wrist rotation was fixed in the clips but hasn't been reviewed frame by frame.
+- `office.html` never imported `anim.js`, so every character in the room stands in
+  the bind T-pose. The clips work; the room just doesn't play them yet.
+- Palm aiming solves for the closest reachable direction, and on a couple of poses
+  the closest is not the one asked for — `sit` ends about 25 degrees off palm-down
+  because a forearm sloping down the thigh cannot get there. Everything else lands
+  inside 20.
 - Interactivity (click to select, click to send, zone routing, demo mode) was
   started and isn't in this branch.
 
