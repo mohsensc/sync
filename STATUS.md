@@ -263,3 +263,43 @@ machine contention more than lane count specifically — the two mutexes
 actually on the hot path were just measured above and are not where the
 loss is coming from. Worth a clean re-run on a quiet box; not something
 this issue's code needed to change to earn, and not claimed as fixed here.
+
+## #21 follow-up: a real tag, a real release, a real download
+
+Everything #21 asked for was in place except the one thing that proves it:
+no tag had ever been cut, so `.github/workflows/release.yml` had never run,
+and `install.sh`'s "fetch a binary" only ever checked a local `dist/`
+directory — it never downloaded anything.
+
+Cutting `v0.1.0` and pushing it found a real bug on the way:
+`scripts/build-go-release.sh`'s output directory argument was used as-is
+without resolving it to an absolute path, so when `release.yml` called it
+with the plain relative `dist` (`ci.yml`'s own call already used
+`$RUNNER_TEMP/dist`, an absolute path, which is why the PR-time cross-compile
+check never caught this), the script's own `cd "$ROOT/go"` — needed so `go
+build`'s module resolution works — silently changed what `dist` resolved
+to. Binaries landed in `go/dist/`, the release step's glob
+(`dist/presenced-*`) matched nothing, `softprops/action-gh-release` doesn't
+fail on a non-matching glob by default, and the run went green with a
+published release that had zero assets attached. Fixed by resolving `$OUT`
+to an absolute path with `cd "$OUT" && pwd` immediately after creating it,
+before anything else in the script can change directories.
+
+`install.sh` now tries a real download before falling back to `go build`:
+`fetch_release_binary` pulls
+`https://github.com/mohsensc/sync/releases/latest/download/<name>-<goos>-<goarch>`
+(or a pinned `$AGENT_PRESENCE_VERSION` tag) with `curl`, and only falls
+back to `go build` when that 404s or `curl`/network isn't there — the
+actual fallback #21 asks for, not the previous "always builds locally"
+behavior wearing a fallback's name.
+
+Verified for real, not asserted: pushed `v0.1.0` from this branch, watched
+`release.yml` run (`gh run watch`), confirmed
+`gh api repos/mohsensc/sync/releases/tags/v0.1.0` lists all 10 asset files
+(`presenced`/`agent-presence-mcp` × 5 targets), then ran `install.sh` with
+`dist/` absent and no local `go/dist` left over from testing — it printed
+`fetched presenced latest for darwin/arm64 from mohsensc/sync`, and the
+resulting binary in `$AGENT_PRESENCE_BIN` is the one the release workflow
+built, not a local one (checked with `cmp` against a fresh
+`build-go-release.sh` output for the same target). CI's `go` job continues
+to cross-compile all 5 targets on every PR via the same script, unchanged.
