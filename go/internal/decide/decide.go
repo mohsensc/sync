@@ -26,14 +26,16 @@ type Request struct {
 func (r Request) WantsDecision() bool { return r.Want == "decision" }
 
 // Response is the line written back to the hook — every field decide.cpp
-// can produce, across both the rung-0 (ambient) and rung-3 (blocked) paths.
+// can produce, across the rung-0 (ambient) and conflict (rung 2 or 3)
+// paths.
 //
 // ExpiresInMs, HandoverInMs and LostMsAgo are *int64, not int64: decide.cpp
 // writes each of these unconditionally whenever that section of the
-// response applies at all (a rung-3 answer always carries expires_in_ms,
-// even when the lease expires this millisecond), and a plain int64 with
-// `omitempty` would drop a genuine zero the same way it drops an absent
-// field — the hook then reads that as "the daemon didn't say" (see
+// response applies at all (a conflict answer always carries
+// expires_in_ms, even when the lease expires this millisecond), and a
+// plain int64 with `omitempty` would drop a genuine zero the same way it
+// drops an absent field — the hook then reads that as "the daemon didn't
+// say" (see
 // hook.cpp's `int_field(line, "expires_in_ms", -1)`) instead of "the lease
 // expires now". A pointer's omitempty only omits a nil, so the field is
 // present, including at zero, exactly when the surrounding code sets it.
@@ -122,11 +124,19 @@ func ambientResponse(cache *leases.Cache, pol *policy.Cache, path, agent string,
 }
 
 // Decide is decide_response: a live lease on the file held by somebody else
-// is rung 3; anything else is rung 0, with the ambient handover/lost-region
-// notes folded in. selfAgent is the id this daemon joined the room under;
-// empty means no room is configured and the request's own agent (the
-// hook's session id) is used instead — see decide.hpp's note on why those
-// are different namespaces.
+// is rung 2 or rung 3 — same symbol (or no evidence either way) is 3,
+// proven-disjoint symbols is 2; anything else is rung 0, with the ambient
+// handover/lost-region notes folded in. selfAgent is the id this daemon
+// joined the room under; empty means no room is configured and the
+// request's own agent (the hook's session id) is used instead — see
+// decide.hpp's note on why those are different namespaces.
+//
+// Rung 1 ("A editing, B reading") never comes out of here: it only exists
+// when the *incoming* action is a read, and a read never asks for a
+// decision at all — hook.cpp's wants_decision only sends `want:"decision"`
+// for a PreToolUse edit. Rung 1 is computed from the presence table
+// instead (see presence.Table.Peers), which is the ambient, no-interrupt
+// surface that rung was always meant to reach.
 func Decide(req Request, cache *leases.Cache, pol *policy.Cache, nowMs int64, selfAgent string) Response {
 	agent := selfAgent
 	if agent == "" {
@@ -137,12 +147,12 @@ func Decide(req Request, cache *leases.Cache, pol *policy.Cache, nowMs int64, se
 		return openResponse(0, pol.EffectFor(0))
 	}
 
-	held, ok := cache.ConflictForFile(req.Path, agent, nowMs)
+	held, rung, ok := cache.Conflict(req.Path, agent, nowMs)
 	if !ok {
 		return ambientResponse(cache, pol, req.Path, agent, nowMs)
 	}
 
-	r := openResponse(3, pol.EffectFor(3))
+	r := openResponse(rung, pol.EffectFor(rung))
 	r.Holder = held.Agent
 	r.Human = held.Human
 	r.Intent = held.Intent

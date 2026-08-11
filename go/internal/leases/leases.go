@@ -25,6 +25,15 @@ type Lease struct {
 	ExpiresAtMs int64 // monotonic instant, this process's clock
 	Waiting     int
 
+	// Symbol is the scope this lease was claimed at — "" for a whole-file
+	// claim, same sentinel same_region() in types.py gives a nil symbol.
+	// It duplicates the second half of the map key it lives under
+	// (RegionKey encodes "path|symbol"), because Conflict needs to read it
+	// back out once a region has already been found by path alone. See
+	// Conflict for why this is the one piece of symbol information that
+	// ever reaches the daemon.
+	Symbol string
+
 	// When this lease stops being renewable. HasHandover false means nobody
 	// has asked for the region — the common case, and one that renews
 	// forever; HandoverAtMs is meaningless until it is true. A Go zero
@@ -104,16 +113,50 @@ func (c *Cache) EraseIfHeldBy(key, agent string) {
 	}
 }
 
-// ConflictForFile is the whole-file question a hook decision asks: is there
-// a live lease anywhere under this path, held by somebody other than
-// myAgent? Region keys are "path|symbol", so this matches by that prefix —
-// a live claim on "path|sign_in" contends with a plain edit on "path" even
+// Conflict is the whole-file question a hook decision asks, extended to
+// tell a same-symbol conflict (rung 3) from a disjoint-symbol one (rung 2):
+// is there a live lease anywhere under this path, held by somebody other
+// than myAgent, and if so, does it actually overlap what myAgent is known
+// to be touching?
+//
+// Region keys are "path|symbol", so the path match is a prefix match — a
+// live claim on "path|sign_in" contends with a plain edit on "path" even
 // though the hook names no symbol. See same_region() in types.py, which is
-// the authority both this and the C++ cache answer to.
-func (c *Cache) ConflictForFile(path, myAgent string, nowMs int64) (Lease, bool) {
+// the authority both this and the relay's own classifier answer to.
+//
+// "What myAgent is known to be touching" is never the incoming edit
+// itself — a hook-observed Edit/Write carries no symbol at all, only a
+// path (cpp/hook/hook.cpp's build_event has no field for one). The only
+// place symbol information about *this* agent's own work ever reaches the
+// daemon is a claim myAgent declared through MCP's claim_work, which is
+// already sitting in this same cache. So "mine" below means "every symbol
+// myAgent currently holds a live lease on at this path" — evidence, not a
+// guess.
+//
+// No claim of my own, or a claim on the whole file on either side, is read
+// the same way same_region() reads a nil symbol: it contends with
+// everything. Rung 2 only comes back when there is positive evidence of
+// two distinct, non-empty symbols; anything less falls back to rung 3,
+// because a rung that fires on the wrong evidence is worse than one that
+// never fires — it makes the ladder lie. When several other agents hold
+// leases on the path, the worse of the two rungs wins, the same way
+// ladder.classify keeps the highest rung across every other activity.
+func (c *Cache) Conflict(path, myAgent string, nowMs int64) (held Lease, rung int, ok bool) {
 	prefix := path + "|"
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+
+	var mine []string
+	for key, l := range c.byRegion {
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		if l.Agent != myAgent || l.ExpiresAtMs <= nowMs {
+			continue
+		}
+		mine = append(mine, l.Symbol)
+	}
+
 	for key, l := range c.byRegion {
 		if !strings.HasPrefix(key, prefix) {
 			continue
@@ -124,16 +167,42 @@ func (c *Cache) ConflictForFile(path, myAgent string, nowMs int64) (Lease, bool)
 		if l.ExpiresAtMs <= nowMs {
 			continue // stale-but-harmless: never blocks, ages out on its own
 		}
-		return l, true
+		r := 2
+		if symbolsConflict(l.Symbol, mine) {
+			r = 3
+		}
+		if !ok || r > rung {
+			held, rung, ok = l, r, true
+		}
+		if rung == 3 {
+			break // nothing beats it
+		}
 	}
-	return Lease{}, false
+	return held, rung, ok
+}
+
+// symbolsConflict is same_region()'s rule, applied between one held
+// symbol and every symbol the requester is known to hold on the same
+// path: a held symbol of "" (the whole file) or a requester with no known
+// symbol of their own conflicts with everything; two known, distinct,
+// non-empty symbols do not.
+func symbolsConflict(held string, mine []string) bool {
+	if held == "" || len(mine) == 0 {
+		return true
+	}
+	for _, s := range mine {
+		if s == "" || s == held {
+			return true
+		}
+	}
+	return false
 }
 
 // OwnHandover is this agent's own live lease on the file, when somebody is
-// waiting on it — the mirror image of ConflictForFile: same prefix match,
-// opposite agent test, and only ever answers when there is a deadline to
-// report. This is how a holder finds out it is on the clock; there is no
-// push channel to an agent, so the warning rides on its next edit.
+// waiting on it — the mirror image of Conflict: same prefix match, opposite
+// agent test, and only ever answers when there is a deadline to report.
+// This is how a holder finds out it is on the clock; there is no push
+// channel to an agent, so the warning rides on its next edit.
 func (c *Cache) OwnHandover(path, myAgent string, nowMs int64) (Lease, bool) {
 	if path == "" || myAgent == "" {
 		return Lease{}, false

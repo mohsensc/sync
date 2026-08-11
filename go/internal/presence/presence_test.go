@@ -105,3 +105,83 @@ func TestWriteSnapshotIsAtomic(t *testing.T) {
 		t.Fatal("the .tmp file must be renamed away, not left behind")
 	}
 }
+
+// --- rung 1: reading what somebody else is editing ------------------------
+
+func TestPeersMarksRung1WhenAnotherAgentEditsTheSamePath(t *testing.T) {
+	tbl := NewTable(1000)
+	tbl.Touch("reader", "dev", "read", "auth.py", 0)
+	tbl.Touch("editor", "sara", "edit", "auth.py", 0)
+
+	peers := tbl.Peers()
+	byHuman := map[string]Peer{}
+	for _, p := range peers {
+		byHuman[p.Human] = p
+	}
+	if byHuman["dev"].Rung != 1 {
+		t.Fatalf("reader must be marked rung 1, got %+v", byHuman["dev"])
+	}
+	if byHuman["sara"].Rung != 0 {
+		t.Fatalf("the editor itself is not what rung 1 is about: got %+v", byHuman["sara"])
+	}
+}
+
+func TestPeersDoesNotMarkRungWithoutAConflict(t *testing.T) {
+	tbl := NewTable(1000)
+	tbl.Touch("reader", "dev", "read", "auth.py", 0)
+	tbl.Touch("editor", "sara", "edit", "other.py", 0) // different file
+
+	for _, p := range tbl.Peers() {
+		if p.Rung != 0 {
+			t.Fatalf("no conflict here, got %+v", p)
+		}
+	}
+}
+
+func TestPeersDoesNotMarkTwoReadersAsRung1(t *testing.T) {
+	tbl := NewTable(1000)
+	tbl.Touch("a1", "dev", "read", "auth.py", 0)
+	tbl.Touch("a2", "sara", "read", "auth.py", 0)
+
+	for _, p := range tbl.Peers() {
+		if p.Rung != 0 {
+			t.Fatalf("rung 1 needs an editor, not another reader: got %+v", p)
+		}
+	}
+}
+
+func TestPeersDoesNotCollideAnAgentWithItself(t *testing.T) {
+	// One agent, one entry: it cannot be "the other agent editing" for its
+	// own read, even though the same id is the only one in the table.
+	tbl := NewTable(1000)
+	tbl.Touch("solo", "dev", "read", "auth.py", 0)
+
+	peers := tbl.Peers()
+	if len(peers) != 1 || peers[0].Rung != 0 {
+		t.Fatalf("a lone reader is never rung 1: got %+v", peers)
+	}
+}
+
+func TestWriteSnapshotOmitsRungWhenZero(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "snap.json")
+	if err := WriteSnapshot(path, []Peer{{Human: "sara", Verb: "edit", Path: "a.py"}}, ""); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	want := `{"peers":[{"human":"sara","verb":"edit","path":"a.py"}]}`
+	if string(data) != want {
+		t.Fatalf("got  %s\nwant %s", data, want)
+	}
+}
+
+func TestWriteSnapshotIncludesRungWhenSet(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "snap.json")
+	if err := WriteSnapshot(path, []Peer{{Human: "dev", Verb: "read", Path: "a.py", Rung: 1}}, ""); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	want := `{"peers":[{"human":"dev","verb":"read","path":"a.py","rung":1}]}`
+	if string(data) != want {
+		t.Fatalf("got  %s\nwant %s", data, want)
+	}
+}

@@ -477,6 +477,10 @@ func (c *Client) toLease(e wire.LeaseFrame) (string, leases.Lease, bool) {
 		Priority:    e.Priority,
 		ExpiresAtMs: nowMs() + ttl.Milliseconds(),
 		Waiting:     e.Waiting,
+		// The scope this lease was claimed at, so a later edit decision
+		// on this path can tell "same symbol" from "disjoint symbol"
+		// without re-deriving it from the key — see leases.Cache.Conflict.
+		Symbol: symbol,
 	}
 	// A duration on the wire, an absolute monotonic-ish instant here —
 	// same rule as expires_in_ms above. Absent means nobody has asked for

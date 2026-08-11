@@ -174,3 +174,105 @@ func TestAbsentExpiresInMsOmittedOnRung0(t *testing.T) {
 		t.Fatalf("expires_in_ms must be absent, not present: %s", out)
 	}
 }
+
+// --- rung 2: same file, disjoint symbols --------------------------------
+
+// TestDecideRung2WhenBothSymbolsAreKnownAndDisjoint is the issue's own
+// repro, done right: "me" has already declared its own scope on
+// "sign_out" through MCP (a claim_work claim, which is a lease exactly
+// like any other in this cache) before the hook asks about an edit to the
+// file. "other" holds "sign_in". Neither the request nor the hook ever
+// says which symbol this specific edit touches, so this claim is the only
+// evidence there is.
+func TestDecideRung2WhenBothSymbolsAreKnownAndDisjoint(t *testing.T) {
+	c := leases.New()
+	c.Upsert(leases.RegionKey("auth.py", "sign_out"),
+		leases.Lease{Agent: "me", Symbol: "sign_out", ExpiresAtMs: 90_000})
+	c.Upsert(leases.RegionKey("auth.py", "sign_in"),
+		leases.Lease{Agent: "other", Human: "sara", Intent: "move session handling to JWT",
+			Symbol: "sign_in", ExpiresAtMs: 90_000})
+
+	resp := Decide(Request{Verb: "edit", Path: "auth.py", Agent: "me"}, c, policy.New(), 0, "me")
+	if resp.Rung != 2 || resp.Effect != "context" {
+		t.Fatalf("got %+v", resp)
+	}
+	if resp.Holder != "other" || resp.Human != "sara" || resp.Intent != "move session handling to JWT" {
+		t.Fatalf("got %+v", resp)
+	}
+	if resp.Decision != "" {
+		t.Fatalf("rung 2 must never carry the legacy ask decision: %+v", resp)
+	}
+	if BlockedByLease(resp) {
+		t.Fatal("rung 2 must never be reported as blocked — nothing here waits on a handover")
+	}
+}
+
+// TestDecideStaysRung3WithoutMyOwnClaim is the precedence case: the same
+// file, the same "other" holder on "sign_in", but "me" never declared a
+// symbol of its own. There is no evidence this edit is disjoint from
+// theirs, so rung 2 must not fire on a guess — the neighbour, rung 3,
+// wins. This is the scenario the issue's literal repro describes if read
+// as "B just edits the file", and it is deliberately still rung 3: a rung
+// that fires on the wrong evidence is worse than one that never fires.
+func TestDecideStaysRung3WithoutMyOwnClaim(t *testing.T) {
+	c := leases.New()
+	c.Upsert(leases.RegionKey("auth.py", "sign_in"),
+		leases.Lease{Agent: "other", Human: "sara", Symbol: "sign_in", ExpiresAtMs: 90_000})
+
+	resp := Decide(Request{Verb: "edit", Path: "auth.py", Agent: "me"}, c, policy.New(), 0, "me")
+	if resp.Rung != 3 || resp.Effect != "deny" {
+		t.Fatalf("got %+v, want rung 3 (no evidence of a disjoint symbol)", resp)
+	}
+	if !BlockedByLease(resp) {
+		t.Fatal("rung 3 must be reported as blocked")
+	}
+}
+
+// TestDecideRung3WinsOverRung2AmongSeveralHolders: two other agents hold
+// leases on the same file, one disjoint from "me" and one on the same
+// symbol. The real conflict must win — a rung 2 answer here would tell
+// "me" it is safe to proceed while a genuine same-symbol collision sits
+// right next to it.
+func TestDecideRung3WinsOverRung2AmongSeveralHolders(t *testing.T) {
+	c := leases.New()
+	c.Upsert(leases.RegionKey("auth.py", "sign_out"),
+		leases.Lease{Agent: "me", Symbol: "sign_out", ExpiresAtMs: 90_000})
+	c.Upsert(leases.RegionKey("auth.py", "sign_in"),
+		leases.Lease{Agent: "other-a", Symbol: "sign_in", ExpiresAtMs: 90_000})
+	c.Upsert(leases.RegionKey("auth.py", "sign_out")+"#2",
+		leases.Lease{Agent: "other-b", Symbol: "sign_out", ExpiresAtMs: 90_000})
+
+	resp := Decide(Request{Verb: "edit", Path: "auth.py", Agent: "me"}, c, policy.New(), 0, "me")
+	if resp.Rung != 3 {
+		t.Fatalf("got %+v, want rung 3 to win over the disjoint rung-2 holder", resp)
+	}
+}
+
+// TestDecideRung2RespectsPolicyEscalation: acceptance criterion 4 — a rung
+// policy raises to ask or deny has to be honoured at every rung, not only
+// at 3. Raising rung 2's floor to deny must actually block, and the
+// resulting response must carry enough (holder, expiry) for hook.cpp's
+// existing effect-driven rendering to say something coherent about it.
+func TestDecideRung2RespectsPolicyEscalation(t *testing.T) {
+	c := leases.New()
+	c.Upsert(leases.RegionKey("auth.py", "sign_out"),
+		leases.Lease{Agent: "me", Symbol: "sign_out", ExpiresAtMs: 90_000})
+	c.Upsert(leases.RegionKey("auth.py", "sign_in"),
+		leases.Lease{Agent: "other", Symbol: "sign_in", ExpiresAtMs: 90_000})
+
+	pol := policy.New()
+	pol.SetFloor(policy.Table{policy.Silent, policy.Silent, policy.Deny, policy.Silent, policy.Silent}, "org")
+
+	resp := Decide(Request{Verb: "edit", Path: "auth.py", Agent: "me"}, c, policy.New(), 0, "me")
+	if resp.Rung != 2 || resp.Effect != "context" {
+		t.Fatalf("sanity check on the unescalated policy failed: %+v", resp)
+	}
+
+	resp = Decide(Request{Verb: "edit", Path: "auth.py", Agent: "me"}, c, pol, 0, "me")
+	if resp.Rung != 2 || resp.Effect != "deny" {
+		t.Fatalf("an org floor raising rung 2 to deny must be honoured: got %+v", resp)
+	}
+	if resp.ExpiresInMs == nil {
+		t.Fatalf("an escalated rung 2 still needs expires_in_ms for the hook's blocked message: %+v", resp)
+	}
+}
