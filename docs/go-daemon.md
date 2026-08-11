@@ -40,7 +40,8 @@ and windows/amd64 from one machine, wired into CI on every PR and into
   `decision_server.cpp` existed).
 - `internal/relay`, `internal/wire` — join, reconnect with backoff, bounded
   drop-oldest outbound, frame parsing via `gorilla/websocket` and
-  `encoding/json` (#19). `wss://` still refused at startup; TLS is #22.
+  `encoding/json` (#19). `wss://` dials with certificate verification on by
+  default (#22) — see `docs/tls-dev-cert.md` and `docs/threat-model.md`.
 - `internal/leases` — the lease cache, now including handover deadlines and
   lost-region notes (`HasHandover`, `NoteHandover`/`HandoverNoteFor`,
   `OwnHandover`) — the Go equivalents of `lease_cache.hpp`'s `HandoverNote`
