@@ -32,6 +32,12 @@ measuring a clone with `Box3`; a stale skeleton reports a near-zero height, so a
 
 ## What's broken
 
-- Hand rotation reads wrong through the wrist on several clips.
-- The paired high-five doesn't land — the two hands don't actually meet.
-- Desk height is off against a 1.68m character.
+- The high-five contact isn't settled. `ik.js` solves two-bone IK so the hands meet
+  at any spacing, but that's the wrong primitive here: the controller owns the
+  pathing, so both characters can just walk to fixed marks and play a clip authored
+  for that exact distance. Marks should replace the solver; keep IK only if a small
+  corrective blend earns its place.
+- Wrist rotation was fixed in the clips but hasn't been reviewed frame by frame.
+- The office scene doesn't consume the corrected desk numbers yet.
+- Interactivity (click to select, click to send, zone routing, demo mode) was
+  started and isn't in this branch.
