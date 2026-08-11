@@ -17,8 +17,7 @@ import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "statusline-presence.sh"
-CPP = ROOT / "cpp"
-WRITER_SRC = pathlib.Path(__file__).resolve().parent / "helpers" / "snapshot_writer.cpp"
+GO_ROOT = ROOT / "go"
 
 # Either nothing at all, or one whole segment. Nothing in between.
 # The trailing `!` is the policy-degraded marker; `· policy degraded` is what
@@ -278,15 +277,14 @@ def test_trailing_slash_on_tmpdir(tmp_path):
 
 @pytest.fixture(scope="module")
 def writer(tmp_path_factory):
-    """Compile a shim around the daemon's write_snapshot."""
-    cxx = os.environ.get("CXX") or shutil.which("c++") or shutil.which("g++")
-    if not cxx:
-        pytest.skip("no C++ compiler")
+    """Build the shim around the daemon's real WriteSnapshot (go/cmd/snapshot_writer)."""
+    go = shutil.which("go")
+    if not go:
+        pytest.skip("no go toolchain")
     out = tmp_path_factory.mktemp("writer") / "snapshot_writer"
     proc = subprocess.run(
-        [cxx, "-std=c++20", "-I", str(CPP), str(WRITER_SRC),
-         str(CPP / "daemon" / "snapshot.cpp"), "-o", str(out)],
-        capture_output=True, text=True,
+        [go, "build", "-o", str(out), "./cmd/snapshot_writer"],
+        cwd=str(GO_ROOT), capture_output=True, text=True,
     )
     assert proc.returncode == 0, f"shim did not build:\n{proc.stderr}"
     return out
