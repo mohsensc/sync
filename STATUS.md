@@ -212,3 +212,54 @@ lease on an empty-string region instead of failing visibly. `Dispatch` now
 checks each required string argument explicitly and errors before it
 reaches the relay; new tests cover the missing-key and wrong-type cases and
 assert the call never reaches the relay at all.
+
+## #20 follow-up: every remaining mutex, checked not asserted
+
+PR #38 left `leases.Cache`, `policy.Cache`, `contend.Queue`,
+`presence.Table`, `outbound.Queue`, `hooksock.Server` and `relay.Client` on
+plain mutexes and said so in its own body. This wave went back and checked
+each one on merit instead of leaving that as a concession: traced every
+caller in `daemon.go` to find which mutexes actually sit on the decision
+hot path (`onRequest` → `decide.Decide`) versus the event path or a tick,
+then measured the two that do.
+
+Only `leases.Cache` and `policy.Cache` are read from `onRequest`. A
+throwaway channel-owned prototype for `leases.Cache` (one goroutine owning
+the map, `Conflict` as a request/reply over a channel) benchmarked against
+the current `RWMutex`, 8 and 16 concurrent callers plus a background
+writer, 3s per run:
+
+| | lanes=8 p99 | lanes=16 p99 |
+| --- | --- | --- |
+| `RWMutex` (current) | 56µs | 107µs |
+| channel-owned (prototype, deleted) | 2.75ms | 9.2ms |
+
+49x-86x worse, and throughput fell as concurrency rose instead of holding —
+a single owner goroutine is a serialization point `RWMutex` readers don't
+hit. Reverted the idea, kept the mutex, deleted the prototype (the losing
+implementation doesn't stay in the tree as a fixture); the winning
+benchmark (`BenchmarkConflictConcurrentReads`) stays in
+`go/internal/leases` as a regression guard. `policy.Cache` has the same
+read-mostly shape and wasn't separately benchmarked — same architectural
+reason applies. Every other mutex (`contend`, `presence`, `outbound`,
+`hooksock.Server`'s single-field lock, `relay.Client`'s single-field lock,
+`daemon.coalesceMu`) turned out to sit off the hot path entirely once
+traced, guarding one small map, slice or field with no ordering requirement
+between callers. Full resource-by-resource writeup in docs/go-daemon.md.
+
+`go test ./... -race -count=1` — clean, unchanged by any of this (nothing
+was converted).
+
+**Contention loss at 16 lanes, actually measured**: `python
+tests/load/run.py hook-latency --storm-lanes 16`, 3 runs, on this box while
+several other agents' sessions were also running (`uptime` load average
+33-59 on 12 cores, not a quiet machine) — "hook storm on the same socket"
+no-answer rate came back 8.6%, 19.8%, 15.75%. Not 0%, and issue #20 has
+been edited to say so rather than leave an unmet checkbox reading as met.
+Down from the pre-fix 83% the issue's own "why it matters" section cites,
+and the same scenario at the harness's own default of 6 lanes on this same
+loaded box still shows 5% loss, which is the tell that this tracks overall
+machine contention more than lane count specifically — the two mutexes
+actually on the hot path were just measured above and are not where the
+loss is coming from. Worth a clean re-run on a quiet box; not something
+this issue's code needed to change to earn, and not claimed as fixed here.

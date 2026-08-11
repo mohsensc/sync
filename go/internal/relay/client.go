@@ -131,6 +131,11 @@ type Client struct {
 	drops           atomic.Uint64
 	protocolErrors  atomic.Uint64
 
+	// mu guards lastError alone; every other piece of shared state on
+	// Client is already an atomic. One string, set from Run's goroutine
+	// and read from LastError by anything reporting status — not on the
+	// decision path, not worth a channel-owned goroutine of its own (#20;
+	// see docs/go-daemon.md's "every remaining mutex, checked on merit").
 	mu        sync.Mutex
 	lastError string
 }
