@@ -10,9 +10,9 @@ There are two halves and both are here:
 
   relay side   the org floor, re-read on the relay's own clock and pushed to
                every attached daemon as a `policy` frame
-  daemon side  `cpp/daemon/policy_cache.cpp`, which stats one compiled blob on
-               the tick it already runs. The contract between the two is a
-               file format, so the last section of this file pins it.
+  daemon side  `go/internal/policy`, which stats one compiled blob on the
+               tick it already runs. The contract between the two is a file
+               format, so the last section of this file pins it.
 """
 
 from __future__ import annotations
@@ -46,6 +46,7 @@ from agent_presence.relay import Relay
 from agent_presence.serve import serve
 
 CPP = Path(__file__).resolve().parents[2] / "cpp"
+GO = Path(__file__).resolve().parents[2] / "go"
 
 
 # --------------------------------------------------------------------------
@@ -430,46 +431,46 @@ def test_the_compiled_cache_never_writes_a_name_the_daemon_cannot_read():
 
 
 def test_the_two_builtin_tables_agree_across_the_language_boundary():
-    """`kBuiltin` in C++ and `BUILTIN` in Python are the same claim written
+    """`Builtin` in Go and `BUILTIN` in Python are the same claim written
     twice: installing this and configuring nothing is today's behaviour. Drift
     between them is exactly how that stops being true, silently."""
-    assert _cpp_table("kBuiltin") == list(BUILTIN.names())
-    assert _cpp_table("kBuiltinFloor") == list(BUILTIN_FLOOR.names())
-
-
-def _cpp_header() -> str:
-    header = CPP / "daemon" / "policy_cache.hpp"
-    if not header.exists():  # pragma: no cover - only in a python-only checkout
-        pytest.skip("no C++ tree here")
-    return header.read_text()
+    assert _go_table("Builtin") == list(BUILTIN.names())
+    assert _go_table("BuiltinFloor") == list(BUILTIN_FLOOR.names())
 
 
 def _cpp_effect_names() -> list[str]:
-    # In hook/protocol.hpp and not policy_cache.cpp: the names go over the wire
-    # now that the hook reads `"effect"`, so they live with the rest of the
-    # protocol both halves have to spell the same way.
+    # Still cpp/hook/protocol.hpp: the hook stays C++ (see
+    # docs/gohook-spike.md) and this is the one place the five effect names
+    # are spelled on that side.
     body = re.search(r"kEffectNames\[kEffects\]\s*=\s*\{([^}]*)\}",
                      (CPP / "hook" / "protocol.hpp").read_text())
     assert body is not None, "kEffectNames moved; this test is the reason it matters"
     return re.findall(r'"([a-z]+)"', body.group(1))
 
 
-def _cpp_table(name: str) -> list[str]:
-    """The five Effect:: enumerators of a constexpr PolicyTable, lowercased."""
-    text = _cpp_header()
-    body = re.search(rf"{name}\{{\s*\{{(.*?)\}}\}};", text, re.S)
-    assert body is not None, f"{name} moved in policy_cache.hpp"
-    return [m.lower() for m in re.findall(r"Effect::(\w+)", body.group(1))]
+def _go_policy_source() -> str:
+    src = GO / "internal" / "policy" / "policy.go"
+    if not src.exists():  # pragma: no cover - only in a python-only checkout
+        pytest.skip("no go tree here")
+    return src.read_text()
+
+
+def _go_table(name: str) -> list[str]:
+    """The five Effect identifiers of a `var Name = Table{...}`, lowercased."""
+    text = _go_policy_source()
+    body = re.search(rf"{name}\s*=\s*Table\{{(.*?)\}}", text, re.S)
+    assert body is not None, f"{name} moved in go/internal/policy/policy.go"
+    return [m.lower() for m in re.findall(r"\b(Silent|Notify|Context|Ask|Deny)\b", body.group(1))]
 
 
 def test_both_halves_agree_on_where_the_compiled_cache_lives():
-    """Python writes it and `daemon/main.cpp` reads it, and the only thing
+    """Python writes it and `go/cmd/presenced` reads it, and the only thing
     joining them is the filename. Rename it on one side and the daemon runs on
     the builtin table forever, correctly and silently, which is the worst way
     for this to break."""
-    main = (CPP / "daemon" / "main.cpp").read_text()
+    main = (GO / "cmd" / "presenced" / "main.go").read_text()
     assert RUNTIME_CACHE_NAME in main, (
-        f"daemon/main.cpp does not mention {RUNTIME_CACHE_NAME!r}"
+        f"cmd/presenced/main.go does not mention {RUNTIME_CACHE_NAME!r}"
     )
     assert runtime_cache_path({"XDG_RUNTIME_DIR": "/run/u"}).name == RUNTIME_CACHE_NAME
 

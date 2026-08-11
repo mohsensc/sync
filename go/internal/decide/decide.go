@@ -1,32 +1,15 @@
 // Package decide answers the hook's half of the unix-socket protocol
 // (hook/protocol.hpp) and turns an admitted hook line into the frame the
-// relay expects. It is the Go mirror of cpp/daemon/decide.cpp, narrowed to
-// what wave 1 ports — see the package doc on Response for the cut line.
+// relay expects. It is the Go mirror of cpp/daemon/decide.cpp.
 package decide
 
 import (
 	"encoding/json"
 
 	"github.com/mohsensc/sync/go/internal/leases"
+	"github.com/mohsensc/sync/go/internal/policy"
 	"github.com/mohsensc/sync/go/internal/wire"
 )
-
-// Effect names, in rung order — hook/protocol.hpp's kEffectNames. The one
-// place they are spelled, same rule as the C++ side.
-const (
-	EffectSilent  = "silent"
-	EffectNotify  = "notify"
-	EffectContext = "context"
-	EffectAsk     = "ask"
-	EffectDeny    = "deny"
-)
-
-// builtinFloor is policy_cache.hpp's kBuiltinFloor: the compiled-in effect
-// per rung when no org policy has been loaded. Wave 1 does not wire the live
-// "policy" frame into this table — see docs/go-daemon.md — so a Go daemon
-// answers with these defaults for the lifetime of the process, same as a
-// C++ daemon that has never received one.
-var builtinFloor = [5]string{EffectSilent, EffectNotify, EffectContext, EffectDeny, EffectContext}
 
 // Request is one line off the hook socket. Verb/Path/Agent mirror
 // build_event in cpp/hook/hook.cpp; Want carries "decision" when the hook
@@ -42,10 +25,18 @@ type Request struct {
 // WantsDecision mirrors decide.cpp's wants_decision_line.
 func (r Request) WantsDecision() bool { return r.Want == "decision" }
 
-// Response is the line written back to the hook. Only the rung-0 and rung-3
-// fields decide.cpp produces are here: no handover_in_ms / lost_to (own
-// lease/handover notes — leases.Cache does not track handovers in wave 1)
-// and no priority-clamped effect beyond the builtin floor.
+// Response is the line written back to the hook — every field decide.cpp
+// can produce, across both the rung-0 (ambient) and rung-3 (blocked) paths.
+//
+// ExpiresInMs, HandoverInMs and LostMsAgo are *int64, not int64: decide.cpp
+// writes each of these unconditionally whenever that section of the
+// response applies at all (a rung-3 answer always carries expires_in_ms,
+// even when the lease expires this millisecond), and a plain int64 with
+// `omitempty` would drop a genuine zero the same way it drops an absent
+// field — the hook then reads that as "the daemon didn't say" (see
+// hook.cpp's `int_field(line, "expires_in_ms", -1)`) instead of "the lease
+// expires now". A pointer's omitempty only omits a nil, so the field is
+// present, including at zero, exactly when the surrounding code sets it.
 type Response struct {
 	Rung           int    `json:"rung"`
 	Effect         string `json:"effect"`
@@ -54,44 +45,125 @@ type Response struct {
 	Human          string `json:"human,omitempty"`
 	Intent         string `json:"intent,omitempty"`
 	HolderPriority string `json:"holder_priority,omitempty"`
-	ExpiresInMs    int64  `json:"expires_in_ms,omitempty"`
+	ExpiresInMs    *int64 `json:"expires_in_ms,omitempty"`
+
+	HandoverInMs       *int64 `json:"handover_in_ms,omitempty"`
+	HandoverTo         string `json:"handover_to,omitempty"`
+	HandoverToHuman    string `json:"handover_to_human,omitempty"`
+	HandoverToPriority string `json:"handover_to_priority,omitempty"`
+	HandoverToMe       bool   `json:"handover_to_me,omitempty"`
+	Waiting            int    `json:"waiting,omitempty"`
+
+	LostTo         string `json:"lost_to,omitempty"`
+	LostToAgent    string `json:"lost_to_agent,omitempty"`
+	LostToPriority string `json:"lost_to_priority,omitempty"`
+	LostMsAgo      *int64 `json:"lost_ms_ago,omitempty"`
 }
 
-func rung0() Response {
-	return Response{Rung: 0, Effect: builtinFloor[0]}
-}
-
-// Decide is decide_response's rung-0/rung-3 path: a live lease on the file,
-// held by somebody else, is rung 3; anything else is rung 0. selfAgent is
-// the id this daemon joined the room under; empty means no room is
-// configured and the request's own agent (the hook's session id) is used
-// instead, exactly as decide.hpp documents.
-func Decide(req Request, cache *leases.Cache, nowMs int64, selfAgent string) Response {
-	if req.Path == "" || req.Verb != "edit" {
-		return rung0()
+func leftMs(atMs, nowMs int64) int64 {
+	if atMs > nowMs {
+		return atMs - nowMs
 	}
+	return 0
+}
+
+func msPtr(v int64) *int64 { return &v }
+
+func openResponse(rung int, effect policy.Effect) Response {
+	r := Response{Rung: rung, Effect: effect.String()}
+	// The old field, still on the wire — a hook from before effects existed
+	// reads `decision` and nothing else.
+	if effect == policy.Ask {
+		r.Decision = "ask"
+	}
+	return r
+}
+
+func appendLost(r *Response, lost leases.HandoverNote, nowMs int64) {
+	if lost.ToHuman != "" {
+		r.LostTo = lost.ToHuman
+	} else {
+		r.LostTo = lost.To
+	}
+	if lost.To != "" {
+		r.LostToAgent = lost.To
+	}
+	if lost.ToPriority != "" {
+		r.LostToPriority = lost.ToPriority
+	}
+	ago := nowMs - lost.AtMs
+	if ago < 0 {
+		ago = 0
+	}
+	r.LostMsAgo = msPtr(ago)
+}
+
+// ambientResponse is decide.cpp's ambient_response: the two things a
+// non-blocked agent may still need to hear — that a region it holds has a
+// deadline, and that a region it held has gone.
+func ambientResponse(cache *leases.Cache, pol *policy.Cache, path, agent string, nowMs int64) Response {
+	r := openResponse(0, pol.EffectFor(0))
+
+	if mine, ok := cache.OwnHandover(path, agent, nowMs); ok {
+		r.HandoverInMs = msPtr(leftMs(mine.HandoverAtMs, nowMs))
+		r.HandoverTo = mine.HandoverTo
+		r.HandoverToHuman = mine.HandoverToHuman
+		r.HandoverToPriority = mine.HandoverToPriority
+		if mine.Waiting > 0 {
+			r.Waiting = mine.Waiting
+		}
+		return r
+	}
+
+	if lost, ok := cache.HandoverNoteFor(path, nowMs, leases.HandoverNoteMs); ok {
+		appendLost(&r, lost, nowMs)
+	}
+	return r
+}
+
+// Decide is decide_response: a live lease on the file held by somebody else
+// is rung 3; anything else is rung 0, with the ambient handover/lost-region
+// notes folded in. selfAgent is the id this daemon joined the room under;
+// empty means no room is configured and the request's own agent (the
+// hook's session id) is used instead — see decide.hpp's note on why those
+// are different namespaces.
+func Decide(req Request, cache *leases.Cache, pol *policy.Cache, nowMs int64, selfAgent string) Response {
 	agent := selfAgent
 	if agent == "" {
 		agent = req.Agent
 	}
-	held, ok := cache.ConflictForFile(req.Path, agent, nowMs)
-	if !ok {
-		return rung0()
+
+	if req.Path == "" || req.Verb != "edit" {
+		return openResponse(0, pol.EffectFor(0))
 	}
 
-	resp := Response{
-		Rung:           3,
-		Effect:         builtinFloor[3],
-		Holder:         held.Agent,
-		Human:          held.Human,
-		Intent:         held.Intent,
-		HolderPriority: held.Priority,
-		ExpiresInMs:    held.ExpiresAtMs - nowMs,
+	held, ok := cache.ConflictForFile(req.Path, agent, nowMs)
+	if !ok {
+		return ambientResponse(cache, pol, req.Path, agent, nowMs)
 	}
-	if resp.Effect == EffectAsk {
-		resp.Decision = EffectAsk // legacy field pre-dating effects; see decide.cpp
+
+	r := openResponse(3, pol.EffectFor(3))
+	r.Holder = held.Agent
+	r.Human = held.Human
+	r.Intent = held.Intent
+	r.HolderPriority = held.Priority
+	r.ExpiresInMs = msPtr(leftMs(held.ExpiresAtMs, nowMs))
+
+	if held.HasHandover {
+		r.HandoverInMs = msPtr(leftMs(held.HandoverAtMs, nowMs))
+		r.HandoverTo = held.HandoverTo
+		if agent != "" && held.HandoverTo == agent {
+			r.HandoverToMe = true
+		}
+		if held.Waiting > 0 {
+			r.Waiting = held.Waiting
+		}
 	}
-	return resp
+
+	if lost, ok := cache.HandoverNoteFor(req.Path, nowMs, leases.HandoverNoteMs); ok {
+		appendLost(&r, lost, nowMs)
+	}
+	return r
 }
 
 // BlockedByLease mirrors decide.cpp's blocked_by_lease: rung 3, regardless

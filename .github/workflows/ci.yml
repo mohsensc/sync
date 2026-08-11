@@ -15,7 +15,7 @@ defaults:
   run:
     shell: bash
 
-# Three jobs, one per language. No `continue-on-error`, no `if:` guards on any
+# One job per language. No `continue-on-error`, no `if:` guards on any
 # step: a toolchain that isn't there has to turn the check red, not skip it.
 
 jobs:
@@ -57,11 +57,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: install compiler, cmake and openssl
+      # Just a compiler and cmake — the hook (all that's left in cpp/, see
+      # #18) has never needed OpenSSL. That dependency belonged to the
+      # daemon's room-key hashing, gone now that the daemon is Go's
+      # crypto/sha256 (#21).
+      - name: install compiler and cmake
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends g++ cmake libssl-dev
+          sudo apt-get install -y --no-install-recommends g++ cmake
 
       - name: preflight
         run: |
@@ -69,8 +73,6 @@ jobs:
           for t in g++ cmake ctest; do
             command -v "$t" >/dev/null || { echo "error: $t is not on PATH"; exit 1; }
           done
-          test -f /usr/include/openssl/sha.h || {
-            echo "error: OpenSSL headers missing; libssl-dev did not install"; exit 1; }
           g++ --version | head -1
           cmake --version | head -1
 
@@ -88,6 +90,42 @@ jobs:
         # --no-tests=error because plain ctest prints "No tests were found!!!"
         # and exits 0. That is the green-check-that-ran-nothing case.
         run: ctest --test-dir cpp/build --output-on-failure --no-tests=error
+
+  go:
+    name: go
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go/go.mod
+
+      - name: preflight
+        run: go version
+
+      - name: vet
+        working-directory: go
+        run: go vet ./...
+
+      - name: build
+        working-directory: go
+        run: go build ./...
+
+      - name: test -race
+        working-directory: go
+        # #20's whole claim — no journal deadlock, no decision starvation —
+        # is only worth anything if -race actually runs. #24 is what makes
+        # that safe to run with -count=1 in CI: every test uses t.TempDir(),
+        # so nothing here can collide with a parallel run on the runner.
+        run: go test ./... -race -count=1
+
+      - name: cross-compile every release target
+        # #21: no toolchain beyond `go` itself, on every PR, not just at
+        # release time. scripts/build-go-release.sh is the same script a
+        # release build runs, so this is the real thing and not a parallel
+        # check that can drift from it.
+        run: bash scripts/build-go-release.sh "$RUNNER_TEMP/dist"
 
   web:
     name: web

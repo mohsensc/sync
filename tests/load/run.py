@@ -52,13 +52,24 @@ def build_hookbench() -> None:
     )
 
 
+def build_presenced() -> None:
+    """The Go daemon (#18). `go build` is fast enough to just always run it
+    rather than track staleness by hand the way build_hookbench does for a
+    C++ compile — `go build` already does its own up-to-date check."""
+    PRESENCED.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["go", "build", "-o", str(PRESENCED), "./cmd/presenced"],
+        cwd=str(ROOT / "go"), check=True,
+    )
+
+
 def preflight() -> None:
-    missing = [str(p) for p in (PRESENCED, AP_HOOK) if not p.exists()]
-    if missing:
+    if not AP_HOOK.exists():
         raise SystemExit(
-            "build the daemon first:\n"
+            "build the hook first:\n"
             "  cmake -S cpp -B cpp/build && cmake --build cpp/build\n"
-            f"missing: {missing}")
+            f"missing: {AP_HOOK}")
+    build_presenced()
     build_hookbench()
     subprocess.run("lsof -ti:8799 | xargs kill -9", shell=True,
                    capture_output=True)

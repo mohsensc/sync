@@ -6,7 +6,7 @@
 # the same way: print nothing, exit 0, don't block.
 set -uo pipefail
 
-# Has to match how cpp/daemon/main.cpp picks the path. XDG_RUNTIME_DIR is
+# Has to match how go/cmd/presenced picks the path. XDG_RUNTIME_DIR is
 # usually unset on macOS, so dropping the TMPDIR step points the reader at a
 # file the daemon never writes and the segment is blank forever.
 runtime="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}"
@@ -21,10 +21,10 @@ SNAP="${AGENT_PRESENCE_SNAPSHOT:-$runtime/agent-presence.json}"
 snap=""
 IFS= read -r -n 65536 snap < "$SNAP" 2>/dev/null
 
-# cpp/daemon/snapshot.cpp escapes " and \ by prefixing a backslash, and nothing
-# else. Park both escapes on control bytes so every quote that's left is
-# structure; put them back on the one name we actually print. Order matters:
-# \\ first, otherwise \\" reads as an escaped quote.
+# go/internal/presence's WriteSnapshot escapes " and \ by prefixing a
+# backslash, and nothing else. Park both escapes on control bytes so every
+# quote that's left is structure; put them back on the one name we actually
+# print. Order matters: \\ first, otherwise \\" reads as an escaped quote.
 BS=$'\001'
 DQ=$'\002'
 snap=${snap//\\\\/$BS}

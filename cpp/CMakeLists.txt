@@ -7,14 +7,14 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # subproject that calls enable_testing() of its own does not enable it here.
 enable_testing()
 
+# The hook, and only the hook — see docs/gohook-spike.md for why it stays
+# C++ while the daemon (go/) does not. No OpenSSL, no Threads: the hook's
+# only dependencies were ever the ones the daemon needed.
 add_library(ap_hook_lib hook/hook.cpp)
 target_include_directories(ap_hook_lib PUBLIC .)
 
 add_executable(ap-hook hook/main.cpp)
 target_link_libraries(ap-hook PRIVATE ap_hook_lib)
-
-add_library(ap_daemon_lib daemon/socket_server.cpp daemon/coalesce.cpp)
-target_include_directories(ap_daemon_lib PUBLIC .)
 
 # Tests are never optional. Prefer an installed Catch2, vendor it otherwise.
 find_package(Catch2 3 QUIET)
@@ -29,65 +29,14 @@ endif()
 add_executable(ap_tests tests/test_hook.cpp)
 target_link_libraries(ap_tests PRIVATE ap_hook_lib Catch2::Catch2WithMain)
 
-# The 5ms budget is the constraint most likely to rot silently. This is its guard.
+# The 5ms budget is the constraint most likely to rot silently. This is its
+# guard. Both files test the hook against FakeDaemon (tests/fake_daemon.hpp),
+# a stand-in that speaks the documented wire protocol — not the real daemon,
+# in either language. The proof that the real Go presenced binary still
+# speaks that protocol byte for byte is tests/load/run.py: it drives this
+# same ap-hook binary, unmodified, against the real Go daemon over the real
+# unix sockets for every scenario it runs.
 target_sources(ap_tests PRIVATE tests/test_latency.cpp)
-
-target_sources(ap_daemon_lib PRIVATE daemon/lease_cache.cpp)
-target_sources(ap_tests PRIVATE tests/test_lease_cache.cpp)
-target_link_libraries(ap_tests PRIVATE ap_daemon_lib)
-
-target_sources(ap_tests PRIVATE tests/test_socket_server.cpp)
-
-target_sources(ap_tests PRIVATE tests/test_coalesce.cpp)
-
-target_sources(ap_daemon_lib PRIVATE daemon/snapshot.cpp)
-target_sources(ap_tests PRIVATE tests/test_snapshot.cpp)
-target_link_libraries(ap_tests PRIVATE ap_daemon_lib)
-
-find_package(OpenSSL REQUIRED)
-target_sources(ap_daemon_lib PRIVATE daemon/repo.cpp)
-target_link_libraries(ap_daemon_lib PUBLIC OpenSSL::Crypto)
-target_sources(ap_tests PRIVATE tests/test_repo.cpp)
-
-target_sources(ap_daemon_lib PRIVATE daemon/outbound.cpp)
-target_sources(ap_tests PRIVATE tests/test_outbound.cpp)
-
-# Compiles daemon/main.cpp a second time with main() off, to test its extractor.
-target_sources(ap_tests PRIVATE tests/test_daemon_field.cpp)
-
-add_executable(presenced daemon/main.cpp)
-target_link_libraries(presenced PRIVATE ap_daemon_lib)
-
-# The relay transport. Needs SHA-1 for the handshake, which OpenSSL::Crypto
-# above already provides, and a thread for the name lookup it must not block on.
-find_package(Threads REQUIRED)
-target_sources(ap_daemon_lib PRIVATE daemon/relay_client.cpp)
-target_link_libraries(ap_daemon_lib PUBLIC Threads::Threads)
-target_sources(ap_tests PRIVATE tests/test_relay_client.cpp)
-
-# The daemon's whole knowledge of policy: five enum values read from the blob
-# `ap policy compile` writes, plus the org floor the relay pushes. No TOML on
-# this side, ever — a decision is a shared lock and an array index.
-target_sources(ap_daemon_lib PRIVATE daemon/policy_cache.cpp)
-target_sources(ap_tests PRIVATE tests/test_policy_cache.cpp)
-
-# The daemon's half of the hook protocol: the extractor both halves read the
-# wire with, and the responder that answers a decision request.
-target_sources(ap_daemon_lib PRIVATE daemon/json.cpp daemon/decide.cpp
-                                daemon/contend_queue.cpp)
-target_sources(ap_tests PRIVATE tests/test_decide.cpp tests/test_decision_path.cpp
-                                tests/test_decide_policy.cpp tests/test_handover.cpp)
-
-# The writer behind `ap why`. The reader has always been journal.py; this is
-# the half that was missing, so a block can be asked about after the fact.
-target_sources(ap_daemon_lib PRIVATE daemon/journal.cpp)
-target_sources(ap_tests PRIVATE tests/test_journal.cpp)
-
-# Decisions off the event loop, on their own socket. Its test floods the event
-# socket and insists the answers keep coming, which is the thing that used to
-# fail silently.
-target_sources(ap_daemon_lib PRIVATE daemon/decision_server.cpp)
-target_sources(ap_tests PRIVATE tests/test_decision_server.cpp)
 
 # One test, running the whole binary, because `ctest --test-dir cpp/build` used
 # to fail with "No test configuration file found" and everyone had to know to

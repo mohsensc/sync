@@ -9,12 +9,6 @@
 #include <utility>
 #include <vector>
 
-#include <fstream>
-
-#include "daemon/decide.hpp"
-#include "daemon/lease_cache.hpp"
-#include "daemon/policy_cache.hpp"
-#include "daemon/socket_server.hpp"
 #include "hook/hook.hpp"
 #include "tests/test_paths.hpp"
 #include "tests/fake_daemon.hpp"
@@ -37,41 +31,6 @@ void spin_us(long us) {
     }
 }
 
-/// The daemon's own accept-and-drain loop on a thread of its own. This is the
-/// same SocketServer presenced runs; the only thing faked is the process
-/// boundary. Without it a "latency" test only ever measures connect() bouncing
-/// off an empty path, which is not what a tool call does when someone is home.
-class LiveDaemon {
-public:
-    explicit LiveDaemon(std::string path) : path_(std::move(path)), server_(path_) {}
-
-    ~LiveDaemon() {
-        stop_.store(true, std::memory_order_relaxed);
-        if (loop_.joinable()) loop_.join();
-        server_.stop();
-        std::error_code ec;
-        std::filesystem::remove(path_, ec);
-    }
-
-    bool start() {
-        server_.on_line([this](std::string) { lines_.fetch_add(1, std::memory_order_relaxed); });
-        if (!server_.start()) return false;
-        loop_ = std::thread([this] {
-            while (!stop_.load(std::memory_order_relaxed)) server_.poll_once(20);
-        });
-        return true;
-    }
-
-    long long lines() const { return lines_.load(std::memory_order_relaxed); }
-
-private:
-    std::string path_;
-    ap::SocketServer server_;
-    std::atomic<long long> lines_{0};
-    std::atomic<bool> stop_{false};
-    std::thread loop_;
-};
-
 }  // namespace
 
 TEST_CASE("hook p99 stays under the 5ms budget with no daemon listening") {
@@ -92,9 +51,11 @@ TEST_CASE("hook p99 stays under the 5ms budget with no daemon listening") {
 // succeeds, and the hook has to get in and out inside the same 5ms.
 TEST_CASE("hook p99 stays under the 5ms budget with a live daemon listening") {
     const auto sock = apt::unique_temp_path("ap_latency.sock");
-    std::filesystem::remove(sock);
 
-    LiveDaemon daemon(sock);
+    // A daemon that reads and drains without answering — today's presenced on
+    // the event socket. What matters for this measurement is a live accept
+    // loop on the other end, not which language wrote it.
+    apt::FakeDaemon daemon(sock, apt::Mode::kSilent);
     REQUIRE(daemon.start());
 
     const std::string event = ap::build_event(kPayload);
@@ -135,11 +96,11 @@ TEST_CASE("hook p99 stays under the 5ms budget with a live daemon listening") {
 
     // And the daemon really was reading them, not just accepting and dropping.
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-    while (daemon.lines() < delivered && std::chrono::steady_clock::now() < deadline) {
+    while (daemon.served() < delivered && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    INFO("daemon saw " << daemon.lines() << " lines, hook sent " << delivered);
-    REQUIRE(daemon.lines() >= delivered);
+    INFO("daemon saw " << daemon.served() << " lines, hook sent " << delivered);
+    REQUIRE(daemon.served() >= delivered);
 }
 
 // ---------------------------------------------------------------------------
@@ -227,14 +188,12 @@ TEST_CASE("decision p99 stays under the 5ms budget against a daemon that never a
     REQUIRE(p99(std::move(samples)) < 5.0);
 }
 
-TEST_CASE("run_hook p99 stays under the 5ms budget against the real daemon") {
-    // SocketServer is what presenced actually runs. It reads the request and
-    // has no responder yet, which is the integration state this lands in: the
-    // hook must cost nothing and print nothing until the daemon side ships.
+TEST_CASE("run_hook p99 stays under the 5ms budget against a daemon that never answers") {
+    // A daemon that reads the request and does not respond — the shape of an
+    // event, which never carries "want":"decision" and never gets a reply.
     const auto sock = apt::unique_temp_path("ap_lat_run.sock");
-    std::filesystem::remove(sock);
 
-    LiveDaemon daemon(sock);
+    apt::FakeDaemon daemon(sock, apt::Mode::kSilent);
     REQUIRE(daemon.start());
 
     for (int i = 0; i < 20; ++i) {
@@ -265,172 +224,10 @@ TEST_CASE("run_hook p99 stays under the 5ms budget against the real daemon") {
     // The request still reached the daemon: this is one socket conversation,
     // not a wasted connect.
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-    while (daemon.lines() < kCalls && std::chrono::steady_clock::now() < deadline) {
+    while (daemon.served() < kCalls && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    INFO("daemon saw " << daemon.lines() << " request lines");
-    REQUIRE(daemon.lines() >= kCalls);
+    INFO("daemon saw " << daemon.served() << " request lines");
+    REQUIRE(daemon.served() >= kCalls);
 }
 
-// ---------------------------------------------------------------------------
-// Policy in the decision path.
-//
-// The budget is the constraint policy was designed around: the daemon reads a
-// precomputed table, never a config file, and answers with one shared lock and
-// one array index. These two cases are what stops that claim from rotting —
-// the first with the table loaded, the second with a thread reloading it in a
-// loop so the lock the hot path takes is genuinely contended.
-// ---------------------------------------------------------------------------
-
-namespace {
-
-/// The daemon, wired the way daemon/main.cpp wires it: SocketServer, a lease
-/// cache with a live collision in it, and a PolicyCache the responder consults.
-class PolicyDaemon {
-public:
-    explicit PolicyDaemon(std::string path) : path_(std::move(path)), server_(path_) {}
-
-    ~PolicyDaemon() {
-        stop_.store(true, std::memory_order_relaxed);
-        if (loop_.joinable()) loop_.join();
-        server_.stop();
-        std::error_code ec;
-        std::filesystem::remove(path_, ec);
-    }
-
-    ap::PolicyCache& policy() { return policy_; }
-
-    bool start() {
-        leases_.replace({{"/repo/src/a.py|",
-                          ap::CachedLease{"sess_other", "sara", "token refresh", 1'000'000}}});
-        server_.on_request([this](const std::string& line) {
-            return ap::decide_response(line, leases_, policy_, 1000);
-        });
-        if (!server_.start()) return false;
-        loop_ = std::thread([this] {
-            while (!stop_.load(std::memory_order_relaxed)) server_.poll_once(5);
-        });
-        return true;
-    }
-
-private:
-    std::string path_;
-    ap::SocketServer server_;
-    ap::LeaseCache leases_;
-    ap::PolicyCache policy_;
-    std::atomic<bool> stop_{false};
-    std::thread loop_;
-};
-
-/// A compiled policy cache on disk, rewritten on demand.
-class CacheFile {
-public:
-    explicit CacheFile(std::string path) : path_(std::move(path)) { write(3); }
-    ~CacheFile() {
-        std::error_code ec;
-        std::filesystem::remove(path_, ec);
-    }
-
-    /// Alternate between two tables so every rewrite is a real change and the
-    /// reload actually takes the write lock.
-    void write(int flavour) {
-        std::ofstream f(path_, std::ios::trunc);
-        f << R"({"schema":1,"digest":"d","table":["silent","notify","context",")"
-          << (flavour % 2 ? "ask" : "deny")
-          << R"(","silent"],"floor":["silent","silent","silent","notify","silent"]})";
-    }
-
-    const std::string& path() const { return path_; }
-
-private:
-    std::string path_;
-};
-
-}  // namespace
-
-TEST_CASE("decision p99 stays inside the budget with a loaded policy cache") {
-    const auto sock = apt::unique_temp_path("ap_lat_pol.sock");
-    std::filesystem::remove(sock);
-    CacheFile cache(apt::unique_temp_path("ap_lat_pol.json"));
-
-    PolicyDaemon daemon(sock);
-    REQUIRE(daemon.start());
-    REQUIRE(daemon.policy().refresh(cache.path(), 1000));
-
-    const std::string req = ap::build_request(kEditHook);
-    for (int i = 0; i < 20; ++i) {
-        ap::request_decision(sock, req, kBudgetMs);
-        spin_us(200);
-    }
-
-    constexpr int kCalls = 500;
-    std::vector<double> samples;
-    samples.reserve(kCalls);
-    int answered = 0;
-    for (int i = 0; i < kCalls; ++i) {
-        const auto t0 = std::chrono::steady_clock::now();
-        const ap::Decision d = ap::request_decision(sock, req, kBudgetMs);
-        const auto t1 = std::chrono::steady_clock::now();
-        samples.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
-        if (d.rung == 3) ++answered;
-        spin_us(200);
-    }
-
-    INFO("answered " << answered << "/" << kCalls);
-    REQUIRE(answered == kCalls);
-    INFO("p99 was " << p99(samples) << "ms over " << samples.size() << " calls");
-    REQUIRE(p99(std::move(samples)) < 5.0);
-}
-
-TEST_CASE("decision p99 survives a policy cache being reloaded underneath it") {
-    // The pathological shape: the file changes on every tick, so the reload
-    // thread takes the write lock as often as it possibly can while the hook
-    // is trying to read. If refresh held that lock across the stat and the
-    // file read, this is the case that would blow the budget.
-    const auto sock = apt::unique_temp_path("ap_lat_churn.sock");
-    std::filesystem::remove(sock);
-    CacheFile cache(apt::unique_temp_path("ap_lat_churn.json"));
-
-    PolicyDaemon daemon(sock);
-    REQUIRE(daemon.start());
-
-    std::atomic<bool> stop{false};
-    std::atomic<long long> reloads{0};
-    std::thread churn([&] {
-        long long now = 1000;
-        while (!stop.load(std::memory_order_relaxed)) {
-            cache.write(static_cast<int>(reloads.load(std::memory_order_relaxed)));
-            now += 1000;  // past the recheck gate every time, so it really re-reads
-            daemon.policy().refresh(cache.path(), now);
-            reloads.fetch_add(1, std::memory_order_relaxed);
-        }
-    });
-
-    const std::string req = ap::build_request(kEditHook);
-    for (int i = 0; i < 20; ++i) {
-        ap::request_decision(sock, req, kBudgetMs);
-        spin_us(200);
-    }
-
-    constexpr int kCalls = 500;
-    std::vector<double> samples;
-    samples.reserve(kCalls);
-    int answered = 0;
-    for (int i = 0; i < kCalls; ++i) {
-        const auto t0 = std::chrono::steady_clock::now();
-        const ap::Decision d = ap::request_decision(sock, req, kBudgetMs);
-        const auto t1 = std::chrono::steady_clock::now();
-        samples.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
-        if (d.rung == 3) ++answered;
-        spin_us(200);
-    }
-
-    stop.store(true, std::memory_order_relaxed);
-    churn.join();
-
-    INFO("answered " << answered << "/" << kCalls << " over " << reloads.load() << " reloads");
-    REQUIRE(answered == kCalls);
-    REQUIRE(reloads.load() > 0);
-    INFO("p99 was " << p99(samples) << "ms over " << samples.size() << " calls");
-    REQUIRE(p99(std::move(samples)) < 5.0);
-}

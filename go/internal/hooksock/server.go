@@ -20,6 +20,7 @@ import (
 	"bufio"
 	"net"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -32,7 +33,16 @@ type RequestHandler func(line []byte) []byte
 
 type Server struct {
 	path string
-	ln   *net.UnixListener
+
+	// mu guards ln itself, not the listener's own use: Start writes it
+	// once, Stop reads-and-clears it once. acceptLoop never touches this
+	// field — it gets the listener as a parameter, captured at the moment
+	// its goroutine is launched, specifically so Stop() closing (and
+	// nilling) ln from another goroutine can never race with acceptLoop's
+	// read of it. A first draft had acceptLoop read s.ln directly; -race
+	// on a loaded CI runner (not on a quiet laptop) is what caught it.
+	mu sync.Mutex
+	ln *net.UnixListener
 
 	onLine  LineHandler
 	respond RequestHandler
@@ -64,15 +74,17 @@ func (s *Server) Start() error {
 	if err != nil {
 		return err
 	}
+	s.mu.Lock()
 	s.ln = ln
+	s.mu.Unlock()
 
-	go s.acceptLoop()
+	go s.acceptLoop(ln)
 	return nil
 }
 
-func (s *Server) acceptLoop() {
+func (s *Server) acceptLoop(ln *net.UnixListener) {
 	for {
-		conn, err := s.ln.AcceptUnix()
+		conn, err := ln.AcceptUnix()
 		if err != nil {
 			return // listener closed: Stop() was called
 		}
@@ -127,9 +139,13 @@ func (s *Server) serveLine(conn *net.UnixConn, line []byte) {
 
 // Stop closes the listener and removes the socket file. Idempotent.
 func (s *Server) Stop() {
-	if s.ln != nil {
-		_ = s.ln.Close()
-		s.ln = nil
+	s.mu.Lock()
+	ln := s.ln
+	s.ln = nil
+	s.mu.Unlock()
+
+	if ln != nil {
+		_ = ln.Close()
 	}
 	_ = os.Remove(s.path)
 }

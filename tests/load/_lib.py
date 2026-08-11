@@ -24,8 +24,11 @@ import websockets
 ROOT = Path(__file__).resolve().parents[2]
 VENV_PY = ROOT / "python" / ".venv" / "bin" / "python"
 CPP_BUILD = ROOT / "cpp" / "build"
-PRESENCED = CPP_BUILD / "presenced"
 AP_HOOK = CPP_BUILD / "ap-hook"
+# The daemon is Go now (#18) — the hook stays C++, see docs/gohook-spike.md.
+# run.py's preflight builds this from go/cmd/presenced if it is stale.
+GO_BUILD = ROOT / "tests" / "load" / "build"
+PRESENCED = GO_BUILD / "presenced"
 BOOT = Path(__file__).resolve().parent / "_relay_boot.py"
 
 
@@ -283,11 +286,12 @@ class DaemonProc:
 def event_line(agent: str, verb: str, path: str, human: str = "") -> str:
     """The line ap-hook writes to the daemon socket.
 
-    Compact separators are load-bearing, not style. daemon/json.cpp and
-    outbound.cpp look for the literal `"verb":"`, so a space after the colon
-    makes every field come back empty and the event is dropped without a word
-    from either side. That is what the real hook emits, so that is what this
-    emits.
+    The Go daemon parses this with encoding/json, so spacing is no longer
+    load-bearing on that side (it was, when the daemon read it with a
+    hand-rolled scanner — see #19). Kept compact anyway because it is what
+    the real hook actually emits (json.dumps on the C++ side has no
+    whitespace either), and matching that keeps this harness measuring the
+    real wire shape rather than a friendlier one.
     """
     return json.dumps(
         {"verb": verb, "agent": agent, "human": human or agent, "path": path},
