@@ -778,29 +778,68 @@ function highfivePose(t) {
 // --- drink -----------------------------------------------------------------
 // Hand to mouth and back, holding a cup. Loops, with a long low dwell so it
 // does not look frantic if left running.
+// The face has no mouth mesh to aim at, so "mouth" is a fixed point measured
+// off the Head bone, the same way palmPoint() in highfive.js measures a palm
+// off the hand bone. Offset is expressed along NECK's world axes rather than
+// Head's: neck's own bind rotation is ~1.4 degrees, close enough to identity
+// that "down"/"forward" read as the character's own down/forward, and using
+// neck rather than Head means the nod below (a Head-local rotation) does not
+// drag the target around with it — the mouth stays put while the head tips.
+//
+// The two numbers were found by sweeping markers in the office/anim-test
+// scene until one sat where a mouth belongs on this face (under the nose,
+// above the chin): 2cm UP and 11cm forward of the Head bone. "Up" because
+// this rig's Head joint sits close to jaw height already, not centre-of-skull
+// — the giant crown is ~45cm above it (see head_end, elsewhere).
+const MOUTH_UP_CM = 2
+const MOUTH_FWD_CM = 11
+const MOUTH_DOWN_LOCAL = new THREE.Vector3(-0.001423, -0.999692, 0.024796)
+const MOUTH_FWD_LOCAL = new THREE.Vector3(0.00146, 0.024794, 0.999692)
+
 function drinkPose(t) {
   const raise = bump(t, 0.5, 0.9)             // up and back down
-  const sip = bump(t, 0.5, 0.28)              // head tilt at the top
+  const sip = bump(t, 0.5, 0.28)              // head nod at the top
   const k = raise
   return pose(STAND, {
     Hips: [0, -3 * k, 0],
     Spine02: [1 * k, -3 * k, 0], Spine01: [0, -3 * k, 0], Spine: [-1 * k, -3 * k, 0],
-    neck: [-2 * sip, 0, 0],
-    Head: [-9 * sip, -5 * k, 0],
-    RightShoulder: [0, 0, 2 + 5 * k],
-    // upper arm stays near the ribs and the elbow does the work, which is how
-    // the hand actually gets to the mouth. The old arm swung out instead and
-    // left the hand 35cm short of it.
-    RightArm:     [mix(-4, -20, k), mix(8, 60, k), mix(99, 90, k)],
-    // the palm stays turned in on the mug the whole way up, which is what keeps
-    // the cup from reading as if it were being poured out sideways.
-    RightForeArm: [0, mix(16, 135, k), 0],
-    RightHand:    [mix(5, 4, k), mix(4, -7, k), 0],
+    // a small forward-and-down nod as the cup arrives, easing back after.
+    // Head X positive tips the TOP of the head forward, which is what reads
+    // as looking down — this is Head, not a spine bone, so the chain's
+    // inversion (Spine02 is the belly) doesn't come into it here.
+    neck: [3 * sip, 0, 0],
+    Head: [9 * sip, -5 * k, 0],
+    // Solved, not eyeballed: fit so the palm centre (palmPoint in
+    // highfive.js) lands on the mouth point above at k=1, with the palm
+    // aimed in at the face throughout via RightPalm. The old arm swung out
+    // and left the hand 20cm short at the wrist, 8cm at the palm centre.
+    RightShoulder: [0, 0, mix(2, -16.3, k)],
+    RightArm:     [mix(-4, -36.9, k), mix(8, 71, k), mix(99, 77.7, k)],
+    RightForeArm: [0, mix(16, 137.4, k), 0],
+    RightHand:    [mix(5, 13.7, k), mix(4, -6.3, k), 0],
     RightPalm:    [mix(1, PALM_SIP_R[0], k), mix(-0.05, PALM_SIP_R[1], k), mix(-0.32, PALM_SIP_R[2], k)],
     LeftArm:      [-4, -8, -99],
     LeftForeArm:  [0, -16 - 4 * k, 0],
     LeftHand:     [5, -4, 0],
   })
+}
+
+/** Where the mouth is in world space, for a character posed by `root` and
+ *  placed at `height` metres. Same shape as highfive.js's palmPoint(): a
+ *  fixed local offset off a bone, not a literal mesh feature (this face has
+ *  no mouth to find). 170.0 is highfive.js's MODEL_HEIGHT_CM, duplicated
+ *  rather than imported to avoid a cycle (highfive.js imports this module). */
+export function mouthPoint(root, height = 1.68) {
+  const head = root.getObjectByName('Head')
+  const neck = root.getObjectByName('neck')
+  if (!head || !neck) return null
+  const k = height / 170.0
+  const q = new THREE.Quaternion()
+  neck.matrixWorld.decompose(new THREE.Vector3(), q, new THREE.Vector3())
+  const out = head.getWorldPosition(new THREE.Vector3())
+  out.addScaledVector(MOUTH_DOWN_LOCAL.clone().applyQuaternion(q), -MOUTH_UP_CM * k)
+  out.addScaledVector(MOUTH_FWD_LOCAL.clone().applyQuaternion(q), MOUTH_FWD_CM * k)
+  return out
 }
 
 // --- read ------------------------------------------------------------------

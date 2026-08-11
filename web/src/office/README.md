@@ -64,8 +64,3 @@ yaw anywhere, use the external convention.
 
 The spine chain is inverted from what you would guess: `Hips > Spine02 > Spine01 >
 Spine > neck > Head`. Spine02 is the belly, Spine is the chest.
-
-## What's broken
-
-- **`drink`** reads as holding something near the face rather than drinking; the hand
-  stops short of the mouth.

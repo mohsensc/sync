@@ -282,6 +282,8 @@ addEventListener('pointermove', e => {
 canvas.addEventListener('wheel', e => { e.preventDefault()
   dist = Math.max(0.3, Math.min(2.5, dist + e.deltaY*0.0012)) }, {passive:false})
 window.__cam = (y,p,d) => { yaw=y; pitch=p; dist=d }
+window.__camera = camera
+window.__renderer = renderer
 
 function resize(){
   const w=canvas.clientWidth,h=canvas.clientHeight
