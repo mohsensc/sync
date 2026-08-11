@@ -38,7 +38,13 @@
 // relative to the T-pose: in bind, a forearm points sideways along X, so elbow
 // flexion is a Y rotation, not an X one. See ELBOW below.
 //
+// HANDS AND FOREARMS ARE THE EXCEPTION. They do not take euler triples. See
+// WRIST FRAME further down: a hand is [flex, dev, twist] about the wrist's own
+// axes, and a forearm takes an optional 4th number, a roll about its own
+// length. Writing a hand as a euler triple is what made the wrists read wrong.
+//
 // Mirroring left to right = negate the Y and Z components, swap the names.
+// That rule holds for the wrist frame too, and for the forearm roll.
 //
 // Units: bone translations in this GLB are CENTIMETRES (the Armature node
 // carries a 0.01 scale). Hips.position offsets below are therefore in cm.
@@ -94,21 +100,97 @@ export const BONES = Object.keys(BIND)
 export const WALK_CYCLE_METERS = 0.86
 
 // ---------------------------------------------------------------------------
+// WRIST FRAME
+// ---------------------------------------------------------------------------
+// A hand is not an euler triple. The three axes a wrist actually turns about
+// are nowhere near the coordinate axes on this rig: the forearm points 29 deg
+// above +X and the hand a further 10 deg past that. Feed a hand a plain
+// [0, y, 0] and roughly half of it comes out as roll about the forearm — a
+// motion the wrist has no joint for. That is what made every hand here read
+// wrong; `read` was smuggling 33 degrees of it into a page turn.
+//
+// So hands are written as degrees about their own axes:
+//
+//   [flex, dev, twist]
+//
+//   flex  + curls the hand palm-ward. In the bind T-pose that swings the
+//         fingertips backward (-Z). Real joint: about -70 to +80.
+//   dev   + swings the hand edge-on within the plane of the palm; in bind that
+//         drops the left fingertips toward -Y. Real joint: about -20 to +30.
+//   twist   there is no wrist twist. Leave it 0. If a pose needs the palm
+//         turned, roll the FOREARM — that is where pronation lives.
+//
+// Forearms take an optional 4th number, a roll about their own long axis:
+//
+//   LeftForeArm: [x, y, z, roll]
+//
+// The roll is composed first, so it spins the forearm in place: where the
+// forearm points is untouched, only the palm comes round with it. + rolls the
+// left palm up and (after mirroring) the right palm up too.
+//
+// Axes below were measured off character.glb — the forearm's long axis from
+// the bone itself, the plane of the palm from a PCA of every vertex weighted
+// to the hand. Signed so that both palms face backward in the bind T-pose,
+// which is what makes the mirror rule [f, -d, -t] come out exact.
+
+/** Palm normal in hand-bone-local space. Exported so a viewer can draw it. */
+export const PALM_NORMAL = {
+  LeftHand:  new THREE.Vector3( 0.6311, -0.0609, -0.7733),
+  RightHand: new THREE.Vector3(-0.6218, -0.0453, -0.7819),
+}
+
+const WRIST = {
+  LeftHand: {
+    flex:  new THREE.Vector3(-0.6253,  0.7537,  0.2025),
+    dev:   new THREE.Vector3(-0.1369,  0.1495, -0.9792),
+    twist: new THREE.Vector3( 0.8734,  0.4867,  0.0170),
+  },
+  RightHand: {
+    flex:  new THREE.Vector3(-0.6285, -0.7498, -0.2069),
+    dev:   new THREE.Vector3( 0.1412,  0.1517, -0.9783),
+    twist: new THREE.Vector3(-0.8903,  0.4553,  0.0097),
+  },
+}
+
+const FOREARM_ROLL = {
+  LeftForeArm:  new THREE.Vector3( 0.8734,  0.4867,  0.0170),
+  RightForeArm: new THREE.Vector3(-0.8903,  0.4553,  0.0097),
+}
+
+// ---------------------------------------------------------------------------
 // Pose -> local quaternion
 // ---------------------------------------------------------------------------
 const _e = new THREE.Euler(0, 0, 0, 'XYZ')
 const _d = new THREE.Quaternion()
+const _x = new THREE.Quaternion()
 const _pw = new THREE.Quaternion()
 const _pwi = new THREE.Quaternion()
 const _qb = new THREE.Quaternion()
 const _out = new THREE.Quaternion()
 
+/** A pose entry -> the bone's delta rotation, in whichever frame it authors in. */
+function deltaQuat(bone, r, out) {
+  const w = WRIST[bone]
+  if (w) {
+    // twist innermost, then dev, then flex: a wrist bends off a forearm that
+    // has already been rolled, not the other way round.
+    out.setFromAxisAngle(w.flex, (r[0] || 0) * D2R)
+    if (r[1]) out.multiply(_x.setFromAxisAngle(w.dev, r[1] * D2R))
+    if (r[2]) out.multiply(_x.setFromAxisAngle(w.twist, r[2] * D2R))
+    return out
+  }
+  _e.set((r[0] || 0) * D2R, (r[1] || 0) * D2R, (r[2] || 0) * D2R, 'XYZ')
+  out.setFromEuler(_e)
+  const axis = FOREARM_ROLL[bone]
+  if (axis && r[3]) out.multiply(_x.setFromAxisAngle(axis, r[3] * D2R))
+  return out
+}
+
 // world_final = delta * world_bind, expressed back in the bone's local space:
 //   local_final = inv(pw) * delta * pw * q_bind
-function localQuat(bone, rx, ry, rz, out = _out) {
+function localQuat(bone, r, out = _out) {
   const b = BIND[bone]
-  _e.set(rx * D2R, ry * D2R, rz * D2R, 'XYZ')
-  _d.setFromEuler(_e)
+  deltaQuat(bone, r, _d)
   _pw.set(b.pw[0], b.pw[1], b.pw[2], b.pw[3])
   _pwi.copy(_pw).invert()
   _qb.set(b.q[0], b.q[1], b.q[2], b.q[3])
@@ -123,7 +205,7 @@ export function applyPose(root, pose) {
     if (!r) continue
     const bone = root.getObjectByName(name)
     if (!bone) continue
-    localQuat(name, r[0], r[1], r[2], bone.quaternion)
+    localQuat(name, r, bone.quaternion)
   }
   if (pose.hips) {
     const h = root.getObjectByName('Hips')
@@ -165,7 +247,10 @@ function pose(...parts) {
   return o
 }
 
-/** Mirror a pose across the character's YZ plane. */
+/** Mirror a pose across the character's YZ plane.
+ *  Negate components 1 and 2 and swap the names. The wrist frame was signed so
+ *  that the same rule mirrors [flex, dev, twist] correctly, and a forearm roll
+ *  in slot 3 mirrors the same way. */
 export function mirrorPose(p) {
   const o = {}
   for (const k in p) {
@@ -173,8 +258,16 @@ export function mirrorPose(p) {
     const swapped = k.startsWith('Left') ? 'Right' + k.slice(4)
                   : k.startsWith('Right') ? 'Left' + k.slice(5) : k
     const v = p[k]
-    o[swapped] = [v[0], -v[1], -v[2]]
+    o[swapped] = v.length > 3 ? [v[0], -v[1], -v[2], -v[3]] : [v[0], -v[1], -v[2]]
   }
+  return o
+}
+
+/** Blend two pose entries. Handles the forearm's optional 4th channel. */
+function mixRot(a, b, k) {
+  const n = Math.max(a.length, b.length)
+  const o = new Array(n)
+  for (let i = 0; i < n; i++) o[i] = mix(a[i] || 0, b[i] || 0, k)
   return o
 }
 
@@ -186,11 +279,15 @@ export function mirrorPose(p) {
 // the arm from horizontal to hanging with a little clearance from the hip.
 // ELBOW: in bind the forearm points sideways along X, so flexion (hand moves
 // forward) is a rotation about -Y on the left and +Y on the right.
+// HANG_ROLL turns the hanging palms in to face the thighs. Without it they sit
+// flat against the character's back, which is a supinated arm and reads stiff.
+const HANG_ROLL = -46
+
 const ARMS_DOWN = {
   LeftShoulder: [0, 0, -2],   RightShoulder: [0, 0, 2],
   LeftArm:      [-4, -8, -99], RightArm:     [-4, 8, 99],
-  LeftForeArm:  [0, -16, 0],  RightForeArm:  [0, 16, 0],
-  LeftHand:     [0, -6, 4],   RightHand:     [0, 6, -4],
+  LeftForeArm:  [0, -16, 0, HANG_ROLL], RightForeArm: [0, 16, 0, -HANG_ROLL],
+  LeftHand:     [5, -4, 0],   RightHand:    [5, 4, 0],
 }
 
 const LEGS_STRAIGHT = {
@@ -220,7 +317,9 @@ export const SEATED = pose(STAND, {
   LeftLeg:   [80, 0, 0],   RightLeg:   [80, 0, 0],
   LeftFoot:  [6, 0, 0],    RightFoot:  [6, 0, 0],
   LeftArm:   [-14, -8, -92], RightArm: [-14, 8, 92],
-  LeftForeArm: [0, -52, 0],  RightForeArm: [0, 52, 0],
+  // hands come off the thighs and forward, so the palms turn down
+  LeftForeArm: [0, -52, 0, -18], RightForeArm: [0, 52, 0, 18],
+  LeftHand:    [7, -4, 0],       RightHand:    [7, 4, 0],
 })
 
 export const STANDING = STAND
@@ -252,8 +351,11 @@ function idlePose(t) {
     Head:    [-0.8 + 1.0 * sin(t + 0.15), 1.8 * sin(t + 0.1), -0.8 * s],
     LeftArm:  [-4 + 1.6 * s, -8, -99 + 1.4 * s],
     RightArm: [-4 + 1.6 * s, 8, 99 + 1.4 * s],
-    LeftForeArm:  [0, -16 - 2 * br, 0],
-    RightForeArm: [0, 16 + 2 * br, 0],
+    LeftForeArm:  [0, -16 - 2 * br, 0, HANG_ROLL],
+    RightForeArm: [0, 16 + 2 * br, 0, -HANG_ROLL],
+    // hands hang off the wrist and lag the breath a touch
+    LeftHand:  [5 + 1.6 * br, -4, 0],
+    RightHand: [5 + 1.6 * br, 4, 0],
   })
 }
 
@@ -316,9 +418,11 @@ function walkPose(t) {
     RightShoulder: [0, 0, 2 + 1.5 * cos(t)],
     LeftArm:  [armL - 4, -10, -97],
     RightArm: [armR - 4, 10, 97],
-    LeftForeArm:  [0, -elbowL, 0],
-    RightForeArm: [0, elbowR, 0],
-    LeftHand:  [0, -8, 4], RightHand: [0, 8, -4],
+    LeftForeArm:  [0, -elbowL, 0, HANG_ROLL],
+    RightForeArm: [0, elbowR, 0, -HANG_ROLL],
+    // the hand trails the swing: extends as the arm goes back, flexes forward
+    LeftHand:  [7 - 5 * cos(t), -5, 0],
+    RightHand: [7 + 5 * cos(t), 5, 0],
   })
 }
 
@@ -333,10 +437,7 @@ function sitPose(t) {
   const lean = 14 * bump(t, 0.45, 0.7)     // leans forward on the way down
 
   const out = {}
-  for (const bone of BONES) {
-    const a = STAND[bone], b = SEATED[bone]
-    out[bone] = [mix(a[0], b[0], k), mix(a[1], b[1], k), mix(a[2], b[2], k)]
-  }
+  for (const bone of BONES) out[bone] = mixRot(STAND[bone], SEATED[bone], k)
   out.hips = [0, mix(0, SEATED.hips[1], k), mix(0, SEATED.hips[2], k)]
   out.Spine02 = [out.Spine02[0] + lean, out.Spine02[1], out.Spine02[2]]
   out.Spine01 = [out.Spine01[0] + lean * 0.4, out.Spine01[1], out.Spine01[2]]
@@ -354,9 +455,10 @@ function typePose(t) {
     neck: [7, 0, 0],
     Head: [9 + 7 * dip, 3 * sin(t), 0],
     LeftArm:  [-30, -14, -84], RightArm: [-30, 14, 84],
-    LeftForeArm:  [0, -74 + 2 * a, 0], RightForeArm: [0, 74 - 2 * b, 0],
-    LeftHand:  [4 * a, -14, 10 + 5 * a],
-    RightHand: [4 * b, 14, -10 - 5 * b],
+    // roll the palms flat over the keys, then the wrist just taps
+    LeftForeArm:  [0, -74 + 2 * a, 0, -26], RightForeArm: [0, 74 - 2 * b, 0, 26],
+    LeftHand:  [13 + 6 * a, -3, 0],
+    RightHand: [13 + 6 * b, 3, 0],
   })
 }
 
@@ -384,10 +486,13 @@ function highfivePose(t) {
     Head:    [-4 * k, -9 * k, 0],
     RightShoulder: [0, 0, 2 + 9 * k],
     RightArm:      [armX, 12 + 10 * k, armZ],
-    RightForeArm:  [0, elbow, 0],
-    RightHand:     [0, 10 + 16 * k, -6],
+    // the roll is what turns the palm out to face the partner; the wrist only
+    // extends into the slap and snaps back on contact.
+    RightForeArm:  [0, elbow, 0, mix(-16, 74, k)],
+    RightHand:     [mix(6, -16, k) + 12 * contact, mix(4, -2, k), 0],
     LeftArm:       [-4 + 6 * k, -8, -99 + 5 * k],
-    LeftForeArm:   [0, -16 - 8 * k, 0],
+    LeftForeArm:   [0, -16 - 8 * k, 0, HANG_ROLL],
+    LeftHand:      [5, -4, 0],
     // Weight shifts onto the front foot as it reaches.
     RightUpLeg: [-6 * k, -2, -3], RightLeg: [8 * k, 0, 0],
     LeftUpLeg:  [4 * k, 2, 3],    LeftLeg:  [3 * k, 0, 0],
@@ -408,10 +513,13 @@ function drinkPose(t) {
     Head: [-9 * sip, -5 * k, 0],
     RightShoulder: [0, 0, 2 + 5 * k],
     RightArm:     [mix(-4, -34, k), mix(8, 34, k), mix(99, 68, k)],
-    RightForeArm: [0, mix(16, 122, k), 0],
-    RightHand:    [0, mix(6, 26, k), mix(-4, -18, k)],
+    // supinate on the way up so the cup stays level and the palm ends up
+    // facing the mouth; the wrist then tips it the last bit.
+    RightForeArm: [0, mix(16, 122, k), 0, mix(-HANG_ROLL, 4, k)],
+    RightHand:    [mix(5, 24, k), mix(4, -7, k), 0],
     LeftArm:      [-4, -8, -99],
-    LeftForeArm:  [0, -16 - 4 * k, 0],
+    LeftForeArm:  [0, -16 - 4 * k, 0, HANG_ROLL],
+    LeftHand:     [5, -4, 0],
   })
 }
 
@@ -428,10 +536,13 @@ function readPose(t) {
     Head: [15, 2.5 * sin(t), 0],
     LeftShoulder: [0, 0, 3], RightShoulder: [0, 0, -3],
     LeftArm:  [-38, -20, -74], RightArm: [-38, 20, 74],
-    LeftForeArm:  [0, -86, 0],
-    RightForeArm: [0, 86 - 26 * turn, 0],
-    LeftHand:  [0, -18, 14],
-    RightHand: [0, 18 + 30 * turn, -14 - 20 * turn],
+    // both forearms supinate so the palms come up under whatever is being
+    // read, instead of holding it face down.
+    LeftForeArm:  [0, -86, 0, 62],
+    RightForeArm: [0, 86 - 26 * turn, 0, -62],
+    // the page turn is a flick of the wrist — flexion, not a sideways sweep.
+    LeftHand:  [-7, -5, 0],
+    RightHand: [-7 + 34 * turn, 5 - 9 * turn, 0],
   })
 }
 
@@ -451,8 +562,8 @@ function sleepPose(t) {
     Head:    [20, 6, 3],
     LeftShoulder: [0, 0, 6], RightShoulder: [0, 0, -6],
     LeftArm:  [-46, -22, -66], RightArm: [-46, 22, 66],
-    LeftForeArm:  [0, -96, 0], RightForeArm: [0, 96, 0],
-    LeftHand:  [0, -20, 16], RightHand: [0, 20, -16],
+    LeftForeArm:  [0, -96, 0, -30], RightForeArm: [0, 96, 0, 30],
+    LeftHand:  [9, -6, 0], RightHand: [9, 6, 0],
   })
 }
 
@@ -468,10 +579,13 @@ function wavePose(t) {
     Head: [-2, -7 + 2 * osc, 1.5 * weight],
     RightShoulder: [0, 0, -12],
     RightArm:     [-12, 26, 18],
-    RightForeArm: [0, 34 + 5 * osc, 0],
-    RightHand:    [0, 6, -20 * osc],
+    // the roll brings the palm round to face front; the wave itself is the
+    // hand rocking edge to edge, which is deviation, not twist.
+    RightForeArm: [0, 34 + 5 * osc, 0, 58],
+    RightHand:    [-6, 17 * osc, 0],
     LeftArm:      [-4 + 1.5 * weight, -8, -99],
-    LeftForeArm:  [0, -18, 0],
+    LeftForeArm:  [0, -18, 0, HANG_ROLL],
+    LeftHand:     [5, -4, 0],
   })
 }
 
@@ -512,7 +626,7 @@ function buildClip(name, spec, { mirror = false } = {}) {
     if (mirror) p = mirrorPose(p)
     for (const b of BONES) {
       const r = p[b] || [0, 0, 0]
-      localQuat(b, r[0], r[1], r[2], q)
+      localQuat(b, r, q)
       rot[b][i * 4 + 0] = q.x; rot[b][i * 4 + 1] = q.y
       rot[b][i * 4 + 2] = q.z; rot[b][i * 4 + 3] = q.w
     }

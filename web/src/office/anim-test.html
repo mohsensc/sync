@@ -105,16 +105,73 @@ function place(src, x, rotY) {
   return { group:g, root:o, scale:s }
 }
 
+// ---- wrist axis overlay -----------------------------------------------------
+// ?axes=1 draws, on each hand, the three vectors the wrist poses are written
+// against: where the fingers point, where the palm faces, and the forearm's own
+// long axis (the one a wrist may NOT rotate about).
+const axesOn = new URLSearchParams(location.search).has('axes')
+const arrows = []
+function buildAxes(root, scale) {
+  if (!axesOn) return
+  for (const side of ['Left', 'Right']) {
+    const hand = root.getObjectByName(side + 'Hand')
+    const fore = root.getObjectByName(side + 'ForeArm')
+    const L = 0.13
+    const mk = c => { const a = new THREE.ArrowHelper(new THREE.Vector3(0,1,0), new THREE.Vector3(), L, c, L*0.3, L*0.2); scene.add(a); return a }
+    arrows.push({ hand, fore, side,
+      fingers: mk(0x35455C), palm: mk(0xD9714F), twist: mk(0xD6B45C) })
+  }
+}
+const _p = new THREE.Vector3(), _q = new THREE.Quaternion(), _s = new THREE.Vector3(), _d = new THREE.Vector3()
+function updateAxes() {
+  for (const a of arrows) {
+    a.hand.matrixWorld.decompose(_p, _q, _s)
+    a.fingers.position.copy(_p); a.fingers.setDirection(_d.set(0,1,0).applyQuaternion(_q))
+    a.palm.position.copy(_p); a.palm.setDirection(_d.copy(ANIM.PALM_NORMAL[a.side + 'Hand']).applyQuaternion(_q))
+    a.fore.matrixWorld.decompose(_p, _q, _s)
+    a.twist.position.copy(_p); a.twist.setDirection(_d.set(0,1,0).applyQuaternion(_q))
+  }
+}
+
 const loader = new GLTFLoader()
 loader.load('../../public/glb/character.glb', gltf => {
   chars.push(place(gltf.scene, 0, 0))
   chars.push(place(gltf.scene, 1.05, 0))
   chars[1].group.visible = false
+  buildAxes(chars[0].root, chars[0].scale)
   buildButtons()
   play('idle')
+  applyQuery()
   window.__ready = true
   report()
 }, undefined, e => { logEl.textContent = 'load failed: ' + e })
+
+// ?clip=wave&t=0.25&yaw=..&pitch=..&dist=..&tx=..&ty=..&tz=..&bind=1
+// t is a fraction of the clip, so a screenshot can be aimed at one frame.
+function applyQuery() {
+  const q = new URLSearchParams(location.search)
+  const num = (k, d) => q.has(k) ? parseFloat(q.get(k)) : d
+  if (q.has('bind')) {
+    const zero = {}; for (const b of ANIM.BONES) zero[b] = [0, 0, 0]
+    ANIM.dispose(chars[0].root)
+    ANIM.applyPose(chars[0].root, zero)
+    nowEl.textContent = 'bind'
+    window.__frozen = true
+  } else if (q.has('clip')) {
+    play(q.get('clip'))
+    if (q.has('t')) {
+      const a = ANIM.makeAction(chars[0].root, currentName)
+      a.reset(); a.play(); a.paused = true
+      a.time = num('t', 0) * a.getClip().duration
+      ANIM.update(chars[0].root, 0)
+      window.__frozen = true
+    }
+  }
+  yaw = num('yaw', yaw); pitch = num('pitch', pitch); dist = num('dist', dist)
+  target.set(num('tx', 0), num('ty', 0.85), num('tz', 0))
+  if (q.has('follow')) followBone = q.get('follow')
+}
+let followBone = null
 
 function play(name) {
   currentName = name
@@ -179,6 +236,11 @@ window.__probe = (name) => {
 window.__scene = scene
 window.__chars = chars
 window.__anim = ANIM
+window.__camera = camera
+window.__arrows = arrows
+window.__view = (o) => { if (o.yaw!=null) yaw=o.yaw; if (o.pitch!=null) pitch=o.pitch
+  if (o.dist!=null) dist=o.dist; if (o.follow!==undefined) followBone=o.follow
+  if (o.target) target.set(...o.target) }
 window.__play = play
 window.__clipName = () => currentName
 window.__setTime = (t) => {
@@ -220,12 +282,18 @@ function resize(){
     renderer.setSize(w,h,false); camera.aspect=w/h; camera.updateProjectionMatrix() }
 }
 const target = new THREE.Vector3(0, 0.85, 0)
+const _t = new THREE.Vector3()
 function tick(){
   resize()
   const dt = clock.getDelta() * (slow ? 0.5 : 1)
-  for (const c of chars) ANIM.update(c.root, dt)
+  if (!window.__frozen) for (const c of chars) ANIM.update(c.root, dt)
+  if (chars.length) chars[0].root.updateMatrixWorld(true)
+  updateAxes()
+  if (followBone && chars.length) {
+    const b = chars[0].root.getObjectByName(followBone)
+    if (b) target.copy(_t.setFromMatrixPosition(b.matrixWorld))
+  } else if (pairMode) target.x = 0.43
   const r = 4.2*dist, cp = Math.cos(pitch)
-  target.x = pairMode ? 0.43 : 0
   camera.position.set(target.x + Math.sin(yaw)*r*cp, target.y + Math.sin(pitch)*r, target.z + Math.cos(yaw)*r*cp)
   camera.lookAt(target)
   renderer.render(scene,camera)
