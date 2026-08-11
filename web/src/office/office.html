@@ -30,6 +30,7 @@
     <button id="bSpin" aria-pressed="true">Auto-rotate</button>
     <button id="bTop" aria-pressed="false">Top down</button>
     <button id="bWire" aria-pressed="false">Wireframe</button>
+    <button id="bFive">High five</button>
   </div>
 </div>
 <div id="log">loading…</div>
@@ -41,6 +42,8 @@
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 import { clone as skinnedClone } from 'three/addons/utils/SkeletonUtils.js'
+import * as ANIM from './anim.js'
+import * as HF from './highfive.js'
 
 const P = { cream:0xF0ECE6, sand:0xE9E0CE, taupe:0xC3B39B, sage:0xE5E1D2, butter:0xF7DFAF,
             mustard:0xD6B45C, caramel:0xC0762A, coffee:0xB0674F, terracotta:0xD9714F,
@@ -109,23 +112,35 @@ const PLAN = [
   { url:'../../public/glb/desk-tripo-12k.glb', h:0.74, surfaceRaw:DESK_SURFACE_RAW, pos:[ 4.0,0, 1.4], rot:Math.PI },
   // reception — taller standing-height counter, same surface logic
   { url:'../../public/glb/desk-tripo-12k.glb', h:0.95, surfaceRaw:DESK_SURFACE_RAW, pos:[-7.2,0, 1.0], rot:Math.PI/2, sx:1.7 },
-  // cups on desks, resting on the corrected surface heights above
-  { url:'../../public/glb/coffee-cup-v2.glb', h:0.14, pos:[-3.0,0.74,-2.2], rot:0.4 },
-  { url:'../../public/glb/coffee-cup-v2.glb', h:0.14, pos:[ 0.7,0.74,-2.5], rot:1.1 },
-  { url:'../../public/glb/coffee-cup-v2.glb', h:0.14, pos:[ 3.8,0.74, 1.5], rot:2.2 },
-  { url:'../../public/glb/coffee-cup-v2.glb', h:0.14, pos:[-7.4,0.95, 1.3], rot:0.2 },
+  // There were four coffee-cup-v2.glb entries here. That asset has never
+  // existed on any branch, so they failed on every load and the tally counted
+  // the failures as successes. Put them back when the cup does.
 ]
-// characters: one rigged mesh, placed around the room
+// characters: one rigged mesh, placed around the room. `clip` is what they
+// stand there doing — all standing clips, because the room has desks and no
+// chairs, and a seated pose with nothing under it reads as floating.
 const PEOPLE = [
-  { pos:[-3.2,0,-1.2], rot:0 }, { pos:[ 0.4,0,-1.2], rot:0.1 },
-  { pos:[ 4.0,0,-1.2], rot:-0.2 }, { pos:[-3.2,0, 0.2], rot:Math.PI },
-  { pos:[ 0.4,0, 0.2], rot:Math.PI-0.15 }, { pos:[-6.2,0, 1.0], rot:Math.PI/2 },
-  { pos:[-5.0,0,-5.2], rot:-0.5 }, { pos:[ 6.4,0,-5.0], rot:0.8 },
+  { pos:[-3.2,0,-1.2], rot:0,           clip:'read'  },
+  { pos:[ 0.4,0,-1.2], rot:0.1,         clip:'idle'  },
+  { pos:[ 4.0,0,-1.2], rot:-0.2,        clip:'drink' },
+  { pos:[-3.2,0, 0.2], rot:Math.PI,     clip:'idle'  },
+  { pos:[ 0.4,0, 0.2], rot:Math.PI-0.15,clip:'read'  },
+  { pos:[-6.2,0, 1.0], rot:Math.PI/2,   clip:'wave'  },
+  { pos:[-5.0,0,-5.2], rot:-0.5,        clip:'idle'  },
+  { pos:[ 6.4,0,-5.0], rot:0.8,         clip:'drink' },
+]
+// The pair that greet each other, out on the open floor south of the desks so
+// the walk to the marks does not cross any furniture. They start far apart on
+// purpose: the marks decide where contact happens, not where they set off.
+const GREETERS = [
+  { pos:[-3.6,0,5.6], rot:1.2 },
+  { pos:[ 1.2,0,5.0], rot:-2.4 },
 ]
 
 const loader = new GLTFLoader()
 const meshes = []
-let pending = 0, done = 0
+let pending = 0, done = 0, failed = 0
+const CHAR_H = HF.CHARACTER_HEIGHT      // 1.68m; HIGHFIVE_SPACING is quoted at it
 
 function place(gltf, spec) {
   const o = gltf.scene
@@ -153,20 +168,63 @@ function place(gltf, spec) {
 function load(spec) {
   pending++
   loader.load(spec.url, gltf => { place(gltf, spec); done++; tally() },
-    undefined, e => { done++; console.warn('failed', spec.url, e); tally() })
+    undefined, e => { done++; failed++; console.warn('failed', spec.url, e); tally() })
 }
-function tally(){ logEl.textContent = `${done}/${pending} objects loaded` }
+// Count failures out loud. This used to report only done/pending, and a load
+// error bumped `done` too, so four missing meshes still read as a full house.
+function tally(){
+  logEl.textContent = `${done - failed}/${pending} objects loaded` +
+    (failed ? ` — ${failed} failed` : '')
+}
 
 PLAN.forEach(load)
-// people share one download
+
+// ---- characters -------------------------------------------------------
+// One download, cloned per person. Everyone gets a clip; two of them also get
+// the greeting routine.
+const cast = []       // { group, root, height }
+let greeters = null, routine = null, restartAt = 0
+
+function spawn(src, pos, rot) {
+  const clone = skinnedClone(src)
+  const g = place({ scene: clone }, { h: CHAR_H, pos, rot })
+  return { group: g, root: clone, height: CHAR_H }
+}
+
 pending++
 loader.load('../../public/glb/character.glb', gltf => {
-  PEOPLE.forEach((p,i) => {
-    const clone = skinnedClone(gltf.scene)
-    place({ scene: clone }, { h:1.68, pos:p.pos, rot:p.rot })
-  })
+  for (const p of PEOPLE) {
+    const c = spawn(gltf.scene, p.pos, p.rot)
+    ANIM.crossfade(c.root, p.clip, 0)
+    cast.push(c)
+  }
+  // greeters stay out of `cast`: highfiveRoutine.step advances their mixers
+  // itself, and updating them twice runs the clip at double rate.
+  greeters = GREETERS.map(p => spawn(gltf.scene, p.pos, p.rot))
+  startFive()
   done++; tally()
-}, undefined, () => { done++; tally() })
+  window.__ready = true
+}, undefined, e => { done++; failed++; console.warn('failed character.glb', e); tally() })
+
+// The pair walk onto marks and then play the clip — the contact geometry is in
+// highfive.js, not in a distance we hope is right. Restarting just moves them
+// back to a fresh start gap and asks for marks again.
+function startFive(gap = null) {
+  if (!greeters) return null
+  const [a, b] = greeters
+  if (gap != null) {
+    // Reposition symmetrically about the pair's midpoint, `gap` apart.
+    const mid = a.group.position.clone().add(b.group.position).multiplyScalar(0.5)
+    const dir = b.group.position.clone().sub(a.group.position); dir.y = 0
+    if (dir.lengthSq() < 1e-8) dir.set(0, 0, 1)
+    dir.normalize()
+    a.group.position.copy(mid).addScaledVector(dir, -gap / 2)
+    b.group.position.copy(mid).addScaledVector(dir,  gap / 2)
+  }
+  routine = HF.highfiveRoutine(a, b, { height: CHAR_H })
+  restartAt = 0
+  return routine
+}
 
 // ---- camera / interaction --------------------------------------------
 let yaw = 0.75, pitch = 0.42, dist = 1, spin = true, top = false, wire = false
@@ -194,6 +252,7 @@ const setB=(b,v)=>b.setAttribute('aria-pressed',String(v))
 bSpin.onclick=()=>{spin=!spin; setB(bSpin,spin)}
 bTop.onclick=()=>{top=!top; setB(bTop,top); pitch = top?1.35:0.42; dist = top?1.15:1}
 bWire.onclick=()=>{wire=!wire; setB(bWire,wire); meshes.forEach(m=>{m.material.wireframe=wire})}
+document.getElementById('bFive').onclick=()=>{ startFive(2.2 + Math.random()*2.6) }
 
 function resize(){
   const w=canvas.clientWidth,h=canvas.clientHeight
@@ -202,8 +261,46 @@ function resize(){
 }
 window.__scene = scene; window.__cam = camera; window.__THREE = THREE; window.__meshes = meshes;
 window.__renderer = renderer; window.__PLAN = PLAN;
+window.__anim = ANIM; window.__hf = HF; window.__cast = cast;
+window.__greeters = () => greeters
+window.__routine = () => routine
+/** Restart the greeting from a given start gap, in metres. */
+window.__fiveFrom = (gap) => { const r = startFive(gap); return r && { spacing: r.spacing,
+  marks: [r.marks.a.pos.toArray(), r.marks.b.pos.toArray()], contactAt: r.contactAt } }
+/** Distance between the two greeters' palm centres, metres. */
+window.__palmGap = () => {
+  if (!greeters) return null
+  const [a, b] = greeters
+  return HF.palmPoint(a.root, 'Right', CHAR_H).distanceTo(HF.palmPoint(b.root, 'Right', CHAR_H))
+}
+window.__tally = () => ({ pending, done, failed })
+/** Park the camera for a screenshot. Stops the auto-orbit so shots repeat. */
+window.__view = (o = {}) => {
+  if (o.yaw != null) yaw = o.yaw
+  if (o.pitch != null) pitch = o.pitch
+  if (o.dist != null) dist = o.dist
+  if (o.target) target.set(...o.target)
+  if (o.spin != null) { spin = o.spin; setB(bSpin, spin) }
+  return { yaw, pitch, dist, target: target.toArray(), spin }
+}
+
+const clock = new THREE.Clock()
 function tick(){
   resize()
+  // Clamp: a backgrounded tab hands back a multi-second delta, which walks the
+  // greeters straight past their marks in one step.
+  const dt = Math.min(clock.getDelta(), 0.05)
+  for (const c of cast) ANIM.update(c.root, dt)
+  if (routine) {
+    const phase = routine.step(dt)
+    if (phase === 'done') {
+      restartAt += dt
+      // hold the end pose a beat, then walk back out and do it again
+      if (restartAt > 2.5) startFive(2.2 + Math.random() * 2.6)
+    }
+  } else if (greeters) {
+    for (const c of greeters) ANIM.update(c.root, dt)
+  }
   if(spin){ yaw += 0.0016*spinDir
     if(yaw>YAW_MAX){ yaw=YAW_MAX; spinDir=-1 }
     if(yaw<YAW_MIN){ yaw=YAW_MIN; spinDir=1 } }
