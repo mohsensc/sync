@@ -41,6 +41,35 @@ SEND_SATURATED_S = 10.0
 # injectable clock. This is only the resolution we notice them at.
 SEND_POLL_S = 0.05
 
+# The inbound twin of the queue above. Outbound backpressure protects the
+# relay from a peer that will not read; this protects it from a peer that
+# will not stop sending.
+#
+# Real traffic — a hook's coalesced batch, an MCP claim, a 30s heartbeat —
+# runs at a few frames a second per connection, nowhere near this. The number
+# is set by a different client: tests/load's contention scenarios run a
+# claim/refuse loop with no backoff at all, back-to-back as fast as the
+# round trip allows, deliberately, to see how the relay behaves under
+# maximum legitimate contention. That loop clears 2000/s in short bursts on
+# a quiet loopback socket. The bucket is set above that so this class of
+# real, if aggressive, retry traffic is never mistaken for a flood — a
+# request the relay refuses is not the request this limiter exists to stop;
+# a peer sending far more than any client, well-behaved or not, ever does is.
+INBOUND_RATE_HZ = 2000.0
+# Bucket capacity: how big a burst is let through before the rate applies. A
+# reconnect replaying a backlog, or a burst of contention retries, should not
+# be punished for arriving all at once.
+INBOUND_BURST = 4000.0
+# Tokens exhausted continuously for this long means the peer is not bursty,
+# it is sustained — the same "stop trusting this peer" call SEND_SATURATED_S
+# makes for outbound, mirrored for inbound.
+INBOUND_SATURATED_S = 10.0
+# One frame is a few hundred bytes on the wire even at its fattest (a claim
+# with a long intent string). This bounds the other kind of inbound cost: one
+# oversized frame trying to make the relay allocate and JSON-parse megabytes.
+# websockets closes the connection with 1009 on anything over this.
+MAX_FRAME_BYTES = 65536
+
 
 class WsConn:
     """One connection, one bounded outbound queue, one writer task.
@@ -104,6 +133,55 @@ class WsConn:
         self._saturated_since: float | None = None
         self._sending_since: float | None = None
         self.dropped = 0
+
+        # Inbound token bucket. Same read-once-per-connection rule as the
+        # outbound limits just above, and the same reason: a test retunes the
+        # module constant before the connection exists.
+        self._in_rate = INBOUND_RATE_HZ
+        self._in_burst = INBOUND_BURST
+        self._in_saturated_s = INBOUND_SATURATED_S
+        self._tokens = self._in_burst
+        self._token_ts = self._clock.now()
+        self._in_saturated_since: float | None = None
+        self.inbound_dropped = 0
+
+    def admit_inbound(self) -> bool:
+        """One token per inbound frame. False means drop this one, unparsed.
+
+        Refills continuously off the injectable clock, like every other
+        deadline here — a test reaches the shed branch by moving the clock
+        rather than by racing a real flood. A frame over budget costs the
+        relay one counter increment and nothing else: it is never JSON-parsed
+        or handed to the relay, which is the CPU a flooding peer is actually
+        after.
+        """
+        now = self._clock.now()
+        elapsed = max(0.0, now - self._token_ts)
+        self._token_ts = now
+        self._tokens = min(self._in_burst, self._tokens + elapsed * self._in_rate)
+        if self._tokens < 1.0:
+            self.inbound_dropped += 1
+            if self._in_saturated_since is None:
+                self._in_saturated_since = now
+            return False
+        self._tokens -= 1.0
+        self._in_saturated_since = None
+        return True
+
+    def inbound_shed_reason(self) -> str | None:
+        """Why this peer should be dropped for sending too much, or None.
+
+        Mirrors `shed_reason` above: a burst alone never trips this, only
+        tokens staying empty for `INBOUND_SATURATED_S` straight — the inbound
+        version of "not busy, just never letting up."
+        """
+        if self._in_saturated_since is None:
+            return None
+        now = self._clock.now()
+        if now - self._in_saturated_since >= self._in_saturated_s:
+            return (f"inbound rate exceeded {self._in_rate}/s for over "
+                    f"{self._in_saturated_s}s")
+        return None
 
     def send(self, payload: dict) -> None:
         """Queue a frame. Never blocks, never raises, never waits on the peer."""
@@ -235,6 +313,28 @@ async def _session(ws, relay: Relay) -> None:
     conn = WsConn(ws, asyncio.get_running_loop(), relay.clock)
     try:
         async for raw in ws:
+            if not conn.admit_inbound():
+                why = conn.inbound_shed_reason()
+                if why is None:
+                    # Over budget but not sustained yet: drop this one frame,
+                    # unparsed, and keep the connection. The common case for a
+                    # legitimate peer is a burst that lets up.
+                    continue
+                log.warning(
+                    "dropping connection %r (room %r): %s, %d frames dropped",
+                    conn.agent, conn.room, why, conn.inbound_dropped,
+                )
+                # Same shutdown as a shed outbound peer: try the handshake,
+                # then take the socket down under it if the peer won't
+                # cooperate with that either.
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(
+                        ws.close(code=1013, reason="too many requests"),
+                        timeout=2.0,
+                    )
+                with contextlib.suppress(Exception):
+                    ws.transport.abort()
+                break
             try:
                 msg = json.loads(raw)
             except Exception:
@@ -324,7 +424,9 @@ async def serve(
     `on_ready` fires once the listening sockets are bound. Pass port 0 and read
     the real port off the server there — that's the only way to learn it.
     """
-    async with websockets.serve(lambda ws: _session(ws, relay), host, port) as server:
+    async with websockets.serve(
+        lambda ws: _session(ws, relay), host, port, max_size=MAX_FRAME_BYTES,
+    ) as server:
         if on_ready is not None:
             on_ready(server)
         if stop is None:
@@ -389,7 +491,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--host",
         default=os.environ.get("AGENT_PRESENCE_HOST", DEFAULT_HOST),
-        help="interface to bind (env AGENT_PRESENCE_HOST, default %(default)s)",
+        help="interface to bind (env AGENT_PRESENCE_HOST, default %(default)s). "
+             "Traffic is unencrypted and room membership needs no credential — "
+             "see docs/threat-model.md before binding anything but loopback.",
     )
     parser.add_argument(
         "--port",
