@@ -37,6 +37,15 @@ found none (#24). Ran `go test ./internal/... -race -count=1` several times
 concurrently by hand — no cross-talk, matching what `t.TempDir()` should give
 for free.
 
+CI's Linux runner caught a real data race locally-clean runs on this laptop
+never hit: `hooksock.Server.Stop()` wrote `s.ln = nil` while `acceptLoop()`
+read `s.ln` unsynchronized — pre-existing wave-1 code, exposed by this wave
+adding a second `Server` (the decide socket) and a CI scheduler that
+interleaves differently than a quiet laptop does. Fixed by having
+`acceptLoop` take the listener as a parameter instead of reading the shared
+field; `go test ./... -race -count=1` clean since, three runs in a row
+locally plus CI.
+
 ## Byte-identical protocol, proven not assumed
 
 Built the real `ap-hook` binary (unmodified) and the real Go `presenced`,
