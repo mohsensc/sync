@@ -89,7 +89,17 @@ async def swarm(agents: int, hot: int, rounds: int, hold_ms: float = 3.0) -> Res
         cpu0 = cpu_seconds(relay.pid)
 
         async def worker(idx: int, c: Client) -> None:
-            for n in range(rounds):
+            # `n` only advances on a grant or an `abort` -- both end this
+            # round, one by finishing it and one by wait-die saying retrying
+            # this region is not worth it. `wait` means the opposite: hold
+            # your place, the region will be yours. #36 found the harness
+            # ignoring that distinction was the whole reason a wait-die fix
+            # elsewhere (#35) never showed up here -- a worker that abandons
+            # the region on every refusal never gives a `wait` verdict
+            # anything to be right about. See tests/test_grant_rate.py for
+            # the deterministic version of this finding.
+            n = 0
+            while n < rounds:
                 path = f"src/hot{(idx + n) % hot}.py"
                 try:
                     reply, ms = await c.claim(path, intent=f"round {n}")
@@ -99,15 +109,20 @@ async def swarm(agents: int, hot: int, rounds: int, hold_ms: float = 3.0) -> Res
                 lat.add(ms)
                 if reply.get("granted"):
                     counts["granted"] += 1
+                    counts["rounds_done"] += 1
                     if hold_ms:
                         await asyncio.sleep(hold_ms / 1000.0)
                     await c.release(path)
+                    n += 1
                 else:
                     counts["refused"] += 1
                     counts[f"decision:{reply.get('decision')}"] += 1
                     # Losing is normal on a hot region. Backing off the way a
                     # real client would keeps this from being a pure spin.
                     await asyncio.sleep(0.002)
+                    if reply.get("decision") != "wait":
+                        counts["rounds_done"] += 1
+                        n += 1
 
         t0 = time.perf_counter()
         try:
@@ -164,13 +179,23 @@ async def swarm(agents: int, hot: int, rounds: int, hold_ms: float = 3.0) -> Res
                   f"member and _PublishingRegistry diffs the whole claim table "
                   f"around each call, so one claim costs O(members + claims).")
 
-        grant_rate = counts["granted"] / ops if ops else 0
-        if grant_rate < 0.10 and ops > 100:
+        # Against rounds_done, not ops (#36). ops is every wire round trip,
+        # including a worker holding its place and asking again after
+        # `wait` — that inflates the denominator without buying anything,
+        # the same way it would inflate a naive requests-per-second count.
+        # rounds_done is agents * rounds by construction: every worker's
+        # unit of work ends in exactly one grant or one abort, so this is
+        # "how much of the work the swarm needed to do actually got done",
+        # which single-round contention on a hot region does not bound the
+        # way ops does — see tests/test_grant_rate.py.
+        rounds_done = counts["rounds_done"]
+        grant_rate = counts["granted"] / rounds_done if rounds_done else 0
+        if grant_rate < 0.15 and rounds_done > 100:
             r.bad(f"USEFUL WORK COLLAPSES UNDER CONTENTION: only "
-                  f"{counts['granted']} of {ops} claims ({grant_rate:.1%}) were "
-                  f"granted. Not a deadlock — everyone is told to abort and "
-                  f"retries — but {agents} agents on {hot} regions get almost "
-                  f"nothing through.")
+                  f"{counts['granted']} of {rounds_done} rounds ({grant_rate:.1%}) "
+                  f"ended granted. Not a deadlock — everyone else is told to "
+                  f"wait or abort and retries — but {agents} agents on {hot} "
+                  f"regions get almost nothing through.")
 
         if counts["refused"] > 100 and counts["decision:wait"] == 0:
             r.bad(f"WAIT-DIE NEVER SAYS WAIT: {counts['refused']} refusals, all "
@@ -187,6 +212,7 @@ async def swarm(agents: int, hot: int, rounds: int, hold_ms: float = 3.0) -> Res
             "rounds_each": rounds,
             "connect_s": round(connect_s, 2),
             "ops": ops,
+            "rounds_done": rounds_done,
             "elapsed_s": round(elapsed, 2),
             "claims_per_s": round(ops / elapsed, 1) if elapsed else 0,
             "granted": counts["granted"],
