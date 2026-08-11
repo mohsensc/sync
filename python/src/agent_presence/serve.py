@@ -445,6 +445,17 @@ async def serve(
     """
     async with websockets.serve(
         lambda ws: _session(ws, relay), host, port, max_size=MAX_FRAME_BYTES,
+        # permessage-deflate is on by default and, per docs/relay-spike.md's
+        # profiler, cost more CPU than every other part of a broadcast
+        # combined -- more than json encoding, more than the lease diff.
+        # These frames run a couple hundred bytes; deflating each one, per
+        # connection, per send, buys back little wire size for real CPU.
+        # That trade only holds because today every deployment is loopback
+        # (relay_client.py, cpp/daemon, go/internal/relay all dial
+        # 127.0.0.1) — bandwidth is free and latency is a memcpy. #22 is the
+        # relay's first network-reachable hop; whoever picks that up should
+        # re-cost this against a real link before assuming "off" still wins.
+        compression=None,
     ) as server:
         if on_ready is not None:
             on_ready(server)
