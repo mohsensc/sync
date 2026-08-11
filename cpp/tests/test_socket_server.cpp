@@ -12,6 +12,7 @@
 #include <vector>
 #include "daemon/socket_server.hpp"
 #include "hook/hook.hpp"
+#include "tests/test_paths.hpp"
 
 namespace {
 
@@ -75,7 +76,7 @@ bool poll_bounded(ap::SocketServer* s, int timeout_ms, int budget_ms) {
 }  // namespace
 
 TEST_CASE("daemon receives a line written by the hook") {
-    auto path = (std::filesystem::temp_directory_path() / "ap_test.sock").string();
+    auto path = apt::unique_temp_path("ap_test.sock");
     std::filesystem::remove(path);
 
     ap::SocketServer server(path);
@@ -95,7 +96,7 @@ TEST_CASE("daemon receives a line written by the hook") {
 // not come back: a wedged thread never lets go, and tearing the objects out
 // from under it would turn a clean FAIL into a crash.
 TEST_CASE("a client that stalls mid-line cannot wedge the daemon") {
-    auto path = (std::filesystem::temp_directory_path() / "ap_wedge.sock").string();
+    auto path = apt::unique_temp_path("ap_wedge.sock");
     std::filesystem::remove(path);
 
     auto* server = new ap::SocketServer(path);
@@ -123,7 +124,7 @@ TEST_CASE("a client that stalls mid-line cannot wedge the daemon") {
 }
 
 TEST_CASE("a half-written line is dropped, not replayed into the next connection") {
-    auto path = (std::filesystem::temp_directory_path() / "ap_partial.sock").string();
+    auto path = apt::unique_temp_path("ap_partial.sock");
     std::filesystem::remove(path);
 
     auto* server = new ap::SocketServer(path);
@@ -149,7 +150,7 @@ TEST_CASE("a half-written line is dropped, not replayed into the next connection
 }
 
 TEST_CASE("several pending connections are all drained in one poll_once") {
-    auto path = (std::filesystem::temp_directory_path() / "ap_drain.sock").string();
+    auto path = apt::unique_temp_path("ap_drain.sock");
     std::filesystem::remove(path);
 
     ap::SocketServer server(path);
@@ -167,7 +168,7 @@ TEST_CASE("several pending connections are all drained in one poll_once") {
 }
 
 TEST_CASE("starting twice on the same path succeeds by reclaiming a stale socket") {
-    const auto path = (std::filesystem::temp_directory_path() / "ap_stale.sock").string();
+    const auto path = apt::unique_temp_path("ap_stale.sock");
 
     // A clean shutdown unlinks the path, so a second SocketServer would find
     // nothing in its way and prove nothing. The daemon that matters here is the

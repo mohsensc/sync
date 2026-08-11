@@ -597,3 +597,122 @@ def test_a_relay_built_with_no_arguments_still_works(monkeypatch, tmp_path):
     assert rel.join(ROOM, conn) is True
     assert claim(rel, conn, "src/pay.py")["granted"] is True
     assert rel.priority_of(conn) == PRIORITY_NAMES["normal"]
+
+
+# -- a path floor has to reach the wire too ----------------------------------
+#
+# `floor_table("")` is the blanket answer, and the empty path matches no glob.
+# So every `[[floor.path]]` line an org wrote was dropped on the way out: the
+# relay enforced it on its own answers and no daemon ever heard about it. Path
+# floors are most of what an org writes.
+
+
+ORG_PATH_FLOOR = """
+[floor]
+rung2 = "notify"
+
+[[floor.path]]
+match = "**/pay.py"
+rung3 = "deny"
+"""
+
+
+def test_a_path_scoped_org_floor_is_on_the_frame(tmp_path):
+    rel, path, _clock = org_relay(tmp_path, ORG_PATH_FLOOR)
+    conn = FakeConn("a1", "sara")
+    rel.join(ROOM, conn)
+
+    frame = [f for f in conn.sent if f["type"] == "policy"][-1]
+    # The blanket table is unchanged: an older daemon reads that and nothing
+    # else, and it must go on behaving exactly as it did.
+    assert frame["floor"] == ["silent", "silent", "notify", "notify", "silent"]
+    assert frame["floors"] == [
+        {"match": "**/pay.py",
+         "effects": ["", "", "", "deny", ""],
+         "layer": "org"},
+    ]
+    assert frame["source"] == f"org:{path}"
+
+
+def test_a_daemon_reading_the_frame_gets_the_floor_the_relay_enforces(tmp_path):
+    # `floor_from_frame` is the daemon's half. It has to land on the same table
+    # the relay resolves for the same path, or the two halves of one org floor
+    # disagree about a file.
+    from agent_presence.policy import floor_from_frame
+
+    rel, _path, _clock = org_relay(tmp_path, ORG_PATH_FLOOR)
+    conn = FakeConn("a1", "sara")
+    rel.join(ROOM, conn)
+    frame = [f for f in conn.sent if f["type"] == "policy"][-1]
+    policy = rel._policy.current()
+
+    for path in ("src/pay.py", "src/api.py",
+                 "/Users/sara/work/myrepo/src/pay.py"):
+        assert floor_from_frame(frame, path).names() == \
+            policy.floor_table(path).names(), path
+    assert floor_from_frame(frame, "src/pay.py").names()[3] == "deny"
+    assert floor_from_frame(frame, "src/api.py").names()[3] == "notify"
+
+
+def test_a_blanket_only_org_floor_puts_nothing_extra_on_the_wire(tmp_path):
+    # Nothing to say, nothing sent. An install whose org file is all blanket
+    # rules writes the same bytes it always did.
+    rel, _path, _clock = org_relay(tmp_path, '[floor]\nrung2 = "context"\n')
+    conn = FakeConn("a1", "sara")
+    rel.join(ROOM, conn)
+    frame = [f for f in conn.sent if f["type"] == "policy"][-1]
+    assert "floors" not in frame
+
+
+def test_an_older_daemon_ignoring_the_new_field_is_no_worse_off(tmp_path):
+    from agent_presence.policy import floor_from_frame
+
+    rel, _path, _clock = org_relay(tmp_path, ORG_PATH_FLOOR)
+    conn = FakeConn("a1", "sara")
+    rel.join(ROOM, conn)
+    frame = [f for f in conn.sent if f["type"] == "policy"][-1]
+    old = {k: v for k, v in frame.items() if k != "floors"}
+    assert floor_from_frame(old, "src/pay.py").names() == \
+        ["silent", "silent", "notify", "notify", "silent"]
+
+
+def contended_edit(rel, path: str) -> dict:
+    a, b = FakeConn("a1", "sara"), FakeConn("a2", "dev")
+    rel.join(ROOM, a)
+    rel.join(ROOM, b)
+    claim(rel, a, path)
+    rel.handle(a, {"type": "event", "verb": "edit", "region": wire_region(path)})
+    return rel.handle(b, {"type": "event", "verb": "edit",
+                          "region": wire_region(path)})
+
+
+def test_an_org_floor_reaches_the_absolute_path_the_hook_sends(tmp_path):
+    # PreToolUse carries `file_path` absolute and nothing between the hook and
+    # here makes it relative, so this is the shape the floor actually meets.
+    # The org quiets rung 3 everywhere and floors it back on one file, which is
+    # the shape a floor is written in.
+    rel, _path, _clock = org_relay(tmp_path, """
+[effects]
+rung3 = "silent"
+
+[[floor.path]]
+match = "src/**"
+rung3 = "deny"
+""")
+    assert contended_edit(rel, "/Users/sara/work/myrepo/src/pay.py")["effect"] \
+        == "deny"
+
+
+def test_a_file_the_org_floor_does_not_name_is_untouched_by_it(tmp_path):
+    rel, _path, _clock = org_relay(tmp_path, """
+[effects]
+rung3 = "silent"
+
+[[floor.path]]
+match = "src/**"
+rung3 = "deny"
+""")
+    # Raised to the builtin floor and no further: this is the control that says
+    # the absolute-path reading is matching one glob, not every glob.
+    assert contended_edit(rel, "/Users/sara/work/myrepo/lib/api.py")["effect"] \
+        == "notify"

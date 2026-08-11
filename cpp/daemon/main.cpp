@@ -64,6 +64,19 @@ std::string env_or(const char* key, const std::string& fallback) {
     return v ? std::string(v) : fallback;
 }
 
+/// Where the decision journal lives, given `$AGENT_PRESENCE_JOURNAL` and the
+/// runtime directory.
+///
+/// The socket and the snapshot have had an override each since they existed;
+/// this one was a bare concatenation, so two daemons sharing an XDG_RUNTIME_DIR
+/// — which is the normal way to run one per repo — wrote into the same journal
+/// and `ap why` answered with the other repo's decisions. Same name and same
+/// precedence as python/src/agent_presence/journal.py, which is the reader.
+std::string discover_journal(const std::string& configured, const std::string& runtime) {
+    if (!configured.empty()) return configured;
+    return runtime + "/agent-presence.decisions.jsonl";
+}
+
 /// Longest thing that can be a bearer token. `secrets.token_urlsafe(32)` is 43
 /// characters; this is orders of magnitude above that and still small enough
 /// that being pointed at the wrong file costs a read and not a process.
@@ -205,10 +218,15 @@ int main() {
     // and produces no PostToolUse, so without this the relay never hears that
     // anybody wanted the region and the holder's lease never gets a deadline.
     ap::ContendQueue contended;
-    // Read by `ap why`. Same directory rule as the snapshot and the sockets,
-    // derived on both sides from the same two env vars rather than passed
-    // between them, so the two halves cannot end up looking at different files.
-    ap::DecisionJournal journal(runtime + "/agent-presence.decisions.jsonl");
+    // Read by `ap why`. Same rule as the snapshot and the sockets: derive it
+    // from the runtime dir, and let one env var move it.
+    //
+    // The override is not decoration. Two daemons on one box already get their
+    // own sockets and their own snapshot through AGENT_PRESENCE_SOCK and
+    // AGENT_PRESENCE_SNAPSHOT; without the same escape hatch here they shared
+    // one journal, and `ap why` answered with the other repo's decisions. Both
+    // halves derive the name the same way — python/src/agent_presence/journal.py.
+    ap::DecisionJournal journal(discover_journal(env_or("AGENT_PRESENCE_JOURNAL", ""), runtime));
     // Once before the socket is up, so the first decision of the session
     // already has the current table rather than the builtin one.
     policy.refresh(policy_cache, now_ms());
@@ -288,7 +306,11 @@ int main() {
     // an older install asks on this one and has to keep getting an answer.
     // Nothing else uses it: current hooks ask on the decision socket.
     auto decide = [&](const std::string& line) {
-        std::string answer = ap::decide_response(line, leases, policy, now_ms());
+        // relay_cfg.agent is the name this daemon joined the room under, and
+        // every lease in the cache is keyed by it. The request carries a
+        // session id instead. See decide.hpp.
+        std::string answer =
+            ap::decide_response(line, leases, policy, now_ms(), relay_cfg.agent);
         // Being stopped is an ask. Recorded here rather than in
         // decide_response, which stays a pure function of the request and the
         // two tables — and noted, never sent: this runs on a decision thread,

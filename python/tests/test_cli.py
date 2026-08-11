@@ -566,7 +566,9 @@ def test_doctor_passes_once_everything_is_in_place(box, listening):
 def test_doctor_notices_a_cache_that_is_one_edit_behind(box, listening):
     box.snapshot.write_text('{"peers":[]}')
     assert box.ap("policy", "compile").returncode == 0
-    assert box.ap("policy", "set", "rung3=ask").returncode == 0
+    # Edited in $EDITOR rather than through `ap policy set`, which recompiles
+    # on its way out. This is the way a cache actually goes stale.
+    box.write_user_policy('schema = 1\n[effects]\nrung3 = "ask"\n')
     done = box.ap("doctor")
     assert done.returncode == 1
     assert "one edit behind" in done.stdout
@@ -604,7 +606,10 @@ def test_principals_add_prints_the_token_once_and_stores_only_its_hash(box):
     assert token not in roster
     assert 'id           = "sara"' in roster
 
-    hashed = box.ap("token", "hash", token)
+    # Via stdin, not argv: token_urlsafe can start with "-", and argparse
+    # then reads it as an option rather than the positional it is. `ap token
+    # hash` reads stdin for exactly this reason.
+    hashed = box.ap("token", "hash", stdin=token)
     assert hashed.returncode == 0
     assert hashed.stdout.strip() in roster
 
@@ -868,3 +873,262 @@ def test_doctor_names_the_tier_the_unattended_bit_selects(box):
     check = doctor_check(box, "principal", env)
     assert check["state"] == "ok"
     assert "critical" in check["detail"]
+
+
+# -- the CLI's claims have to be true ---------------------------------------
+#
+# Everything below is one shape of bug: the tool said something confidently
+# and the machine did something else. That is worse than a missing feature,
+# because a tool you have caught lying once is a tool you stop reading.
+
+
+def _daemon_effect(blob: dict, rung: int, path: str) -> str:
+    """What the daemon gets out of the compiled cache for one path.
+
+    A transcription of the loop documented on `compile_runtime`, kept here so
+    the format is pinned by something that reads it rather than by a comment.
+    Ordering, the empty-slot rule and floors-take-the-max are all load-bearing;
+    if any of them changes, this stops agreeing with `ap policy explain` and
+    the test below says so.
+
+    The glob compiler is borrowed rather than reimplemented. What a `**` means
+    is the daemon's other obligation and has its own tests; this one is about
+    which entry wins.
+    """
+    from agent_presence.policy import _compile_glob
+
+    def hit(match: str) -> bool:
+        if not match:
+            return True
+        compiled = _compile_glob(match)
+        return compiled is not None and compiled.match(path) is not None
+
+    order = ["silent", "notify", "context", "ask", "deny"]
+    effect = blob["table"][rung]
+    for entry in blob["rules"]:
+        if hit(entry["match"]) and entry["effects"][rung]:
+            effect = entry["effects"][rung]
+            break
+    floor = blob["floor"][rung]
+    for entry in blob["floors"]:
+        if hit(entry["match"]) and entry["effects"][rung]:
+            floor = max(floor, entry["effects"][rung], key=order.index)
+    return max(effect, floor, key=order.index)
+
+
+def test_compile_carries_path_rules_into_the_cache(box):
+    box.write_repo_policy(
+        'schema = 1\n'
+        '[effects]\n'
+        'rung3 = "notify"\n'
+        '\n'
+        '[[floor.path]]\n'
+        'match = "**/pay.py"\n'
+        'rung3 = "deny"\n'
+    )
+    done = box.ap("policy", "compile")
+    assert done.returncode == 0, done.stderr
+    assert "**/pay.py" in done.stdout, "a rule you cannot see is one you cannot check"
+
+    blob = json.loads(box.cache.read_text())
+    # The blanket table is still what a path with no rule matching it gets.
+    assert blob["table"][3] == "notify"
+    # And the rule itself is in the file the daemon reads, which is the bug:
+    # it used to be resolved away against one path at compile time, so a repo
+    # could pin **/pay.py to deny, `ap policy explain` would agree, and the
+    # daemon would go on serving notify because that is all the cache held.
+    floors = {e["match"]: e["effects"] for e in blob["floors"]}
+    assert floors["**/pay.py"][3] == "deny"
+
+
+def test_the_compiled_cache_answers_the_way_explain_does(box):
+    # Rung 2, because rung 3 has a builtin floor of notify and would flatten
+    # three of the four answers into one.
+    box.write_repo_policy(
+        'schema = 1\n'
+        '[effects]\n'
+        'rung2 = "notify"\n'
+        '\n'
+        '[[path]]\n'
+        'match = "vendor/**"\n'
+        'rung2 = "silent"\n'
+        '\n'
+        '[[floor.path]]\n'
+        'match = "**/pay.py"\n'
+        'rung2 = "deny"\n'
+    )
+    assert box.ap("policy", "compile").returncode == 0
+    blob = json.loads(box.cache.read_text())
+
+    for path in ("vendor/pay.py", "vendor/util.py", "src/pay.py", "src/app.py"):
+        explained = json.loads(box.ap("policy", "explain", path, "--rung", "2",
+                                      "--json").stdout)
+        assert _daemon_effect(blob, 2, path) == explained["effect"], path
+    # Not a vacuous agreement: the cache has three different answers in it.
+    assert _daemon_effect(blob, 2, "vendor/pay.py") == "deny"
+    assert _daemon_effect(blob, 2, "vendor/util.py") == "silent"
+    assert _daemon_effect(blob, 2, "src/app.py") == "notify"
+
+
+def test_compile_promotes_ask_when_the_environment_says_nobody_is_watching(box):
+    box.write_user_policy('schema = 1\n[effects]\nrung3 = "ask"\n')
+    env = box.env | {"AGENT_PRESENCE_UNATTENDED": "1"}
+    done = box.ap("policy", "compile", env=env)
+    assert done.returncode == 0, done.stderr
+
+    blob = json.loads(box.cache.read_text())
+    # The flag is for a person at a terminal. The env var is the case the
+    # promotion exists for — an agent launched by a script, which is not going
+    # to pass `ap` a flag — and it used to be read nowhere in this command.
+    assert blob["unattended"] is True
+    assert blob["table"][3] == "deny"
+
+
+def test_explain_promotes_ask_when_the_environment_says_so(box):
+    box.write_user_policy('schema = 1\n[effects]\nrung3 = "ask"\n')
+    env = box.env | {"AGENT_PRESENCE_UNATTENDED": "1"}
+    blob = json.loads(box.ap("policy", "explain", "src/auth.py", "--rung", "3",
+                             "--json", env=env).stdout)
+    assert blob["effect"] == "deny"
+    assert blob["unattended_promoted"] is True
+
+
+def test_the_cache_digest_covers_the_supervision_it_was_compiled_for(box):
+    box.write_user_policy('schema = 1\n[effects]\nrung3 = "ask"\n')
+    attended, unattended = box.run / "att.json", box.run / "unatt.json"
+    assert box.ap("policy", "compile", "-o", str(attended)).returncode == 0
+    assert box.ap("policy", "compile", "-o", str(unattended),
+                  "--unattended").returncode == 0
+
+    a = json.loads(attended.read_text())
+    u = json.loads(unattended.read_text())
+    assert a["table"][3] == "ask" and u["table"][3] == "deny"
+    assert a["digest"] != u["digest"], "two tables cannot share one digest"
+
+
+def test_doctor_will_not_pass_a_cache_compiled_for_the_other_supervision(
+    box, listening
+):
+    box.snapshot.write_text('{"peers":[]}')
+    box.write_user_policy('schema = 1\n[effects]\nrung3 = "ask"\n')
+    assert box.ap("policy", "compile").returncode == 0
+
+    env = box.env | {"AGENT_PRESENCE_UNATTENDED": "1"}
+    done = box.ap("doctor", env=env)
+    assert done.returncode == 1
+    assert "unattended" in done.stdout
+    assert "ap policy compile" in done.stdout
+
+
+def test_doctor_will_not_pass_a_cache_pinned_to_one_path(box, listening):
+    box.snapshot.write_text('{"peers":[]}')
+    assert box.ap("policy", "compile", "--path", "src/pay.py").returncode == 0
+    done = box.ap("doctor")
+    assert done.returncode == 1
+    assert "--path src/pay.py" in done.stdout
+
+
+def test_doctor_will_not_pass_a_cache_that_was_edited_by_hand(box, listening):
+    box.snapshot.write_text('{"peers":[]}')
+    assert box.ap("policy", "compile").returncode == 0
+    blob = json.loads(box.cache.read_text())
+    blob["table"][3] = "silent"
+    box.cache.write_text(json.dumps(blob))
+
+    done = box.ap("doctor")
+    assert done.returncode == 1
+    assert "edited by hand" in done.stdout
+
+
+def test_set_makes_now_mean_now(box):
+    assert box.ap("policy", "compile").returncode == 0
+    assert json.loads(box.cache.read_text())["table"][3] == "deny"
+
+    done = box.ap("policy", "set", "rung3=ask")
+    assert done.returncode == 0, done.stderr
+    assert "now:" in done.stdout
+    # The TOML is not what the daemon reads. Saying "now" in the present tense
+    # while the daemon carries on off a cache nobody rewrote is the lie.
+    assert json.loads(box.cache.read_text())["table"][3] == "ask"
+    assert str(box.cache) in done.stdout
+
+
+def test_unset_makes_now_mean_now_as_well(box):
+    assert box.ap("policy", "set", "rung3=ask").returncode == 0
+    assert json.loads(box.cache.read_text())["table"][3] == "ask"
+    assert box.ap("policy", "unset", "rung3").returncode == 0
+    assert json.loads(box.cache.read_text())["table"][3] == "deny"
+
+
+def test_set_exits_nonzero_when_it_cannot_apply_what_it_wrote(box):
+    box.run.chmod(0o500)
+    try:
+        done = box.ap("policy", "set", "rung3=ask")
+    finally:
+        box.run.chmod(0o700)
+
+    assert done.returncode == 1
+    assert "still on the old table" in done.stdout
+    # The edit landed. It is the applying that failed, and the exit code is
+    # about the behaviour, not the bytes.
+    assert 'rung3 = "ask"' in box.user_policy.read_text()
+
+
+def test_check_does_not_claim_a_whole_layer_fell_back(box):
+    box.write_user_policy(
+        'schema = 1\n[effects]\nrung2 = "deny"\nrung3 = "loudly"\n'
+    )
+    done = box.ap("policy", "check")
+    assert done.returncode == 1
+    # rung2 parsed and is still in force, so "anything they were meant to
+    # change falls back to the builtin table" sent people to check the wrong
+    # thing. Only the line that did not parse fell through.
+    resolved = json.loads(box.ap("policy", "explain", "src/a.py", "--rung", "2",
+                                 "--json").stdout)
+    assert resolved["effect"] == "deny"
+    assert "Anything they were meant to change" not in done.stdout
+    assert "the rest of the same file still applies" in done.stdout
+
+
+def _five_records(box) -> None:
+    box.journal.write_text("\n".join(
+        json.dumps({"at_ms": i, "rung": 3, "effect": "deny",
+                    "path": f"src/f{i}.py"}) for i in range(5)
+    ) + "\n")
+
+
+@pytest.mark.parametrize("count", ["0", "-1", "-20"])
+def test_why_refuses_a_count_that_is_not_a_count(box, count):
+    _five_records(box)
+    done = box.ap("why", "-n", count, "--json")
+    # `lines[-0:]` is the whole list, so -n 0 used to print every record in the
+    # journal, and so did -n -20. Asking for none and getting fifty is the
+    # opposite of what was typed.
+    assert done.returncode == 2, done.stdout
+    assert done.stdout == ""
+    assert "1 or more" in done.stderr
+
+
+def test_why_all_reads_the_whole_journal(box):
+    _five_records(box)
+    done = box.ap("why", "--all", "--json")
+    assert done.returncode == 0, done.stderr
+    assert len(json.loads(done.stdout)) == 5
+
+
+def test_why_help_says_what_the_count_does(box):
+    done = box.ap("why", "--help")
+    assert done.returncode == 0
+    assert "most recent" in done.stdout
+    assert "--all" in done.stdout
+
+
+def test_principals_add_names_the_token_file_that_is_actually_read(box):
+    xdg = box.home / "xdg"
+    env = box.env | {"XDG_CONFIG_HOME": str(xdg)}
+    done = box.ap("principals", "add", "sara", env=env)
+    assert done.returncode == 0, done.stderr
+    # `read_token` honours $XDG_CONFIG_HOME. The instructions printed here did
+    # not, so on a machine that sets it they named a file nothing would read.
+    assert str(xdg / "agent-presence" / "token") in done.stdout
+    assert "~/.config" not in done.stdout

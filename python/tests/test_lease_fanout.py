@@ -371,23 +371,26 @@ def test_opaque_mode_does_not_hash_a_lease_region_twice(monkeypatch):
 
 # -- over a real socket ------------------------------------------------------
 
-PORT = 8802
-
 
 @pytest.fixture
 async def server():
     relay = Relay(RealClock())
-    task = asyncio.create_task(serve("127.0.0.1", PORT, relay))
-    await asyncio.sleep(0.2)
-    yield relay
-    task.cancel()
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    ready: asyncio.Future = loop.create_future()
+
+    def on_ready(srv) -> None:
+        if not ready.done():
+            ready.set_result(srv.sockets[0].getsockname()[1])
+
+    task = asyncio.create_task(
+        serve("127.0.0.1", 0, relay, stop=stop, on_ready=on_ready)
+    )
+    port = await asyncio.wait_for(ready, timeout=5)
+    yield relay, f"ws://127.0.0.1:{port}"
+    stop.set()
     with contextlib.suppress(asyncio.CancelledError):
-        await task
-
-
-async def _join(ws, agent, human):
-    await ws.send(json.dumps({"type": "join", "room": "r1",
-                              "agent": agent, "human": human}))
+        await asyncio.wait_for(task, timeout=5)
 
 
 async def _await_frame(ws, kind, state=None, tries=6):
@@ -400,12 +403,28 @@ async def _await_frame(ws, kind, state=None, tries=6):
     return None
 
 
+async def _join(ws, agent, human):
+    """Join and wait out the lease snapshot the relay answers it with.
+
+    That snapshot is sent synchronously as part of the relay processing the
+    join frame, so seeing it is proof the join has landed — the connection is
+    a room member and reachable by fan-out. A fixed sleep here was standing in
+    for that proof and guessing how long it takes; under real CPU pressure
+    (this file's own docstring is about exactly that kind of gap) the guess is
+    sometimes wrong and a fan-out assertion looks for a frame that was sent to
+    a room this connection was not yet a member of.
+    """
+    await ws.send(json.dumps({"type": "join", "room": "r1",
+                              "agent": agent, "human": human}))
+    frame = await _await_frame(ws, "leases")
+    assert frame is not None, f"{agent} never got a join snapshot back"
+
+
 async def test_a_second_connection_receives_the_lease_over_the_wire(server):
-    url = f"ws://127.0.0.1:{PORT}"
+    _, url = server
     async with websockets.connect(url) as sara, websockets.connect(url) as dev:
         await _join(sara, "a1", "sara")
         await _join(dev, "a2", "dev")
-        await asyncio.sleep(0.1)
 
         await sara.send(json.dumps({"type": "claim", "region": REGION,
                                     "intent": "refactor to JWT"}))
@@ -421,11 +440,10 @@ async def test_a_second_connection_receives_the_lease_over_the_wire(server):
 
 
 async def test_a_release_reaches_the_second_connection_over_the_wire(server):
-    url = f"ws://127.0.0.1:{PORT}"
+    _, url = server
     async with websockets.connect(url) as sara, websockets.connect(url) as dev:
         await _join(sara, "a1", "sara")
         await _join(dev, "a2", "dev")
-        await asyncio.sleep(0.1)
 
         await sara.send(json.dumps({"type": "claim", "region": REGION,
                                     "intent": "refactor"}))

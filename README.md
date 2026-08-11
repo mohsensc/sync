@@ -30,16 +30,19 @@ blocked shouldn't be the one that turns blocking off.
 
 ```
 ap policy show --effective     # what's in force, and which file said so
-ap policy set rung3=ask        # writes ~/.config/agent-presence/policy.toml
+ap policy set rung3=ask        # writes the TOML, then recompiles the cache
 ap policy explain src/pay.py --rung 3    # which rule fired, and what it beat
-ap why                         # the last decisions and why they went that way
+ap why -n 20                   # the last decisions and why they went that way
 ap doctor                      # is any of this actually reaching the daemon
 ```
 
+`$AGENT_PRESENCE_UNATTENDED` promotes `ask` to `deny` — an unwatched `ask` is a
+hang. `ap doctor` fails if the cache was compiled for the other one.
+
 Who outranks whom is `.agent-presence/principals.toml`, committed so priority
 gets reviewed in a PR. `ap principals add sara --attended elevated` prints a
-token once; put it in `~/.config/agent-presence/token` and `presenced` presents
-it on join. Seniority among people playing along, not a security boundary.
+token once and names the file to put it in; `presenced` presents it on join.
+Seniority among people playing along, not a security boundary.
 
 Tests: `cd python && .venv/bin/python -m pytest`; `cmake -S cpp -B cpp/build &&
 cmake --build cpp/build && ctest --test-dir cpp/build`; `cd web && pnpm install
@@ -52,7 +55,9 @@ isn't the compiler. CI runs all three on every push.
 The MCP server keeps its own in-process registry instead of claiming over the
 wire, so a claim through the tool never reaches another machine. Ladder tuning is
 guesswork and the chain has only run against scripted clients, not real sessions.
-`ap policy compile` resolves one path, so a `[[path]]` rule only covers that one.
+`ap policy compile` puts the `[[path]]` rules in the cache now, but the daemon
+still reads only the blanket table, so a path rule is right everywhere except
+where it's enforced.
 
 Rung 4 (same work, different files) is off unless `AGENT_PRESENCE_RUNG4=1`;
 `_RUNG4_THRESHOLD` moves the bar from 0.82. It matches declared intents by token

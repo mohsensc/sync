@@ -15,15 +15,14 @@
 #include <vector>
 
 #include "daemon/policy_cache.hpp"
+#include "tests/test_paths.hpp"
 
 namespace {
 
 std::string temp_file(const char* stem) {
     static std::atomic<int> counter{0};
-    return (std::filesystem::temp_directory_path() /
-            (std::string("ap_policy_") + stem + "_" +
-             std::to_string(counter.fetch_add(1)) + ".json"))
-        .string();
+    return apt::unique_temp_path(std::string("ap_policy_") + stem + "_" +
+                                  std::to_string(counter.fetch_add(1)) + ".json");
 }
 
 void write(const std::string& path, const std::string& body) {
@@ -342,4 +341,160 @@ TEST_CASE("concurrent refresh and effect_for stay coherent") {
     for (auto& t : readers) t.join();
     REQUIRE(reads.load() > 0);
     REQUIRE_FALSE(below_floor.load());
+}
+
+// ===========================================================================
+// A degradation the compiler found, not one the daemon did
+// ===========================================================================
+//
+// `ap policy compile` writes `"degraded":true` and `"problem":"<one line>"`
+// when a layer it read had something wrong with it — `rung3 = "loud"` is the
+// canonical one. The blob is well formed, the table is usable, and the only
+// record that anything went wrong is those two keys.
+//
+// The daemon parsed one key out of that file, `table`, and nothing else. So the
+// one case docs/policy-design.md §9 wrote "degradation is loud" for — a typo in
+// somebody's policy.toml — was the case where nothing said anything: the table
+// silently fell back, snapshot.cpp had no problem to write, `ap doctor` exited
+// 0 and the statusline stayed blank.
+
+TEST_CASE("a cache the compiler marked degraded degrades the daemon too") {
+    const Scratch s("compiled-degraded");
+    write(s.path,
+          R"({"schema":1,"digest":"d","degraded":true,)"
+          R"("problem":"policy.toml:3: rung3 = 'loud' is not an effect","table":)"
+          R"(["silent","notify","context","deny","context"],)"
+          R"("floor":["silent","silent","silent","notify","silent"]})");
+
+    ap::PolicyCache p;
+    p.refresh(s.path, tick(1));
+
+    REQUIRE(p.degraded());
+    REQUIRE(p.problem().find("rung3 = 'loud'") != std::string::npos);
+    // And the table it did compile is still in force. Refusing the file would
+    // be the quieter product, which is the outcome that is never right.
+    REQUIRE(p.effect_for(3) == ap::Effect::Deny);
+    REQUIRE(p.effect_for(2) == ap::Effect::Context);
+}
+
+TEST_CASE("a healthy cache clears a degradation the last one carried") {
+    const Scratch s("compiled-recovers");
+    write(s.path,
+          R"({"schema":1,"degraded":true,"problem":"policy.toml:3: bad key","table":)" +
+              kAllSilent + R"(,"floor":["silent","silent","silent","notify","silent"]})");
+    ap::PolicyCache p;
+    p.refresh(s.path, tick(1));
+    REQUIRE(p.degraded());
+
+    // Somebody fixed the typo and recompiled. The daemon has to notice that as
+    // readily as it noticed the break, or the marker sticks until a restart.
+    write(s.path, blob(R"(["silent","notify","context","deny","context"])"));
+    p.refresh(s.path, tick(2));
+    REQUIRE_FALSE(p.degraded());
+    REQUIRE(p.problem().empty());
+}
+
+TEST_CASE("degraded without a reason still reads as degraded") {
+    // A compiler that flags the file and forgets to say why is still a compiler
+    // that flagged the file. `degraded()` is keyed on the problem line, so an
+    // empty one would silently un-flag it.
+    const Scratch s("compiled-no-why");
+    write(s.path, R"({"schema":1,"degraded":true,"table":)" + kAllSilent + "}");
+    ap::PolicyCache p;
+    p.refresh(s.path, tick(1));
+    REQUIRE(p.degraded());
+    REQUIRE(p.problem().find(s.path) != std::string::npos);
+}
+
+TEST_CASE("only a literal true flags a degradation") {
+    // The daemon must not invent one out of a file it half understood, and
+    // `"problem"` on its own is not a claim that anything is wrong — the
+    // compiler writes it empty on every healthy run.
+    for (const char* flag : {R"("degraded":false,)", R"("degraded":null,)", "",
+                             R"("degraded":"true",)"}) {
+        const Scratch s("compiled-not-true");
+        write(s.path, std::string(R"({"schema":1,)") + flag + R"("problem":"","table":)" +
+                          kAllSilent + "}");
+        ap::PolicyCache p;
+        p.refresh(s.path, tick(1));
+        INFO("flag " << flag);
+        REQUIRE_FALSE(p.degraded());
+    }
+}
+
+TEST_CASE("the compiler's problem and the daemon's are both reported") {
+    // Two different failures — a layer the compiler could not use, and a word
+    // in the table this daemon does not know — and losing either one loses the
+    // half of the story that explains the other.
+    const Scratch s("compiled-both");
+    write(s.path,
+          R"({"schema":1,"degraded":true,"problem":"policy.toml:3: rung3 = 'loud'","table":)"
+          R"(["silent","notify","context","shout","context"]})");
+    ap::PolicyCache p;
+    p.refresh(s.path, tick(1));
+
+    REQUIRE(p.degraded());
+    REQUIRE(p.problem().find("rung3 = 'loud'") != std::string::npos);
+    REQUIRE(p.problem().find("shout") != std::string::npos);
+    // The word it could not read left that rung where it was: the builtin deny.
+    REQUIRE(p.effect_for(3) == ap::Effect::Deny);
+}
+
+// -- the cache is not five names any more ------------------------------------
+//
+// `ap policy compile` used to resolve the [[path]] rules away and write a blob
+// of about 600 bytes. It carries the globs now, so the file grows with the
+// policy: a 1200-rule repo policy compiles to ~100KB. The daemon still only
+// wants `table` out of it, but it has to get through the file to find it.
+
+namespace {
+
+/// A compiled cache with `rules` in front of `table`, the way `ap policy
+/// compile` writes it, padded out to at least `bytes`.
+std::string fat_blob(const std::string& table, std::size_t bytes) {
+    std::string rules;
+    for (int i = 0; rules.size() < bytes; ++i) {
+        if (!rules.empty()) rules += ",";
+        rules += R"({"match":"src/mod)" + std::to_string(i) +
+                 R"(/**/*.py","effects":["","","","ask",""],"layer":"repo"})";
+    }
+    return R"({"schema":1,"digest":"d","degraded":false,"problem":"","rules":[)" + rules +
+           R"(],"floors":[],"table":)" + table +
+           R"(,"floor":["silent","silent","silent","notify","silent"]})";
+}
+
+}  // namespace
+
+TEST_CASE("a large compiled policy still reaches the daemon") {
+    Scratch s("large");
+    write(s.path, fat_blob(R"(["silent","notify","notify","ask","silent"])", 200 * 1024));
+
+    ap::PolicyCache p;
+    REQUIRE(p.refresh(s.path, tick(1)));
+    REQUIRE(p.effect_for(3) == ap::Effect::Ask);
+    REQUIRE_FALSE(p.degraded());
+}
+
+TEST_CASE("a cache too big to read says so instead of failing quietly") {
+    Scratch s("toobig");
+    write(s.path, blob(R"(["silent","notify","notify","ask","silent"])"));
+
+    ap::PolicyCache p;
+    REQUIRE(p.refresh(s.path, tick(1)));
+    REQUIRE(p.effect_for(3) == ap::Effect::Ask);
+
+    // Past any policy anyone compiles. The point is that the daemon names the
+    // size rather than reporting a generic unreadable file, and that it does
+    // not go back and read the whole thing again on every tick.
+    write(s.path, fat_blob(R"(["silent","deny","deny","deny","deny"])",
+                           ap::PolicyCache::max_bytes() + 1024));
+    REQUIRE_FALSE(p.refresh(s.path, tick(2)));
+
+    REQUIRE(p.effect_for(3) == ap::Effect::Ask);  // last good table stays in force
+    REQUIRE(p.degraded());
+    REQUIRE(p.problem().find("too large") != std::string::npos);
+
+    const std::size_t parsed = p.parses();
+    for (int i = 3; i < 8; ++i) REQUIRE_FALSE(p.refresh(s.path, tick(i)));
+    REQUIRE(p.parses() == parsed);
 }

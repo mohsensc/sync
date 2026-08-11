@@ -161,6 +161,31 @@ def local_identity(env: Mapping[str, str] | None = None) -> LocalIdentity:
     )
 
 
+def find_roster(start: str | os.PathLike) -> Path | None:
+    """The nearest ``.agent-presence/principals.toml`` at or above ``start``.
+
+    Stops climbing at the checkout — the directory holding ``.git`` — because a
+    roster belongs to a repo. Without that stop, one stray roster in a home
+    directory would silently set tiers for every repo under it, and the file
+    that decides who outranks whom is not a file to find by accident.
+
+    No subprocess and no git: two stat calls per level, on a path the relay
+    walks once at startup.
+    """
+    here = Path(start).expanduser()
+    try:
+        here = here.resolve()
+    except OSError:
+        return None
+    for candidate in (here, *here.parents):
+        target = candidate / ROSTER_RELPATH
+        if target.exists():
+            return target
+        if (candidate / ".git").exists():
+            return None
+    return None
+
+
 @dataclass(frozen=True)
 class Principal:
     id: str
@@ -321,12 +346,29 @@ class Roster:
         repo_root: str | None = None,
         env: Mapping[str, str] | None = None,
     ) -> "Roster":
+        """The roster for a checkout: ``$AGENT_PRESENCE_PRINCIPALS``, else
+        ``$AGENT_PRESENCE_REPO_ROOT``, else the nearest one at or above the
+        working directory.
+
+        The walk is the difference between a roster that works and one that
+        works from one directory. This used to look in the working directory
+        and nowhere else, so a relay started in ``repo/server/`` — or by a
+        service manager with no working directory to speak of — read no roster
+        at all and granted every connection ``normal``, with nothing said. A
+        tier nobody can see is a tier nobody configured.
+        """
         env = os.environ if env is None else env
         override = env.get(ROSTER_ENV)
         if override:
             return cls.load(override)
-        root = repo_root or env.get(REPO_ROOT_ENV) or os.getcwd()
-        return cls.load(Path(root) / ROSTER_RELPATH)
+        start = repo_root or env.get(REPO_ROOT_ENV) or os.getcwd()
+        found = find_roster(start)
+        if found is None:
+            log.info(
+                "no principals roster at or above %s; everyone is normal", start
+            )
+            return cls.inert()
+        return cls.load(found)
 
     # -- reading ------------------------------------------------------------
 

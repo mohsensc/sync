@@ -279,3 +279,77 @@ def test_a_squatter_that_already_held_a_region_loses_it_to_the_principal():
     sara = FakeConn(AGENT, "sara", principal="sara", token=TOKEN)
     rel.join("beta", sara)
     assert rel.registry.holder_of("beta", contested) is None
+
+
+# -- the half that outlives the socket ---------------------------------------
+#
+# Binding an id to one grant covers the ids somebody is holding. A claim can
+# outlive the connection that took it: `leave` releases the leases of the room
+# the connection was in when it hung up, and a connection that moved rooms
+# leaves the first room's leases to age out over a TTL. For that TTL the id is
+# unheld and its claims still carry `critical`, and `acquire` reads an agent's
+# tier off that agent's live claims.
+
+
+def strand_saras_claims(rel: Relay) -> None:
+    """Sara claims in alpha, moves her connection to beta, then hangs up.
+
+    One daemon switching repos does this. `leave` releases beta, alpha's lease
+    is left holding a critical stamp with nobody behind it.
+    """
+    sara = FakeConn(AGENT, "sara", principal="sara", token=TOKEN)
+    assert rel.join("alpha", sara)
+    assert claim(rel, sara, "alpha/only.py")["priority"] == "critical"
+    assert rel.join("beta", sara)
+    rel.leave(sara)
+    assert rel.registry.priority_of(AGENT) == CRITICAL, "no stranded claim left"
+
+
+def test_a_squatter_cannot_inherit_a_tier_from_a_stranded_claim():
+    rel = relay()
+    strand_saras_claims(rel)
+
+    # No principal, no token, no roster entry, and now no live connection to
+    # collide with either — the whole of the attack is knowing the id.
+    mallory = FakeConn(AGENT, "mallory")
+    assert rel.join("gamma", mallory)
+    assert claim(rel, mallory, "gamma/anything.py")["priority"] == "normal"
+    assert rel.registry.priority_of(AGENT) == NORMAL
+
+
+def test_the_stranded_claims_go_rather_than_linger_at_the_old_tier():
+    rel = relay()
+    strand_saras_claims(rel)
+
+    mallory = FakeConn(AGENT, "mallory")
+    rel.join("gamma", mallory)
+    assert rel.registry.active_claims("alpha") == [], (
+        "a claim nobody holds, at a tier nobody was granted, is what the "
+        "squatter was reading the tier off"
+    )
+
+
+def test_a_reconnect_at_the_same_tier_keeps_its_leases():
+    # The case worth protecting: a dropped socket, a fresh one, same principal,
+    # same tier. Nothing was laundered and nothing should be dropped.
+    rel = relay()
+    strand_saras_claims(rel)
+
+    again = FakeConn(AGENT, "sara", principal="sara", token=TOKEN)
+    assert rel.join("gamma", again)
+    assert [c.agent for c in rel.registry.active_claims("alpha")] == [AGENT]
+    assert rel.registry.priority_of(AGENT) == CRITICAL
+
+
+def test_a_teammate_sharing_the_id_keeps_its_leases():
+    # Two checkouts on one laptop under the default presenced@<hostname>. One
+    # of them holding the id means the claims under it are live work, not
+    # leftovers, whichever room they are in.
+    rel = relay()
+    first = FakeConn(AGENT, "sara", principal="sara", token=TOKEN)
+    rel.join("alpha", first)
+    claim(rel, first, "alpha/only.py")
+
+    second = FakeConn(AGENT, "sara", principal="sara", token=TOKEN)
+    assert rel.join("beta", second)
+    assert [c.agent for c in rel.registry.active_claims("alpha")] == [AGENT]

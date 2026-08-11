@@ -342,9 +342,16 @@ std::string read_line(int fd, std::chrono::steady_clock::time_point start, int t
     }
 }
 
-/// Rung 3 is the only rung that spends the agent's attention, so it is the only
-/// one allowed to name a permission decision.
-bool blocks_at(int rung) { return rung >= 3; }
+/// What a daemon that has never heard of effects meant by a rung.
+///
+/// It is still on the wire and it still ships: `decision` is the only field an
+/// older daemon sets, and dropping this would turn every `ask` such a daemon
+/// can express into the `deny` it did not ask for.
+Effect legacy_effect(int rung, const std::string& decision) {
+    if (rung <= 0) return Effect::Silent;
+    if (rung < 3) return Effect::Context;  // what "additionalContext for 1..2" was
+    return decision == "ask" ? Effect::Ask : Effect::Deny;
+}
 
 /// Whatever we can call the holder without lying.
 std::string holder_name(const Decision& d) {
@@ -482,6 +489,7 @@ Decision parse_decision(const std::string& line) {
     if (line.empty()) return d;
     d.rung = int_field(line, "rung", -1);
     if (d.rung < 0) return d;  // no rung, no answer; the rest is not worth reading
+    d.effect = field(line, "effect");
     d.decision = field(line, "decision");
     d.holder = field(line, "holder");
     d.human = field(line, "human");
@@ -492,6 +500,7 @@ Decision parse_decision(const std::string& line) {
     d.handover_to = field(line, "handover_to");
     d.handover_to_human = field(line, "handover_to_human");
     d.handover_to_priority = field(line, "handover_to_priority");
+    d.handover_to_me = line.find("\"handover_to_me\":true") != std::string::npos;
     d.waiting = int_field(line, "waiting", 0);
     d.lost_to = field(line, "lost_to");
     d.lost_to_priority = field(line, "lost_to_priority");
@@ -541,7 +550,12 @@ std::string blocked_message(const Decision& d, const std::string& where) {
              "written was reverted.";
     }
 
-    const bool queued_for_me = !d.handover_to.empty() && d.handover_to == d.agent;
+    // The daemon's word first. Its `handover_to` is a relay agent id and
+    // `d.agent` is a Claude Code session id, so the comparison below is only
+    // ever true when somebody has set AGENT_PRESENCE_AGENT to the session id by
+    // hand. Kept anyway: a daemon from before the flag existed sends no flag.
+    const bool queued_for_me =
+        d.handover_to_me || (!d.handover_to.empty() && d.handover_to == d.agent);
     if (d.handover_in_ms >= 0 && queued_for_me) {
         m += " Their lease stops being renewable in ";
         m += humanise_ms(d.handover_in_ms);
@@ -630,47 +644,92 @@ std::string near_message(const Decision& d, const std::string& where) {
     return m;
 }
 
+/// Nobody is in the region and the room still wants this edit stopped. That is
+/// a configuration, so say it is one: inventing a holder to blame would send a
+/// model looking for an agent that is not there.
+std::string policy_message(const std::string& where, Effect e) {
+    std::string m = "Agent presence ";
+    m += e == Effect::Deny ? "blocks" : "asks before allowing";
+    m += " edits to ";
+    m += where;
+    m += " at this rung. Nobody else holds this region — this is the room's effect table, "
+         "not a collision. `ap policy explain` names the layer that set it.";
+    return m;
+}
+
+std::string context_output(const std::string& message) {
+    std::string out = "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",";
+    append_field(out, "additionalContext", message);
+    out += "}}";
+    return out;
+}
+
+std::string permission_output(const char* decision, const std::string& message) {
+    std::string out = "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",";
+    append_field(out, "permissionDecision", decision);
+    out += ',';
+    append_field(out, "permissionDecisionReason", message);
+    out += "}}";
+    return out;
+}
+
 }  // namespace
+
+Effect effect_of(const Decision& d) {
+    const Effect said = parse_effect(d.effect).value_or(legacy_effect(d.rung, d.decision));
+    const int rung = d.rung < 0 ? 0 : (d.rung >= 5 ? 4 : d.rung);
+    return louder(said, kHookFloor[rung]);
+}
 
 std::string hook_output(const Decision& d, const std::string& path) {
     // No answer at all is allow, and says nothing.
     if (d.rung < 0) return {};
 
     const std::string where = path.empty() ? "this file" : path;
+    const Effect e = effect_of(d);
 
-    // Rung 0 is co-location, which is the world's business and not the agent's,
-    // so it stays silent — unless the daemon attached one of the two things
-    // that are about this agent's own region rather than about the room. Both
-    // require fields an older relay never sends, so an unconfigured install
-    // produces exactly the silence it always did.
-    if (d.rung == 0) {
-        if (d.handover_in_ms >= 0 && !d.handover_to.empty()) {
-            std::string out = "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",";
-            append_field(out, "additionalContext", handover_warning(d, where));
-            out += "}}";
-            return out;
-        }
-        if (!d.lost_to.empty()) {
-            std::string out = "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",";
-            append_field(out, "additionalContext", lost_message(d, where));
-            out += "}}";
-            return out;
-        }
-        return {};
-    }
+    // Two questions, and they used to be one. *What* to say is decided by what
+    // happened: who is in the region, whether this agent is about to lose one,
+    // whether it already has. *Whether and how loudly* to say it is the effect's
+    // and only the effect's. Keying the output off the rung instead is what made
+    // every `[effects]` table on the machine decorative.
+    std::string message;
+    // The two things that are about this agent's own lease rather than about
+    // the room. They are the daemon telling one agent what happened to a region
+    // it holds, there is no other channel for them, and no effect table is
+    // asking to suppress them.
+    bool own_region = false;
 
-    std::string out = "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",";
-    if (blocks_at(d.rung)) {
-        // A daemon may soften a block into a prompt. It may not talk us out of
-        // one: anything on this machine can write to that socket.
-        append_field(out, "permissionDecision", d.decision == "ask" ? "ask" : "deny");
-        out += ',';
-        append_field(out, "permissionDecisionReason", blocked_message(d, where));
+    if (d.rung == 0 && d.handover_in_ms >= 0 && !d.handover_to.empty()) {
+        message = handover_warning(d, where);
+        own_region = true;
+    } else if (d.rung == 0 && !d.lost_to.empty()) {
+        message = lost_message(d, where);
+        own_region = true;
+    } else if (d.rung > 0 || !d.holder.empty()) {
+        // Any rung above 0 is somebody else in the region, named or not.
+        // Whether that is worth stopping for is the effect's call; who they are
+        // and what they are doing is the same either way.
+        message = e >= Effect::Ask ? blocked_message(d, where) : near_message(d, where);
     } else {
-        append_field(out, "additionalContext", near_message(d, where));
+        message = policy_message(where, e);
     }
-    out += "}}";
-    return out;
+
+    switch (e) {
+        case Effect::Silent:
+        case Effect::Notify:
+            // Nothing on the hook for either — `notify` reaches a human through
+            // the statusline and the peer list, which is the surface it is
+            // named for. See docs/policy-design.md §1.
+            return own_region ? context_output(message) : std::string{};
+        case Effect::Context:
+            return context_output(message);
+        case Effect::Ask:
+            return permission_output("ask", message);
+        case Effect::Deny:
+            return permission_output("deny", message);
+    }
+    return {};
 }
 
 std::string run_hook(const std::string& hook_json, const std::string& sock_path, int budget_ms) {

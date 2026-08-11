@@ -2,6 +2,8 @@
 #include <cstddef>
 #include <string>
 
+#include "hook/protocol.hpp"
+
 namespace ap {
 
 // ===========================================================================
@@ -45,32 +47,43 @@ namespace ap {
 //
 // --- Response (daemon -> hook), exactly one line ---------------------------
 //
-//   {"rung":<int>,"holder":"<agent id>","human":"<name>","intent":"<text>",
-//    "decision":"deny"|"ask"}
+//   {"rung":<int>,"effect":"<name>","holder":"<agent id>","human":"<name>",
+//    "intent":"<text>","decision":"ask"}
 //
 //   rung      required. The collision ladder rung this edit reaches, decided
 //             against the daemon's local LeaseCache. No network call: a lookup
 //             on a table the relay pushed. Absent or unparseable means "no
 //             answer", which means allow.
+//   effect    what to do about it: silent, notify, context, ask or deny. This
+//             is the room's policy, resolved on the daemon side. Absent means
+//             the daemon predates effects; see `decision` below.
 //   holder    the agent id already in the region. Optional.
 //   human     display name for that agent. Optional; falls back to holder.
 //   intent    what the holder said they are doing, from their MCP claim.
 //             Optional, and the reason rung 3 is worth interrupting for.
-//   decision  optional override, and only ever downward: "ask" softens a rung 3
-//             block into a prompt. Anything else is ignored. A daemon cannot
-//             use this field to turn a block into an allow, and cannot use it
-//             to turn rungs 0-2 into a block.
+//   decision  the legacy shape of `effect`, still sent, set to "ask" when the
+//             effect is "ask". Read only when `effect` is absent.
 //
 // The region is the path for now. When region keys grow symbols and line
 // ranges, both sides gain the same fields on `path`; the shape does not change.
 //
-// --- What the hook does with a rung ----------------------------------------
+// --- What the hook does with an answer -------------------------------------
 //
-//   no answer  print nothing. Exit 0. Identical to nothing being installed.
-//   rung 0     print nothing. Co-location is the world's job, not the agent's.
-//   rung 1-2   additionalContext only. Never blocks.
-//   rung >= 3  permissionDecision deny (or ask), with the holder and their
-//              intent in the reason.
+// The rung says what happened. The effect says what to do about it, and it is
+// the effect that picks the output — a rung 3 the room quieted to `notify`
+// prints nothing, and a rung 1 the room raised to `deny` blocks. For a while
+// the rung picked the output on its own and the effect was parsed by nobody,
+// which made every `[effects]` table on the machine decorative: `ap why`
+// reported the configured effect and the hook denied anyway.
+//
+//   no answer          print nothing. Exit 0. Identical to nothing installed.
+//   silent, notify     print nothing.
+//   context            additionalContext. Never blocks.
+//   ask                permissionDecision ask, with the reason.
+//   deny               permissionDecision deny, with the reason.
+//
+// `kHookFloor` is the part of that the daemon does not get a vote on — anything
+// on this box can write to that socket. See hook.cpp.
 //
 // --- Budget ----------------------------------------------------------------
 //
@@ -85,7 +98,11 @@ namespace ap {
 struct Decision {
     /// Ladder rung, or negative for "the daemon did not answer".
     int rung = -1;
-    /// Daemon's downward override at rung 3: "ask", or empty for the default.
+    /// What the room's policy says to do about that rung, by name. Empty when
+    /// the daemon did not say, which is a daemon from before effects existed;
+    /// `decision` is then the only thing left to read.
+    std::string effect;
+    /// The legacy spelling of an `ask` effect. Only read when `effect` is empty.
     std::string decision;
     std::string holder;
     std::string human;
@@ -108,6 +125,12 @@ struct Decision {
     std::string handover_to;
     std::string handover_to_human;
     std::string handover_to_priority;
+    /// The daemon saying the queue is for this machine. It knows: the queue is
+    /// in the relay's namespace and `agent` above is Claude Code's session id,
+    /// so the two are different strings and comparing them here answered "no"
+    /// for every agent that was in fact next in line. False from a daemon that
+    /// does not send it, and then the comparison is still made below.
+    bool handover_to_me = false;
     /// How many agents are queued on the region. 0 when unsaid.
     int waiting = 0;
 
@@ -135,6 +158,25 @@ std::string build_request(const std::string& hook_json);
 /// Parse one response line. Anything unparseable yields rung < 0, which the
 /// rest of the hook treats as "allow".
 Decision parse_decision(const std::string& line);
+
+/// The floor the hook holds the daemon's answer to.
+///
+/// Anything on this box can write to that socket, so the effect that arrives is
+/// the room's opinion and not an instruction. This is the part of the answer
+/// that is not up for negotiation.
+///
+/// `notify` at rung 3 and not `deny`, deliberately: quieting rung 3 is a thing a
+/// room is allowed to ask for, and `notify` still reaches a human through the
+/// statusline and the relay's fan-out. What the floor rules out is a rung 3
+/// resolving below what the rest of the system treats as the minimum. It is the
+/// same table as `kBuiltinFloor` on the daemon side, for the same reason.
+inline constexpr Effect kHookFloor[5] = {Effect::Silent, Effect::Silent, Effect::Silent,
+                                         Effect::Notify, Effect::Silent};
+
+/// What the daemon's answer resolves to once the floor is applied. Exposed
+/// because "which effect did this response actually mean" is a question worth
+/// asking without rendering a whole message to find out.
+Effect effect_of(const Decision& d);
 
 /// Render a decision as what belongs on stdout. Empty means print nothing,
 /// which Claude Code reads as allow.

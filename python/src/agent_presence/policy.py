@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Literal
 
 from .clock import Clock
+from .redact import OPAQUE_ENV
 
 log = logging.getLogger("agent_presence.policy")
 
@@ -273,6 +274,104 @@ def _literal_prefix(pattern: str) -> int:
     return len(pattern) if found is None else found.start()
 
 
+# -- what a path is, before a glob is allowed near it -------------------------
+#
+# Every glob anybody writes is repo-relative. `[[path]] match = "src/pay.py"`
+# is what the docs show, what `ap policy explain src/pay.py` takes, and what
+# people mean. What arrives at a decision is not always that shape, and until
+# this section existed the mismatch was silent:
+#
+#   src/payments/charge.py                       what was written down
+#   /Users/sara/work/repo/src/payments/charge.py what the hook sends (PreToolUse
+#                                                carries file_path absolute)
+#   de56cd6b6439220c                             what the relay holds in opaque
+#                                                mode (redact.opaque_region)
+#
+# The first matched. The other two matched nothing, so every [[path]] rule and
+# every [[floor.path]] rule quietly stopped existing and the blanket answered
+# instead. The floor a repo wrote to make `**/pay.py` deny came back `notify`
+# for the same file, and nothing anywhere said so.
+#
+# Normalisation belongs here rather than at each caller because "which paths
+# does this glob cover" is a question about globs, and this is the only file
+# that knows the answer. The three shapes are handled by reading, not guessing:
+#
+#   rooted     a relative path. Matched as written.
+#   unrooted   an absolute path. The checkout root is not knowable here — the
+#              relay never learns it and must not, and one policy file is read
+#              on machines that clone to different places — so a repo-relative
+#              glob is tried against every tail of it. `src/payments/**` covers
+#              `/Users/sara/work/repo/src/payments/charge.py` because that IS
+#              `src/payments/charge.py` under some root.
+#   opaque     a hash. No glob can ever match one, so there is no reading that
+#              tells the truth, and the honest answer is the strictest thing
+#              any rule could have said. See `_OPAQUE`.
+#
+# Where more than one reading is possible the strictest one wins. A path we are
+# not certain about must not come out quieter than the same path spelled the way
+# the policy file spells it — that is the direction the old behaviour failed in.
+
+_SEPS = re.compile(r"/{2,}")
+
+# A path redact.opaque_region produced: sha256 truncated to 16 hex characters,
+# and nothing else — no separator, no dot. A real file called `deadbeefcafe1234`
+# at the repo root reads as opaque too. It gets the strictest reading of the
+# rules rather than the blanket, which is the safe direction to be wrong in, and
+# renaming it is a one-line fix for anybody who trips over it.
+_OPAQUE = re.compile(r"[0-9a-f]{16}\Z")
+
+
+def normalize_path(path: str, *, root: str | None = None) -> str:
+    """One spelling of a path, for matching against a repo-relative glob.
+
+    Collapses ``//``, drops ``./`` and any trailing slash, and — when the
+    caller knows the checkout root — makes an absolute path relative to it.
+    ``root`` is how a caller that *does* know (``ap`` knows: see
+    ``cli.find_repo_root``) gets an exact match instead of the tail-matching
+    fallback below.
+    """
+    text = (path or "").strip()
+    if not text:
+        return ""
+    text = _SEPS.sub("/", text)
+    while text.startswith("./"):
+        text = text[2:]
+    if len(text) > 1:
+        text = text.rstrip("/")
+    if root:
+        base = _SEPS.sub("/", root.strip()).rstrip("/")
+        if base and text.startswith(base + "/"):
+            text = text[len(base) + 1:]
+    return text
+
+
+def path_is_opaque(path: str) -> bool:
+    """True for a path `redact.opaque_region` hashed. No glob matches one."""
+    return bool(_OPAQUE.fullmatch(path))
+
+
+def _readings(path: str) -> tuple[str, ...]:
+    """Every spelling of ``path`` a repo-relative glob may be tried against,
+    most literal first. One entry for an ordinary relative path.
+
+    An absolute path is every tail of itself at a directory boundary, because
+    exactly one of those tails is the repo-relative path and this side cannot
+    tell which. The absolute form stays in the list first, so a policy file
+    that really does pin an absolute glob keeps working.
+    """
+    if not path.startswith("/"):
+        return (path,)
+    out = [path]
+    rest = path.lstrip("/")
+    while rest:
+        out.append(rest)
+        cut = rest.find("/")
+        if cut == -1:
+            break
+        rest = rest[cut + 1:]
+    return tuple(out)
+
+
 @dataclass(frozen=True)
 class Rule:
     """One line of policy: which paths, which rungs, which effects."""
@@ -490,7 +589,8 @@ class Policy:
                 return candidate
         return None
 
-    def _floor_for(self, rung: int, path: str) -> tuple[Effect, LayerName | None]:
+    def _floor_at(self, rung: int, path: str) -> tuple[Effect, LayerName | None]:
+        """The floor for one exact spelling of a path."""
         floor: Effect = BUILTIN_FLOOR[rung]
         source: LayerName | None = None
         # Least authority first, so a repo floor can only ever raise an org one.
@@ -506,6 +606,65 @@ class Policy:
                 floor, source = candidate, layer.name
         return floor, source
 
+    def _floor_anywhere(self, rung: int) -> tuple[Effect, LayerName | None]:
+        """The strictest floor any rule in this policy sets for the rung, for a
+        path no glob can be matched against at all.
+
+        A floor is "this never goes below". A path we cannot read is not a
+        reason to go below it, so an unreadable path gets the strictest floor
+        that could have applied rather than the blanket one. That is what makes
+        opaque mode a privacy setting instead of a policy switch: hashing the
+        path hides the filename from the relay, and it does not buy a quieter
+        answer for the file.
+        """
+        floor: Effect = BUILTIN_FLOOR[rung]
+        source: LayerName | None = None
+        for layer in self._ordered():
+            if layer.name not in FLOOR_LAYERS:
+                continue
+            for rule in layer.rules:
+                if not rule.is_floor:
+                    continue
+                candidate = rule.effects.get(_rung_index(rung))
+                if candidate is not None and RANK[candidate] > RANK[floor]:
+                    floor, source = candidate, layer.name
+        return floor, source
+
+    def _has_path_rules(self) -> bool:
+        """Does anything here name a path at all? Cheap — a handful of rules —
+        and it keeps the reading machinery off the shipped default, where every
+        rule is a blanket and every spelling of a path answers alike."""
+        return any(
+            rule.match is not None
+            for layer in self.layers
+            for rule in layer.rules
+        )
+
+    def _touches(self, path: str) -> bool:
+        """Does any glob in this policy match this exact spelling of a path?"""
+        return any(
+            rule.match is not None and rule.matches(path)
+            for layer in self.layers
+            for rule in layer.rules
+        )
+
+    def _floor_for(self, rung: int, path: str) -> tuple[Effect, LayerName | None]:
+        """The floor for a path in whatever shape it arrived in.
+
+        Strictest reading wins: an absolute path is floored by any rule that
+        covers any tail of it, and an opaque one by any rule at all. See the
+        `_readings` block above for why there is more than one reading.
+        """
+        path = normalize_path(path)
+        if path_is_opaque(path):
+            return self._floor_anywhere(rung)
+        best = self._floor_at(rung, path)
+        for alt in _readings(path)[1:]:
+            candidate = self._floor_at(rung, alt)
+            if RANK[candidate[0]] > RANK[best[0]]:
+                best = candidate
+        return best
+
     def _ordered(self) -> list[Layer]:
         return sorted(
             self.layers,
@@ -514,9 +673,108 @@ class Policy:
         )
 
     def resolve(self, rung: int, path: str, *, unattended: bool = False) -> Resolution:
-        rung = _rung_index(rung)
-        path = path or ""
+        """What happens at this rung on this path.
 
+        The path is normalised first and may have more than one honest reading
+        — see the `_readings` block. Where it does, the strictest reading wins:
+        a path this side cannot pin down exactly must not come out quieter than
+        the same file spelled the way the policy file spells it.
+        """
+        rung = _rung_index(rung)
+        path = normalize_path(path)
+
+        if path_is_opaque(path):
+            return self._resolve_opaque(rung, path, unattended=unattended)
+
+        best = self._resolve_at(rung, path, unattended=unattended)
+        if not self._has_path_rules():
+            # Nothing in this policy can tell two spellings of a path apart, so
+            # there is no second reading to take. The shipped default is here —
+            # a stack with no `[[path]]` line in it pays one resolution, which
+            # is what it paid before any of this existed.
+            return best
+        # A reading no glob in this policy touches resolves the same way every
+        # other untouched reading does — to the blanket answer — so it is worth
+        # computing once and comparing rather than resolving per tail. That is
+        # most tails: `/Users/sara/work/repo/src/pay.py` has seven and one of
+        # them is the file.
+        blanket: Resolution | None = None
+        for alt in _readings(path)[1:]:
+            if self._touches(alt):
+                candidate = self._resolve_at(rung, alt, unattended=unattended)
+            else:
+                if blanket is None:
+                    blanket = self._resolve_at(rung, "", unattended=unattended)
+                candidate = blanket
+            if RANK[candidate.effect] > RANK[best.effect]:
+                # Keep the path the caller asked about. The tail is how the
+                # rule was found, not what the agent is editing, and every
+                # reader of this — `ap policy explain`, `ap why`, the refusal
+                # the model gets — is talking about the file.
+                best = replace(candidate, path=path)
+        return best
+
+    def _resolve_opaque(
+        self, rung: int, path: str, *, unattended: bool = False
+    ) -> Resolution:
+        """A hashed path. No glob matches one, so every path rule is treated as
+        if it might apply and the strictest of them stands.
+
+        The alternative is what shipped: opaque mode turned every ``[[path]]``
+        and ``[[floor.path]]`` rule off, silently, for every file. Privacy and
+        policy do not compose here and this says which one wins.
+        """
+        blanket = self._resolve_at(rung, "", unattended=unattended)
+        floor, floor_layer = self._floor_anywhere(rung)
+        effect = stricter(blanket.base if blanket.ceiling is None else
+                          quieter(blanket.base, blanket.ceiling), floor)
+        base, layer_name, rule_name, source = (
+            blanket.base, blanket.winning_layer, blanket.winning_rule,
+            blanket.source,
+        )
+
+        for layer in self._ordered():
+            ceiling = OBSERVER_CEILING if layer.mode == "observer" else None
+            for rule in layer.rules:
+                if rule.is_floor or rule.match is None:
+                    continue
+                candidate = rule.effects.get(rung)
+                if candidate is None:
+                    continue
+                if ceiling is not None:
+                    candidate = quieter(candidate, ceiling)
+                if RANK[candidate] > RANK[effect]:
+                    effect = candidate
+                    base, layer_name = candidate, layer.name
+                    rule_name, source = rule.describe(), layer.source
+
+        promoted = False
+        if unattended and effect == "ask":
+            effect, promoted = "deny", True
+
+        return Resolution(
+            rung=rung,
+            path=path,
+            effect=effect,
+            base=base,
+            winning_layer=layer_name,
+            winning_rule=rule_name,
+            ceiling=blanket.ceiling,
+            floor=floor,
+            floor_layer=floor_layer,
+            unattended_promoted=promoted,
+            problems=blanket.problems + (
+                f"{path} is an opaque path ({OPAQUE_ENV}); no glob can "
+                f"match a hash, so every path rule was read as if it might "
+                f"apply and the strictest one stands",
+            ),
+            source=source,
+        )
+
+    def _resolve_at(
+        self, rung: int, path: str, *, unattended: bool = False
+    ) -> Resolution:
+        """One exact spelling of a path, matched as written."""
         base: Effect = BUILTIN[rung]
         winning_layer: LayerName = "builtin"
         winning_rule = "blanket"
@@ -551,7 +809,12 @@ class Policy:
         # Step 3, and it has to be this way round. `mode = "observer"` is a
         # personal preference; a floor is a statement by the people responsible
         # for the code. Floors beat ceilings, always.
-        floor, floor_layer = self._floor_for(rung, path)
+        #
+        # The floor for *this* spelling of the path, not the strictest floor
+        # across every spelling: `resolve` is already walking the readings and
+        # taking the strictest answer, so asking for them again here would be
+        # the same search squared.
+        floor, floor_layer = self._floor_at(rung, path)
         effect = stricter(effect, floor)
 
         # Step 4. `ask` means "interrupt the human". An unsupervised agent has
@@ -586,6 +849,95 @@ class Policy:
 
     def floor_table(self, path: str) -> EffectTable:
         return EffectTable(tuple(self._floor_for(r, path)[0] for r in RUNGS))
+
+    def floor_rules(self) -> list[dict]:
+        """Every path-scoped floor, in the shape the wire carries them.
+
+        ``floor_table`` answers for one path, and the relay does not have one:
+        it sends its floor once, on join, and the daemon applies it to every
+        file afterwards. So the flat table is what a blanket floor comes to and
+        these are the lines it cannot express — ``[[floor.path]] match =
+        "**/pay.py"`` and the like. Without them the wire dropped every
+        path-scoped floor an org wrote, which is most of what an org writes:
+        `floor_table("")` matches no glob, so the frame said `notify` for a file
+        the relay itself was denying.
+
+        Five slots per rule, ``""`` where the rule says nothing, so a reader can
+        raise rung by rung without knowing which rungs a line mentioned. Order
+        does not matter: a floor is the strictest thing that matches, never the
+        most specific. ``floor_from_frame`` is the reader, written out so the
+        daemon has something to mirror.
+        """
+        out: list[dict] = []
+        for layer in self._ordered():
+            if layer.name not in FLOOR_LAYERS:
+                continue
+            for rule in layer.rules:
+                if not rule.is_floor or rule.match is None:
+                    continue
+                effects = [rule.effects.get(rung, "") for rung in RUNGS]
+                if any(effects):
+                    out.append({
+                        "match": rule.match,
+                        "effects": effects,
+                        "layer": layer.name,
+                    })
+        return out
+
+
+def glob_covers(pattern: str, path: str) -> bool:
+    """Does this repo-relative glob cover this path, in whatever shape the path
+    turned up in? The one matching rule, in one place, for callers outside the
+    layer machinery. See the `_readings` block for the three shapes."""
+    compiled = _compile_glob(pattern)
+    if compiled is None:
+        return False
+    path = normalize_path(path)
+    if path_is_opaque(path):
+        # A hash is not distinguishable from the file the rule names, so a
+        # floor written against that file applies. Strictest reading wins.
+        return True
+    return any(compiled.match(reading) is not None for reading in _readings(path))
+
+
+def floor_from_frame(frame: Mapping[str, object], path: str) -> EffectTable:
+    """The floor a daemon should enforce for one path, out of one relay frame.
+
+    The daemon's half of ``Relay._policy_frame``, written on this side so the
+    two halves cannot drift and so a test can drive it. In order:
+
+        start at the builtin floor, which is compiled into both sides;
+        raise it with `floor`, the org's blanket floor;
+        raise it again with every `floors` entry whose glob covers the path.
+
+    Only ever raises — a floor that could lower something is a default with
+    extra steps — so an unknown or malformed field costs the reader nothing and
+    a frame from an older relay with no `floors` key behaves exactly as it did.
+    """
+    table = list(BUILTIN_FLOOR.rungs)
+
+    blanket = frame.get("floor")
+    if isinstance(blanket, (list, tuple)) and len(blanket) == len(table):
+        for rung, name in enumerate(blanket):
+            if isinstance(name, str) and name in RANK:
+                table[rung] = stricter(table[rung], name)  # type: ignore[arg-type]
+
+    entries = frame.get("floors")
+    if isinstance(entries, (list, tuple)):
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                continue
+            match = entry.get("match")
+            effects = entry.get("effects")
+            if not isinstance(match, str) or not isinstance(effects, (list, tuple)):
+                continue
+            if not glob_covers(match, path):
+                continue
+            for rung, name in enumerate(effects[:len(table)]):
+                if isinstance(name, str) and name in RANK:
+                    table[rung] = stricter(table[rung], name)  # type: ignore[arg-type]
+
+    return EffectTable(tuple(table))  # type: ignore[arg-type]
 
 
 # -- parsing -----------------------------------------------------------------
@@ -957,20 +1309,153 @@ def runtime_cache_path(env: Mapping[str, str] | None = None) -> Path:
     return Path(base) / RUNTIME_CACHE_NAME
 
 
+def runtime_digest(
+    policy: Policy, *, path: str = "", unattended: bool = False
+) -> str:
+    """sha256 over everything that decides what ``compile_runtime`` writes.
+
+    ``policy.digest`` covers the files. It does not cover the two arguments,
+    and both of them change the table: a cache compiled ``--unattended`` holds
+    ``deny`` where the same files attended hold ``ask``, and a cache pinned to
+    one path holds that path's table for every path. With only the file digest
+    to compare, ``ap doctor`` said ``ok`` over both — the daemon on a table the
+    config on disk does not describe, and the one command whose job is to
+    notice reporting green. So the compile arguments are in here too.
+    """
+    digest = hashlib.sha256()
+    digest.update(policy.digest.encode())
+    digest.update(b"\x00")
+    digest.update(path.encode())
+    digest.update(b"\x00")
+    digest.update(b"unattended" if unattended else b"attended")
+    return digest.hexdigest()
+
+
+def _compiled_effects(
+    rule: Rule, *, ceiling: Effect | None, unattended: bool
+) -> list[str]:
+    """One rule as five slots, ``""`` where the rule says nothing.
+
+    The ceiling and the unattended promotion are folded in here rather than
+    left for the daemon. The ceiling belongs to the layer that won a rung, and
+    a rule only appears under its own layer, so applying it per rule is the
+    same thing ``resolve`` does. The promotion distributes over the floor —
+    ``max`` of two promoted effects is the promotion of their ``max``, since
+    the only thing it moves is ``ask``, upward — so per-entry is safe there
+    too, and the daemon never has to know which run it is in.
+    """
+    out: list[str] = []
+    for rung in RUNGS:
+        effect = rule.effects.get(rung)
+        if effect is None:
+            out.append("")
+            continue
+        if ceiling is not None:
+            effect = quieter(effect, ceiling)
+        if unattended and effect == "ask":
+            effect = "deny"
+        out.append(effect)
+    return out
+
+
+def _compiled_rules(policy: Policy, *, unattended: bool) -> list[dict]:
+    """Every effect rule, flattened into one first-match-wins list.
+
+    Highest-authority layer first, and within a layer most specific first, so
+    walking this list and taking the first entry that matches the path *and*
+    fills that rung's slot gives exactly what ``Policy.resolve`` gives. The
+    builtin blanket is last and matches everything, so the walk always ends.
+
+    ``match`` is ``""`` for a blanket rule, which is a glob nothing else can
+    spell.
+    """
+    out: list[dict] = []
+    for layer in reversed(policy._ordered()):
+        ceiling: Effect | None = (
+            OBSERVER_CEILING if layer.mode == "observer" else None
+        )
+        ordered = sorted(
+            (r for r in layer.rules if not r.is_floor),
+            key=lambda r: (r.specificity(), r.order),
+            reverse=True,
+        )
+        for rule in ordered:
+            effects = _compiled_effects(
+                rule, ceiling=ceiling, unattended=unattended
+            )
+            if any(effects):
+                out.append({
+                    "match": rule.match or "",
+                    "effects": effects,
+                    "layer": layer.name,
+                })
+    return out
+
+
+def _compiled_floors(policy: Policy, *, unattended: bool) -> list[dict]:
+    """Every floor rule, unordered on purpose.
+
+    A floor is not first-match-wins. The strictest floor that matches applies,
+    across layers and within one, so the daemon takes the max over every entry
+    that matches plus the blanket ``floor`` array.
+    """
+    out: list[dict] = []
+    for layer in policy._ordered():
+        if layer.name not in FLOOR_LAYERS:
+            continue
+        for rule in layer.rules:
+            if not rule.is_floor:
+                continue
+            effects = _compiled_effects(rule, ceiling=None, unattended=unattended)
+            if any(effects):
+                out.append({
+                    "match": rule.match or "",
+                    "effects": effects,
+                    "layer": layer.name,
+                })
+    return out
+
+
 def compile_runtime(
     policy: Policy, *, path: str = "", unattended: bool = False
 ) -> dict:
     """The blob the daemon reads.
 
-    Deliberately tiny and deliberately pre-resolved: no TOML, no globs, no
-    layers. The daemon stats one file on a tick it already runs and parses only
-    when the mtime moves, so a decision costs a shared lock and an array index.
+    Deliberately tiny and deliberately pre-resolved: no TOML, no layers, no
+    modes. The daemon stats one file on a tick it already runs and parses only
+    when the mtime moves.
+
+    ``table`` and ``floor`` are the blanket answer, resolved for ``path``
+    (empty, normally, which no glob matches). ``rules`` and ``floors`` carry
+    the ``[[path]]`` globs, which used to be resolved away here and never
+    reached the daemon at all: a repo could pin ``**/pay.py`` to ``deny``,
+    ``ap policy explain`` would agree, and the daemon would go on serving the
+    blanket table because that is all the cache held.
+
+    The daemon's half, for one rung and one path:
+
+        for entry in rules:            # already in priority order
+            if matches(entry.match, path) and entry.effects[rung]:
+                effect = entry.effects[rung]; break
+        else:
+            effect = table[rung]
+        floor = floor[rung]
+        for entry in floors:
+            if matches(entry.match, path) and entry.effects[rung]:
+                floor = stricter(floor, entry.effects[rung])
+        effect = stricter(effect, floor)
+
+    A daemon that reads only ``table`` and ``floor`` — every daemon shipped so
+    far — keeps behaving exactly as it did.
     """
     return {
         "schema": SCHEMA_VERSION,
         "table": policy.table_for(path, unattended=unattended).names(),
         "floor": policy.floor_table(path).names(),
-        "digest": policy.digest,
+        "rules": _compiled_rules(policy, unattended=unattended),
+        "floors": _compiled_floors(policy, unattended=unattended),
+        "digest": runtime_digest(policy, path=path, unattended=unattended),
+        "policy_digest": policy.digest,
         "degraded": policy.degraded,
         "problem": policy.problems[0] if policy.problems else "",
         "path": path,

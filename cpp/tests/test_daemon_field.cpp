@@ -10,6 +10,7 @@
 #include <string>
 
 #include "hook/hook.hpp"
+#include "tests/test_paths.hpp"
 
 // The seam that broke: the hook escapes a path correctly, the daemon read it
 // back by scanning for the next bare '"'. Every event for a path holding a
@@ -75,8 +76,7 @@ std::string write_token_file(const std::string& dir, const std::string& body) {
 }
 
 std::string scratch_dir(const std::string& leaf) {
-    const std::string dir =
-        (std::filesystem::temp_directory_path() / ("ap-tok-" + leaf)).string();
+    const std::string dir = apt::unique_temp_path("ap-tok-" + leaf);
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
     std::filesystem::create_directories(dir);
@@ -153,4 +153,32 @@ TEST_CASE("truthy spellings of the unattended flag") {
     // Not a guess either way: an unreadable value is the safer of the two,
     // which is attended, because attended is the quieter end of every band.
     REQUIRE_FALSE(env_is_true("maybe"));
+}
+
+// ---------------------------------------------------------------------------
+// Where the decision journal goes
+// ---------------------------------------------------------------------------
+//
+// The socket and the snapshot have had an override each since they existed.
+// This one was a bare concatenation of the runtime dir and a fixed name, so two
+// presenced on one box — one per repo, which is how anyone with two checkouts
+// runs it — wrote every decision into the same file and `ap why` in one repo
+// answered with the other repo's blocks.
+
+TEST_CASE("the journal path falls back to the runtime directory") {
+    REQUIRE(discover_journal("", "/run/user/501") ==
+            "/run/user/501/agent-presence.decisions.jsonl");
+}
+
+TEST_CASE("AGENT_PRESENCE_JOURNAL moves the journal, like the sock and snapshot vars") {
+    REQUIRE(discover_journal("/run/user/501/repo-a.jsonl", "/run/user/501") ==
+            "/run/user/501/repo-a.jsonl");
+}
+
+TEST_CASE("two daemons sharing a runtime dir get two journals") {
+    // The whole point. Distinct AGENT_PRESENCE_SOCK already gives them separate
+    // sockets; without this they still shared the file behind `ap why`.
+    const std::string runtime = "/run/user/501";
+    REQUIRE(discover_journal("/run/user/501/a.jsonl", runtime) !=
+            discover_journal("/run/user/501/b.jsonl", runtime));
 }

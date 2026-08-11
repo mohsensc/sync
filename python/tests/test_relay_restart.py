@@ -78,17 +78,26 @@ async def _recv(ws, kind: str, timeout: float = 3.0) -> dict:
             return frame
 
 
-async def _join(ws, agent: str) -> None:
+async def _join(ws, agent: str) -> dict:
+    """Join and wait out the lease snapshot the relay answers it with.
+
+    That snapshot is sent synchronously as part of the relay processing the
+    join frame, so seeing it is proof the join has landed — the connection is
+    a room member and reachable by fan-out. A fixed sleep here was standing in
+    for that proof and guessing how long it takes; under real CPU pressure the
+    guess is sometimes wrong and a claim fans out before the other daemon is
+    actually a room member yet.
+    """
     await ws.send(json.dumps({"type": "join", "room": ROOM,
                               "agent": agent, "human": agent}))
+    return await _recv(ws, "leases")
 
 
 async def test_a_join_into_an_empty_room_is_answered_with_an_empty_snapshot():
     server = await RelayServer().start()
     try:
         async with websockets.connect(server.url) as ws:
-            await _join(ws, "a1")
-            snapshot = await _recv(ws, "leases")
+            snapshot = await _join(ws, "a1")
             assert snapshot["leases"] == []
     finally:
         await server.stop()
@@ -108,7 +117,6 @@ async def test_a_stale_lease_clears_on_reconnect_not_on_the_ttl():
                    websockets.connect(first.url) as daemon:
             await _join(holder, "holder")
             await _join(daemon, "daemon")
-            await asyncio.sleep(0.1)
 
             await holder.send(json.dumps({"type": "claim", "region": REGION,
                                           "intent": "held across the restart"}))
@@ -129,8 +137,7 @@ async def test_a_stale_lease_clears_on_reconnect_not_on_the_ttl():
             "a restarted relay is supposed to come back empty"
         )
         async with websockets.connect(second.url) as daemon:
-            await _join(daemon, "daemon")
-            snapshot = await _recv(daemon, "leases", timeout=3.0)
+            snapshot = await _join(daemon, "daemon")
             assert snapshot["leases"] == [], (
                 "the reconnecting daemon was never told the relay holds "
                 "nothing, so it goes on blocking src/contested.py until its own "
@@ -151,8 +158,7 @@ async def test_a_reconnect_into_a_room_that_still_has_leases_gets_them_all():
             assert (await _recv(holder, "claim_result"))["granted"] is True
 
             async with websockets.connect(server.url) as daemon:
-                await _join(daemon, "daemon")
-                snapshot = await _recv(daemon, "leases")
+                snapshot = await _join(daemon, "daemon")
                 assert [e["agent"] for e in snapshot["leases"]] == ["holder"]
                 assert snapshot["leases"][0]["intent"] == "still held"
     finally:

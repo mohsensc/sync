@@ -103,14 +103,18 @@ std::string ambient_response(const LeaseCache& leases, const PolicyCache& policy
 }  // namespace
 
 std::string decide_response(const std::string& request, const LeaseCache& leases,
-                            const PolicyCache& policy, long long now_ms) {
+                            const PolicyCache& policy, long long now_ms,
+                            const std::string& self_agent) {
     if (!wants_decision_line(request)) return {};
 
     // Rung 0 is a real answer, not a shrug: the hook prints nothing for it, and
     // sending it means a working chain is distinguishable on the wire from a
     // daemon that drained the line and hung up. Every path below answers.
     const std::string path = json_field(request, "path");
-    const std::string agent = json_field(request, "agent");
+    // The name the lease table knows this machine by. The request carries the
+    // session id, which is a different namespace: see decide.hpp.
+    const std::string agent =
+        self_agent.empty() ? json_field(request, "agent") : self_agent;
 
     // Only edits contend, and only a named region can be looked up. The hook
     // already filters both, but the socket is writable by anything on the box.
@@ -143,6 +147,13 @@ std::string decide_response(const std::string& request, const LeaseCache& leases
         // Whether the region is queued for *this* agent decides whether the
         // right instruction is "wait, it is yours" or "wait, and you are second".
         append_field(out, "handover_to", held->handover_to);
+        // Said outright rather than left to the hook to work out by comparing
+        // ids: the hook only knows the session id, and the queue is in the
+        // relay's namespace. Omitted when false so an older hook, which does
+        // its own comparison, sees exactly the frame it saw before.
+        if (!agent.empty() && held->handover_to == agent) {
+            out += ",\"handover_to_me\":true";
+        }
         if (held->waiting > 0) append_number(out, "waiting", held->waiting);
     }
 
@@ -169,7 +180,12 @@ std::string decide_response(const std::string& request, const LeaseCache& leases
     // Function-local so there is exactly one, built on first use and never
     // refreshed: it is the compiled-in table by construction.
     static const PolicyCache kDefaults;
-    return decide_response(request, leases, kDefaults, now_ms);
+    return decide_response(request, leases, kDefaults, now_ms, std::string{});
+}
+
+std::string decide_response(const std::string& request, const LeaseCache& leases,
+                            const PolicyCache& policy, long long now_ms) {
+    return decide_response(request, leases, policy, now_ms, std::string{});
 }
 
 }  // namespace ap
