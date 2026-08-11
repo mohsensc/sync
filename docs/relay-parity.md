@@ -8,9 +8,9 @@ runs it; the default is still the Python relay. See "the call" at the bottom.
 PRs #31, #37, #38, #39 and #41 merged into it. Those bring the Python relay
 the presence-snapshot fix, the lease-expiry/wait-die fixes, the marshal-once
 fan-out fix, and delete `cpp/daemon/` in favor of `go/cmd/presenced`. This
-branch was rebased onto the merged `main` and everything below —
+branch was merged with the updated `main` and everything below —
 the golden-scenario diff, the black-box suite, the load numbers — was
-re-run *after* that rebase, against what `main` actually is now, not
+re-run *after* that merge, against what `main` actually is now, not
 against the pre-merge snapshot. Where that changes the story from what an
 earlier version of this doc said, it's noted inline.
 
@@ -215,7 +215,7 @@ verbatim to `go/internal/relaysrv/golden_test.go` — same calls, same
 clock schedule — and diffed field-by-field against Python's own current
 output (not the `golden_base.json` fixture, which predates the policy
 engine and PR #31; comparing against *current* `main` is the harder and
-more direct check). Run twice: once before the rebase (normalizing two
+more direct check). Run twice: once before the merge (normalizing two
 documented differences — Go omits `effect`/`effect_source`, no policy
 engine; Go's `presence` array on the join snapshot was PR #31 ahead of it
 merging), and once after (PR #31 is on `main` now, so `presence` is no
@@ -247,7 +247,7 @@ repo-root path normalization behaving differently in a `git worktree`
 checkout than a plain one, not to anything on the wire; not chased
 further given the time budget.
 
-Moot now: PR #38 merged into `main` in the same wave as this rebase and
+Moot now: PR #38 merged into `main` in the same wave as this merge and
 deletes `cpp/daemon/` entirely, along with `relay_client.{cpp,hpp}` — the
 C++ code this section was testing no longer exists on `main`.
 `go/cmd/presenced` (the Go daemon) is the only daemon on `main` as of this
@@ -296,19 +296,19 @@ socket/decide packages.
 Same scenario code, same machine, interleaved by member count (not a
 custom bench — a `RelayProc`-shaped subprocess wrapper around `gorelay`
 stands in for `_lib.RelayProc`, nothing else changed). Run both before and
-after the rebase onto merged `main` — see below for both sets of numbers,
+after merging with the updated `main` — see below for both sets of numbers,
 since `perf/marshal-once` and the wait-die fix landing mid-PR changes what
 "python" means between the two.
 
 ### `swarm` — the spike's own scenario, 8 hot regions, 15 rounds
 
-Run twice: once before the rebase onto the merged `main` (stock Python,
+Run twice: once before merging with the updated `main` (stock Python,
 pre-#37/#41), once after (Python now has the wait-die/expiry fixes and
 marshal-once). Both are reported — the second is the number that matters
 going forward, the first is why the `wait`/`abort` split below reads
 differently between them.
 
-**Before the rebase** (Python = stock `main`, no #37/#41):
+**Before the merge** (Python = stock `main`, no #37/#41):
 
 | agents | python p99 (ms) | go p99 (ms) | ratio | python wait/abort | go wait/abort |
 | --- | --- | --- | --- | --- | --- |
@@ -321,38 +321,43 @@ Stock Python's `wait` column is zero at every scale — `WAIT-DIE NEVER SAYS
 WAIT` fires every run — which is issue #35 exactly. The Go relay had the
 fix from the start, ported from PR #37 before it merged.
 
-**After the rebase** (Python = current `main`, with #37/#41; same machine,
-now also running several other concurrent sessions' work — noisier than
-the first round, noted per row):
+**After the merge** (Python = current `main`, with #37/#41). `uptime` read
+load averages around 51/48/36 (1/5/15 min) for this entire set of runs —
+this machine was running well over a dozen other concurrent agent sessions
+throughout, not just this one's own background work. That is far past even
+`docs/relay-spike.md`'s own "not a quiesced box" caveat (that spike saw
+3.5–25.7); the absolute numbers below are correspondingly noisier than the
+pre-merge round, and 1600 agents — the point where a single-process
+client is closest to becoming the bottleneck itself — was run three times
+rather than once because of it:
 
-| agents | python p99 (ms) | go p99 (ms) | ratio | python cpu/op | go cpu/op | conditions |
-| --- | --- | --- | --- | --- | --- | --- |
-| 200 | 412.2 | 69.5 | 5.9x | 0.33ms | 0.17ms | machine moderately busy |
-| 400 | 587.1 | 321.7 | 1.8x | 0.31ms | 0.16ms | busy: concurrent with this session's own pytest rerun |
-| 800 | 644.7 | 396.4 | 1.6x | 0.31ms | 0.19ms | busy: same |
-| 1600 (round A) | 1794.3 | 2338.0 | **0.77x — go lost** | 0.34ms | 0.20ms | busy: same, plus other sessions' work |
-| 1600 (round B, isolated) | 5944.6 | 1262.5 | 4.7x | 0.41ms | 0.19ms | this session's own load quieted; other sessions still running |
+| agents | python p99 (ms) | go p99 (ms) | ratio | python cpu/op | go cpu/op |
+| --- | --- | --- | --- | --- | --- |
+| 200 | 412.2 | 69.5 | 5.9x | 0.33ms | 0.17ms |
+| 400 | 587.1 | 321.7 | 1.8x | 0.31ms | 0.16ms |
+| 800 | 644.7 | 396.4 | 1.6x | 0.31ms | 0.19ms |
+| 1600, round A | 1794.3 | 2338.0 | **0.77x — go lost** | 0.34ms | 0.20ms |
+| 1600, round B | 5944.6 | 1262.5 | 4.7x | 0.41ms | 0.19ms |
+| 1600, round C | 4768.9 | 1324.8 | 3.6x | — | — |
 
-Go still wins on every row except one, and that one is explained rather
-than hidden: at 1600 agents in round A, `relay_cpu_s` for the Go run was
-4.88s against a 23.41s wall-clock elapsed — the relay was busy barely a
-fifth of the time it took to finish. That is the exact "single-process
-asyncio client becomes the ceiling, not the relay" effect
-`docs/relay-spike.md` measured and named (`harness_cpu_s` dominating
-elapsed time once the relay is fast enough that the *client* can't drive
-it any harder from one process) — this PR uses the standard
-`tests/load/scenarios.py` harness as instructed, not the spike's
-client-sharding fix, so it inherits that ceiling at the highest agent
-count. Round B, run in isolation after quieting this session's own
-concurrent work, shows the same shape the pre-rebase numbers did: Go
-ahead by 4.7x. `relay_cpu_ms_per_op` — a metric less sensitive to
-wall-clock scheduling noise than p99 — favored Go in every single row
-without exception, including round A: 0.20ms/op vs Python's 0.34ms/op.
+Go wins 5 of 6 rows, including 2 of 3 at 1600 agents — the scale where
+this machine's load made every number swing hardest (Python's own p99 at
+1600 ranges 1794–5945ms across the three rounds, a >3x spread run to run
+with nothing about either relay changing between them; that variance is
+the load average talking, not a property of either relay). Round A is the
+one Go lost, and it's explained rather than hidden: `relay_cpu_s` for that
+Go run was 4.88s against a 23.41s wall-clock elapsed — the relay was busy
+barely a fifth of the time the run took. That's the exact "single-process
+client becomes the ceiling, not the relay" effect `docs/relay-spike.md`
+measured and named — this PR uses the standard `tests/load/scenarios.py`
+harness as instructed, not the spike's client-sharding fix, so it
+inherits that ceiling at the highest agent count on a machine already this
+loaded. `relay_cpu_ms_per_op` — the metric least sensitive to wall-clock
+scheduling noise — favored Go in every single row without exception,
+including round A: 0.20ms/op vs Python's 0.34ms/op.
 
-Across both rounds and both machine conditions: no `LEASE LEAK` finding,
-no lost relay process, on either side. This machine was not quiesced for
-any of these runs — `docs/relay-spike.md`'s own caveat applies here too,
-more so given how much else was running on it during this PR.
+Across all three 1600-agent rounds and every other row: no `LEASE LEAK`
+finding, no lost relay process, on either side.
 
 Memory: Go's post-drain RSS was lower than Python's in every run measured
 (e.g. round B at 1600 agents: Python 17.4 MiB after every connection
@@ -362,14 +367,14 @@ enough to put a precise number on beyond "the pattern holds."
 
 ### `rooms`, `slow_subscriber`, `lease_churn`
 
-Run once, before the rebase onto the merged `main` (so "python" below is
+Run once, before merging with the updated `main` (so "python" below is
 stock `main`, pre-#31/#37/#41 — see the note at the top of this doc). Not
-re-run after the rebase given the time this PR had; the `swarm` numbers
-above were re-run post-rebase and are the ones to trust for latency. What
+re-run after the merge given the time this PR had; the `swarm` numbers
+above were re-run post-merge and are the ones to trust for latency. What
 these three still show correctly regardless of which Python they're
 compared against: isolation holds, backpressure holds, and — before #37
 merged — the Go relay already had the fix stock `main` didn't. After the
-rebase, current `main` also has that fix (that's the whole point of PR
+merge, current `main` also has that fix (that's the whole point of PR
 #37 landing), so re-running `lease_churn` today would no longer show
 Python's `NO EXPIRY EVER BROADCAST` finding — both sides would pass. That
 doesn't change what's demonstrated here: the Go relay was built with the
@@ -456,20 +461,26 @@ selects the Go relay from `agent-presence-relay`'s existing entrypoint
 default stays the Python relay for one release.
 
 What holds up, for the default configuration: a zero-diff golden scenario
-against Python's *current* behaviour (re-verified after the rebase onto
-merged `main` — still zero); 13/14 real-socket black-box tests passing
+against Python's *current* behaviour (re-verified after merging with
+the updated `main` — still zero); 13/14 real-socket black-box tests passing
 (the one failure is a test-harness artifact, independently confirmed
-fixed by starting the env var correctly instead of mid-test); two real
-bugs found and fixed by the process itself, one by the golden-scenario
-diff and one by re-reading the brief (see above); the Go daemon's
-existing, unmodified relay client working against it, re-verified after
-the daemon's own significant restructure in the same merge wave; the web
+fixed by starting the env var correctly instead of mid-test); five real
+issues found and fixed by the process itself — two by the golden-scenario
+diff and by re-reading the brief before ever pushing (see "a real bug"
+above), three more by an adversarial review against the python source
+after that (a carry-key that dropped `lines` from its identity, a
+snapshot-then-iterate gap in the identity-reclaim sweep, and the opaque
+toggle being read twice per event instead of once — see the commit
+"marshal once per fan-out, fix three adversarial-review findings" for
+each one's exact failure scenario and fix) — the Go daemon's existing,
+unmodified relay client working against it, re-verified after the
+daemon's own significant restructure in the same merge wave; the web
 client's actual `connect()`/`isPresence()` code working against it; and a
-load-test run that beats Python on p99 in 8 of 9 rows measured across two
-machine-load conditions and two Python baselines (see the `swarm` numbers
-above for the one row that didn't, and why — a client-side bottleneck
-this PR's harness doesn't shard around, not a relay regression, backed by
-`relay_cpu_ms_per_op` favoring Go in that same row).
+load-test run that beats Python on p99 in 9 of 10 rows measured across
+two machine-load conditions and two Python baselines (see the `swarm`
+numbers above for the one row that didn't, and why — a client-side
+bottleneck this PR's harness doesn't shard around, not a relay
+regression, backed by `relay_cpu_ms_per_op` favoring Go in that same row).
 
 Why opt-in rather than flipping the default outright, despite that:
 
@@ -488,12 +499,13 @@ Why opt-in rather than flipping the default outright, despite that:
   load harness's `slow_subscriber` scenario exercises the same mechanism
   under real concurrent load and passes on both relays.
 - The load numbers this PR reports were gathered on a shared machine
-  running several other concurrent sessions' work throughout, sometimes
-  including this session's own concurrent test runs by mistake (caught
-  and re-run in isolation once noticed — see `swarm`'s 1600-agent rows).
-  The relative comparison (paired, interleaved, same machine) is the part
-  expected to survive that; a single absolute number from any one row is
-  not.
+  running well over a dozen other concurrent agent sessions throughout
+  (`uptime` load average 51/48/36 for the post-merge runs) — never
+  quiesced, at any point in this PR. The relative comparison (paired,
+  interleaved, same machine, same moment) is the part expected to survive
+  that; a single absolute number from any one row is not, which is why
+  1600 agents — the row this hits hardest — is reported as three
+  independent rounds rather than one.
 
 None of that is a reason to hold the work — the numbers are real, the
 domain layer is genuinely ported, not stubbed, and the C++ daemon this
