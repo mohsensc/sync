@@ -457,16 +457,96 @@ function idlePose(t) {
 // --- walk ------------------------------------------------------------------
 // One clip cycle = two steps. Leg phase p: 0 is heel strike, 0.5 is toe-off
 // and the other foot's heel strike.
-function legPose(p) {
-  // Thigh swings forward at contact, extends behind through stance.
-  // Forward is -X on a downward-pointing bone.
-  const thigh = -24 * cos(p)
 
-  // Knee: nearly straight through stance with a small loading dip just after
-  // contact, then a big flexion in swing to get the foot off the floor.
-  const knee = 3
+// Knee: nearly straight through stance with a small loading dip just after
+// contact, then a big flexion in swing to get the foot off the floor.
+function kneeCurve(p) {
+  return 3
     + 11 * bump(p, 0.14, 0.26)
     + 57 * bump(p, 0.72, 0.34)
+}
+
+// Thigh sweep at heel strike / toe-off, degrees. Same amplitude the old
+// single-cosine curve used, kept as the stance/swing boundary values so
+// stride length and timing don't change, only the shape between them.
+const THIGH_AMPLITUDE = 24
+
+// -----------------------------------------------------------------------
+// Stance foot solve
+// -----------------------------------------------------------------------
+// A thigh curve that is a single cosine over the whole gait cycle keeps the
+// phasing right but makes the ANKLE's fore-aft travel sinusoidal: constant
+// angular velocity at the hip does not mean constant ground velocity at the
+// far end of a two-link leg. Invisible during swing. During STANCE it is a
+// bug — the foot is on the floor, so the body should pass over it at a
+// constant rate (the walk speed), which means the ankle's position relative
+// to the hip has to be LINEAR in phase, not sinusoidal. A sinusoidal stance
+// curve makes the "planted" foot slide back and forth under the body as the
+// thigh sweeps through it.
+//
+// Fix: solve the thigh angle per stance sample so ankle-relative-to-hip Z is
+// linear. This goes through the same pose math as everywhere else
+// (localQuat/applyPose, against a tiny scratch rig) rather than a
+// hand-derived trig formula for the leg, so it can't drift out of sync with
+// how the rig actually composes rotations.
+const _legRig = (() => {
+  const parent = { Hips: null, LeftUpLeg: 'Hips', LeftLeg: 'LeftUpLeg', LeftFoot: 'LeftLeg' }
+  const bones = {}
+  for (const name in parent) {
+    const b = new THREE.Object3D()
+    b.name = name   // applyPose finds bones with getObjectByName
+    const bd = BIND[name]
+    b.position.set(bd.t[0], bd.t[1], bd.t[2])
+    b.quaternion.set(bd.q[0], bd.q[1], bd.q[2], bd.q[3])
+    bones[name] = b
+  }
+  for (const name in parent) { const p = parent[name]; if (p) bones[p].add(bones[name]) }
+  bones.Hips.updateMatrixWorld(true)
+  return bones
+})()
+const _legHipZ = _legRig.LeftUpLeg.getWorldPosition(new THREE.Vector3()).z
+const _legAnkleV = new THREE.Vector3()
+
+/** Ankle's fore-aft (Z) position relative to the hip, cm, for a given thigh
+ *  (X delta, degrees) and knee flexion. Solved off the LEFT leg chain;
+ *  legPose() shares the result across both legs, same as it already shares
+ *  its curve. */
+function ankleZ(thigh, knee) {
+  applyPose(_legRig.Hips, { LeftUpLeg: [thigh, 2, 3], LeftLeg: [knee, 0, 0] })
+  _legRig.LeftFoot.getWorldPosition(_legAnkleV)
+  return _legAnkleV.z - _legHipZ
+}
+
+// Endpoints of the stance sweep. kneeCurve is 3 (baseline) at both p=0 and
+// p=0.5 — the loading dip lands strictly inside stance — so these use the
+// baseline knee angle and match the old curve's -24/+24 exactly.
+const STANCE_Z0   = ankleZ(-THIGH_AMPLITUDE, 3)   // heel strike, foot forward
+const STANCE_Z1   = ankleZ(THIGH_AMPLITUDE, 3)    // toe-off, foot back
+
+/** Thigh angle (degrees) whose ankleZ(thigh, knee) hits `targetZ`. ankleZ is
+ *  monotonically decreasing in thigh over the walk's range, so bisection
+ *  always converges; run enough steps that the result is float-exact at the
+ *  endpoints (needed for the loop seam). */
+function solveThighForZ(targetZ, knee) {
+  let lo = -THIGH_AMPLITUDE - 1, hi = THIGH_AMPLITUDE + 1
+  for (let i = 0; i < 40; i++) {
+    const mid = (lo + hi) / 2
+    if (ankleZ(mid, knee) > targetZ) lo = mid; else hi = mid
+  }
+  return (lo + hi) / 2
+}
+
+function legPose(p) {
+  const knee = kneeCurve(p)
+
+  // Thigh: linear ankle travel through stance, the old single-cosine sweep
+  // through swing (where a natural-looking accel/decel is fine — nothing is
+  // planted). wrap() first so p=0 and p=1 land on the same branch; otherwise
+  // the loop seam breaks even though the underlying trig is periodic.
+  const pw = wrap(p)
+  const thigh = pw <= 0.5
+    ? solveThighForZ(STANCE_Z0 + (STANCE_Z1 - STANCE_Z0) * (pw / 0.5), knee)
+    : -THIGH_AMPLITUDE * cos(pw)
 
   // Ankle: slight toes-up at heel strike, roll flat, plantarflex hard at
   // toe-off, dorsiflex again in swing for clearance. +X is toes down.

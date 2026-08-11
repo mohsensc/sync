@@ -67,10 +67,5 @@ Spine > neck > Head`. Spine02 is the belly, Spine is the chest.
 
 ## What's broken
 
-- **Walk has foot slide.** Phasing is correct, but no IK pins the foot and the thigh
-  curve makes ankle travel sinusoidal instead of linear, so the planted foot slides
-  about 6cm at the ankle and 10cm at the toe per step. Invisible at office distance,
-  visible in close-up. The fix is shaping the thigh curve so ankle travel is linear
-  through stance.
 - **`drink`** reads as holding something near the face rather than drinking; the hand
   stops short of the mouth.
