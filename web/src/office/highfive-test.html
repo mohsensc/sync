@@ -1,0 +1,444 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>High five — IK contact test</title>
+<style>
+  html,body{margin:0;height:100%;background:#F0ECE6;overflow:hidden;
+    font:14px/1.5 ui-sans-serif,-apple-system,Segoe UI,sans-serif;color:#35455C}
+  #c{display:block;width:100%;height:100%;cursor:grab}
+  #c:active{cursor:grabbing}
+  #hud{position:fixed;left:18px;top:16px;background:#fffdfaee;border:1px solid #C3B39B;
+    border-radius:10px;padding:12px 14px;max-width:340px;box-shadow:0 6px 24px #4a1f3d18}
+  #hud h1{font-size:15px;margin:0 0 3px;letter-spacing:-.01em}
+  #hud p{margin:0 0 10px;font-size:12px;color:#6b5f56}
+  .row{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}
+  button{font:inherit;font-size:12px;padding:5px 10px;border-radius:6px;
+    border:1px solid #C3B39B;background:#fff;color:#35455C;cursor:pointer}
+  button:hover{background:#E9E0CE}
+  button[aria-pressed="true"]{background:#35455C;color:#F0ECE6;border-color:#35455C}
+  input[type=range]{width:100%}
+  #phase{font:600 13px ui-monospace,monospace;color:#4A1F3D}
+  #tab{position:fixed;right:18px;top:16px;background:#fffdfaee;border:1px solid #C3B39B;
+    border-radius:10px;padding:10px 12px;font:12px/1.45 ui-monospace,monospace;
+    box-shadow:0 6px 24px #4a1f3d18}
+  #tab table{border-collapse:collapse}
+  #tab th{text-align:left;font-weight:600;padding:0 10px 4px 0;color:#6b5f56;font-size:11px}
+  #tab td{padding:2px 10px 2px 0}
+  .ok{color:#3f7d4e;font-weight:700}
+  .bad{color:#D9714F;font-weight:700}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">
+  <h1>High five, solved with IK</h1>
+  <p>Three pairs, three spacings. Same clip, same contact solve. Drag to orbit,
+     scroll to zoom.</p>
+  <div class="row">
+    <button id="bPlay" aria-pressed="true">Play</button>
+    <button id="bContact">Hold contact</button>
+    <button id="bNoIK" aria-pressed="false">IK off</button>
+    <button id="bMark" aria-pressed="false">Show targets</button>
+  </div>
+  <div class="row">
+    <button data-cam="0">All</button>
+    <button data-cam="1">Pair 1</button>
+    <button data-cam="2">Pair 2</button>
+    <button data-cam="3">Pair 3</button>
+  </div>
+  <div id="phase">t = 0.000</div>
+  <input id="scrub" type="range" min="0" max="1000" value="0">
+</div>
+<div id="tab">loading…</div>
+
+<script type="importmap">
+{"imports":{"three":"../../public/vendor/three.module.js","three/addons/":"../../public/vendor/addons/"}}
+</script>
+<script type="module">
+import * as THREE from 'three'
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
+import { clone as skinnedClone } from 'three/addons/utils/SkeletonUtils.js'
+import * as ANIM from './anim.js'
+import { highFive } from './ik.js'
+
+const canvas = document.getElementById('c')
+// preserveDrawingBuffer so the page can grab its own frames for review.
+const renderer = new THREE.WebGLRenderer({ canvas, antialias:true, preserveDrawingBuffer:true })
+renderer.setPixelRatio(Math.min(devicePixelRatio,2))
+renderer.shadowMap.enabled = true
+renderer.shadowMap.type = THREE.PCFSoftShadowMap
+
+const scene = new THREE.Scene()
+scene.background = new THREE.Color(0xF0ECE6)
+const camera = new THREE.PerspectiveCamera(34, 1, 0.1, 120)
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.95))
+const key = new THREE.DirectionalLight(0xfff0d8, 2.0)
+key.position.set(5, 9, 7); key.castShadow = true
+key.shadow.mapSize.set(2048,2048)
+Object.assign(key.shadow.camera, { left:-8, right:8, top:8, bottom:-4, near:0.5, far:40 })
+scene.add(key)
+const fill = new THREE.DirectionalLight(0xd6e0f0, 0.5); fill.position.set(-6,4,-5); scene.add(fill)
+
+const floor = new THREE.Mesh(new THREE.BoxGeometry(24, 0.3, 24),
+  new THREE.MeshStandardMaterial({ color:0xE9E0CE, roughness:1 }))
+floor.position.y = -0.15; floor.receiveShadow = true; scene.add(floor)
+
+// Three spacings, deliberately spread: one close, one ordinary, one further
+// apart than the arms can span on their own.
+const SPACINGS = [0.75, 1.10, 1.55]
+const ROW_Z = [3.4, 0, -3.4]
+const CHAR_H = 1.68
+
+const pairs = []
+let phase = 0, playing = true, useIK = true, dur = 1.5, pairing = 'mirror'
+
+function place(src, x, z, rotY) {
+  const o = skinnedClone(src)
+  // A fresh clone carries stale world matrices; Box3 reads a near-zero height
+  // and the scale explodes to ~99x if you measure before this.
+  o.updateMatrixWorld(true)
+  const box = new THREE.Box3().setFromObject(o)
+  const size = box.getSize(new THREE.Vector3())
+  const c = box.getCenter(new THREE.Vector3())
+  const s = CHAR_H / Math.max(size.y, 1e-4)
+  const g = new THREE.Group()
+  o.position.set(-c.x, -box.min.y, -c.z)
+  g.add(o); g.scale.setScalar(s)
+  g.position.set(x, 0, z); g.rotation.y = rotY
+  o.traverse(n => { if (n.isMesh) { n.castShadow = true; n.receiveShadow = true } })
+  scene.add(g)
+  return { group:g, root:o, scale:s }
+}
+
+// Little markers for the shared contact point, so it is obvious the two are
+// solving to the same place and not just happening to line up.
+function marker(color, r) {
+  const m = new THREE.Mesh(new THREE.SphereGeometry(r, 16, 12),
+    new THREE.MeshBasicMaterial({ color, depthTest:false, transparent:true, opacity:0.85 }))
+  m.renderOrder = 10; m.visible = false; scene.add(m)
+  return m
+}
+
+const loader = new GLTFLoader()
+loader.load('../../public/glb/character.glb', gltf => {
+  SPACINGS.forEach((d, i) => {
+    const z = ROW_Z[i]
+    // Deliberately NOT pre-aimed at each other — the driver has to turn them.
+    const a = place(gltf.scene, -d/2, z,  Math.PI/2 - 0.45)
+    const b = place(gltf.scene,  d/2, z, -Math.PI/2 + 0.55)
+    const hf = highFive(a, b)
+    pairs.push({ a, b, hf, d,
+      mContact: marker(0xD9714F, 0.035),
+      mA: marker(0x35455C, 0.022), mB: marker(0x4A1F3D, 0.022) })
+  })
+  dur = ANIM.getClip('highfive').duration
+  for (const p of pairs) for (const c of [p.a, p.b]) armAction(c.root)
+  window.__ready = true
+}, undefined, e => { document.getElementById('tab').textContent = 'load failed: ' + e })
+
+// Drive the clip by hand rather than letting it free-run, so the contact frame
+// can be held exactly.
+function armAction(root) {
+  const act = ANIM.makeAction(root, 'highfive')
+  act.setLoop(THREE.LoopRepeat, Infinity)
+  act.enabled = true
+  act.setEffectiveWeight(1)
+  act.paused = true
+  act.play()
+  return act
+}
+function setPhase(root, t) {
+  const act = ANIM.makeAction(root, 'highfive')
+  act.time = t * dur
+  ANIM.update(root, 0)
+}
+
+// ---- UI -------------------------------------------------------------------
+const bPlay = document.getElementById('bPlay')
+const bNoIK = document.getElementById('bNoIK')
+const bMark = document.getElementById('bMark')
+const scrub = document.getElementById('scrub')
+const phaseEl = document.getElementById('phase')
+const tabEl = document.getElementById('tab')
+
+bPlay.onclick = () => { playing = !playing; bPlay.setAttribute('aria-pressed', String(playing)) }
+document.getElementById('bContact').onclick = () => { playing = false
+  bPlay.setAttribute('aria-pressed','false'); phase = 0.5 }
+bNoIK.onclick = () => { useIK = !useIK; bNoIK.setAttribute('aria-pressed', String(!useIK)) }
+bMark.onclick = () => { const v = bMark.getAttribute('aria-pressed') !== 'true'
+  bMark.setAttribute('aria-pressed', String(v))
+  pairs.forEach(p => { p.mContact.visible = v; p.mA.visible = v; p.mB.visible = v }) }
+scrub.oninput = () => { playing = false; bPlay.setAttribute('aria-pressed','false')
+  phase = scrub.value / 1000 }
+
+const VIEWS = [
+  { at:[0,1.15,0],    yaw:0.0,  pitch:0.30, dist:11.0 },
+  { at:[0,1.15,3.4],  yaw:0.0,  pitch:0.10, dist:3.6 },
+  { at:[0,1.15,0],    yaw:0.0,  pitch:0.10, dist:3.6 },
+  { at:[0,1.15,-3.4], yaw:0.0,  pitch:0.10, dist:3.6 },
+]
+// A close-up looks straight down the row, so the rows in front have to get out
+// of the way.
+function focus(i) {
+  pairs.forEach((p, j) => {
+    const on = (i === 0 || j === i - 1)
+    p.a.group.visible = on; p.b.group.visible = on
+  })
+}
+window.__focus = focus
+let view = VIEWS[0], yaw = view.yaw, pitch = view.pitch, dist = view.dist
+const target = new THREE.Vector3(0,1.15,0)
+function setView(i) {
+  view = VIEWS[i]; yaw = view.yaw; pitch = view.pitch; dist = view.dist
+  target.set(...view.at)
+}
+document.querySelectorAll('[data-cam]').forEach(b => b.onclick = () => { setView(+b.dataset.cam); focus(+b.dataset.cam) })
+
+let drag=false, px=0, py=0
+canvas.addEventListener('pointerdown', e => { drag=true; px=e.clientX; py=e.clientY })
+addEventListener('pointerup', () => drag=false)
+addEventListener('pointermove', e => {
+  if(!drag) return
+  yaw -= (e.clientX-px)*0.006
+  pitch = Math.max(-0.2, Math.min(1.3, pitch + (e.clientY-py)*0.005))
+  px=e.clientX; py=e.clientY
+})
+canvas.addEventListener('wheel', e => { e.preventDefault()
+  dist = Math.max(1.5, Math.min(24, dist + e.deltaY*0.006)) }, {passive:false})
+
+// ---- readout / assertions -------------------------------------------------
+function rows() {
+  return pairs.map((p,i) => ({
+    pair: i+1,
+    spacing: +p.d.toFixed(3),
+    pairing: p.hf.sides.join('/'),
+    gapCm: +(p.hf.gap()*100).toFixed(2),
+    stepCm: +(p.hf.state.step*100).toFixed(1),
+    ik: +p.hf.state.ik.toFixed(3),
+    residualCm: +(p.hf.state.residual*100).toFixed(2),
+    iters: p.hf.state.iters,
+    contact: p.hf.contact.toArray().map(v => +v.toFixed(3)),
+    handA: p.hf.handWorld(0).toArray().map(v => +v.toFixed(3)),
+    handB: p.hf.handWorld(1).toArray().map(v => +v.toFixed(3)),
+  }))
+}
+function report() {
+  if (!pairs.length) return
+  const r = rows()
+  tabEl.innerHTML =
+    '<table><tr><th>pair</th><th>spacing</th><th>wrist gap</th><th>step in</th></tr>' +
+    r.map(x => `<tr><td>${x.pair}</td><td>${x.spacing.toFixed(2)} m</td>` +
+      `<td class="${x.gapCm<=8?'ok':'bad'}">${x.gapCm.toFixed(1)} cm</td>` +
+      `<td>${x.stepCm.toFixed(0)} cm</td></tr>`).join('') + '</table>'
+  phaseEl.textContent = `t = ${phase.toFixed(3)}`
+}
+
+window.__pairs = pairs
+window.__rows = rows
+// 'mirror' = A's right meets B's left, contact off to one side. 'same' = both
+// use their right, contact on the centre line between their faces.
+window.__pairing = p => {
+  pairs.forEach(x => { x.hf.reset(); x.hf = highFive(x.a, x.b, { pairing:p }) })
+  pairing = p
+}
+
+// ---- self test ------------------------------------------------------------
+// Load with ?auto=1 and the page runs the whole check itself and POSTs the
+// numbers back. Screenshots still need eyes, but the assertions don't.
+const frame = () => new Promise(r => requestAnimationFrame(r))
+async function settle(n = 4) { for (let i = 0; i < n; i++) await frame() }
+
+window.__selftest = async () => {
+  const out = { spacings: SPACINGS, dur }
+
+  // 1. is the held pose stable, or does the procedural layer stack up?
+  window.__setPhase(0.5)
+  const sp = pairs[2].a.root.getObjectByName('Spine02')
+  const trace = []
+  for (let i = 0; i < 6; i++) { await frame()
+    trace.push([+sp.quaternion.x.toFixed(5), +(pairs[2].hf.state.step*100).toFixed(2)]) }
+  out.holdTrace = trace
+  out.stable = trace.every(v => Math.abs(v[0]-trace[0][0]) < 1e-4 && Math.abs(v[1]-trace[0][1]) < 0.05)
+
+  // 2. contact frame, IK on
+  useIK = true; window.__setPhase(0.5); await settle()
+  out.contact = rows()
+
+  // 3. contact frame, IK off — the fixed-angle clip on its own, for comparison
+  useIK = false; window.__setPhase(0.5); await settle()
+  out.contactNoIK = rows()
+  useIK = true; window.__setPhase(0.5); await settle()
+
+  // 4. sweep the whole clip and record the closest approach + the gap curve
+  out.sweep = []
+  const best = pairs.map(() => ({ gap: 1e9, t: 0 }))
+  for (let i = 0; i <= 40; i++) {
+    const t = i / 40
+    window.__setPhase(t); await frame()
+    const g = pairs.map(p => +(p.hf.gap()*100).toFixed(2))
+    out.sweep.push([+t.toFixed(3), ...g])
+    g.forEach((v, j) => { if (v < best[j].gap) best[j] = { gap: v, t: +t.toFixed(3) } })
+  }
+  out.closest = best
+
+  // 5. does it pop? largest single-frame jump of a wrist through the clip
+  const jumps = pairs.map(() => 0)
+  let prev = null
+  for (let i = 0; i <= 60; i++) {
+    window.__setPhase(i / 60); await frame()
+    const now = pairs.map(p => p.hf.handWorld(0))
+    if (prev) now.forEach((v, j) => { jumps[j] = Math.max(jumps[j], v.distanceTo(prev[j])) })
+    prev = now
+  }
+  out.maxWristStepCm = jumps.map(v => +(v*100).toFixed(2))
+
+  window.__setPhase(0.5)
+  return out
+}
+
+// ---- self-captured frames -------------------------------------------------
+// Grabs the canvas, stamps the measured numbers on it, and posts it back. The
+// point is that the caption and the pixels come from the same frame.
+async function shot(name, caption, w = 1500, h = 880) {
+  const oldW = canvas.width, oldH = canvas.height
+  renderer.setSize(w, h, false)
+  camera.aspect = w / h; camera.updateProjectionMatrix()
+  const cp = Math.cos(pitch)
+  camera.position.set(target.x + Math.sin(yaw)*dist*cp,
+                      target.y + Math.sin(pitch)*dist, target.z + Math.cos(yaw)*dist*cp)
+  camera.lookAt(target)
+  renderer.render(scene, camera)
+
+  const cv = document.createElement('canvas')
+  cv.width = w; cv.height = h
+  const g = cv.getContext('2d')
+  g.drawImage(canvas, 0, 0, w, h)
+  const lines = Array.isArray(caption) ? caption : [caption]
+  g.font = '600 17px ui-monospace, SFMono-Regular, monospace'
+  const bw = Math.max(...lines.map(l => g.measureText(l).width)) + 28
+  g.fillStyle = 'rgba(255,253,250,0.93)'
+  g.fillRect(16, 16, bw, 14 + lines.length * 24)
+  g.strokeStyle = '#C3B39B'; g.strokeRect(16, 16, bw, 14 + lines.length * 24)
+  g.fillStyle = '#35455C'
+  lines.forEach((l, i) => g.fillText(l, 30, 42 + i * 24))
+
+  renderer.setSize(oldW, oldH, false)
+  camera.aspect = oldW / oldH; camera.updateProjectionMatrix()
+  const png = cv.toDataURL('image/png')
+  try { await fetch('/__log', { method:'POST', body: JSON.stringify({ shot:name, png }) }) } catch (e) {}
+  return name
+}
+window.__shot = shot
+
+window.__shoot = async () => {
+  const taken = []
+  const gapLine = i => `pair ${i+1}  spacing ${SPACINGS[i].toFixed(2)} m  ` +
+    `wrist gap ${(pairs[i].hf.gap()*100).toFixed(1)} cm  ` +
+    `step-in ${(pairs[i].hf.state.step*100).toFixed(0)} cm each`
+
+  for (const p of ['mirror', 'same']) {
+    window.__pairing(p)
+    useIK = true; setView(0); focus(0); window.__setPhase(0.5); await settle(3)
+    taken.push(await shot(`01-all-contact-${p}`,
+      [`t = 0.500  contact frame, IK on, pairing "${p}"`].concat(pairs.map((q,i) => gapLine(i)))))
+    for (let i = 0; i < 3; i++) {
+      setView(i+1); focus(i+1); window.__setPhase(0.5); await settle(3)
+      taken.push(await shot(`02-${p}-pair${i+1}`, [`pairing "${p}"  t = 0.500`, gapLine(i)], 1200, 800))
+      yaw = 1.15; dist = 4.2
+      taken.push(await shot(`02-${p}-pair${i+1}-3q`, [`pairing "${p}"  t = 0.500  3/4 view`, gapLine(i)], 1200, 800))
+    }
+    focus(0)
+  }
+  window.__pairing('mirror')
+
+  // the same frame with the IK layer off: the clip's fixed angles on their own
+  useIK = false; setView(0); window.__setPhase(0.5); await settle(3)
+  taken.push(await shot('03-all-contact-ik-off',
+    ['t = 0.500  IK OFF — fixed angles only, this is the bug'].concat(
+      pairs.map((p,i) => `pair ${i+1}  spacing ${SPACINGS[i].toFixed(2)} m  wrist gap ${(p.hf.gap()*100).toFixed(1)} cm`))))
+  useIK = true
+
+  // blend in and out
+  focus(2)
+  for (const t of [0.25, 0.40, 0.50, 0.62, 0.78]) {
+    setView(2); window.__setPhase(t); await settle(3)
+    taken.push(await shot(`04-phase-${String(Math.round(t*100)).padStart(2,'0')}`,
+      [`pair 2 (1.10 m)  t = ${t.toFixed(2)}  ik weight ${pairs[1].hf.state.ik.toFixed(2)}`,
+       `wrist gap ${(pairs[1].hf.gap()*100).toFixed(1)} cm`], 1000, 760))
+  }
+
+  focus(0); setView(0); window.__setPhase(0.5); await settle(3)
+  return taken
+}
+
+if (new URLSearchParams(location.search).has('shots')) {
+  ;(async () => {
+    while (!window.__ready) await new Promise(r => setTimeout(r, 100))
+    await settle(8)
+    let taken
+    try { taken = await window.__shoot() } catch (e) { taken = { error: String(e && e.stack || e) } }
+    try { await fetch('/__log', { method:'POST', body: JSON.stringify({ shots: taken }) }) } catch (e) {}
+    document.title = 'shots done'
+  })()
+}
+
+if (new URLSearchParams(location.search).has('auto')) {
+  ;(async () => {
+    while (!window.__ready) await new Promise(r => setTimeout(r, 100))
+    await settle(6)
+    let payload
+    try { payload = await window.__selftest() } catch (e) { payload = { error: String(e && e.stack || e) } }
+    payload.at = new Date().toISOString()
+    try { await fetch('/__log', { method:'POST', body: JSON.stringify(payload) }) } catch (e) {}
+    document.title = 'selftest done'
+  })()
+}
+window.__setPhase = t => { playing = false; phase = t; step(0); report() }
+window.__play = () => { playing = true }
+window.__setIK = v => { useIK = v }
+window.__setView = setView
+window.__scene = scene
+
+// ---- loop -----------------------------------------------------------------
+const clock = new THREE.Clock()
+function step(dt) {
+  if (!pairs.length) return
+  if (playing) { phase += dt / dur; if (phase >= 1) { phase = 0 } }
+  for (const p of pairs) {
+    // Undo last frame's procedural pose before the mixer runs, or the deltas
+    // stack (the mixer skips tracks whose value has not changed).
+    p.hf.restore()
+    setPhase(p.a.root, phase)
+    setPhase(p.b.root, phase)
+    if (useIK) p.hf.update(phase)
+    else p.hf.reset()
+    p.mContact.position.copy(p.hf.contact)
+    p.mA.position.copy(p.hf.handWorld(0))
+    p.mB.position.copy(p.hf.handWorld(1))
+  }
+  scrub.value = String(Math.round(phase*1000))
+}
+
+function resize(){
+  const w=canvas.clientWidth,h=canvas.clientHeight
+  if(canvas.width!==w||canvas.height!==h){
+    renderer.setSize(w,h,false); camera.aspect=w/h; camera.updateProjectionMatrix() }
+}
+function tick(){
+  resize()
+  step(clock.getDelta())
+  const cp = Math.cos(pitch)
+  camera.position.set(target.x + Math.sin(yaw)*dist*cp,
+                      target.y + Math.sin(pitch)*dist,
+                      target.z + Math.cos(yaw)*dist*cp)
+  camera.lookAt(target)
+  renderer.render(scene,camera)
+  requestAnimationFrame(tick)
+}
+tick()
+setInterval(report, 200)
+</script>
+</body>
+</html>
