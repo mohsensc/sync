@@ -213,8 +213,12 @@ const DESK_SX = 1.15
 const PLAN = [
   // The vault is deliberately half-buried in the back wall so it reads as set
   // into it rather than parked in front of it. Front face lands near z = -5.2.
-  { id:'vault',   url:'glb/vault-door.glb',   h:2.6,  pos:[-6.0,0,-6.5], rot:0            },
-  { id:'phones',  url:'glb/phone-wall.glb',   h:2.0,  pos:[ 5.4,1.1,-6.35], rot:0, air:true },
+  // Faces +X in mesh space (bbox x=0.566 y=1.000 z=0.998), so it needs -PI/2
+  // to look into the room. Centre sits half its depth off the wall plane
+  // (-6.625) so the back touches rather than intersects: 0.566*2.6/2 = 0.736.
+  { id:'vault',   url:'glb/vault-door.glb',   h:2.6,  pos:[-6.0,0,-5.889], rot:-Math.PI/2, facing:'+z' },
+  // bbox x=0.247 y=1.000 z=0.645. Same -PI/2; depth 0.247*2.0/2 = 0.247.
+  { id:'phones',  url:'glb/phone-wall.glb',   h:2.0,  pos:[ 5.4,1.1,-6.378], rot:-Math.PI/2, facing:'+z', air:true },
   { id:'cables',  url:'glb/cable-ball.glb',   h:1.1,  pos:[-7.3,0, 4.7], rot:0.6          },
   { id:'tortoise',url:'glb/tortoise-v2.glb',  h:0.55, pos:[ 2.0,0, 4.3], rot:-0.9         },
   // Desks are click targets. The seat is the zone slot in front of the desk,
