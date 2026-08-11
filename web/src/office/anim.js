@@ -758,6 +758,11 @@ function sleepPose(t) {
   return pose(SEATED, {
     hips: [0, -27, -4],
     Hips: [6, 0, 0],
+    // The thighs hang off Hips, so pitching the pelvis from SEATED's -12 to +6
+    // to get the slump swings both legs down with it and drives the feet
+    // through the floor. Give the 18 back at the hip joint so the legs stay
+    // where SEATED put them and only the spine slumps.
+    LeftUpLeg: [-88, 5, 4], RightUpLeg: [-88, -5, -4],
     Spine02: [26 + 0.9 * breath, 0, 2],
     Spine01: [16 + 0.7 * breath, 0, 1],
     Spine:   [12 + 0.5 * breath, 2, 1],
