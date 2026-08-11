@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Installs agent-presence hooks. Prints settings with --print-settings.
+# Installs the three agent-presence binaries: ap-hook, presenced,
+# agent-presence-mcp. Prints Claude Code hook settings with
+# --print-settings.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -44,10 +46,11 @@ mkdir -p "$BIN"
 cp "$ROOT/cpp/build/ap-hook" "$BIN/ap-hook"
 chmod +x "$BIN/ap-hook"
 
-# presenced: a release binary if one is already sitting next to this script
-# (scripts/build-go-release.sh's output, or something CI attached to a tag),
-# otherwise a local `go build` — the whole point of #21 is that this is the
-# only toolchain requirement left, no compiler or headers.
+# presenced and agent-presence-mcp: a release binary if one is already
+# sitting next to this script (scripts/build-go-release.sh's output, or
+# something CI attached to a tag), otherwise a local `go build` — the whole
+# point of #21 is that this is the only toolchain requirement left, no
+# compiler or headers.
 RELEASE_DIR="$ROOT/dist"
 GOOS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 GOARCH="$(uname -m)"
@@ -55,18 +58,25 @@ case "$GOARCH" in
   x86_64) GOARCH=amd64 ;;
   arm64|aarch64) GOARCH=arm64 ;;
 esac
-RELEASE_BIN="$RELEASE_DIR/presenced-$GOOS-$GOARCH"
 
-if [[ -x "$RELEASE_BIN" ]]; then
-  cp "$RELEASE_BIN" "$BIN/presenced"
-elif command -v go >/dev/null 2>&1; then
-  ( cd "$ROOT/go" && CGO_ENABLED=0 go build -o "$BIN/presenced" ./cmd/presenced )
-else
-  echo "no $RELEASE_BIN and no 'go' on PATH — install Go or fetch a release binary into $RELEASE_DIR" >&2
-  exit 1
-fi
-chmod +x "$BIN/presenced"
+install_go_binary() {
+  local name="$1" release_bin="$RELEASE_DIR/$1-$GOOS-$GOARCH"
+  if [[ -x "$release_bin" ]]; then
+    cp "$release_bin" "$BIN/$name"
+  elif command -v go >/dev/null 2>&1; then
+    ( cd "$ROOT/go" && CGO_ENABLED=0 go build -o "$BIN/$name" "./cmd/$name" )
+  else
+    echo "no $release_bin and no 'go' on PATH — install Go or fetch a release binary into $RELEASE_DIR" >&2
+    exit 1
+  fi
+  chmod +x "$BIN/$name"
+}
+
+install_go_binary presenced
+install_go_binary agent-presence-mcp
 
 echo "Binaries installed to $BIN"
 echo "Add this to ~/.claude/settings.json:"
 settings_json
+echo
+echo "Then: claude mcp add agent-presence -- $BIN/agent-presence-mcp"

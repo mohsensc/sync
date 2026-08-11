@@ -10,12 +10,11 @@ import contextlib
 import json
 
 import pytest
+import websockets
 
 from agent_presence.clock import RealClock, VirtualClock
-from agent_presence.mcp_server import Tools
 from agent_presence.redact import opaque_outbound
 from agent_presence.relay import Relay
-from agent_presence.relay_client import RelayConnection
 from agent_presence.serve import serve
 
 SECRET = "AKIAIOSFODNN7EXAMPLE-hunter2"
@@ -80,8 +79,12 @@ def test_a_claim_with_an_unusable_region_is_dropped_not_guessed(room):
 
 
 async def test_opaque_mode_hashes_regions_on_every_frame_not_just_events(monkeypatch):
-    """The wire and MCP channels have to key the lease table the same way. When
-    only one of them hashes, both agents get the same region granted."""
+    """Every client's claim frame has to key the lease table the same way,
+    whatever sent it — the Go MCP tool surface included, though this test
+    only needs a second raw claim frame to prove the relay hashes it
+    regardless of source. When only one caller's region gets hashed, two
+    agents claiming "the same" region by different paths both get it
+    granted."""
     monkeypatch.setenv("AGENT_PRESENCE_OPAQUE", "1")
     relay = Relay(RealClock())
 
@@ -99,20 +102,23 @@ async def test_opaque_mode_hashes_regions_on_every_frame_not_just_events(monkeyp
     port = await asyncio.wait_for(ready, timeout=5)
     url = f"ws://127.0.0.1:{port}"
 
-    conn = RelayConnection(url, "r1", "a2", "kai")
-    tools = Tools(conn, "r1", "a2", "kai")
-    try:
-        assert await tools.claim_work("src/auth.py", "sign_in", "mcp side") == {
-            "granted": True
-        }
-        # Checked with a2's connection still open — closing it releases
-        # everything a2 held (`Relay.leave`), which would let this claim
-        # through for the wrong reason.
+    async with websockets.connect(url) as first:
+        await first.send(json.dumps({
+            "type": "join", "room": "r1", "agent": "a2", "human": "kai",
+        }))
+        await first.recv()  # the leases snapshot
+        await first.send(json.dumps({
+            "type": "claim", "region": REGION, "intent": "first side",
+        }))
+        first_reply = json.loads(await first.recv())
+        assert first_reply["granted"] is True
+
+        # Checked with the first connection still open — closing it
+        # releases everything a2 held (`Relay.leave`), which would let this
+        # second claim through for the wrong reason.
         a = FakeConn("a1", "sara")
         relay.join("r1", a)
         reply = relay.handle(a, {"type": "claim", "region": REGION, "intent": "wire side"})
-    finally:
-        await conn.close()
 
     assert reply["granted"] is False
 
