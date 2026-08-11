@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Cross-compiles presenced for every target platform (#21). No cgo, so no
-# per-target toolchain: one machine with `go` on PATH produces all five.
+# Cross-compiles presenced and agent-presence-mcp for every target platform
+# (#21, #32). No cgo, so no per-target toolchain: one machine with `go` on
+# PATH produces all ten.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -15,15 +16,19 @@ TARGETS=(
   "windows amd64"
 )
 
+BINARIES=(presenced agent-presence-mcp)
+
 cd "$ROOT/go"
 for t in "${TARGETS[@]}"; do
   read -r goos goarch <<<"$t"
   ext=""
   [[ "$goos" == "windows" ]] && ext=".exe"
-  name="presenced-$goos-$goarch$ext"
-  echo "building $name"
-  CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
-    go build -o "$OUT/$name" ./cmd/presenced
+  for bin in "${BINARIES[@]}"; do
+    name="$bin-$goos-$goarch$ext"
+    echo "building $name"
+    CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+      go build -o "$OUT/$name" "./cmd/$bin"
+  done
 done
 
 echo "done: $OUT"

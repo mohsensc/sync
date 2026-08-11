@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build:
-    name: build and attach presenced binaries
+    name: build and attach release binaries
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -25,4 +25,6 @@ jobs:
       - name: attach to the release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/presenced-*
+          files: |
+            dist/presenced-*
+            dist/agent-presence-mcp-*
