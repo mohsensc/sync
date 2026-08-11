@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from typing import Protocol
@@ -13,6 +14,7 @@ from .principals import Grant, Roster
 from .priority import PRIORITY_NORMAL, name_of
 from .redact import (
     OPAQUE_MARK,
+    apply_opaque,
     clean_intent,
     clean_region_dict,
     opaque_enabled,
@@ -29,6 +31,10 @@ class Conn(Protocol):
     room: str | None
 
     def send(self, payload: dict) -> None: ...
+
+    # send_encoded is deliberately not part of this Protocol: it's an
+    # optional fast path `broadcast` reaches for with getattr, so a Conn
+    # (test doubles included) that only implements `send` still works.
 
 
 def _declared_str(conn: Conn, attr: str) -> str | None:
@@ -916,9 +922,39 @@ class Relay:
     def broadcast(
         self, room: str, payload: dict, exclude: Conn | None = None
     ) -> list[Conn]:
+        """Fan a single payload out to every member of a room.
+
+        One `payload` in, one room-wide answer out — nothing here branches on
+        *which* member is getting it, so there is exactly one wire frame for
+        the whole call. It used to be marshaled again per recipient: each
+        connection's own writer ran `json.dumps` (and, until recently,
+        per-connection permessage-deflate) on an identical dict. Under a
+        crowded room that redundant re-encode was the dominant cost, well
+        ahead of the lease-table diff — see docs/relay-spike.md. Now it is
+        marshaled once and every connection that can take pre-encoded text
+        (`send_encoded`, `serve.WsConn`) gets the same string.
+
+        Opaque hashing has to happen before that one encode, not after: it is
+        an all-or-nothing, relay-wide toggle (`opaque_enabled()`), never
+        something that differs between two members of the same room, so
+        applying it once here is equivalent to applying it per connection —
+        just not redundant. A `Conn` without `send_encoded` (a test double,
+        typically) gets the same already-hashed dict handed to `send`
+        instead, so it sees identical content either way.
+        """
         targets = [c for c in self._members.get(room, []) if c is not exclude]
+        if not targets:
+            return targets
+        outgoing = apply_opaque(payload) if opaque_enabled() else payload
+        text: str | None = None
         for c in targets:
-            c.send(payload)
+            send_encoded = getattr(c, "send_encoded", None)
+            if send_encoded is not None:
+                if text is None:
+                    text = json.dumps(outgoing)
+                send_encoded(text)
+            else:
+                c.send(outgoing)
         return targets
 
     def publish(self, room: str, payload: dict) -> None:
