@@ -357,14 +357,33 @@ def test_e2e_odd_names_with_several_peers(writer, tmp_path):
     assert r.out == "· 2 agents here"
 
 
+def test_e2e_newline_in_a_name_keeps_the_file_one_line(writer, tmp_path):
+    # The bug #19's rewrite of WriteSnapshot fixes: the old hand-rolled
+    # escaper touched only " and \, so a raw newline in a name broke the
+    # snapshot out of its one-line contract instead of being escaped into
+    # it. encoding/json escapes every control byte, so the file this script
+    # reads with `read -r -n 65536` (one line, full stop) stays one line no
+    # matter what a peer's name contains.
+    p = tmp_path / "agent-presence.json"
+    write_real_snapshot(writer, p, [("before\nafter", "edit", "src/a.py")])
+    raw = p.read_text(encoding="utf-8")
+    assert "\n" not in raw, f"a peer name broke the one-line contract: {raw!r}"
+
+    r = ok(run(p))
+    # bash unescapes \" and \\ only, so \n passes through as two literal
+    # characters rather than an actual line break landing in someone's
+    # prompt — which is the point.
+    assert r.out == "· before\\nafter here"
+
+
 # --- the degraded marker ------------------------------------------------------
 #
-# cpp/daemon/snapshot.cpp puts these two keys at the top level whenever the
-# daemon's PolicyCache has a problem — a bad effect name the compiler kept going
-# past, a cache that could not be read, one that vanished. docs/policy-design.md
-# §9 says degradation is loud, and names this script as one of the three places
-# it has to show up. It showed up in none of them: the flag was written and
-# nothing read it.
+# go/internal/presence's WriteSnapshot puts these two keys at the top level
+# whenever the daemon's PolicyCache has a problem — a bad effect name the
+# compiler kept going past, a cache that could not be read, one that
+# vanished. docs/policy-design.md §9 says degradation is loud, and names this
+# script as one of the three places it has to show up. It showed up in none
+# of them: the flag was written and nothing read it.
 
 
 def degraded_json(*humans, problem="policy.toml:3: rung3 = 'loud' is not an effect"):

@@ -2,11 +2,14 @@ package daemon
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -189,4 +192,93 @@ func decideOverSocket(t *testing.T, sock, line string) map[string]any {
 		t.Fatalf("reply not JSON: %q: %v", reply, err)
 	}
 	return out
+}
+
+// hookBinary is the real cpp/build/ap-hook, not a Go stand-in. It exists
+// only when the cpp toolchain has run — a separate CI job from this one
+// (.github/workflows/ci.yml) — so a Go-only run skips rather than fails.
+func hookBinary(t *testing.T) string {
+	t.Helper()
+	root, err := filepath.Abs(filepath.Join("..", "..", ".."))
+	if err != nil {
+		t.Fatalf("resolve repo root: %v", err)
+	}
+	bin := filepath.Join(root, "cpp", "build", "ap-hook")
+	if _, err := os.Stat(bin); err != nil {
+		t.Skipf("ap-hook not built, skipping: %s\nbuild it with: cmake -S cpp -B cpp/build && cmake --build cpp/build", bin)
+	}
+	return bin
+}
+
+// TestRoundTripSpecialCharsHookToDaemon is #19's missing DoD item: a path
+// with a quote, a backslash, a newline and a non-ASCII character has to
+// survive from the hook's hand-rolled JSON writer to the daemon's
+// encoding/json reader byte for byte. cpp/tests/test_hook.cpp already pins
+// each of those characters individually against build_event's own output —
+// the hook checked against itself, in isolation. This drives the real
+// ap-hook binary against a real daemon over a real unix socket, the
+// boundary a live install actually crosses, and reads back what the daemon
+// decoded.
+func TestRoundTripSpecialCharsHookToDaemon(t *testing.T) {
+	bin := hookBinary(t)
+
+	sock := filepath.Join(t.TempDir(), "s")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	d, err := New(ctx, Options{Sock: sock})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Quote, backslash, newline, non-ASCII — all four in one path, the
+	// combination #19 asked for and nothing under go/ exercised.
+	const wantPath = "/repo/a\"quote\\backslash\nnewline_日本語_🚀.py"
+
+	type toolInput struct {
+		FilePath string `json:"file_path"`
+	}
+	payload, err := json.Marshal(struct {
+		ToolName  string    `json:"tool_name"`
+		ToolInput toolInput `json:"tool_input"`
+		SessionID string    `json:"session_id"`
+	}{
+		ToolName:  "Read", // one-way event: no decision wait, one socket hop
+		ToolInput: toolInput{FilePath: wantPath},
+		SessionID: "roundtrip-agent",
+	})
+	if err != nil {
+		t.Fatalf("marshal hook payload: %v", err)
+	}
+
+	cmd := exec.CommandContext(ctx, bin)
+	cmd.Env = append(os.Environ(), "AGENT_PRESENCE_SOCK="+sock)
+	cmd.Stdin = bytes.NewReader(payload)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("ap-hook: %v", err)
+	}
+	if len(out) != 0 {
+		t.Fatalf("ap-hook printed a decision for a one-way event: %q", out)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		for _, p := range d.presence.Peers() {
+			if p.Path == wantPath {
+				if p.Verb != "read" {
+					t.Fatalf("path round-tripped but verb did not: got %q", p.Verb)
+				}
+				return // byte for byte: quote, backslash, newline and non-ASCII intact
+			}
+		}
+		if time.Now().After(deadline) {
+			var seen []string
+			for _, p := range d.presence.Peers() {
+				seen = append(seen, p.Path)
+			}
+			t.Fatalf("daemon never saw the round-tripped path; peers seen: %q", seen)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
