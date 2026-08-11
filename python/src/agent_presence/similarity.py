@@ -50,6 +50,7 @@ import math
 import os
 import re
 from collections import Counter
+from functools import lru_cache
 from typing import Callable, Protocol, runtime_checkable
 
 # -- the interface ----------------------------------------------------------
@@ -275,12 +276,15 @@ def weight(token: str) -> float:
     return DOMAIN_WEIGHT
 
 
-def tokens(text: str) -> list[str]:
-    """Normalise, drop stopwords, fold bigrams, then fold and stem.
-
-    Returns a list rather than a set: repetition is mild evidence of emphasis
-    and the cosine below uses the counts.
-    """
+# redundant_peer (ladder.py) calls score(intent, o.intent) once per peer, and
+# `intent` - the incoming side - is the same string on every one of those
+# calls. Cache the tokenizer so that constant side costs one regex pass per
+# room, not one per peer: ~0.34ms -> ~0.06ms at 5 peers, ~8.4ms -> ~0.4ms at
+# 200 peers, measured with tools/bench_redundant_peer.py. Bounded so a relay
+# that lives for days doesn't grow this without limit; 4096 is generously
+# above any plausible room's worth of distinct declared intents.
+@lru_cache(maxsize=4096)
+def _tokens_cached(text: str) -> tuple[str, ...]:
     raw = _TOKEN_RE.findall(text.lower())
 
     folded: list[str] = []
@@ -302,7 +306,18 @@ def tokens(text: str) -> list[str]:
         stemmed = _stem(token)
         if stemmed and stemmed not in STOPWORDS:
             out.append(stemmed)
-    return out
+    return tuple(out)
+
+
+def tokens(text: str) -> list[str]:
+    """Normalise, drop stopwords, fold bigrams, then fold and stem.
+
+    Returns a list rather than a set: repetition is mild evidence of emphasis
+    and the cosine below uses the counts. Backed by a cache keyed on the raw
+    text - see `_tokens_cached` - so callers should feel free to call this
+    more than once on the same string.
+    """
+    return list(_tokens_cached(text))
 
 
 # Floors, checked before the cosine. They exist because cosine on a two-token
@@ -328,7 +343,7 @@ class LexicalSimilarity:
 
     def score(self, a: str, b: str) -> float:
         try:
-            ta, tb = tokens(a), tokens(b)
+            ta, tb = _tokens_cached(a), _tokens_cached(b)
         except Exception:  # pragma: no cover - fail open, never raise
             return 0.0
         if len(ta) < MIN_TOKENS or len(tb) < MIN_TOKENS:
