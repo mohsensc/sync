@@ -13,6 +13,7 @@ package presence
 import (
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -22,6 +23,12 @@ type Peer struct {
 	Human string
 	Verb  string
 	Path  string
+	// Rung is the ladder rung this peer's own activity reaches against
+	// everyone else in the table, computed by Peers. 0 (the zero value,
+	// omitted on the wire) covers every case but one: a peer reading a
+	// file somebody else is editing is rung 1 — see Peers' doc comment
+	// for why this is the only place that rung is ever computed.
+	Rung int
 }
 
 type entry struct {
@@ -76,7 +83,17 @@ func (t *Table) Expire(nowMs int64) bool {
 }
 
 // Peers returns first-seen order, so the statusline does not reshuffle
-// every tick.
+// every tick, with rung 1 filled in wherever it applies.
+//
+// Rung 1 — "A editing, B reading" — is the one rung that never reaches
+// decide.Decide: it only exists when the *incoming* action is a read, and
+// a read never asks for a decision at all (hook.cpp's wants_decision only
+// sends want:"decision" for a PreToolUse edit). The table this method
+// reads is fed from both this machine's own hook events and every other
+// daemon's presence broadcast, so it already has everything rung 1 needs —
+// who is reading what, and who else is editing that same path — without
+// any new plumbing. This is the whole of the computation: no interrupt,
+// no lease, just two entries in the same table.
 func (t *Table) Peers() []Peer {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -89,9 +106,22 @@ func (t *Table) Peers() []Peer {
 		all = append(all, ordered{e, id})
 	}
 	sort.Slice(all, func(i, j int) bool { return all[i].seq < all[j].seq })
+
 	out := make([]Peer, len(all))
 	for i, e := range all {
-		out[i] = Peer{Human: e.human, Verb: e.verb, Path: e.path}
+		rung := 0
+		if e.verb == "read" && e.path != "" {
+			for _, o := range all {
+				if o.id == e.id {
+					continue
+				}
+				if o.verb == "edit" && o.path == e.path {
+					rung = 1
+					break
+				}
+			}
+		}
+		out[i] = Peer{Human: e.human, Verb: e.verb, Path: e.path, Rung: rung}
 	}
 	return out
 }
@@ -150,7 +180,12 @@ func WriteSnapshot(path string, peers []Peer, problem string) error {
 		b.WriteString(escape(p.Verb))
 		b.WriteString(`","path":"`)
 		b.WriteString(escape(p.Path))
-		b.WriteString(`"}`)
+		b.WriteString(`"`)
+		if p.Rung > 0 {
+			b.WriteString(`,"rung":`)
+			b.WriteString(strconv.Itoa(p.Rung))
+		}
+		b.WriteString(`}`)
 	}
 	b.WriteString(`]`)
 	if problem != "" {
