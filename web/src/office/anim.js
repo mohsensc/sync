@@ -562,40 +562,136 @@ function typePose(t) {
 }
 
 // --- highfive --------------------------------------------------------------
-// One shot. Right arm comes up and reaches across, contact at t=0.5, recoil,
-// return. Play the mirrored version on the partner with the same timing and
-// the hands meet.
-function highfivePose(t) {
-  const up = ease(t / 0.42, 0, 1)             // raise
-  const back = ease((t - 0.62) / 0.38, 0, 1)  // return
-  const k = up * (1 - back)
-  const contact = bump(t, 0.5, 0.16)          // the little jolt on impact
-  const anticip = bump(t, 0.3, 0.3)
+// One shot, authored for ONE spacing. This clip does not try to reach whatever
+// distance the partner happens to be at — the controller walks both characters
+// onto marks first (see highfive.js) and then this plays. That is how a
+// choreographed contact has always been done: hit your mark, play the canned
+// action. It costs nothing per frame and it is right every time.
+//
+// The contract with highfive.js is one number. At t = HIGHFIVE_CONTACT_T the
+// palm centre sits at
+//
+//     x = 0                       on the character's OWN midline
+//     y = HIGHFIVE_CONTACT_Y_CM   about eye height
+//     z = HIGHFIVE_CONTACT_Z_CM   forward reach
+//
+// with the palm square on to +Z. Two characters facing each other 2z apart put
+// their palm centres at the same world point, whatever their world positions
+// and headings, because a 180 degree turn maps (0, y, z) onto (-0, y, -z).
+// x = 0 is the load-bearing part: reaching only as far as the shoulder line
+// would leave the two hands a shoulder-width apart on opposite sides.
+//
+// Both characters play THIS clip, not a mirrored copy. Facing each other is
+// already the mirror: each raises its right hand, and those end up on opposite
+// sides in world space, so each reaches across its own centreline and they meet
+// in the middle. Running the mirrored clip on the partner would pair a right
+// hand with a left one and the contact slides off to one side.
+//
+// The pose at contact was solved rather than eyeballed: 11 angles fitted so the
+// palm lands on that point with the palm normal forward, inside joint limits,
+// with the elbow left bent. Nudging any of them by hand moves the contact, so
+// nudge HF_CONTACT and re-fit rather than editing it in place — and if the
+// contact z moves, CONTACT_Z_CM in highfive.js moves with it.
 
-  const armZ = mix(99, 26, k) - 8 * contact
-  const armX = mix(-4, -26, k) + 6 * contact
-  const elbow = mix(16, 44, k) - 18 * contact
+/** Fraction of the clip at which the palms touch. Must be a sampled key. */
+export const HIGHFIVE_CONTACT_T = 0.5
+/** Palm centre at contact, in the GLB's armature centimetres. */
+export const HIGHFIVE_CONTACT_Y_CM = 149.0
+export const HIGHFIVE_CONTACT_Z_CM = 45.93
+
+// [hipsYaw, lean, twist, shoulderYaw, shoulderZ, armX, armY, armZ, elbow, wristFlex, wristDev]
+// hipsYaw stays small on purpose: the legs hang off the hips, so yawing them
+// pivots the feet. The reach across comes from the spine, spread over three
+// bones, which is what a person actually does.
+const HF_REST    = [0,    0,  0,  0,   2,   -4,  8, 99, 16,   5,  4]
+const HF_WINDUP  = [1,    0,  6,  4, -18,   10, 44, 30, 88,  -6, 12]
+// Cocked and ready, one tenth of the clip before contact. Without this key the
+// windup-to-contact lerp bulges the palm 4cm PAST the contact plane on its way
+// there, which puts the two hands through each other a frame before they touch.
+// With it the palm closes on the plane from behind and from its own side.
+const HF_SWING   = [3,    11, 14,  6,  -2,  -42, 54, 30, 98,  -2, 20]
+const HF_CONTACT = [4.02, 18, 32.01, 8.01, -10.16, -31.35, 60.25, -6.12, 29.99, -28.18, 22.01]
+const HF_RECOIL  = [3,    11, 26,  8,  -4,  -24, 58, -6, 58, -20, 20]
+// Same trap as HF_SWING, mirrored: recoil straight to the drop and the lerp
+// swings the palm 3cm through the contact plane on the way down, i.e. into
+// where the partner's hand still is. This holds the retreat behind the plane.
+const HF_FALL    = [0,     4,  6, -21,  4,  -43, 70, 105, 100, -34, 22]
+// The way back down needs its own key. Lerping straight from the recoil to the
+// rest pose takes armZ from -6 to 99 and the elbow from 58 to 16 at the same
+// time, which swings the hand OUT past where it just made contact before it
+// falls. This routes it down the front of the body instead.
+const HF_DROP    = [1,     4, 10,  2,   0,   10, 30, 62, 42,   2,  8]
+
+const HF_PALM_REST    = [1, -0.05, -0.32]   // hanging, on the thigh
+const HF_PALM_WINDUP  = [0.50, 0.45, 0.74]  // rolling over as it comes up
+const HF_PALM_SWING   = [-0.10, 0.16, 0.98] // already square before the strike
+const HF_PALM_CONTACT = [0, 0.14, 0.99]     // square on to the partner
+const HF_PALM_RECOIL  = [0.10, 0.22, 0.97]
+const HF_PALM_FALL    = [0.45, 0.15, 0.88]  // turning over as the arm comes down
+const HF_PALM_DROP    = [0.85, 0.05, 0.05]
+
+// How committed the pose is, per key. Drives everything secondary — the head,
+// the off arm — so those never need their own timing curve.
+const HF_K = { rest: 0, windup: 0.55, swing: 0.85, contact: 1, recoil: 0.85, fall: 0.6, drop: 0.4 }
+
+const lerpArr = (a, b, u) => a.map((v, i) => v + (b[i] - v) * u)
+
+const smooth = u => u * u * (3 - 2 * u)
+
+// Segment table: [end t, from, to, fromPalm, toPalm, kFrom, kTo, easing]. Every
+// boundary is a sampled key of the clip (21 keys => steps of 0.05), so the pose
+// function is only ever evaluated at a segment end or inside one, never across.
+const HF_SEGS = [
+  [0.30, HF_REST,    HF_WINDUP,  HF_PALM_REST,    HF_PALM_WINDUP,  HF_K.rest,    HF_K.windup,  smooth],
+  [0.40, HF_WINDUP,  HF_SWING,   HF_PALM_WINDUP,  HF_PALM_SWING,   HF_K.windup,  HF_K.swing,   smooth],
+  // the strike: accelerates in, so the last frames before contact are the fast ones
+  [0.50, HF_SWING,   HF_CONTACT, HF_PALM_SWING,   HF_PALM_CONTACT, HF_K.swing,   HF_K.contact, u => Math.pow(u, 1.6)],
+  // and bounces straight off it
+  [0.60, HF_CONTACT, HF_RECOIL,  HF_PALM_CONTACT, HF_PALM_RECOIL,  HF_K.contact, HF_K.recoil,  u => 1 - (1 - u) * (1 - u)],
+  [0.70, HF_RECOIL,  HF_FALL,    HF_PALM_RECOIL,  HF_PALM_FALL,    HF_K.recoil,  HF_K.fall,    smooth],
+  [0.80, HF_FALL,    HF_DROP,    HF_PALM_FALL,    HF_PALM_DROP,    HF_K.fall,    HF_K.drop,    smooth],
+  [1.00, HF_DROP,    HF_REST,    HF_PALM_DROP,    HF_PALM_REST,    HF_K.drop,    HF_K.rest,    smooth],
+]
+
+/** Blend through rest -> windup -> swing -> contact -> recoil -> drop -> rest.
+ *  t = HIGHFIVE_CONTACT_T returns HF_CONTACT exactly, which is the whole point. */
+function hfBlend(t) {
+  let i = 0, t0 = 0
+  while (i < HF_SEGS.length - 1 && t >= HF_SEGS[i][0]) { t0 = HF_SEGS[i][0]; i++ }
+  const [t1, a, b, pa, pb, ka, kb, easing] = HF_SEGS[i]
+  const u = easing(Math.min(1, Math.max(0, (t - t0) / (t1 - t0))))
+  return { v: lerpArr(a, b, u), palm: lerpArr(pa, pb, u), k: ka + (kb - ka) * u }
+}
+
+function highfivePose(t) {
+  const { v, palm, k } = hfBlend(t)
+  const [hipsYaw, lean, twist, shY, shZ, armX, armY, armZ, elbow, flex, dev] = v
 
   return pose(STAND, {
-    hips: [0, -1.5 * anticip, 1.5 * k],
-    Hips: [0, -5 * k, 0],
-    Spine02: [-2 * k, -7 * k, 0],
-    Spine01: [-1 * k, -6 * k, 0],
-    Spine:   [-2 * k, -5 * k, 0],
-    Head:    [-4 * k, -9 * k, 0],
-    RightShoulder: [0, 0, 2 + 9 * k],
-    RightArm:      [armX, 12 + 10 * k, armZ],
-    // the palm has to be square on to the partner at contact, so it is aimed,
-    // not rolled; the wrist only extends into the slap and snaps back.
+    // No hips translation anywhere in this clip. The feet are children of the
+    // hips, so sliding the pelvis forward for a lean drags them along the
+    // floor. Every bit of the reach is rotation.
+    hips: [0, 0, 0],
+    Hips:    [0, hipsYaw, 0],
+    Spine02: [lean * 0.45, twist * 0.34, 0],
+    Spine01: [lean * 0.30, twist * 0.33, 0],
+    Spine:   [lean * 0.25, twist * 0.33, 0],
+    // the torso turns under the head; the neck gives most of it back so the
+    // character keeps looking at the partner rather than past their shoulder
+    neck:    [0, -10 * k, 0],
+    Head:    [-6 * k, -17 * k, 2 * k],
+
+    RightShoulder: [0, shY, shZ],
+    RightArm:      [armX, armY, armZ],
     RightForeArm:  [0, elbow, 0],
-    RightHand:     [mix(6, -16, k) + 12 * contact, mix(4, -2, k), 0],
-    RightPalm:     [mix(1, PALM_FWD[0], k), mix(-0.05, PALM_FWD[1], k), mix(-0.32, PALM_FWD[2], k)],
-    LeftArm:       [-4 + 6 * k, -8, -99 + 5 * k],
-    LeftForeArm:   [0, -16 - 8 * k, 0],
-    LeftHand:      [5, -4, 0],
-    // Weight shifts onto the front foot as it reaches.
-    RightUpLeg: [-6 * k, -2, -3], RightLeg: [8 * k, 0, 0],
-    LeftUpLeg:  [4 * k, 2, 3],    LeftLeg:  [3 * k, 0, 0],
+    RightHand:     [flex, dev, 0],
+    RightPalm:     palm,
+
+    // Off arm counterbalances. Mostly elbow: swinging the whole arm back leaves
+    // the hand splayed out behind the hip where it catches the eye.
+    LeftArm:      [-4 - 7 * k, -8, -99 + 3 * k],
+    LeftForeArm:  [0, -16 - 32 * k, 0],
+    LeftHand:     [5 + 4 * k, -4, 0],
   })
 }
 
@@ -711,7 +807,10 @@ const CLIPS = {
   walk:     { fn: walkPose,     dur: 1.05, keys: 18, loop: true },
   sit:      { fn: sitPose,      dur: 1.5,  keys: 14, loop: false },
   type:     { fn: typePose,     dur: 2.0,  keys: 20, loop: true },
-  highfive: { fn: highfivePose, dur: 1.5,  keys: 18, loop: false },
+  // 21 keys puts a sample exactly on 0.30, 0.50 and 0.60, which is where the
+  // pose function changes segment. The contact frame has to BE a key: slerped
+  // between neighbours it lands a centimetre or two short.
+  highfive: { fn: highfivePose, dur: 1.5,  keys: 21, loop: false },
   drink:    { fn: drinkPose,    dur: 3.4,  keys: 16, loop: true },
   read:     { fn: readPose,     dur: 5.0,  keys: 16, loop: true },
   sleep:    { fn: sleepPose,    dur: 5.5,  keys: 10, loop: true },
@@ -765,8 +864,11 @@ export function createClips() {
   if (_cache) return _cache
   _cache = {}
   for (const name in CLIPS) _cache[name] = buildClip(name, CLIPS[name])
-  // Paired action: same timing, opposite arm, so two characters facing each
-  // other can play highfive / highfiveMirror from the same start time.
+  // Left-handed high five. NOT what a pair should play — two characters facing
+  // each other are already mirrored by the facing, so both play `highfive` and
+  // right meets right. This is here for a character that wants to five with the
+  // other hand (someone approaching from the wrong side, say); it will not make
+  // contact against `highfive`.
   _cache.highfiveMirror = buildClip('highfive', CLIPS.highfive, { mirror: true })
   return _cache
 }

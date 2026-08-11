@@ -47,6 +47,7 @@ import * as THREE from 'three'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 import { clone as skinnedClone } from 'three/addons/utils/SkeletonUtils.js'
 import * as ANIM from './anim.js'
+import * as HF from './highfive.js'
 
 const canvas = document.getElementById('c')
 const logEl = document.getElementById('log')
@@ -186,12 +187,13 @@ function play(name) {
   nowEl.textContent = name
   ANIM.crossfade(chars[0].root, name, 0.3)
   if (chars[1]) {
-    const partner = (name === 'highfive') ? 'highfiveMirror' : name
-    ANIM.crossfade(chars[1].root, partner, 0.3)
+    // Both play the SAME clip. Facing each other is the mirror; the mirrored
+    // clip would pair a right hand with a left one. See highfive.js.
+    ANIM.crossfade(chars[1].root, name, 0.3)
     // Restart both from zero so the paired contact frames line up.
     if (name === 'highfive') {
       ANIM.makeAction(chars[0].root,'highfive').time = 0
-      ANIM.makeAction(chars[1].root,'highfiveMirror').time = 0
+      ANIM.makeAction(chars[1].root,'highfive').time = 0
     }
   }
   const seated = ANIM.SEATED_CLIPS.has(name)
@@ -216,8 +218,9 @@ document.getElementById('bPair').onclick = e => {
   e.target.setAttribute('aria-pressed', String(pairMode))
   chars[1].group.visible = pairMode
   // Face them at each other for the high five.
+  // On the mark, not eyeballed: the clip only makes contact at this one gap.
   chars[1].group.rotation.y = pairMode ? Math.PI : 0
-  chars[1].group.position.x = pairMode ? 0.86 : 1.05
+  chars[1].group.position.x = pairMode ? HF.HIGHFIVE_SPACING : 1.05
   play(currentName)
 }
 document.getElementById('bSlow').onclick = e => {
@@ -296,7 +299,7 @@ function tick(){
   if (followBone && chars.length) {
     const b = chars[0].root.getObjectByName(followBone)
     if (b) target.copy(_t.setFromMatrixPosition(b.matrixWorld))
-  } else if (pairMode) target.x = 0.43
+  } else if (pairMode) target.x = HF.HIGHFIVE_SPACING * 0.5
   const r = 4.2*dist, cp = Math.cos(pitch)
   camera.position.set(target.x + Math.sin(yaw)*r*cp, target.y + Math.sin(pitch)*r, target.z + Math.cos(yaw)*r*cp)
   camera.lookAt(target)

@@ -8,7 +8,11 @@ props are static meshes. Nothing here is generated at runtime.
 - `anim.js` — procedural animation clips built against the rig's 24 bones. The GLB
   ships no usable motion (its one clip is a bind-pose snapshot), so every clip is
   authored from keyframe tracks.
+- `highfive.js` — the paired action. `HIGHFIVE_SPACING`, the marks the pair walk
+  to, and the routine that gets them there and starts both clips on one frame.
 - `anim-test.html` — one character, a button per clip. Use this to judge a clip.
+- `highfive-test.html` — three pairs at random start distances, walking to marks
+  and fiving. Reports the palm gap at the contact frame.
 - `office.html` — the room, props and characters.
 
 ## Rig
@@ -32,11 +36,6 @@ measuring a clone with `Box3`; a stale skeleton reports a near-zero height, so a
 
 ## What's broken
 
-- The high-five contact isn't settled. `ik.js` solves two-bone IK so the hands meet
-  at any spacing, but that's the wrong primitive here: the controller owns the
-  pathing, so both characters can just walk to fixed marks and play a clip authored
-  for that exact distance. Marks should replace the solver; keep IK only if a small
-  corrective blend earns its place.
 - `office.html` never imported `anim.js`, so every character in the room stands in
   the bind T-pose. The clips work; the room just doesn't play them yet.
 - Palm aiming solves for the closest reachable direction, and on a couple of poses
@@ -45,6 +44,14 @@ measuring a clone with `Box3`; a stale skeleton reports a near-zero height, so a
   inside 20.
 - Interactivity (click to select, click to send, zone routing, demo mode) was
   started and isn't in this branch.
+
+High five: fixed, with marks. The clip is authored for one spacing
+(`HIGHFIVE_SPACING`, 0.908m at a 1.68m character) and the pair walk onto marks
+before it plays, so contact does not depend on where they started. Palm centres
+land within a millimetre at the contact frame; the wrists sit 5cm apart, which is
+what palms flush against each other look like. `ik.js` is gone — marks alone were
+enough, and a solver for a choreographed action is complexity that only looks
+like rigor.
 
 Desk height: fixed. desk-tripo-12k.glb has a raised back lip above the actual
 worksurface, so `office.html` scales off `DESK_SURFACE_RAW` (0.536, measured by
