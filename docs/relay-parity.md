@@ -4,6 +4,16 @@
 **Status:** ships opt-in. `AGENT_PRESENCE_RELAY_IMPL=go` (or `agent-presence-relay --impl go`)
 runs it; the default is still the Python relay. See "the call" at the bottom.
 
+**A note on timing:** this branch was built against an older `main`, before
+PRs #31, #37, #38, #39 and #41 merged into it. Those bring the Python relay
+the presence-snapshot fix, the lease-expiry/wait-die fixes, the marshal-once
+fan-out fix, and delete `cpp/daemon/` in favor of `go/cmd/presenced`. This
+branch was rebased onto the merged `main` and everything below —
+the golden-scenario diff, the black-box suite, the load numbers — was
+re-run *after* that rebase, against what `main` actually is now, not
+against the pre-merge snapshot. Where that changes the story from what an
+earlier version of this doc said, it's noted inline.
+
 ## What was built
 
 `go/cmd/gorelay` + `go/internal/relaysrv`: a from-scratch Go relay speaking
@@ -13,20 +23,28 @@ has the domain layer: wait-die arbitration, the ladder (rungs 0-3), handover
 and reservations, the fair-share/handover grace split, tiers and priority
 off `principals.toml`, negotiation moves (DEFER/SPLIT/HANDOFF/PROCEED),
 redaction and opaque-mode hashing, and the join-time presence snapshot
-(PR #31 / issue #30). It ports the *fixed* lease-expiry-broadcast and
-requester-age behaviour from PR #37 (issues #34, #35), not the bugs those
-fixed — see "issues #34 and #35" below.
+(PR #31 / issue #30, now on `main`). It ports the *fixed* lease-expiry-
+broadcast and requester-age behaviour from PR #37 (issues #34, #35, also
+now on `main`) — see "issues #34 and #35" below for what those were and how
+this was verified, even though `main` no longer reproduces the bugs to
+compare against directly.
 
 Goroutine per connection, one outbound channel per connection (bounded 512,
-drop-oldest, matching `serve.py`'s `SEND_QUEUE_MAX`), incremental fan-out.
-The lock is sharded per room *and* per region within a room (by path hash,
-16 shards) — the spike explicitly flagged its single room-wide mutex as
-making its high-concurrency numbers a floor, not a ceiling; this is that
-gap closed. Wait-die's age/tier bookkeeping is deliberately *not*
-shard-local: `age_of`/`priority_of` are agent-global in the Python relay
-(a wait-for cycle can span rooms), so they live in a small separate
-striped index, updated on every acquire/release, read under its own lock.
-See `go/internal/relaysrv/leases.go`'s doc comments for the full argument.
+drop-oldest, matching `serve.py`'s `SEND_QUEUE_MAX`), incremental fan-out,
+one encode per distinct payload fanned out to every recipient as the same
+bytes (`EncodeFrame`, called once per `Broadcast`/`PublishTo` call) —
+the same fix `main`'s `broadcast()` independently landed as `perf/marshal-once`;
+see "a real bug" below for how the first pass of this port got that backwards
+before catching it. The lock is sharded per room *and* per region within a
+room (by path hash, 16 shards) — the spike explicitly flagged its single
+room-wide mutex as making its high-concurrency numbers a floor, not a
+ceiling; this is that gap closed, and it's a step further than `main`'s own
+fix goes (that one is single-threaded regardless). Wait-die's age/tier
+bookkeeping is deliberately *not* shard-local: `age_of`/`priority_of` are
+agent-global in the Python relay (a wait-for cycle can span rooms), so
+they live in a small separate striped index, updated on every
+acquire/release, read under its own lock. See
+`go/internal/relaysrv/leases.go`'s doc comments for the full argument.
 
 ## What is not ported
 
@@ -103,9 +121,57 @@ class of bug the task called out as the most dangerous line in the diff —
 it wasn't that one, but it was adjacent to it (the opaque-mode outbound
 walk), and the same root cause (a named-type assertion silently failing)
 would have produced it under the right conditions. Both are covered by
-tests now (`TestGoldenScenarioDumpsForComparison` catches the first;
+tests now (`TestGoldenScenarioMatchesPython` catches the first;
 `applyOpaqueMap`'s `Frame` handling is exercised by the opaque-mode
 end-to-end check in `test_serve.py`, run against the Go relay).
+
+A second issue, caught by re-reading the brief rather than by a test: the
+first working version of `Broadcast`/`PublishTo` called each target
+connection's `Send(Frame)`, and each connection's own writer goroutine
+independently ran `EncodeFrame` (opaque-mode walk + `json.Marshal`) on
+its way out — the exact per-recipient re-serialization this issue exists
+to get rid of, and coincidentally the same thing stock `serve.py` still
+does today (`_drain()` calls `json.dumps` per connection; that's what
+`perf/marshal-once` fixes on the Python side). Fixed by moving the
+`Conn` interface to take pre-encoded `[]byte` instead of a `Frame`:
+`Relay.Broadcast`/`PublishTo` call `EncodeFrame` exactly once per
+distinct payload and hand every recipient the same bytes; a
+single-recipient reply encodes once too, trivially. No behavior change —
+`EncodeFrame` is a pure function of the payload, so the bytes are
+identical either way — this was a "do it right by construction" fix, not
+a correctness bug, but it's worth naming because it's exactly the design
+property issue #40 asked for by name and the first pass didn't have it.
+
+An adversarial review pass (dispatched against the diff and the Python
+source, per this issue's own requirement) found three more, real ones,
+fixed in the same commit:
+
+- `carryKey` (the dodge-your-own-deadline guard in `leases.go`) dropped
+  `Region.Lines` from its identity. Python's `_carry` keys on the full
+  frozen `Region` dataclass, lines included; the Go key was coarser, so a
+  release and re-claim of the same symbol at a *different* line range
+  would have incorrectly resumed a capped handover deadline that Python
+  would have treated as a fresh claim.
+- `ReleaseEverywhere` snapshotted the room list under a brief read lock
+  and iterated the snapshot after releasing it — a room created in that
+  window was invisible to the sweep. Narrow (identity-reclaim only), but
+  real; now holds the lock for the whole sweep. Covered by
+  `TestReleaseEverywhereSeesRoomsCreatedDuringItsOwnSweep`, run under
+  `-race`.
+- `RedactEvent` read the opaque-mode toggle twice per event — once inside
+  `CleanRegionDict`, once in its own trailing pass — where Python's
+  `redact()` reads it once, and the two reads could disagree about
+  whether a region was already hashed, marking it stale before the
+  trailing pass saw it. Now builds the event's region unhashed and defers
+  to the single trailing pass, matching Python's structure exactly.
+
+None of the three were caught by the golden-scenario diff or the
+black-box suite — the first needs a release/re-claim-with-a-different-
+line-range sequence neither exercises, the second needs concurrent room
+creation during an identity reclaim, and the third only diverges from
+Python under opaque mode on specific field orderings. Named here because
+"the tests passed" was not, on its own, evidence these three were fine —
+the adversarial pass is what found them.
 
 ## Parity verification: what was actually run
 
@@ -149,11 +215,13 @@ verbatim to `go/internal/relaysrv/golden_test.go` — same calls, same
 clock schedule — and diffed field-by-field against Python's own current
 output (not the `golden_base.json` fixture, which predates the policy
 engine and PR #31; comparing against *current* `main` is the harder and
-more direct check). Result, after normalizing the two known,
-already-documented differences (Go omits `effect`/`effect_source` — no
-policy engine; Go adds `presence` to the join snapshot — PR #31, not yet
-on `main`): **zero differences.** This is what caught the region-parsing
-bug above.
+more direct check). Run twice: once before the rebase (normalizing two
+documented differences — Go omits `effect`/`effect_source`, no policy
+engine; Go's `presence` array on the join snapshot was PR #31 ahead of it
+merging), and once after (PR #31 is on `main` now, so `presence` is no
+longer a difference to normalize — only `effect`/`effect_source` is).
+Both: **zero differences.** This is what caught the region-parsing bug
+above, on the first run.
 
 ### Go daemon's relay client, unchanged, against the Go relay
 
@@ -164,22 +232,29 @@ joins a room, and a second raw connection claims a region; the test
 asserts the daemon's own `leases.Cache` (the thing a hook decision
 actually reads) picks up the claim through ordinary fan-out. Passes.
 
-### C++ daemon (`presenced`)
+### C++ daemon (`presenced`) — since removed from `main`
 
-Built via `cmake` and pointed at a running `gorelay`. The websocket
-connection joins and stays established (confirmed via `lsof`) through a
-raw client claiming a region in the same room — the join snapshot and the
-fan-out frame both parse without the daemon dropping the connection, which
-is the thing that would happen first if a field were missing or
-mis-shaped. Did **not** get a clean end-to-end confirmation through
-`ap-hook`'s actual block/allow decision — the one attempt made returned an
-unconditional allow, which traces to `decide.cpp`/`repo.cpp`'s repo-root
-path normalization behaving differently when run from a `git worktree`
-(this checkout) than a plain checkout, not to anything on the wire; not
-chased further given the time budget. Flagged, not swept under anything:
-the C++ daemon's wire-level join and fan-out are verified; a full
-hook-decision round trip through it is not. `cpp/daemon` is also the thing
-PR #38 deletes, so this gap has a shrinking blast radius on its own.
+Tested against `cpp/daemon` while this branch was still based on the
+pre-#38 `main`: built via `cmake`, pointed at a running `gorelay`. The
+websocket connection joined and stayed established (confirmed via `lsof`)
+through a raw client claiming a region in the same room — the join
+snapshot and the fan-out frame both parsed without the daemon dropping the
+connection, which is the thing that would happen first if a field were
+missing or mis-shaped. Did **not** get a clean end-to-end confirmation
+through `ap-hook`'s actual block/allow decision — the one attempt made
+returned an unconditional allow, which traced to `decide.cpp`/`repo.cpp`'s
+repo-root path normalization behaving differently in a `git worktree`
+checkout than a plain one, not to anything on the wire; not chased
+further given the time budget.
+
+Moot now: PR #38 merged into `main` in the same wave as this rebase and
+deletes `cpp/daemon/` entirely, along with `relay_client.{cpp,hpp}` — the
+C++ code this section was testing no longer exists on `main`.
+`go/cmd/presenced` (the Go daemon) is the only daemon on `main` as of this
+PR, and it's what "Go daemon's relay client" above verifies directly,
+unmodified, re-run after that same daemon went through its own
+significant restructure in the merge wave (new `internal/{coalesce,
+contend, journal, policy, presence, repo}` packages) — still passes.
 
 ### Web client
 
@@ -220,33 +295,86 @@ socket/decide packages.
 
 Same scenario code, same machine, interleaved by member count (not a
 custom bench — a `RelayProc`-shaped subprocess wrapper around `gorelay`
-stands in for `_lib.RelayProc`, nothing else changed). `perf/marshal-once`
-has not merged to `main` as of this PR, so "python" below is stock,
-un-fixed `main` — the same baseline the spike measured.
+stands in for `_lib.RelayProc`, nothing else changed). Run both before and
+after the rebase onto merged `main` — see below for both sets of numbers,
+since `perf/marshal-once` and the wait-die fix landing mid-PR changes what
+"python" means between the two.
 
 ### `swarm` — the spike's own scenario, 8 hot regions, 15 rounds
 
-| agents | python p50/p95/p99/max (ms) | go p50/p95/p99/max (ms) | p99 ratio | python cpu/op | go cpu/op | python wait/abort | go wait/abort |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| 200 | 69.3 / 105.1 / 107.7 / 116.1 | 10.1 / 24.3 / 32.5 / 33.6 | 3.3x | 0.37ms | 0.233ms | 0 / 2879 | 1554 / 1343 |
-| 400 | 162.1 / 306.1 / 313.9 / 352.9 | 21.8 / 48.6 / 55.2 / 57.4 | 5.7x | 0.437ms | 0.238ms | 0 / 5879 | 3414 / 2474 |
-| 800 | 328.4 / 408.2 / 413.1 / 423.0 | 78.9 / 188.1 / 193.2 / 195.0 | 2.1x | 0.415ms | 0.248ms | 0 / 11879 | 5804 / 6087 |
-| 1600 | 793.7 / 980.4 / 1008.9 / 1016.3 | 133.0 / 232.3 / 345.0 / 458.7 | 2.9x | 0.465ms | 0.288ms | 0 / 23879 | 12200 / 11679 |
+Run twice: once before the rebase onto the merged `main` (stock Python,
+pre-#37/#41), once after (Python now has the wait-die/expiry fixes and
+marshal-once). Both are reported — the second is the number that matters
+going forward, the first is why the `wait`/`abort` split below reads
+differently between them.
 
-Go beat Python at every scale, by 2.1x-5.7x on p99, using less relay CPU
-per operation throughout. The `wait`/`abort` split is the practical
-evidence for issues #34/#35's fix landing correctly: Python (`main`,
-without PR #37) reports zero `wait` verdicts at every scale — the
-`WAIT-DIE NEVER SAYS WAIT` finding fires every time — while the Go relay
-routinely tells 40-50% of refused agents to `wait` instead of `abort`.
-Neither relay leaked a lease (no `LEASE LEAK` finding) or lost the relay
-process (`relay.alive()` held) at any scale.
+**Before the rebase** (Python = stock `main`, no #37/#41):
 
-Memory: Go's post-drain RSS was consistently lower than Python's (e.g. at
-1600 agents: Python 39.1 MiB after every connection closed, Go 10.7 MiB) —
-consistent with Go's stack-allocated goroutines vs. asyncio's per-connection
-Python objects, not a claim this PR measured carefully enough to put a
-number on beyond "the raw pattern is favorable."
+| agents | python p99 (ms) | go p99 (ms) | ratio | python wait/abort | go wait/abort |
+| --- | --- | --- | --- | --- | --- |
+| 200 | 107.7 | 32.5 | 3.3x | 0 / 2879 | 1554 / 1343 |
+| 400 | 313.9 | 55.2 | 5.7x | 0 / 5879 | 3414 / 2474 |
+| 800 | 413.1 | 193.2 | 2.1x | 0 / 11879 | 5804 / 6087 |
+| 1600 | 1008.9 | 345.0 | 2.9x | 0 / 23879 | 12200 / 11679 |
+
+Stock Python's `wait` column is zero at every scale — `WAIT-DIE NEVER SAYS
+WAIT` fires every run — which is issue #35 exactly. The Go relay had the
+fix from the start, ported from PR #37 before it merged.
+
+**After the rebase** (Python = current `main`, with #37/#41; same machine,
+now also running several other concurrent sessions' work — noisier than
+the first round, noted per row):
+
+| agents | python p99 (ms) | go p99 (ms) | ratio | python cpu/op | go cpu/op | conditions |
+| --- | --- | --- | --- | --- | --- | --- |
+| 200 | 412.2 | 69.5 | 5.9x | 0.33ms | 0.17ms | machine moderately busy |
+| 400 | 587.1 | 321.7 | 1.8x | 0.31ms | 0.16ms | busy: concurrent with this session's own pytest rerun |
+| 800 | 644.7 | 396.4 | 1.6x | 0.31ms | 0.19ms | busy: same |
+| 1600 (round A) | 1794.3 | 2338.0 | **0.77x — go lost** | 0.34ms | 0.20ms | busy: same, plus other sessions' work |
+| 1600 (round B, isolated) | 5944.6 | 1262.5 | 4.7x | 0.41ms | 0.19ms | this session's own load quieted; other sessions still running |
+
+Go still wins on every row except one, and that one is explained rather
+than hidden: at 1600 agents in round A, `relay_cpu_s` for the Go run was
+4.88s against a 23.41s wall-clock elapsed — the relay was busy barely a
+fifth of the time it took to finish. That is the exact "single-process
+asyncio client becomes the ceiling, not the relay" effect
+`docs/relay-spike.md` measured and named (`harness_cpu_s` dominating
+elapsed time once the relay is fast enough that the *client* can't drive
+it any harder from one process) — this PR uses the standard
+`tests/load/scenarios.py` harness as instructed, not the spike's
+client-sharding fix, so it inherits that ceiling at the highest agent
+count. Round B, run in isolation after quieting this session's own
+concurrent work, shows the same shape the pre-rebase numbers did: Go
+ahead by 4.7x. `relay_cpu_ms_per_op` — a metric less sensitive to
+wall-clock scheduling noise than p99 — favored Go in every single row
+without exception, including round A: 0.20ms/op vs Python's 0.34ms/op.
+
+Across both rounds and both machine conditions: no `LEASE LEAK` finding,
+no lost relay process, on either side. This machine was not quiesced for
+any of these runs — `docs/relay-spike.md`'s own caveat applies here too,
+more so given how much else was running on it during this PR.
+
+Memory: Go's post-drain RSS was lower than Python's in every run measured
+(e.g. round B at 1600 agents: Python 17.4 MiB after every connection
+closed, Go 8.5 MiB) — consistent with Go's stack-allocated goroutines vs.
+asyncio's per-connection Python objects, not a claim measured carefully
+enough to put a precise number on beyond "the pattern holds."
+
+### `rooms`, `slow_subscriber`, `lease_churn`
+
+Run once, before the rebase onto the merged `main` (so "python" below is
+stock `main`, pre-#31/#37/#41 — see the note at the top of this doc). Not
+re-run after the rebase given the time this PR had; the `swarm` numbers
+above were re-run post-rebase and are the ones to trust for latency. What
+these three still show correctly regardless of which Python they're
+compared against: isolation holds, backpressure holds, and — before #37
+merged — the Go relay already had the fix stock `main` didn't. After the
+rebase, current `main` also has that fix (that's the whole point of PR
+#37 landing), so re-running `lease_churn` today would no longer show
+Python's `NO EXPIRY EVER BROADCAST` finding — both sides would pass. That
+doesn't change what's demonstrated here: the Go relay was built with the
+fix from the start, verified against it being live-reproducible on the
+`main` this branch started from.
 
 ### `rooms` — 40 rooms x 25 agents, cross-room isolation and dead-room memory
 
@@ -328,18 +456,20 @@ selects the Go relay from `agent-presence-relay`'s existing entrypoint
 default stays the Python relay for one release.
 
 What holds up, for the default configuration: a zero-diff golden scenario
-against Python's *current* behaviour; 13/14 real-socket black-box tests
-passing (the one failure is a test-harness artifact, independently
-confirmed fixed by starting the env var correctly instead of mid-test);
-a real bug found and fixed by the diff itself (see above); the Go daemon's
-existing, unmodified relay client working against it; the web client's
-actual `connect()`/`isPresence()` code working against it; and a load-test
-run that never regresses and wins by 2-6x on p99 at every scale, with two
-of the four load scenarios directly reproducing issues #34 and #35 as *live*
-behavioral differences (Python drops every `expired` broadcast and never
-once says `wait`; the Go relay does neither), and the backpressure scenario
-(`slow_subscriber`) showing a deaf connection doesn't stall the room on
-either relay, at noticeably lower latency on the Go side.
+against Python's *current* behaviour (re-verified after the rebase onto
+merged `main` — still zero); 13/14 real-socket black-box tests passing
+(the one failure is a test-harness artifact, independently confirmed
+fixed by starting the env var correctly instead of mid-test); two real
+bugs found and fixed by the process itself, one by the golden-scenario
+diff and one by re-reading the brief (see above); the Go daemon's
+existing, unmodified relay client working against it, re-verified after
+the daemon's own significant restructure in the same merge wave; the web
+client's actual `connect()`/`isPresence()` code working against it; and a
+load-test run that beats Python on p99 in 8 of 9 rows measured across two
+machine-load conditions and two Python baselines (see the `swarm` numbers
+above for the one row that didn't, and why — a client-side bottleneck
+this PR's harness doesn't shard around, not a relay regression, backed by
+`relay_cpu_ms_per_op` favoring Go in that same row).
 
 Why opt-in rather than flipping the default outright, despite that:
 
@@ -349,24 +479,30 @@ Why opt-in rather than flipping the default outright, despite that:
   worse experience switching relays today, not a wrong one — rung 4 is
   advisory and the policy floor only narrows enforcement, never removes a
   daemon's own compiled-in floor). Still real gaps, still block "default."
-- The C++ daemon's wire-level join and fan-out are confirmed (established
-  connection, no protocol-driven disconnect); a full hook-decision round
-  trip through it isn't, for a reason that traces to local repo-root path
-  handling in a `git worktree` checkout rather than the wire, but wasn't
-  run to ground given the time this PR had.
 - `python/tests/` is ~12,700 lines; this PR's real-socket black-box
   coverage is a double-digit fraction of it — the fraction that's actually
   runnable against an external process, not a random sample, but still a
   fraction. `test_backpressure.py` and `test_inbound_rate_limit.py`
   specifically were not run in their original, deterministic
-  `VirtualClock` form (see above for what stood in for them).
+  `VirtualClock` form (see above for what stood in for them) — though the
+  load harness's `slow_subscriber` scenario exercises the same mechanism
+  under real concurrent load and passes on both relays.
+- The load numbers this PR reports were gathered on a shared machine
+  running several other concurrent sessions' work throughout, sometimes
+  including this session's own concurrent test runs by mistake (caught
+  and re-run in isolation once noticed — see `swarm`'s 1600-agent rows).
+  The relative comparison (paired, interleaved, same machine) is the part
+  expected to survive that; a single absolute number from any one row is
+  not.
 
 None of that is a reason to hold the work — the numbers are real, the
-domain layer is genuinely ported, not stubbed, and two live-fire load
-scenarios independently reproduced the exact bugs #34/#35 describe on
-Python and showed the Go relay free of both. It's a reason to let someone
-opt in, watch it under real traffic for a release, and close the two named
-feature gaps before making it the default. Follow-up issues: port the org
-policy floor, port or explicitly retire rung 4, chase the C++ daemon
-hook-decision gap to ground, and widen the black-box parity run to the
-rest of `python/tests/` that can be adapted.
+domain layer is genuinely ported, not stubbed, and the C++ daemon this
+would have needed to worry about is gone from `main` as of this same merge
+wave (`go/cmd/presenced` is the only daemon now, and it's the one this PR's
+integration test exercises directly, unmodified). It's a reason to let
+someone opt in, watch it under real traffic for a release, and close the
+two named feature gaps before making it the default. Follow-up issues:
+port the org policy floor, port or explicitly retire rung 4, widen the
+black-box parity run to the rest of `python/tests/` that can be adapted,
+and re-run the load harness on a quieter machine for a cleaner 1600-agent
+number.
