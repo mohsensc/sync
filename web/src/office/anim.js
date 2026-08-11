@@ -926,7 +926,12 @@ function wavePose(t) {
 // ---------------------------------------------------------------------------
 // Clip table
 // ---------------------------------------------------------------------------
-const CLIPS = {
+// Exported so a paired-action module can fold its own clips in — see
+// clips/argue.js's header ("an integrator can fold straight into anim.js's
+// own CLIPS table"). Merge before the first createClips() call: the table is
+// cached on first use, so a merge after some other clip has already played
+// is silently too late.
+export const CLIPS = {
   idle:     { fn: idlePose,     dur: 4.6,  keys: 12, loop: true },
   walk:     { fn: walkPose,     dur: 1.05, keys: 18, loop: true },
   sit:      { fn: sitPose,      dur: 1.5,  keys: 14, loop: false },

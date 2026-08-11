@@ -31,6 +31,12 @@
   #beat{position:fixed;right:18px;top:16px;background:#fffdfaee;border:1px solid #C3B39B;
     border-radius:10px;padding:9px 12px;font:11px ui-monospace,monospace;color:#6b5f56}
   #beat b{color:#35455C}
+  #mode{position:fixed;left:50%;top:16px;transform:translateX(-50%);
+    background:#35455Cf2;color:#F0ECE6;border-radius:999px;padding:6px 16px;
+    font:600 11px ui-monospace,monospace;letter-spacing:.04em;text-transform:uppercase;
+    box-shadow:0 4px 14px #4a1f3d22}
+  #mode.demo{background:#C0762Af2}
+  #mode.connecting{background:#8A94A3f2}
 </style>
 </head>
 <body>
@@ -54,6 +60,7 @@
   </div>
 </div>
 <div id="beat">idle</div>
+<div id="mode" class="connecting">connecting…</div>
 <div id="caption"></div>
 <div id="log">loading…</div>
 
@@ -70,6 +77,7 @@ import { createAgent, World } from './agent.js'
 import { attachInteraction } from './interact.js'
 import { runDemo } from './demo.js'
 import { buildDressing } from './dressing.js'
+import * as Live from './live.js'
 
 const P = { cream:0xF0ECE6, sand:0xE9E0CE, taupe:0xC3B39B, sage:0xE5E1D2, butter:0xF7DFAF,
             mustard:0xD6B45C, caramel:0xC0762A, coffee:0xB0674F, terracotta:0xD9714F,
@@ -79,6 +87,7 @@ const canvas = document.getElementById('c')
 const logEl = document.getElementById('log')
 const capEl = document.getElementById('caption')
 const beatEl = document.getElementById('beat')
+const modeEl = document.getElementById('mode')
 const renderer = new THREE.WebGLRenderer({ canvas, antialias:true })
 renderer.setPixelRatio(Math.min(devicePixelRatio,2))
 renderer.shadowMap.enabled = true
@@ -444,6 +453,7 @@ function setupCast() {
   })
   window.__interact = interaction
   window.__ready = true
+  initLive()
 }
 
 pending++
@@ -517,6 +527,141 @@ function pairUp(a = interaction && interaction.selected) {
   return [a.id, b.id]
 }
 const dist2 = (p,q) => (p.pos.x-q.pos.x)**2 + (p.pos.z-q.pos.z)**2
+
+// ---- live ---------------------------------------------------------------
+// Points the room at the relay. demo.js is the fallback, not the default: if
+// nothing answers within LIVE_TIMEOUT_MS, or the relay hangs up later, the
+// scene falls back to the scripted demo and the #mode badge says so — it
+// never quietly sits there looking staffed when nobody is home.
+const LIVE_TIMEOUT_MS = 1500
+const director = new Live.LiveDirector()
+const liveAgents = new Map()     // agent id -> Agent, live-spawned characters only
+const liveMeshes = new Map()     // agent id -> meshes pushed into the shared `meshes` array
+let liveMode = false
+let liveConn = null
+let fallbackTimer = null
+
+function setMode(kind, text) { modeEl.className = kind; modeEl.textContent = text }
+
+/** Height-normalised, hair-tinted character for one live agent id. Reuses
+ *  the exact same rig setup the demo cast gets — same clone, same tint math,
+ *  same shadow flags — so a live figure and a demo figure are indistinguishable
+ *  except for what they are actually doing. */
+function spawnLive(id, human) {
+  if (!charGLTF) return null      // frame arrived before the rig finished loading
+  const color = Live.hairFor(human)
+  const before = meshes.length
+  const root = makeCharacterRoot(skinnedClone(charGLTF.scene), 1.68, color)
+  scene.add(root)
+  liveMeshes.set(id, meshes.slice(before))
+  const a = world.add(createAgent({
+    root, id, name: id, role: human, color, height: 1.68,
+    // Enter from reception so an arrival reads as an arrival, same as
+    // characters.ts's CharacterRegistry does for the capsule viewer.
+    pos: [Z.ZONES.reception.at[0], Z.ZONES.reception.at[1]], yaw: Math.PI / 2,
+    scale: root.userData.scale,
+  }))
+  liveAgents.set(id, a)
+  if (interaction) interaction.addAgent(a)
+  return a
+}
+
+/** Undo spawnLive(): drop the pick target, the world entry, the slot, and
+ *  the per-character materials (cloned per instance, so safe to dispose —
+ *  the geometry underneath is shared across every clone and stays put). */
+function despawnLive(id) {
+  const a = liveAgents.get(id)
+  if (!a) return
+  liveAgents.delete(id)
+  const partner = director.clearContest(id)
+  if (partner) endContestFor(a, partner)
+  if (interaction) interaction.removeAgent(a)
+  world.remove(a)
+  Z.releaseSlots(id)
+  scene.remove(a.root)
+  a.root.traverse(n => {
+    if (!n.isMesh && !n.isSkinnedMesh) return
+    const mats = Array.isArray(n.material) ? n.material : [n.material]
+    mats.forEach(m => m && m.dispose())
+  })
+  const mine = liveMeshes.get(id)
+  if (mine) { for (const m of mine) { const i = meshes.indexOf(m); if (i >= 0) meshes.splice(i, 1) } }
+  liveMeshes.delete(id)
+  if (a.badge.material.map) a.badge.material.map.dispose()
+  a.badge.material.dispose()
+  a.halo.geometry.dispose()
+  a.halo.material.dispose()
+}
+
+function endContestFor(a, partnerId) {
+  const b = liveAgents.get(partnerId)
+  const enc = world.encounters.find(e => e.kind === 'contest' &&
+    (e.a === a || e.b === a || e.a === b || e.b === b))
+  if (enc) world.resolveContest(enc)
+}
+
+/** One presence frame, applied: spawn if new, route to the zone the real
+ *  verb/path maps to (zones.js's zoneFor, not a script), share a slot for
+ *  rung 0 co-location or same-human clustering, and hand rung 3 off to
+ *  World.contest() for the real collision animation instead of a scripted one. */
+function onLivePresence(msg) {
+  const now = Date.now()
+  const info = director.onPresence(msg, now)
+  const a = liveAgents.get(info.id) || spawnLive(info.id, info.human)
+  if (!a) return   // rig still loading; the next frame for this agent will spawn it
+
+  if (info.contestWith) {
+    const b = liveAgents.get(info.contestWith)
+    if (b && !a.busy && !b.busy && director.contestPartner(info.id) == null) {
+      director.markContest(info.id, info.contestWith)
+      world.contest(a, b)
+    }
+    a.say(`${info.verb} ${info.path}`.trim(), 'blocked')
+    a.setState('blocked')
+    return
+  }
+
+  const resolved = director.clearContest(info.id)
+  if (resolved) endContestFor(a, resolved)
+
+  const tone = info.verb === 'edit' ? 'working' : 'ok'
+  a.say(`${info.verb} ${info.path}`.trim(), tone)
+  a.setState(tone)
+  if (!a.busy) {
+    const slot = info.shareWith
+      ? Z.claimSlot(info.zone, info.id, { share: info.shareWith })
+      : Z.claimSlot(info.zone, info.id)
+    a.goTo(slot.pos[0], slot.pos[1], { yaw: slot.yaw, label: info.zone })
+  }
+}
+
+function expireLive(now) {
+  for (const id of director.expire(now)) despawnLive(id)
+}
+
+function goLive() {
+  liveMode = true
+  setMode('live', `live · room ${new URLSearchParams(location.search).get('room') || '(default)'}`)
+}
+
+function goDemoFallback(reason) {
+  liveMode = false
+  setMode('demo', `demo — ${reason}`)
+  startDemo()
+}
+
+function initLive() {
+  const room = new URLSearchParams(location.search).get('room') ?? ''
+  const human = new URLSearchParams(location.search).get('human') ?? ''
+  fallbackTimer = setTimeout(() => goDemoFallback(`no relay at ${Live.RELAY_URL}`), LIVE_TIMEOUT_MS)
+  liveConn = Live.connect({
+    room, human,
+    onOpen: () => { clearTimeout(fallbackTimer); goLive() },
+    onClose: () => { clearTimeout(fallbackTimer); goDemoFallback('relay unreachable') },
+    onPresence: onLivePresence,
+  })
+  window.__liveConn = liveConn
+}
 
 // ---- demo -------------------------------------------------------------
 let demo = null
@@ -597,6 +742,7 @@ function tick(){
 
   world.update(dt)
   updateChairs(dt)
+  expireLive(Date.now())
   if (demo) demo.update(dt)
   if (interaction) interaction.paint()
 
@@ -637,6 +783,7 @@ window.__zoneUI = zoneUI
 window.__anim = ANIM
 window.__startDemo = startDemo
 window.__caption = () => capEl.textContent
+window.__live = { director, liveAgents, mode: () => (liveMode ? 'live' : 'demo'), onPresence: onLivePresence }
 window.__focus = focus
 window.__setCam = (y,p,d) => { goal.active=false; yaw=y; pitch=p; dist=d }
 window.__agentState = () => world.agents.map(a => ({

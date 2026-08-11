@@ -56,7 +56,14 @@ the surface sits 4cm above it.
 - `interact.js` — click to select, click the floor to send, click a desk to sit and
   type, hover to highlight.
 - `demo.js` — `runDemo(ctx)`, six captioned beats, cancellable and replayable.
+  Fallback only: `office.html` runs it when the relay is unreachable, and
+  says so in the `#mode` badge.
 - `dressing.js` — set dressing for the zones with no generated prop.
+- `live.js` — the relay connection and `LiveDirector`, which turns a presence
+  frame into a zone, a slot to share (co-location or same-human clustering),
+  and a rung 3 contest pairing. Pure logic, no THREE; `office.html` does the
+  spawning and disposal. Rung 3/4 stay dark until #12 wires MCP intent
+  through to the relay — presence-only collisions still light up rung 3.
 
 Yaw convention at the boundary is EXTERNAL (`atan2(-dx, -dz)`), not the rig's. The
 rig faces +Z; `agent.js` absorbs the difference with `YAW_OFFSET = PI`. If you touch
