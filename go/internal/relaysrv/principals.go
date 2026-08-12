@@ -23,6 +23,47 @@ const (
 
 var hex64 = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
+// resolvePath mirrors python's Path(start).expanduser().resolve(): an
+// absolute path with every symlink in it followed, not just made textually
+// absolute. filepath.Abs alone (what this used to call) does neither —
+// see issue #48. Confirmed to matter on stock macOS, where /tmp is itself
+// a symlink to /private/tmp: filepath.Abs("/tmp/foo") stays "/tmp/foo",
+// Path("/tmp/foo").resolve() returns "/private/tmp/foo", and a checkout
+// reached through either spelling could load a different
+// principals.toml depending purely on which relay implementation
+// resolved the path.
+//
+// filepath.EvalSymlinks alone isn't a drop-in replacement: it requires
+// every component to exist on disk, where resolve() (without strict=True)
+// resolves as far as the filesystem allows and appends whatever is left
+// literally. Falling back component-by-component keeps that behaviour for
+// a path whose tail doesn't exist yet, which matters here because `start`
+// can be a working directory a caller only intends to create.
+func resolvePath(p string) (string, error) {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err == nil {
+		return resolved, nil
+	}
+	if !os.IsNotExist(err) {
+		return "", err
+	}
+	parent := filepath.Dir(abs)
+	if parent == abs {
+		// Reached the filesystem root and it doesn't exist either — as
+		// unresolvable as Path.resolve() gets without raising.
+		return abs, nil
+	}
+	parentResolved, perr := resolvePath(parent)
+	if perr != nil {
+		return "", perr
+	}
+	return filepath.Join(parentResolved, filepath.Base(abs)), nil
+}
+
 func hashToken(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:])
@@ -294,7 +335,7 @@ func (r Roster) Authenticate(principal, token string) Grant {
 // start, stopping at the checkout root (a directory holding .git).
 // Mirrors principals.py's find_roster.
 func FindRoster(start string) string {
-	here, err := filepath.Abs(start)
+	here, err := resolvePath(start)
 	if err != nil {
 		return ""
 	}

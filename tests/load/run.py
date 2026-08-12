@@ -23,7 +23,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from _lib import AP_HOOK, PRESENCED, ROOT  # noqa: E402
+from _lib import AP_HOOK, GORELAY, PRESENCED, ROOT  # noqa: E402
 import scenarios as S  # noqa: E402
 
 HOOKBENCH_SRC = HERE / "hookbench.cpp"
@@ -63,6 +63,16 @@ def build_presenced() -> None:
     )
 
 
+def build_gorelay() -> None:
+    """The relay (#40, the only one now). Same always-rebuild rule as the
+    daemon: `go build` is fast enough not to bother tracking staleness."""
+    GORELAY.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["go", "build", "-o", str(GORELAY), "./cmd/gorelay"],
+        cwd=str(ROOT / "go"), check=True,
+    )
+
+
 def preflight() -> None:
     if not AP_HOOK.exists():
         raise SystemExit(
@@ -70,6 +80,7 @@ def preflight() -> None:
             "  cmake -S cpp -B cpp/build && cmake --build cpp/build\n"
             f"missing: {AP_HOOK}")
     build_presenced()
+    build_gorelay()
     build_hookbench()
     subprocess.run("lsof -ti:8799 | xargs kill -9", shell=True,
                    capture_output=True)

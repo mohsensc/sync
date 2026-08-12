@@ -377,3 +377,61 @@ func TestCarryDoesResumeAcrossTheSameLineRange(t *testing.T) {
 		t.Fatalf("expected the carried deadline %v to resume, got %+v", deadline, reacquired.Claim.HandoverAt)
 	}
 }
+
+// -- issue #47: expiry sweep, cross-shard -----------------------------------
+
+// TestSweepAllBroadcastsAnIdleShardsExpiry is the two-region test issue #47
+// asks for: an expiry on a region nobody touches again must still reach the
+// room, not just an expiry on a region somebody happens to poll. Region
+// names are picked to land in different shards (see shardFor) so a touch on
+// one cannot piggyback on the other's pruneExpired call the way the golden
+// scenario's single-region script never would.
+func TestSweepAllBroadcastsAnIdleShardsExpiry(t *testing.T) {
+	clock, reg, pub := newTestRegistry()
+
+	a := Region{Path: "a.py"}
+	b := Region{Path: "b.py"}
+	if shardFor(t, reg, "r1", a.Path) == shardFor(t, reg, "r1", b.Path) {
+		t.Fatalf("test fixture needs a.py and b.py in different shards")
+	}
+
+	reg.Acquire("r1", "sara", "a1", a, "x", nil, PriorityNormal, nil)
+	reg.Acquire("r1", "dev", "a2", b, "y", nil, PriorityNormal, nil)
+	clock.Advance(LeaseTTLS + 1)
+
+	// Nothing touches a.py again. Only b.py's shard sees any traffic.
+	reg.Heartbeat("r1", "a2", b, nil)
+
+	pub.mu.Lock()
+	sawAExpired := false
+	for _, f := range pub.broadcast {
+		if f["type"] == "lease" && f["state"] == "expired" && f["agent"] == "a1" {
+			sawAExpired = true
+		}
+	}
+	pub.mu.Unlock()
+	if sawAExpired {
+		t.Fatalf("a.py's expiry should not be visible yet — nothing touched its shard")
+	}
+
+	// The background sweep (server.go's ticker, called directly here)
+	// reaches every shard regardless of what traffic touched.
+	reg.SweepAll()
+
+	pub.mu.Lock()
+	defer pub.mu.Unlock()
+	sawAExpired = false
+	for _, f := range pub.broadcast {
+		if f["type"] == "lease" && f["state"] == "expired" && f["agent"] == "a1" {
+			sawAExpired = true
+		}
+	}
+	if !sawAExpired {
+		t.Fatalf("expected SweepAll to broadcast a.py's expiry even though nothing polled it, got %+v", pub.broadcast)
+	}
+}
+
+func shardFor(t *testing.T, reg *Registry, room, path string) *shard {
+	t.Helper()
+	return reg.shardFor(room, path)
+}

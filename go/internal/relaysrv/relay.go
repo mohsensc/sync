@@ -84,6 +84,14 @@ type Relay struct {
 	identityMu sync.Mutex
 	identity   map[Conn]identityRecord
 	principal  map[Conn]principalRecord
+
+	// Builtin plus org floor, and nothing else — see policy.go's package
+	// doc comment. policyMu guards policyDigest, which is read and
+	// written from Join/Handle on any goroutine; policy itself
+	// (*PolicyFile) is already safe for concurrent use on its own.
+	policy       *PolicyFile
+	policyMu     sync.Mutex
+	policyDigest string
 }
 
 func NewRelay(clock Clock, roster Roster) *Relay {
@@ -93,15 +101,94 @@ func NewRelay(clock Clock, roster Roster) *Relay {
 		rooms:     make(map[string]*roomInfo),
 		identity:  make(map[Conn]identityRecord),
 		principal: make(map[Conn]principalRecord),
+		policy:    NewPolicyFileForRelay(clock),
 	}
 	r.registry = NewRegistry(clock, r)
 	r.negotiator = NewNegotiator(r.registry)
+	r.policyDigest = r.policy.Current().Digest
 	if roster.Present() {
 		log.Printf("roster %s: %d principal(s), default %s", roster.Source(), roster.PrincipalCount(), PriorityName(roster.DefaultTier()))
 	} else {
 		log.Printf("no principals roster (%s); every connection joins at %s", roster.Source(), PriorityName(PriorityNormal))
 	}
 	return r
+}
+
+// policyFrame is the org floor, as this relay currently reads it. Only the
+// floor travels — effects are the client's business, the relay cannot see
+// a client's repo/user/session layers — but a floor composes with
+// whatever the client resolved locally by taking the louder of the two.
+// nil when there is no org file to state: a relay with nothing configured
+// has nothing to say beyond the daemon's own compiled-in floor, and
+// test_golden_noop.py-equivalent coverage (golden_test.go) locks down
+// that this must not put a frame on the wire nobody configured. Mirrors
+// relay.py's _policy_frame.
+func (r *Relay) policyFrame() Frame {
+	policy := r.policy.Current()
+	org := policy.layer(layerOrg)
+	if org == nil {
+		return nil
+	}
+	frame := Frame{
+		"type":   "policy",
+		"floor":  policy.floorTable("").names(),
+		"source": "org:" + org.source,
+		"digest": policy.Digest,
+	}
+	if floors := policy.floorRules(); len(floors) > 0 {
+		out := make([]any, len(floors))
+		for i, f := range floors {
+			out[i] = Frame{"match": f.Match, "effects": f.Effects, "layer": f.Layer}
+		}
+		frame["floors"] = out
+	}
+	return frame
+}
+
+// publishPolicyChange pushes a new org floor to every room, if there is
+// one. PolicyFile.Current gates its own stat to once a second, so this
+// costs a comparison per frame in the steady state. Mirrors relay.py's
+// _publish_policy_change.
+func (r *Relay) publishPolicyChange() bool {
+	digest := r.policy.Current().Digest
+	r.policyMu.Lock()
+	changed := digest != r.policyDigest
+	if changed {
+		r.policyDigest = digest
+	}
+	r.policyMu.Unlock()
+	if !changed {
+		return false
+	}
+	frame := r.policyFrame()
+	if frame == nil {
+		// The org file went away. The floor drops back to the compiled-in
+		// one, which every daemon already has, so there is nothing to send.
+		return false
+	}
+	log.Printf("org policy changed (%s); republishing the floor", shortDigest(digest))
+	r.roomsMu.RLock()
+	rooms := make([]string, 0, len(r.rooms))
+	for name := range r.rooms {
+		rooms = append(rooms, name)
+	}
+	r.roomsMu.RUnlock()
+	for _, room := range rooms {
+		r.Broadcast(room, frame, nil)
+	}
+	return true
+}
+
+func shortDigest(d string) string {
+	if len(d) > 12 {
+		return d[:12]
+	}
+	return d
+}
+
+// resolvePolicy mirrors relay.py's Relay.resolve_policy.
+func (r *Relay) resolvePolicy(conn Conn, rung int, path string) Resolution {
+	return r.policy.Current().Resolve(rung, path, r.unattendedOf(conn))
 }
 
 func (r *Relay) Clock() Clock { return r.clock }
@@ -180,6 +267,11 @@ func (r *Relay) Join(room string, conn Conn) bool {
 	}
 	r.roomsMu.RUnlock()
 
+	// Before the joiner is a member, so a change picked up here fans out
+	// to the room that already exists and the joiner gets its own copy
+	// below rather than two.
+	r.publishPolicyChange()
+
 	conn.SetRoom(room)
 	ri := r.roomOf(room)
 	ri.mu.Lock()
@@ -187,6 +279,11 @@ func (r *Relay) Join(room string, conn Conn) bool {
 	ri.mu.Unlock()
 
 	r.sendLeaseSnapshot(conn, room)
+	// Only when there is an org policy to state — see policyFrame's doc
+	// comment on why a relay with nothing configured must stay silent.
+	if frame := r.policyFrame(); frame != nil {
+		conn.Send(EncodeFrame(frame))
+	}
 	return true
 }
 
@@ -476,6 +573,13 @@ func (r *Relay) presence(room string) []Activity {
 // Handle dispatches one inbound frame (not "join", which Join handles
 // directly). Mirrors relay.py's Relay.handle + _dispatch.
 func (r *Relay) Handle(conn Conn, msg map[string]any) Frame {
+	// Live reload, on the only clock the relay has. PolicyFile gates its
+	// own stat at one a second, so this costs a comparison per frame in
+	// the steady state. The broadcast goes out before the frame is
+	// dispatched so the answer this connection is about to get and the
+	// floor the room is holding cannot disagree. Mirrors relay.py's
+	// Relay.handle.
+	r.publishPolicyChange()
 	return r.dispatch(conn, msg)
 }
 
@@ -544,14 +648,14 @@ func (r *Relay) onEvent(room string, conn Conn, msg map[string]any) Frame {
 	region := regionFromPayload(regionRaw)
 	verb, _ := clean["verb"].(string)
 	// Hooks never carry one; only an MCP-sourced event does, and only that
-	// kind can reach rung 4 (not ported — see ladder.go).
+	// kind can reach rung 4.
 	intent := CleanIntent(clean["intent"])
 
 	event := AgentEvent{Room: room, Human: conn.Human(), Agent: conn.Agent(), Kind: "touch",
 		Source: ParseSource(cleanString(clean["source"])), Verb: verb, Region: region, Ts: now}
 
 	others := r.presence(room)
-	rung := Classify(event, others)
+	rung := Classify(event, others, intent)
 
 	ri.mu.Lock()
 	ri.activity = append(ri.activity, timedActivity{now, Activity{
@@ -565,19 +669,43 @@ func (r *Relay) onEvent(room string, conn Conn, msg map[string]any) Frame {
 		"verb": verb, "region": clean["region"], "rung": rung, "ts": now,
 	}, conn)
 
-	if !InterruptsAt(rung) {
-		return Frame{"type": "ack", "rung": rung}
+	// Policy decides how loudly this rung is told. It does not decide the
+	// rung, and it never reaches the lease table: Classify above and
+	// Negotiator.Open below run exactly as they did before, whatever the
+	// effect turns out to be. Mirrors relay.py's _on_event.
+	resolution := r.resolvePolicy(conn, rung, region.Path)
+	effect := resolution.Effect
+
+	// Rung 4 always asks the negotiator, whatever its effect says: the
+	// effect governs how loudly a *text match* is reported, not whether
+	// there is a lease underneath.
+	if !InterruptsAt(rung, &effect) && rung != 4 {
+		return Frame{"type": "ack", "rung": rung, "effect": string(effect)}
 	}
 
 	brief := r.negotiator.Open(room, conn.Agent(), r.registry.AgeOf(conn.Agent()), region, r.priorityOf(conn), conn.Human(), conn)
 	if brief == nil {
-		return Frame{"type": "ack", "rung": rung}
+		if rung == 4 && effect != EffectSilent {
+			if red := redundantPeer(event, others, intent); red != nil {
+				frame := Frame{
+					"type": "redundant_work", "rung": 4,
+					"effect": string(effect), "effect_source": string(resolution.WinningLayer),
+				}
+				for k, v := range redundancyPayload(*red) {
+					frame[k] = v
+				}
+				return frame
+			}
+		}
+		return Frame{"type": "ack", "rung": rung, "effect": string(effect)}
 	}
 	frame := Frame{
 		"type": "negotiate", "rung": rung,
 		"holder_agent": brief.HolderAgent, "holder_human": brief.HolderHuman,
 		"holder_intent": brief.HolderIntent, "moves": moves,
 		"decision":        string(brief.Decision),
+		"effect":          string(effect),
+		"effect_source":   string(resolution.WinningLayer),
 		"priority":        PriorityName(brief.RequesterPriority),
 		"holder_priority": PriorityName(brief.HolderPriority),
 	}
@@ -597,6 +725,44 @@ func (r *Relay) onEvent(room string, conn Conn, msg map[string]any) Frame {
 		}
 	}
 	return frame
+}
+
+// redundancyPayload is a rung 4 hit, in the shape both channels hand
+// back. Mirrors relay.py's redundancy_payload.
+func redundancyPayload(red Redundancy) Frame {
+	score := float64(int(red.Score*1000+0.5)) / 1000.0
+	return Frame{
+		"agent": red.Agent, "human": red.Human, "intent": red.Intent,
+		"region": regionPayload(red.Region), "score": score,
+		"moves": moves, "advisory": true,
+	}
+}
+
+// declaredWork is every live MCP-declared intent in the room. Live claims,
+// not presence activity, because a claim is the only thing an agent ever
+// attaches an intent to. Mirrors relay.py's Relay.declared_work.
+func (r *Relay) declaredWork(room string) []Activity {
+	claims := r.registry.ActiveClaims(room, nil)
+	out := make([]Activity, 0, len(claims))
+	for _, c := range claims {
+		if c.Intent == "" {
+			continue
+		}
+		out = append(out, Activity{Agent: c.Agent, Human: c.Human, Verb: "edit", Region: c.Scope, Intent: c.Intent, Source: SourceMCP})
+	}
+	return out
+}
+
+// checkRedundancy is is somebody else already doing this, somewhere else
+// in the tree? Both declaration channels (the wire claim frame and the
+// MCP claim_work tool) land here. Mirrors relay.py's Relay.check_redundancy.
+func (r *Relay) checkRedundancy(room, agent, human string, region Region, intent string) *Redundancy {
+	peers := r.declaredWork(room)
+	probe := AgentEvent{Room: room, Human: human, Agent: agent, Kind: "claim", Source: SourceMCP, Verb: "edit", Region: region, Ts: r.clock.Now()}
+	if Classify(probe, peers, intent) != 4 {
+		return nil
+	}
+	return redundantPeer(probe, peers, intent)
 }
 
 func regionFromPayload(d Frame) Region {
@@ -630,6 +796,17 @@ func (r *Relay) onClaim(room string, conn Conn, msg map[string]any, region Regio
 		for k, v := range leaseFrame(result.Claim, now) {
 			granted[k] = v
 		}
+		// The lease is granted either way. Rung 4 is not contention — the
+		// paths are disjoint — it is the news that somebody else already
+		// declared this work, delivered while the agent is still
+		// deciding what to do. Same volume knob as the event path.
+		rung4Effect := r.resolvePolicy(conn, 4, region.Path).Effect
+		if rung4Effect != EffectSilent {
+			if red := r.checkRedundancy(room, conn.Agent(), conn.Human(), region, intent); red != nil {
+				granted["rung"] = 4
+				granted["redundant"] = redundancyPayload(*red)
+			}
+		}
 		return granted
 	}
 
@@ -639,11 +816,19 @@ func (r *Relay) onClaim(room string, conn Conn, msg map[string]any, region Regio
 		r.registry.ReleaseAll(room, conn.Agent(), conn)
 	}
 
+	// A refused claim is a rung 3 by definition: a relay-granted lease on
+	// a contending region. The effect is advisory here — the daemon's
+	// own table is what blocks the edit — but it is what the MCP and web
+	// surfaces render, so it travels.
+	resolution := r.resolvePolicy(conn, 3, region.Path)
+
 	reply := Frame{
 		"type": "claim_result", "granted": false,
-		"decision": string(result.Decision),
-		"priority": PriorityName(requesterPriority),
-		"region":   regionPayload(region),
+		"decision":      string(result.Decision),
+		"effect":        string(resolution.Effect),
+		"effect_source": string(resolution.WinningLayer),
+		"priority":      PriorityName(requesterPriority),
+		"region":        regionPayload(region),
 	}
 
 	held := result.HeldBy

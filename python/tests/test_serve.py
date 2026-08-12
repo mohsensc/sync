@@ -1,20 +1,26 @@
 import asyncio
-import contextlib
+import hashlib
 import json
+import pathlib
+import sys
 
 import pytest
 import websockets
 
-from agent_presence.clock import RealClock
-from agent_presence.redact import opaque_region
-from agent_presence.relay import Relay
-from agent_presence.serve import serve
-from agent_presence.types import Region
+sys.path.insert(0, str(pathlib.Path(__file__).parent / "helpers"))
+from gorelay_proc import start_gorelay  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
 def _opaque_off(monkeypatch):
     monkeypatch.delenv("AGENT_PRESENCE_OPAQUE", raising=False)
+
+
+def _opaque_hash(value: str) -> str:
+    """Mirrors redact.py's `_h` for the one assertion here that needs it.
+    redact.py is gone with the Python relay; this is the only remaining
+    caller that cared about the hash shape, not the whole module."""
+    return hashlib.sha256(value.encode()).hexdigest()[:16]
 
 
 async def recv(ws, kind, timeout=2):
@@ -49,25 +55,21 @@ async def _joined(ws, room, agent, human):
 
 @pytest.fixture
 async def server():
-    relay = Relay(RealClock())
-    stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    ready: asyncio.Future = loop.create_future()
+    proc = await start_gorelay()
+    yield None, proc.url
+    await proc.stop()
 
-    def on_ready(srv) -> None:
-        if not ready.done():
-            ready.set_result(srv.sockets[0].getsockname()[1])
 
-    task = asyncio.create_task(
-        serve("127.0.0.1", 0, relay, stop=stop, on_ready=on_ready)
-    )
-    port = await asyncio.wait_for(ready, timeout=5)
-    yield relay, f"ws://127.0.0.1:{port}"
-    stop.set()
-    # Await the stop, otherwise the listening socket is still bound when the
-    # next test tries to claim a port.
-    with contextlib.suppress(asyncio.CancelledError):
-        await asyncio.wait_for(task, timeout=5)
+@pytest.fixture
+async def opaque_server():
+    """AGENT_PRESENCE_OPAQUE has to be set before the process starts — a
+    child never observes a parent's later env change, which is exactly
+    the harness artifact docs/relay-parity.md's black-box run hit doing
+    this with monkeypatch.setenv mid-test against an already-spawned
+    subprocess."""
+    proc = await start_gorelay(env={"AGENT_PRESENCE_OPAQUE": "1"})
+    yield None, proc.url
+    await proc.stop()
 
 
 async def test_two_clients_in_one_room_see_each_other(server):
@@ -146,9 +148,8 @@ async def test_join_with_a_non_string_room_is_dropped_not_fatal(server):
         await recv(ws, "ack")
 
 
-async def test_opaque_mode_leaves_no_cleartext_path_on_the_wire(server, monkeypatch):
-    monkeypatch.setenv("AGENT_PRESENCE_OPAQUE", "1")
-    _, url = server
+async def test_opaque_mode_leaves_no_cleartext_path_on_the_wire(opaque_server):
+    _, url = opaque_server
     async with websockets.connect(url) as a, \
                websockets.connect(url) as b, \
                websockets.connect(url) as c:
@@ -167,11 +168,8 @@ async def test_opaque_mode_leaves_no_cleartext_path_on_the_wire(server, monkeypa
         assert "sign_in" not in first
 
         seen = json.loads(first)["region"]
-        expected = opaque_region(
-            Region(path="src/auth.py", symbol="sign_in", lines=None)
-        )
-        assert seen["path"] == expected.path
-        assert seen["symbol"] == expected.symbol
+        assert seen["path"] == _opaque_hash("src/auth.py")
+        assert seen["symbol"] == _opaque_hash("sign_in")
 
         # Collision detection survives the hashing: same region compares equal,
         # a different one doesn't.

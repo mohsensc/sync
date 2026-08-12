@@ -23,7 +23,6 @@ from pathlib import Path
 import websockets
 
 ROOT = Path(__file__).resolve().parents[2]
-VENV_PY = ROOT / "python" / ".venv" / "bin" / "python"
 CPP_BUILD = ROOT / "cpp" / "build"
 AP_HOOK = CPP_BUILD / "ap-hook"
 # The daemon is Go now (#18) — the hook stays C++, see docs/gohook-spike.md.
@@ -73,7 +72,7 @@ def dev_client_ssl_context() -> ssl.SSLContext:
         _tls_client_ctx = ssl.create_default_context(cafile=str(cert))
     return _tls_client_ctx
 PRESENCED = GO_BUILD / "presenced"
-BOOT = Path(__file__).resolve().parent / "_relay_boot.py"
+GORELAY = GO_BUILD / "gorelay"
 
 
 # -- stats --------------------------------------------------------------------
@@ -153,18 +152,18 @@ def cpu_seconds(pid: int) -> float:
 
 
 class RelayProc:
-    """The Python relay in its own process, so it can be measured and killed.
+    """`gorelay` (#40, the only relay now) in its own process, so it can be
+    measured and killed.
 
-    Goes through _relay_boot.py rather than the console script: some scenarios
-    need a lease TTL shorter than 90 seconds to observe expiry at all, and the
-    TTL is a module constant with no knob on it.
+    `AP_LOAD_LEASE_TTL_S` is gorelay's own env var (`leases.go`'s
+    `leaseTTLFromEnv`) — no boot shim needed to patch a module constant the
+    way the deleted Python relay's `_relay_boot.py` did; some scenarios need
+    a lease TTL shorter than the shipped 90s to observe expiry at all.
     """
 
-    def __init__(self, port: int | None = None, *, lease_ttl_s: float | None = None,
-                 log_level: str = "WARNING") -> None:
+    def __init__(self, port: int | None = None, *, lease_ttl_s: float | None = None) -> None:
         self.port = port or free_port()
         self.lease_ttl_s = lease_ttl_s
-        self.log_level = log_level
         self.proc: subprocess.Popen | None = None
         self.log = ROOT / "tests" / "load" / f".relay-{self.port}.log"
 
@@ -176,8 +175,6 @@ class RelayProc:
     def start(self) -> None:
         env = dict(os.environ)
         env["AGENT_PRESENCE_PORT"] = str(self.port)
-        env["AGENT_PRESENCE_LOG_LEVEL"] = self.log_level
-        env["PYTHONPATH"] = str(ROOT / "python" / "src")
         if self.lease_ttl_s is not None:
             env["AP_LOAD_LEASE_TTL_S"] = str(self.lease_ttl_s)
         if TLS_ENABLED:
@@ -187,7 +184,8 @@ class RelayProc:
         self.log.parent.mkdir(parents=True, exist_ok=True)
         fh = open(self.log, "wb")
         self.proc = subprocess.Popen(
-            [str(VENV_PY), str(BOOT)], env=env, stdout=fh, stderr=fh,
+            [str(GORELAY), "--host", "127.0.0.1", "--port", str(self.port)],
+            env=env, stdout=fh, stderr=fh,
         )
         self.wait_ready()
 

@@ -213,106 +213,186 @@ checks each required string argument explicitly and errors before it
 reaches the relay; new tests cover the missing-key and wrong-type cases and
 assert the call never reaches the relay at all.
 
-## #20 follow-up: every remaining mutex, checked not asserted
+## Go relay only, Python relay deleted (#40, #47, #48)
 
-PR #38 left `leases.Cache`, `policy.Cache`, `contend.Queue`,
-`presence.Table`, `outbound.Queue`, `hooksock.Server` and `relay.Client` on
-plain mutexes and said so in its own body. This wave went back and checked
-each one on merit instead of leaving that as a concession: traced every
-caller in `daemon.go` to find which mutexes actually sit on the decision
-hot path (`onRequest` → `decide.Decide`) versus the event path or a tick,
-then measured the two that do.
+The Python relay is gone. `gorelay` is the relay, full stop —
+`AGENT_PRESENCE_RELAY_IMPL` and `--impl go/python` don't exist anymore,
+there's nothing to select. Four things blocked this; all four are closed:
 
-Only `leases.Cache` and `policy.Cache` are read from `onRequest`. A
-throwaway channel-owned prototype for `leases.Cache` (one goroutine owning
-the map, `Conflict` as a request/reply over a channel) benchmarked against
-the current `RWMutex`, 8 and 16 concurrent callers plus a background
-writer, 3s per run:
+- **TLS.** `gorelay` terminates `wss://` now (`crypto/tls`, same
+  `--tls-cert`/`--tls-key` flags and `AGENT_PRESENCE_TLS_*` env names the
+  Python side had). Verified with a real handshake: `openssl s_client`
+  reports TLS 1.3, cert verify OK against the dev cert; a plaintext HTTP
+  request to the same port gets Go's own "client sent an HTTP request to
+  an HTTPS server" 400, never a working connection. Four Go tests
+  (`server_tls_test.go`) cover the same shape `test_serve_tls.py` did:
+  trusted handshake succeeds, untrusted one fails, two clients see each
+  other over `wss://`, plaintext stays the zero-config default.
+- **#48 (roster discovery).** `FindRoster` resolves symlinks now
+  (`filepath.EvalSymlinks`, falling back component-by-component for a
+  path whose tail doesn't exist yet, matching `Path.resolve()`'s
+  non-strict behavior). Tested on this machine's own `/tmp ->
+  /private/tmp` symlink, not a synthetic case.
+- **#47 (expiry-broadcast latency).** `Registry.SweepAll`, run off a 1s
+  background ticker in `Server.Serve`, walks every shard of every room
+  and prunes+publishes regardless of whether anything touched that shard
+  — an idle shard's expiry no longer waits for its next touch. Doesn't
+  reintroduce a lock spanning shards: each tick takes and releases one
+  shard's mutex in turn, same as `ActiveClaims` already did off the hot
+  path. Two-region test (`TestSweepAllBroadcastsAnIdleShardsExpiry`)
+  picks `a.py`/`b.py` landing in different shards and confirms `a.py`'s
+  expiry stays invisible until either something touches it or the sweep
+  runs.
+- **Org policy floor + rung 4.** Ported from `policy.py`/`similarity.py`.
+  `go/internal/relaysrv/policy.go` is the relay's actual slice of
+  `policy.py` — builtin plus one org layer, exactly `policy.py`'s own
+  `RELAY_INCLUDE` (the repo/user/session layers were never the relay's to
+  resolve; that's the daemon's `ap policy compile` output, unchanged).
+  `similarity.go` is `similarity.py` ported as-is — same synonym table,
+  same weights, same thresholds, off by default. Not improved; #15 owns
+  that. `policy_test.go` and `relay_policy_test.go` port the org-floor
+  slice of `test_policy.py`/`test_relay_policy.py` (glob specificity,
+  observer-mode ceiling vs. floor ordering, live reload via
+  `PolicyFile.Current`, the floor pushed on join after the lease
+  snapshot, republish-on-change, blanket-vs-path-scoped floor shape on
+  the wire); `rung4_test.go` covers the lexical scorer's true positive /
+  true negative / near-miss cases straight from `tune_rung4.py`'s own
+  corpus, plus the off-by-default gate and the same-path exclusion.
 
-| | lanes=8 p99 | lanes=16 p99 |
-| --- | --- | --- |
-| `RWMutex` (current) | 56µs | 107µs |
-| channel-owned (prototype, deleted) | 2.75ms | 9.2ms |
+**The oracle wasn't deleted without a replacement.** `python/tests/` (the
+suite that produced the 13/14 real-socket result and the golden-scenario
+diff in `docs/relay-parity.md`) is gone with the rest of the Python relay,
+but:
 
-49x-86x worse, and throughput fell as concurrency rose instead of holding —
-a single owner goroutine is a serialization point `RWMutex` readers don't
-hit. Reverted the idea, kept the mutex, deleted the prototype (the losing
-implementation doesn't stay in the tree as a fixture); the winning
-benchmark (`BenchmarkConflictConcurrentReads`) stays in
-`go/internal/leases` as a regression guard. `policy.Cache` has the same
-read-mostly shape and wasn't separately benchmarked — same architectural
-reason applies. Every other mutex (`contend`, `presence`, `outbound`,
-`hooksock.Server`'s single-field lock, `relay.Client`'s single-field lock,
-`daemon.coalesceMu`) turned out to sit off the hot path entirely once
-traced, guarding one small map, slice or field with no ordering requirement
-between callers. Full resource-by-resource writeup in docs/go-daemon.md.
+- The subprocess-swap harness that produced that 13/14 number lived in a
+  scratch dir and was never checked in. It is now:
+  `python/tests/helpers/gorelay_proc.py`, used by `test_e2e.py`,
+  `test_serve.py` and `test_relay_restart.py`, all three rewritten to
+  spawn the real `gorelay` binary instead of driving a Python `Relay`
+  object in-process. **17/17 passing** against `gorelay` — better than
+  the original 13/14, because the one known failure (opaque mode, an
+  env-var-set-after-spawn harness artifact) doesn't reproduce here: this
+  harness sets `AGENT_PRESENCE_OPAQUE` in the child's env before spawn,
+  the only way any operator actually sets it.
+- `python/tests/test_relay_restart.py` lost exactly one assertion with no
+  Go equivalent — `relay.registry.active_claims(room) == []` on a bare
+  in-process object, which is trivially true of any freshly constructed
+  `Registry` by construction and isn't really an assertion about the
+  *relay*, just about `NewRegistry`.
+- `test_backpressure.py`'s and `test_inbound_rate_limit.py`'s
+  `VirtualClock`-only cases (no real socket, a duck-typed fake transport)
+  are native Go tests now: `backpressure_test.go`,
+  `inbound_rate_limit_test.go`. Porting the former required extracting a
+  `wsWriter` interface out of `WsConn` (it held a concrete
+  `*websocket.Conn` before, so nothing could stand in for "a peer whose
+  write blocks forever" the way Python's `_FakeWs` could) — a small,
+  behavior-preserving refactor, not a rewrite.
+- The golden scenario's role as a live differential oracle has no
+  replacement, because there's no second implementation left to diff
+  against — that's what "only one relay" means. `golden_test.go` still
+  exists and still runs, now with zero fields normalized away (`effect`/
+  `effect_source` are populated for real, since the policy engine
+  landed in the same PR).
 
-`go test ./... -race -count=1` — clean, unchanged by any of this (nothing
-was converted).
+**Two bugs found by actually running this, neither a wave-1 issue:**
 
-**Contention loss at 16 lanes, actually measured**: `python
-tests/load/run.py hook-latency --storm-lanes 16`, 3 runs, on this box while
-several other agents' sessions were also running (`uptime` load average
-33-59 on 12 cores, not a quiet machine) — "hook storm on the same socket"
-no-answer rate came back 8.6%, 19.8%, 15.75%. Not 0%, and issue #20 has
-been edited to say so rather than leave an unmet checkbox reading as met.
-Down from the pre-fix 83% the issue's own "why it matters" section cites,
-and the same scenario at the harness's own default of 6 lanes on this same
-loaded box still shows 5% loss, which is the tell that this tracks overall
-machine contention more than lane count specifically — the two mutexes
-actually on the hot path were just measured above and are not where the
-loss is coming from. Worth a clean re-run on a quiet box; not something
-this issue's code needed to change to earn, and not claimed as fixed here.
+- **`write()` never watched the clock while a send was in flight.**
+  `test_a_frame_that_will_not_leave_is_shed_on_clock_seconds`'s Go port
+  is what surfaced it: the doc comment already claimed the polling
+  behavior (copied from `serve.py`'s `_write`), the code didn't actually
+  have it. A genuinely wedged peer's writer goroutine blocked inside
+  `WriteMessage` forever — `shedReason` never got a chance to fire, the
+  connection was never shed, the goroutine leaked for the life of the
+  process. Fixed by racing the send (its own goroutine, a buffered
+  1-length result channel) against a real-time poll ticker that decides
+  on the injectable clock, same split `serve.py` always had: poll
+  frequency is wall time, the shed decision is clock time.
+- **`session()` never closed its own end of the connection.** Found
+  while running the load harness, not by a unit test: every scenario
+  that closes a client connection (all of them) took a flat 10.0s per
+  close — `websockets`' default `close_timeout`. gorilla's default close
+  handler already echoes the close frame back (that's automatic), but
+  nothing ever called `ws.Close()` on gorelay's side once the read loop
+  returned, so the underlying TCP connection was never actually closed —
+  a client's `close()` waits for the transport to go away, not just for
+  the frame exchange. One line (`defer` now calls `ws.Close()`) turned
+  every disconnect from 10.0s into ~0.2ms — confirmed directly, and it's
+  why the black-box suite's wall time went from 321s to 0.91s for the
+  same 17 tests. `TestClientInitiatedCloseCompletesPromptly` pins it.
 
-## #21 follow-up: a real tag, a real release, a real download
+**Deleted, once nothing referenced it anymore:** `relay.py`, `serve.py`,
+`leases.py`, `negotiation.py`, `ladder.py`, `wait_die.py`, `similarity.py`,
+`redact.py` (its one surviving export, `OPAQUE_ENV`, is inlined into
+`policy.py`), `types.py`, `sim/` and `tools/tune_rung4.py` (both dead the
+moment `leases.py`/`wait_die.py`/`similarity.py` went), `spike/relay/`,
+`python/tests/helpers/golden_scenario.py` + `golden_base.json`, and every
+test file that existed only to drive the deleted `Relay` object
+in-process. `priority.py`, `principals.py` and `policy.py` stayed — the
+CLI (`ap`) and the Go relay both still need them, `policy.py`/CLI-only,
+`priority.py`/`principals.py` mirrored into `relaysrv/{priority,principals}.go`
+for the relay's own path. `websockets` moved from a runtime dependency to
+a dev one — nothing left in `src/agent_presence` imports it, only the
+black-box suite (as a client now, not the relay).
 
-Everything #21 asked for was in place except the one thing that proves it:
-no tag had ever been cut, so `.github/workflows/release.yml` had never run,
-and `install.sh`'s "fetch a binary" only ever checked a local `dist/`
-directory — it never downloaded anything.
+`tests/load/_lib.py`'s `RelayProc` spawns `gorelay` directly (a `go
+build`, same on-demand pattern `build_presenced` already used) instead of
+going through `_relay_boot.py`, which is deleted — `AP_LOAD_LEASE_TTL_S`
+is gorelay's own env var already (`leases.go`), no boot shim needed to
+patch a module constant.
 
-Cutting `v0.1.0` and pushing it found a real bug on the way:
-`scripts/build-go-release.sh`'s output directory argument was used as-is
-without resolving it to an absolute path, so when `release.yml` called it
-with the plain relative `dist` (`ci.yml`'s own call already used
-`$RUNNER_TEMP/dist`, an absolute path, which is why the PR-time cross-compile
-check never caught this), the script's own `cd "$ROOT/go"` — needed so `go
-build`'s module resolution works — silently changed what `dist` resolved
-to. Binaries landed in `go/dist/`, the release step's glob
-(`dist/presenced-*`) matched nothing, `softprops/action-gh-release` doesn't
-fail on a non-matching glob by default, and the run went green with a
-published release that had zero assets attached. Fixed by resolving `$OUT`
-to an absolute path with `cd "$OUT" && pwd` immediately after creating it,
-before anything else in the script can change directories.
+### Suites
 
-`install.sh` now tries a real download before falling back to `go build`.
-First attempt is `gh release download` — this repo is **private**, so the
-plain `github.com/.../releases/latest/download/...` redirect 404s
-unauthenticated (confirmed directly with `curl -v`: HTTP 404, not a
-network failure), and `gh` is the credential anyone with push access to
-this repo already has. `fetch_release_binary` falls through to a bare
-`curl` (with `$GITHUB_TOKEN` as a bearer header if one is set) for the day
-this repo goes public, and only reaches `go build` when neither download
-path works — the actual fallback #21 asks for, not the previous "always
-builds locally" behavior wearing a fallback's name. Also found and fixed
-along the way: the first version of `fetch_release_binary` used `"${arr[@]}"`
-on a possibly-empty array to build optional `gh`/`curl` flags, which throws
-"unbound variable" under `set -u` on bash 3.2 — still `/bin/bash` on every
-unmodified macOS install. Rewritten to branch instead of relying on array
-expansion, and re-tested against `/bin/bash` specifically, not whatever
-`bash` resolves to in this environment.
+| suite | result |
+| --- | --- |
+| `go test ./... -race -count=1` | 272 tests, clean (`relaysrv` alone: 113) |
+| `python -m pytest` | 359 passed, 13.5s (was ~1094 before this wave's deletions — the difference is `python/tests/` losing everything that only tested the deleted Python relay, per above) |
+| black-box suite alone (`test_e2e.py`, `test_serve.py`, `test_relay_restart.py`) | 17/17, 0.91s against a real `gorelay` subprocess |
+| `ctest --test-dir cpp/build` | 1/1 (hook untouched) |
 
-Verified for real, not asserted: pushed `v0.1.0` from this branch, watched
-`release.yml` run (`gh run watch`) — first attempt built green but attached
-**zero assets** (the `build-go-release.sh` bug above), caught by actually
-checking `gh api repos/mohsensc/sync/releases/tags/v0.1.0` rather than
-trusting the workflow's own green checkmark. Deleted that release and tag,
-fixed the script, re-tagged `v0.1.0` from the fixed commit, re-ran: this
-time the API lists all 10 assets (`presenced`/`agent-presence-mcp` × 5
-targets). Then ran `install.sh` against a scratch `$AGENT_PRESENCE_BIN`
-with no local `dist/` present — it printed `fetched presenced latest for
-darwin/arm64 from mohsensc/sync` via `gh release download`, and the
-resulting binary runs (`--help` exits 0, real Mach-O arm64). CI's `go` job
-continues to cross-compile all 5 targets on every PR via the same script,
-unchanged, and now actually shares the bug-fixed path with the release
-job instead of only resembling it.
+### Load harness, final state (`tests/load/run.py`, this machine, one run each)
+
+`swarm50 --agents 200 --hot 8 --rounds 15`:
+
+| | |
+| --- | --- |
+| claim p50/p95/p99/max (ms) | 8.5 / 15.0 / 17.6 / 27.0 |
+| grant rate | 11.1% (332/3000) — **finding**, see below |
+| wait / abort | 4223 / 2668 |
+| relay CPU/op | 0.262ms |
+| relay RSS after drain | 12.4 MiB |
+
+`rooms --rooms 20 --per-room 8`:
+
+| | |
+| --- | --- |
+| claim p50/p95/p99/max (ms) | 5.2 / 9.9 / 11.6 / 12.6 |
+| isolation_violations | 0 |
+| dead-room cost, first/second 500 | 18.8 / 18.6 MiB — **finding**, see below |
+
+`slow-subscriber --busy-agents 25 --window-s 10`: ops healthy/with-deaf
+57104/55446 (ratio 0.97), claim p99 healthy/deaf 15.1ms/18.3ms,
+`relay_alive: true`. **0 findings** — a deaf subscriber costs this room
+3% of its throughput and nothing else.
+
+`lease-churn --churn-agents 40 --ttl-s 3 --window-s 10`: 1560 grants, 8
+`expired` frames broadcast, 0 leases left after 2x TTL, `relay_alive:
+true`. **0 findings** — issue #34/#37's fix (and #47's shard-scoped sweep
+now running promptly off the background ticker) holds under live churn,
+not just in the unit tests.
+
+**2 findings, both pre-existing and out of this track's scope:**
+`swarm50`'s grant-rate collapse under 200-agents-on-8-regions contention
+(issue #36's own scenario shape; #36 and its follow-ups
+`fix/grant-rate-collapse`/`fix/rescue-grant-rate` already merged into
+`main` before this track started — this number is the scenario's own
+strict threshold at these parameters, not a regression this PR
+introduced, and nothing here touched wait-die's arbitration) and
+`rooms`'s dead-room memory growth (`Relay.rooms`/`Registry.rooms` are
+never pruned, already named in `docs/relay-parity.md` as "a real, separate,
+already-known issue," present before this PR and not one of the four
+things it closed). Neither is issue #40, #47 or #48; neither blocks
+"the Go relay is the only relay."
+
+This machine was running other agents' work throughout, same caveat every
+prior load number in this file carries — read the relative shape, not the
+absolute ms.

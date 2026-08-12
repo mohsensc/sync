@@ -7,20 +7,32 @@ whatever it was told before the relay died, and it keeps blocking edits on it.
 The frame that fixes that is the join snapshot, and it has to be sent even when
 it is empty. "Nothing held" is a fact about the authority; silence is not.
 Without it a daemon waits out the 90 second TTL for a lease nothing holds.
+
+Runs against the real gorelay binary (helpers/gorelay_proc.py) — the one
+in-process assertion the original version of this file had
+(`relay.registry.active_claims(room) == []` on a bare Python Relay
+object) has no analogue across a process boundary and isn't ported here;
+it's a restatement of "a freshly constructed relay holds nothing," which
+every Go leases_test.go fixture already demonstrates by construction
+(NewRegistry starts with no claims, full stop — there's no code path that
+could populate one before the first Acquire call). What this file actually
+proves — that a *reconnecting* client is told the truth over the wire — is
+the part with no analogue in a fresh in-process object, and it's the part
+still exercised end to end below.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
+import pathlib
+import sys
 
 import pytest
 import websockets
 
-from agent_presence import serve as serve_mod
-from agent_presence.clock import RealClock
-from agent_presence.relay import Relay
+sys.path.insert(0, str(pathlib.Path(__file__).parent / "helpers"))
+from gorelay_proc import start_gorelay  # noqa: E402
 
 ROOM = "restart-room"
 REGION = {"path": "src/contested.py", "symbol": None, "lines": None}
@@ -31,41 +43,7 @@ def _opaque_off(monkeypatch):
     monkeypatch.delenv("AGENT_PRESENCE_OPAQUE", raising=False)
 
 
-class RelayServer:
-    def __init__(self, port: int = 0) -> None:
-        self.relay = Relay(RealClock())
-        self.port = port
-        self._stop = asyncio.Event()
-        self._task: asyncio.Task | None = None
-
-    async def start(self) -> "RelayServer":
-        loop = asyncio.get_running_loop()
-        ready: asyncio.Future = loop.create_future()
-
-        def on_ready(server) -> None:
-            if not ready.done():
-                ready.set_result(server.sockets[0].getsockname()[1])
-
-        self._task = asyncio.create_task(
-            serve_mod.serve("127.0.0.1", self.port, self.relay,
-                            stop=self._stop, on_ready=on_ready)
-        )
-        self.port = await asyncio.wait_for(ready, timeout=5)
-        return self
-
-    @property
-    def url(self) -> str:
-        return f"ws://127.0.0.1:{self.port}"
-
-    async def stop(self) -> None:
-        """Closest thing to SIGKILL that leaves the port free for the next one."""
-        self._stop.set()
-        if self._task is not None:
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(self._task, timeout=5)
-
-
-async def _recv(ws, kind: str, timeout: float = 3.0) -> dict:
+async def _recv(ws, kind: str, timeout: float = 5.0) -> dict:
     """The next frame of `kind`, skipping anything else on the way."""
     deadline = asyncio.get_running_loop().time() + timeout
     while True:
@@ -94,23 +72,24 @@ async def _join(ws, agent: str) -> dict:
 
 
 async def test_a_join_into_an_empty_room_is_answered_with_an_empty_snapshot():
-    server = await RelayServer().start()
+    proc = await start_gorelay()
     try:
-        async with websockets.connect(server.url) as ws:
+        async with websockets.connect(proc.url) as ws:
             snapshot = await _join(ws, "a1")
             assert snapshot["leases"] == []
     finally:
-        await server.stop()
+        await proc.stop()
 
 
 async def test_a_stale_lease_clears_on_reconnect_not_on_the_ttl():
-    """Claim, kill the relay, restart it, reconnect. The daemon has to be told.
+    """Claim, kill the relay, restart it on the same port, reconnect. The
+    daemon has to be told.
 
-    `expires_in_ms` on the original grant is the 90 second TTL. The point of the
-    test is that the clearing frame arrives in well under that, on the join,
-    rather than the daemon sitting out the lease it cached.
+    `expires_in_ms` on the original grant is the 90 second TTL. The point of
+    the test is that the clearing frame arrives in well under that, on the
+    join, rather than the daemon sitting out the lease it cached.
     """
-    first = await RelayServer().start()
+    first = await start_gorelay()
     port = first.port
     try:
         async with websockets.connect(first.url) as holder, \
@@ -131,11 +110,8 @@ async def test_a_stale_lease_clears_on_reconnect_not_on_the_ttl():
     finally:
         await first.stop()
 
-    second = await RelayServer(port).start()
+    second = await start_gorelay(port=port)
     try:
-        assert second.relay.registry.active_claims(ROOM) == [], (
-            "a restarted relay is supposed to come back empty"
-        )
         async with websockets.connect(second.url) as daemon:
             snapshot = await _join(daemon, "daemon")
             assert snapshot["leases"] == [], (
@@ -149,17 +125,17 @@ async def test_a_stale_lease_clears_on_reconnect_not_on_the_ttl():
 
 async def test_a_reconnect_into_a_room_that_still_has_leases_gets_them_all():
     """The reconciliation is a replacement, so it must carry the live ones too."""
-    server = await RelayServer().start()
+    proc = await start_gorelay()
     try:
-        async with websockets.connect(server.url) as holder:
+        async with websockets.connect(proc.url) as holder:
             await _join(holder, "holder")
             await holder.send(json.dumps({"type": "claim", "region": REGION,
                                           "intent": "still held"}))
             assert (await _recv(holder, "claim_result"))["granted"] is True
 
-            async with websockets.connect(server.url) as daemon:
+            async with websockets.connect(proc.url) as daemon:
                 snapshot = await _join(daemon, "daemon")
                 assert [e["agent"] for e in snapshot["leases"]] == ["holder"]
                 assert snapshot["leases"][0]["intent"] == "still held"
     finally:
-        await server.stop()
+        await proc.stop()
