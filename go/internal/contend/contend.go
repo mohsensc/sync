@@ -14,6 +14,12 @@ import "sync"
 // session touching everything, not a contest worth queueing.
 const Max = 64
 
+// Queue stays a plain mutex, not a channel-owned goroutine (#20): Note only
+// fires from the decision path on the branch where a decision was already
+// blocked, not on every call, and Drain runs once a tick. Off the hot path,
+// guards one small slice plus a dedup map, no ordering requirement between
+// callers — see docs/go-daemon.md's "every remaining mutex, checked on
+// merit" section.
 type Queue struct {
 	mu      sync.Mutex
 	pending []string

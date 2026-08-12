@@ -63,7 +63,13 @@ func RegionKey(path, symbol string) string {
 }
 
 // Cache is safe for concurrent use: replaced by the relay's read pump,
-// queried by the hook socket's decision handlers.
+// queried by the hook socket's decision handlers. Deliberately RWMutex, not
+// a channel-owned goroutine (#20): Conflict is the decision hot path, many
+// goroutines reading concurrently against one occasional writer, and a
+// measured channel-owned prototype was 49x-86x worse at p99 under an 8/16
+// lane storm because a single owner goroutine serializes what RWMutex lets
+// run in parallel. See docs/go-daemon.md's "every remaining mutex, checked
+// on merit" section for the numbers.
 type Cache struct {
 	mu       sync.RWMutex
 	byRegion map[string]Lease

@@ -70,14 +70,19 @@ func TestClientRejectsUntrustedCertByDefault(t *testing.T) {
 		URL:        wssURL(t, srv),
 		Room:       "test-room",
 		Agent:      "go-daemon-test",
-		BackoffMin: 5 * time.Millisecond,
-		BackoffMax: 20 * time.Millisecond,
+		// Backoff longer than the context below, so exactly one dial
+		// attempt happens and LastError is that attempt's error rather
+		// than whatever a retry raced the deadline to.
+		BackoffMin: 30 * time.Second,
+		BackoffMax: 30 * time.Second,
 		// No TLSCAFile, no TLSInsecureSkipVerify: the default must verify
 		// against the system pool, which does not trust httptest's
 		// self-signed leaf.
 	}, lc)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	// Generous: a slow runner that cancels mid-handshake reports an i/o
+	// timeout instead of the rejection we're asserting on.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	c.Run(ctx)
 
