@@ -8,17 +8,23 @@
 // or the endpoint not existing at all fall through to the same "no history
 // here yet" state. Never an empty box.
 //
-// Three switchable card layouts (press V while a card is open, cycling
-// graphic -> classic -> gutter, or load with ?bcVariant=classic|gutter):
-// "graphic" (default) draws ownership as one tug-of-war bar and history as
-// a dot timeline; "classic" is the earlier per-author-row + text-list
-// treatment, kept around so they can be compared side by side rather than
-// thrown away; "gutter" is real source lines from /api/git/source with a
-// per-line author gutter tinted from blame's &lines=1 shape — the closest
-// thing here to true line-by-line blame, falling back to the proportional
-// bar with no error when the server or the range doesn't support it (see
-// buildGutterRows). See STATE.md round-2-task-3 for which one the owner
-// picked, if they picked.
+// Four switchable card layouts (press V while a card is open, cycling
+// graphic -> classic -> gutter -> story, or load with
+// ?bcVariant=classic|gutter|story):
+// "graphic" (default for multi-author files) draws ownership as one
+// tug-of-war bar and history as a dot timeline; "classic" is the earlier
+// per-author-row + text-list treatment, kept around so they can be
+// compared side by side rather than thrown away; "gutter" is real source
+// lines from /api/git/source with a per-line author gutter tinted from
+// blame's &lines=1 shape — the closest thing here to true line-by-line
+// blame, falling back to the proportional bar with no error when the
+// server or the range doesn't support it (see buildGutterRows); "story"
+// replaces the bar with two or three prose sentences composed from real
+// stat/log/blame data (composeStory, history-viz.js) and is the default
+// for single-author files (see pickDefaultVariant) — a full-width bar
+// that just says "mohsensc 100%" conveys nothing a sentence doesn't say
+// faster, and post email-dedup that's most files in this repo. See
+// STATE.md round-2-task-3 for which one the owner picked, if they picked.
 //
 // Two more single-purpose treatments layer on top of whichever variant is
 // active: a file with exactly one author collapses the ownership section
@@ -29,7 +35,7 @@
 // bucket instead of rendering eight commits as one dot
 // (stackTimelinePositions, in history-viz.js).
 
-import { colorForAuthor, parseRelativeAge, stackTimelinePositions } from './history-viz.js'
+import { colorForAuthor, parseRelativeAge, stackTimelinePositions, formatAge, composeStory } from './history-viz.js'
 
 const CSS = `
 /* top:328px clears the #hud panel (office.html), which runs from 16px down
@@ -147,6 +153,13 @@ const CSS = `
   user-select:none}
 #bc .code-text{flex:none;padding-right:14px;color:#F0ECE6}
 #bc .gutter-legend{display:flex;flex-wrap:wrap;gap:4px 10px;margin:8px 0 0}
+
+/* --- story variant: prose instead of bars, for the single-author-file
+   common case where a bar would just be one solid color --- */
+#bc .story-line{margin:0 0 8px;font-size:12.5px;line-height:1.55;color:#35455C;
+  opacity:0;transform:translateY(3px);transition:opacity .35s ease,transform .35s ease}
+#bc .story-line.in{opacity:1;transform:translateY(0)}
+#bc .story-line:last-child{margin-bottom:0}
 `
 
 /** repo-relative path -> {blame, log} promise, so re-selecting the same agent
@@ -159,12 +172,17 @@ function fetchJSON(fetchFn, url) {
 }
 
 function loadFor(path, fetchFn) {
-  if (!path) return Promise.resolve({ blame: { ok: false }, log: { ok: false } })
+  if (!path) return Promise.resolve({ blame: { ok: false }, log: { ok: false }, stat: { ok: false } })
   if (cache.has(path)) return cache.get(path)
   const p = Promise.all([
     fetchJSON(fetchFn, `/api/git/blame?path=${encodeURIComponent(path)}`),
     fetchJSON(fetchFn, `/api/git/log?path=${encodeURIComponent(path)}&n=8`),
-  ]).then(([blame, log]) => ({ blame, log }))
+    // only the story variant reads this, but it's one small round trip and
+    // fetching it eagerly here means switching into story mid-session never
+    // has to wait — same reasoning as blame/log already being prefetched
+    // together for every variant
+    fetchJSON(fetchFn, `/api/git/stat?path=${encodeURIComponent(path)}`),
+  ]).then(([blame, log, stat]) => ({ blame, log, stat }))
   cache.set(path, p)
   return p
 }
@@ -248,15 +266,6 @@ export function regionGutterSegments(blame, agent) {
     pct: Math.max(Math.round(o.share * 100), blame.owners.length > 1 ? 1.5 : Math.round(o.share * 100)),
     self: agent ? isSelf(agent, o.author) : false,
   }))
-}
-
-function formatAge(days) {
-  if (days == null) return null
-  if (days <= 0) return 'today'
-  if (days === 1) return '1 day'
-  if (days < 30) return `${days} days`
-  if (days < 365) return `${Math.round(days / 30)} months`
-  return `${Math.round(days / 365)} years`
 }
 
 /** "these 14 lines: mostly mohsen (78%), newest 2 days ago" — the one-line
@@ -644,6 +653,27 @@ function renderHistoryClassic(host, log) {
   })
 }
 
+// ---------------------------------------------------------------------
+// story variant: prose composed from stat/log/blame (composeStory,
+// history-viz.js) instead of a bar. Special-cased in renderBody like
+// gutter — it needs the whole {blame, log, stat} triple, not just the
+// aggregate blame object the graphic/classic ownership fns take — so
+// .ownership below is unused, kept only so Object.keys(VARIANTS) still
+// drives the V cycle and picks up the right label.
+// ---------------------------------------------------------------------
+
+function renderStorySection(host, data) {
+  const { lines } = composeStory(data.stat, data.log, data.blame)
+  host.innerHTML = ''
+  lines.forEach((line, i) => {
+    const p = document.createElement('p')
+    p.className = 'story-line'
+    p.textContent = line
+    host.appendChild(p)
+    setTimeout(() => p.classList.add('in'), 60 + i * 90)
+  })
+}
+
 const VARIANTS = {
   graphic: { ownership: renderOwnershipGraphic, history: renderHistoryGraphic, label: 'graphic' },
   classic: { ownership: renderOwnershipClassic, history: renderHistoryClassic, label: 'classic' },
@@ -652,14 +682,23 @@ const VARIANTS = {
   // the other two variants' ownership fns take) — .ownership here is
   // unused but kept so Object.keys(VARIANTS) still drives the V cycle.
   gutter: { ownership: null, history: renderHistoryClassic, label: 'gutter' },
+  story: { ownership: null, history: renderHistoryClassic, label: 'story' },
+}
+
+/** Whether a file's deduped blame owner count means the ownership bar
+ *  would just be one solid color — the case story exists for. Exported so
+ *  the single-owner auto-pick logic and its tests share one definition
+ *  of "dead bar" with isSingleOwner instead of restating the check. */
+export function pickDefaultVariant(blame) {
+  return isSingleOwner(blame) ? 'story' : 'graphic'
 }
 
 function initialVariant() {
   try {
     const q = new URLSearchParams(location.search).get('bcVariant')
-    if (q && VARIANTS[q]) return q
+    if (q && VARIANTS[q]) return { variant: q, explicit: true }
   } catch { /* no location in a non-browser test context */ }
-  return 'graphic'
+  return { variant: 'graphic', explicit: false }
 }
 
 /**
@@ -689,7 +728,13 @@ export function attachBlameCard(cfg = {}) {
   el.querySelector('.close').addEventListener('click', () => cfg.onClose?.())
 
   let reqId = 0
-  let variant = initialVariant()
+  const initVariant = initialVariant()
+  let variant = initVariant.variant
+  // once true (an explicit ?bcVariant=, a V press, or the button click),
+  // the single-owner auto-pick in show() below leaves `variant` alone —
+  // the owner's own choice always wins over "this file happens to be
+  // single-author"
+  let variantPinned = initVariant.explicit
   let current = null // { agent, data } — so a variant switch can re-render without refetching
 
   function renderBody() {
@@ -699,7 +744,8 @@ export function attachBlameCard(cfg = {}) {
     body.innerHTML = ''
 
     const isGutter = variant === 'gutter'
-    const showRegion = !isGutter && current.hasRegion && current.regionMode
+    const isStory = variant === 'story'
+    const showRegion = !isGutter && !isStory && current.hasRegion && current.regionMode
     const showRange = isGutter ? !!current.range : showRegion
     el.querySelector('#bcPath').textContent = showRange
       ? `${agent.gitPath} : lines ${current.range.start}–${current.range.end}`
@@ -709,19 +755,21 @@ export function attachBlameCard(cfg = {}) {
     // the region/whole-file toggle only makes sense outside gutter mode —
     // gutter always shows whatever range the agent holds (or a fallback
     // note explaining why it can't)
-    const toggleBtn = (current.hasRegion && !isGutter)
+    const toggleBtn = (current.hasRegion && !isGutter && !isStory)
       ? `<button class="variant-btn" id="bcRegionBtn" title="press R to switch between region and whole file">${showRegion ? 'this region' : 'whole file'}</button>`
       : ''
     ownH3.innerHTML = `<span>whose lines these are</span>` +
       toggleBtn +
       `<button class="variant-btn" id="bcVariantBtn" title="press V to switch view">${VARIANTS[variant].label}</button>`
-    if (current.hasRegion && !isGutter) ownH3.querySelector('#bcRegionBtn').addEventListener('click', () => toggleRegion())
+    if (current.hasRegion && !isGutter && !isStory) ownH3.querySelector('#bcRegionBtn').addEventListener('click', () => toggleRegion())
     ownH3.querySelector('#bcVariantBtn').addEventListener('click', () => cycleVariant())
     body.appendChild(ownH3)
     const ownBody = document.createElement('div')
     body.appendChild(ownBody)
     if (isGutter) {
       renderGutterSection(ownBody, current, agent)
+    } else if (isStory) {
+      renderStorySection(ownBody, data)
     } else if (showRegion) {
       renderRegionStrip(ownBody, current.regionData, agent, current.range)
     } else if (variant === 'graphic' && isSingleOwner(data.blame)) {
@@ -737,19 +785,21 @@ export function attachBlameCard(cfg = {}) {
     body.appendChild(histBody)
     // single-owner reclaims the vertical space the collapsed sentence
     // freed up by using the classic commit list instead of the dot
-    // timeline; gutter is code-focused throughout so it gets the list too
-    const useListHistory = isGutter || (variant === 'graphic' && isSingleOwner(data.blame))
+    // timeline; gutter and story are both code/text-focused throughout so
+    // they get the list too
+    const useListHistory = isGutter || isStory || (variant === 'graphic' && isSingleOwner(data.blame))
     ;(useListHistory ? renderHistoryClassic : VARIANTS[variant].history)(histBody, data.log)
   }
 
   function cycleVariant() {
     const names = Object.keys(VARIANTS)
     variant = names[(names.indexOf(variant) + 1) % names.length]
+    variantPinned = true
     renderBody()
   }
 
   function toggleRegion() {
-    if (!current || !current.hasRegion || variant === 'gutter') return
+    if (!current || !current.hasRegion || variant === 'gutter' || variant === 'story') return
     current.regionMode = !current.regionMode
     renderBody()
   }
@@ -785,6 +835,13 @@ export function attachBlameCard(cfg = {}) {
       wantsRegion ? loadGutter(path, agent.gitStart, agent.gitEnd, fetchFn) : Promise.resolve(null),
     ]).then(([data, regionBlame, gutter]) => {
       if (myReq !== reqId) return   // a later select() beat this fetch home
+      // single-owner auto-pick: unless the owner has already made an
+      // explicit choice this session (?bcVariant=, a V press, or the
+      // button), a single-author file opens on story instead of graphic —
+      // see pickDefaultVariant's comment for why. Explicit choices always
+      // win, and this only ever moves *toward* story, never away from a
+      // variant the owner picked on purpose.
+      if (!variantPinned) variant = pickDefaultVariant(data.blame)
       const hasRegion = wantsRegion && regionBlameUsable(regionBlame)
       const gutterRows = gutter
         ? buildGutterRows(gutter.source, gutter.lineBlame, { startLine: agent.gitStart })
@@ -807,5 +864,5 @@ export function attachBlameCard(cfg = {}) {
     current = null
   }
 
-  return { show, hide, setVariant: (v) => { if (VARIANTS[v]) { variant = v; renderBody() } }, el }
+  return { show, hide, setVariant: (v) => { if (VARIANTS[v]) { variant = v; variantPinned = true; renderBody() } }, el }
 }

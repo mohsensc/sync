@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { ownershipShare } from '../src/office/interact.js'
-import { isSingleOwner, singleOwnerSummary } from '../src/office/blamecard.js'
+import { isSingleOwner, singleOwnerSummary, pickDefaultVariant } from '../src/office/blamecard.js'
 
 const blame = (owners: { author: string; lines: number; share: number }[]) =>
   ({ ok: true, total: owners.reduce((s, o) => s + o.lines, 0), owners })
@@ -84,5 +84,31 @@ describe('singleOwnerSummary', () => {
       { author: 'a', lines: 1, share: 0.5 }, { author: 'b', lines: 1, share: 0.5 },
     ]))).toBeNull()
     expect(singleOwnerSummary({ ok: false })).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------
+// pickDefaultVariant — the single-owner auto-pick that opens the blame
+// card on 'story' instead of a dead one-color 'graphic' bar. Shares its
+// definition of "dead bar" with isSingleOwner on purpose; this just
+// checks the mapping, not the ownership logic itself (already covered
+// above).
+// ---------------------------------------------------------------------
+
+describe('pickDefaultVariant', () => {
+  it('picks story for a single-author file', () => {
+    expect(pickDefaultVariant(blame([{ author: 'mohsensc', lines: 40, share: 1 }]))).toBe('story')
+  })
+
+  it('picks graphic for a multi-author file', () => {
+    expect(pickDefaultVariant(blame([
+      { author: 'mohsensc', lines: 10, share: 0.5 },
+      { author: 'agentai', lines: 10, share: 0.5 },
+    ]))).toBe('graphic')
+  })
+
+  it('picks graphic when there is no usable blame at all', () => {
+    expect(pickDefaultVariant(null)).toBe('graphic')
+    expect(pickDefaultVariant({ ok: false })).toBe('graphic')
   })
 })

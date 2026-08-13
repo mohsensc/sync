@@ -62,6 +62,8 @@ export function regionSummary(blame: BlameResult | null | undefined): RegionSumm
 
 export function isSingleOwner(blame: BlameResult | null | undefined): boolean
 
+export function pickDefaultVariant(blame: BlameResult | null | undefined): 'story' | 'graphic'
+
 export interface SingleOwnerSummary {
   author: string
   total: number
