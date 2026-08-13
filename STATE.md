@@ -453,3 +453,114 @@ rung-2 and a rung-3 reel row a few times each to see the beat cycle, and
 check contrast of the split card's white-on-navy text against the actual
 3D scene behind it (same class of check task 3 did for the glass reel
 skin).
+
+## round 6 task 2 — dominance-beat variants: waveoff and slap
+
+Built the other two "out-authoritied" beats the brief named alongside
+shove: `clips/waveoff.js` (no contact at all — a slow, barely-turned
+back-of-hand wave, loser deflates and shuffles back a step) and
+`clips/slap.js` (cartoon slap — big telegraphed wind-up, a fast swing to
+contact, loser's head whips and staggers, ends with a hand slowly
+drifting up to the struck cheek). Same shape as shove.js throughout:
+marks function + asymmetric clip pair, `a` always the winner. Harnesses
+`clips/waveoff-test.html` / `clips/slap-test.html`, cloned from
+shove-test.html (both use absolute `/glb/character.glb`, so neither
+needed the relative-path fix task 1 flagged for the yield/doubletake
+harnesses — that bug is specific to office.html, not these).
+
+Wired into the rig, all append-only: `World.waveoff(a,b)` /
+`World.slap(a,b)` directly below `World.shove` in `agent.js`, same
+`(a,b)` signature and a-wins convention, `typeof`-guardable by task 4's
+dispatch. Added `waveoff`/`slap` to `STAGE_MARKS` (the table at ~line
+495 the brief pointed at) and to `ACTS`/`ACT_OF_CLIP`/`DOING` (the real
+`const ACTS = {}` table, not literally at the brief's ~529 — that line
+landed inside `STAGE_MARKS` in this tree's actual layout, so "ACTS
+table" was read by identity, not line number). Also had to touch two
+more spots in the shared `#step()` method that neither task's brief
+named explicitly but that shove/chestbump/fistbump already extend for
+the exact same reason: the settle-phase act-dispatch `if/else` chain and
+`CLIP_OF_KIND`'s end-detection map. Skipping either would leave
+`World.waveoff`/`World.slap` encounters stuck `busy` forever — not
+optional plumbing, just unnamed in the brief. Task 1 (chestbump/fistbump)
+hit the identical situation and made the identical kind of edit; no
+conflict, `git pull --rebase` merged clean since we landed in different
+branches of the same if/else and different keys of the same object.
+
+**Real bug found and fixed via the browser, not by inspection:**
+`waveoff.js`'s `milestone()` helper destructured `{ rightArm: ra, leftArm:
+la }` but every call site in the same file passed `{ ra, la }` — a
+plain key-name mismatch. Every arm pose in the file was silently a
+no-op; the clip would have shipped with the winner's arms hanging at
+rest through the entire "wave" for both the wave and the deflate-react
+sides' arm reads (torso/hips fields were passed under their real names
+and DID work, which is why the deflate/shuffle geometry tests I wrote
+first all passed — nothing exercised the arm fields). Only caught it
+because the round's own instructions insist on looking at a screenshot
+of the harness rather than trusting the pose math; the "held on the
+peak-wave frame" shot showed a dead arm at rest, which is not what the
+authored SWEEP milestone looks like on paper. One-line fix
+(`{ ra, la }` in the destructure), reloaded, re-screenshotted, confirmed
+the arm actually sweeps out now.
+
+**Slap contact tuned in-browser, twice.** First pass authored CONTACT/
+FOLLOW poses by eye against shove.js's own THRUST numbers as a
+reference, loaded slap-test.html, and the palm landed ~44cm from the
+loser's head — nowhere near a hit. Rather than eyeball-adjust blind, did
+a small in-page grid search (`evaluate_script`, reusing the running
+scene's actual positioned pair, applying candidate poses via
+`ANIM.applyPose` and measuring `palmPoint(...).distanceTo(headBone)`
+directly) over lean/twist/hips-forward-lunge/shoulder/elbow — landed a
+combination under 4cm. Baked those numbers into `CONTACT_Y_CM`/
+`CONTACT_Z_CM`, which changed `SLAP_SPACING`, which moved the pair
+further apart and undid the fit (44cm -> then a first attempt still only
+got to ~24cm). Root cause turned out to be a second, separate problem:
+`SLAP_KEYS=60` didn't happen to land a sample exactly on
+`SLAP_CONTACT_T=0.50` (`(60-1)*0.5=29.5`, not an integer), so
+`holdContact()`'s mixer-driven playback was interpolating between a
+mostly-wound-up sample and the true contact sample and landing short —
+the exact "mushes" failure mode `office-clips-geometry.test.ts` already
+has a named rule for on doubletake's snap, just not one this file had
+guarded against. Fixed by bumping to 81 keys (`(81-1)*0.5=40`, exact).
+Re-verified in the harness after each change, not just re-derived on
+paper: final palm-to-head at rest spacing is 9.4cm, screenshotted at the
+held contact frame from a rotated camera angle (not just the default
+back-of-both-heads preset every one of these harnesses ships with) —
+the palm is visibly on the loser's cheek, not just numerically close.
+
+**Browser verification, what was actually looked at (not just
+triggered):** both harnesses loaded clean, zero console errors beyond
+the pre-existing favicon 404 (harmless, unrelated). For slap: screenshot
+of the windup-hold anticipation pose (arm cocked out to the side,
+elbow bent, held), a rotated-camera contact-frame screenshot with the
+palm visibly touching the cheek (9.4cm, matches the harness's own `ok`
+threshold), and a post-contact follow-through frame showing the loser's
+head turned from the whip. For waveoff: the pre-fix broken screenshot
+(dead arm) and the post-fix screenshot (arm swept out, loser's head
+already down) from a rotated angle, plus the clip's final frame (both
+settled — winner's arm dropped back near rest, loser fully deflated).
+Did not screenshot every intermediate segment boundary (GLANCE, RETURN,
+STAGGER, DAZED) individually — timing/shape of those is covered by the
+vitest geometry file's "holds still then moves" assertions instead,
+consistent with how round 4 covered yield/doubletake's timing.
+
+Shared browser lock: acquired after an ~12 minute wait behind
+`featA-round4-reviewer` (the other feature's worktree had a stale vite
+process still bound to 5173 from an earlier session — killed it per the
+lock protocol before starting my own). Killed the server and released
+the lock when done; did not leave it running.
+
+Files owned this task: `clips/waveoff.js`, `clips/slap.js`, both
+`.d.ts` (needed — `tsconfig.json`'s `allowJs` surface doesn't cover
+`office/*.js`, same reason `yield.d.ts`/`doubletake.d.ts` exist; the
+first typecheck run failed without them), both harnesses, `agent.js`'s
+import block + the four append-only regions above. New test file
+`web/test/office-clips-dominance-variants.test.ts` (20 tests, geometry +
+timing/sequencing checks mirroring `office-clips-geometry.test.ts`'s own
+shape). All 189 tests pass, `pnpm typecheck` clean. Pushed in three
+commits: clips+harnesses+tests, the browser-driven pose/timing fixes,
+the agent.js wiring.
+
+Nothing filed as a GitHub issue this task — no edge case hit that was
+expensive enough to defer; the two real problems found (the arm-pose
+typo, the keyframe-straddling contact) were both fixed in-round since
+they were caught early enough (before commit) to be cheap.
