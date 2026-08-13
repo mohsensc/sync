@@ -18,3 +18,16 @@ export function stackTimelinePositions(
   maxDays: number | null | undefined,
   slop?: number
 ): TimelineSlot[]
+
+export function formatAge(days: number | null | undefined): string | null
+
+export interface StoryResult {
+  lines: string[]
+  commits: unknown[]
+}
+
+export function composeStory(
+  stat: { ok?: boolean; commits?: number; lastAuthor?: string; lastAgeDays?: number | null; firstAgeDays?: number | null } | null | undefined,
+  log: { ok?: boolean; entries?: Array<{ sha?: string; author?: string; when?: string; subject?: string }> } | null | undefined,
+  blame: { ok?: boolean; owners?: Array<{ author?: string; share?: number }> } | null | undefined
+): StoryResult
