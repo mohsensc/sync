@@ -40,6 +40,10 @@ import { handshakeMarks, spacingFor as handshakeSpacingFor, registry as HANDSHAK
 import { shoveMarks, spacingFor as shoveSpacingFor, registry as SHOVE_CLIPS } from './clips/shove.js'
 import { yieldMarks, spacingFor as yieldSpacingFor, registry as YIELD_CLIPS } from './clips/yield.js'
 import { doubletakeMarks, spacingFor as doubletakeSpacingFor, registry as DOUBLETAKE_CLIPS } from './clips/doubletake.js'
+// Rung-2 "collaboration" beat family — alternates to highfive. See
+// clips/chestbump.js / clips/fistbump.js headers.
+import { chestbumpMarks, spacingFor as chestbumpSpacingFor, registry as CHESTBUMP_CLIPS } from './clips/chestbump.js'
+import { fistbumpMarks, spacingFor as fistbumpSpacingFor, registry as FISTBUMP_CLIPS } from './clips/fistbump.js'
 
 // Fold the paired-action clips into anim.js's own table, once, at import
 // time — before any agent has crossfaded into anything and cached the clip
@@ -49,6 +53,8 @@ Object.assign(ANIM.CLIPS, HANDSHAKE_CLIPS)
 Object.assign(ANIM.CLIPS, SHOVE_CLIPS)
 Object.assign(ANIM.CLIPS, YIELD_CLIPS)
 Object.assign(ANIM.CLIPS, DOUBLETAKE_CLIPS)
+Object.assign(ANIM.CLIPS, CHESTBUMP_CLIPS)
+Object.assign(ANIM.CLIPS, FISTBUMP_CLIPS)
 
 export const YAW_OFFSET = Math.PI
 
@@ -103,6 +109,11 @@ const ACTS = {
   // Rung 4: redundant work caught by similarity — same beat both sides,
   // mirrored. clips/doubletake.js.
   doubletaking: { clip: 'doubletake', fade: 0.16, oneShot: true, next: 'idle' },
+  // Rung 2 collaboration beat family, alternates to highfiving above: both
+  // sides play the same clip, same "facing each other is the mirror" trick.
+  // clips/chestbump.js (bigger, weightier) / clips/fistbump.js (understated).
+  chestbumping: { clip: 'chestbump', fade: 0.20, oneShot: true, next: 'idle' },
+  fistbumping:  { clip: 'fistbump',  fade: 0.16, oneShot: true, next: 'idle' },
 }
 export const ACTIVITIES = Object.keys(ACTS)
 
@@ -115,6 +126,7 @@ const ACT_OF_CLIP = {
   highfive: 'highfiving', argue: 'arguing', argueReact: 'reacting',
   handshake: 'handshaking', shove: 'shoving', shoveReact: 'shoveReacting',
   yieldStep: 'yielding', yieldKeep: 'keeping', doubletake: 'doubletaking',
+  chestbump: 'chestbumping', fistbump: 'fistbumping',
 }
 
 const DOING = {
@@ -495,6 +507,8 @@ const STAGE_MARKS = {
   highfive:   (pa, pb, h) => highfiveMarks(pa, pb, spacingFor(h)),
   yield:      (pa, pb, h) => yieldMarks(pa, pb, yieldSpacingFor(h)),
   doubletake: (pa, pb, h) => doubletakeMarks(pa, pb, doubletakeSpacingFor(h)),
+  chestbump:  (pa, pb, h) => chestbumpMarks(pa, pb, chestbumpSpacingFor(h)),
+  fistbump:   (pa, pb, h) => fistbumpMarks(pa, pb, fistbumpSpacingFor(h)),
 }
 
 /**
@@ -624,6 +638,55 @@ export class World {
     b.goTo(bx, bz, { yaw: yawToward(bx, bz, ax, az), label: 'meeting ' + a.name })
 
     const e = { a, b, kind: 'highfive', phase: 'approach', t: 0, marks: { a:[ax, az], b:[bx, bz] } }
+    this.encounters.push(e)
+    return e
+  }
+
+  /**
+   * Rung-2 collaboration beat, alternate take to highfive() — same contract,
+   * same (a, b) signature, same "both play the SAME clip, facing each other
+   * is already the mirror" trick. See clips/chestbump.js.
+   */
+  chestbump(a, b) {
+    if (!a || !b || a === b || a.busy || b.busy) return null
+    const height = (a.height + b.height) / 2
+    const marks = chestbumpMarks(
+      new THREE.Vector3(a.pos.x, 0, a.pos.z),
+      new THREE.Vector3(b.pos.x, 0, b.pos.z),
+      chestbumpSpacingFor(height))
+    const ax = marks.a.pos.x, az = marks.a.pos.z
+    const bx = marks.b.pos.x, bz = marks.b.pos.z
+
+    a.busy = b.busy = true
+    a.lastGreet = b.lastGreet = this.time
+    a.goTo(ax, az, { yaw: yawToward(ax, az, bx, bz), label: 'meeting ' + b.name })
+    b.goTo(bx, bz, { yaw: yawToward(bx, bz, ax, az), label: 'meeting ' + a.name })
+
+    const e = { a, b, kind: 'chestbump', phase: 'approach', t: 0, marks: { a:[ax, az], b:[bx, bz] } }
+    this.encounters.push(e)
+    return e
+  }
+
+  /**
+   * Rung-2 collaboration beat, understated alternate to highfive()/
+   * chestbump(). Same contract. See clips/fistbump.js.
+   */
+  fistbump(a, b) {
+    if (!a || !b || a === b || a.busy || b.busy) return null
+    const height = (a.height + b.height) / 2
+    const marks = fistbumpMarks(
+      new THREE.Vector3(a.pos.x, 0, a.pos.z),
+      new THREE.Vector3(b.pos.x, 0, b.pos.z),
+      fistbumpSpacingFor(height))
+    const ax = marks.a.pos.x, az = marks.a.pos.z
+    const bx = marks.b.pos.x, bz = marks.b.pos.z
+
+    a.busy = b.busy = true
+    a.lastGreet = b.lastGreet = this.time
+    a.goTo(ax, az, { yaw: yawToward(ax, az, bx, bz), label: 'meeting ' + b.name })
+    b.goTo(bx, bz, { yaw: yawToward(bx, bz, ax, az), label: 'meeting ' + a.name })
+
+    const e = { a, b, kind: 'fistbump', phase: 'approach', t: 0, marks: { a:[ax, az], b:[bx, bz] } }
     this.encounters.push(e)
     return e
   }
@@ -881,11 +944,14 @@ export class World {
           a.act('yielding')
           b.act('keeping')
         } else {
-          // highfive, handshake, doubletake: same frame, same fade, both
-          // from time zero, both the SAME clip — facing each other is
-          // already the mirror. That is the whole sync story; see
-          // highfive.js.
-          const sameClipAct = { handshake: 'handshaking', doubletake: 'doubletaking' }[e.kind] || 'highfiving'
+          // highfive, handshake, doubletake, chestbump, fistbump: same
+          // frame, same fade, both from time zero, both the SAME clip —
+          // facing each other is already the mirror. That is the whole
+          // sync story; see highfive.js.
+          const sameClipAct = {
+            handshake: 'handshaking', doubletake: 'doubletaking',
+            chestbump: 'chestbumping', fistbump: 'fistbumping',
+          }[e.kind] || 'highfiving'
           a.act(sameClipAct)
           b.act(sameClipAct)
         }
@@ -910,11 +976,12 @@ export class World {
       }
       // A contest has no clip-length end: it lasts until resolveContest()
       // says the region is free. Everything else (highfive, handshake,
-      // shove, yield, doubletake) plays out once and ends on its own
-      // clip's length.
+      // shove, yield, doubletake, chestbump, fistbump) plays out once and
+      // ends on its own clip's length.
       const CLIP_OF_KIND = {
         highfive: 'highfive', handshake: 'handshake', shove: 'shove',
         yield: 'yieldStep', doubletake: 'doubletake',
+        chestbump: 'chestbump', fistbump: 'fistbump',
       }
       const clipName = CLIP_OF_KIND[e.kind]
       if (clipName && e.t >= ANIM.getClip(clipName).duration + 0.2) {
