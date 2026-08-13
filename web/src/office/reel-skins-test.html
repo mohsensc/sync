@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Reel skins — paper / glass / ticker</title>
+<style>
+  /* Base page chrome — deliberately not the 3D scene, just a plain surface
+     the three panels sit on, so glass's blur has something to differ from
+     the office.html scene by. A photo-ish gradient stands in for "the
+     scene behind it" so glass's backdrop-filter has texture to blur. */
+  html,body{margin:0;min-height:100%;overflow-x:hidden;
+    font:14px/1.5 ui-sans-serif,-apple-system,Segoe UI,sans-serif;color:#35455C;
+    background:
+      radial-gradient(circle at 15% 20%, #E8946C55, transparent 40%),
+      radial-gradient(circle at 80% 10%, #A5738C55, transparent 45%),
+      radial-gradient(circle at 60% 80%, #5C8C7455, transparent 40%),
+      #1B2430}
+  #note{max-width:960px;margin:0 auto;padding:22px 20px 6px;color:#F3F5F8}
+  #note h1{font-size:16px;margin:0 0 6px}
+  #note p{margin:0 0 8px;font-size:12.5px;color:#C7D0DC}
+  #note code{background:#0006;padding:1px 5px;border-radius:4px}
+  #grid{display:flex;gap:20px;align-items:flex-start;flex-wrap:wrap;
+    padding:14px 20px 40px;max-width:1040px;margin:0 auto}
+  .col{flex:0 0 308px;display:flex;flex-direction:column;gap:8px}
+  .col h2{margin:0;font-size:11px;letter-spacing:.06em;text-transform:uppercase;
+    color:#C7D0DC;font-family:ui-monospace,monospace}
+  .col p.about{margin:0;font-size:11px;color:#8FA0B5;line-height:1.4}
+
+  /* ---- copied verbatim from office.html's reel CSS block --------------
+     Keep this block byte-for-byte in sync with office.html's — this
+     harness exists specifically so the next round can see all three skins
+     without booting the 3D scene, so drift here is drift in what gets
+     reviewed. See STATE.md for the "known duplication" note. */
+  .reel{width:308px;max-height:70vh;
+    background:#fffdfaee;border:1px solid #C3B39B;border-radius:10px;
+    box-shadow:0 6px 24px #4a1f3d18;display:flex;flex-direction:column;
+    overflow:hidden}
+  .reel-head{display:flex;align-items:baseline;justify-content:space-between;
+    padding:11px 14px 0}
+  .reel-title{font-size:14px;font-weight:600;letter-spacing:-.01em;color:#35455C}
+  .reel-head-right{display:flex;align-items:center;gap:6px}
+  .reel-count{font:11px ui-monospace,monospace;color:#8a94a3}
+  .reel-skin-btn{font:600 10px ui-monospace,monospace;padding:3px 7px;border-radius:6px;
+    border:1px solid #C3B39B;background:#fff;color:#6b5f56;cursor:pointer;
+    text-transform:uppercase;letter-spacing:.02em}
+  .reel-skin-btn:hover{background:#E9E0CE}
+  .reel-filters{display:flex;align-items:center;gap:6px;padding:8px 14px 10px;
+    border-bottom:1px solid #E9E0CE;flex-wrap:wrap}
+  .reel-chips{display:flex;gap:4px;flex-wrap:wrap}
+  .reel-chip{font:600 10px ui-monospace,monospace;padding:3px 7px;border-radius:999px;
+    border:1px solid #C3B39B;background:#fff;color:#6b5f56;cursor:pointer;
+    text-transform:uppercase;letter-spacing:.02em}
+  .reel-chip:hover{background:#E9E0CE}
+  .reel-chip.on{background:#35455C;color:#F0ECE6;border-color:#35455C}
+  .reel-human{font:11px ui-sans-serif,sans-serif;color:#35455C;background:#fff;
+    border:1px solid #C3B39B;border-radius:6px;padding:3px 6px;margin-left:auto;
+    max-width:110px}
+  .reel-list{overflow-y:auto;overflow-x:hidden;max-height:52vh}
+  .reel-item{border-bottom:1px solid #F0ECE6}
+  .reel-item:last-child{border-bottom:0}
+  .reel-row{display:flex;align-items:flex-start;gap:8px;width:100%;
+    text-align:left;font:inherit;border:0;
+    background:none;cursor:pointer;padding:9px 14px}
+  .reel-row:hover{background:#F7F4EC}
+  .reel-row-open{background:#F7F2E7}
+  .reel-row-open:hover{background:#F7F2E7}
+  .reel-row:focus-visible,.reel-chip:focus-visible,.reel-human:focus-visible,
+  .reel-replay-btn:focus-visible,.reel-more:focus-visible{
+    outline:2px solid #35455C;outline-offset:-2px;border-radius:4px}
+  .reel-badge{flex:0 0 auto;font:700 10px ui-monospace,monospace;padding:2px 6px;
+    border-radius:5px;margin-top:1px}
+  .reel-body{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:2px}
+  .reel-line1{display:flex;align-items:center;gap:5px;font-size:12px;color:#35455C;
+    flex-wrap:wrap}
+  .reel-who{font-weight:600}
+  .reel-vs{color:#8a94a3;font-size:10px}
+  .reel-src{font:600 9px ui-monospace,monospace;padding:1px 5px;border-radius:4px;
+    text-transform:uppercase;letter-spacing:.03em}
+  .reel-src-live{background:#DCEFE3;color:#2E7D50}
+  .reel-src-gen{background:#EEF0F3;color:#6b5f56}
+  .reel-line2{display:flex;align-items:center;gap:5px;font-size:11px;color:#6b5f56;
+    min-width:0}
+  .reel-path{font-family:ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;
+    white-space:nowrap;max-width:150px}
+  .reel-dot{opacity:.6}
+  .reel-res{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .reel-time{flex:0 0 auto;font:11px ui-monospace,monospace;color:#8a94a3;
+    margin-top:1px}
+  .reel-empty{padding:22px 14px;text-align:center;font-size:12px;color:#8a94a3}
+  .reel-foot{padding:7px 14px;font:11px ui-monospace,monospace;color:#6b5f56;
+    border-top:1px solid #E9E0CE}
+  .reel-foot b{color:#35455C}
+  .reel-row-new{animation:reel-arrive 1.6s ease-out}
+  @keyframes reel-arrive{0%{background:#DCEFE3}100%{background:transparent}}
+  .reel-row-playing{position:relative;background:#FBF2DE}
+  .reel-row-playing::before{content:'';position:absolute;left:0;top:0;bottom:0;
+    width:3px;background:#D6B45C}
+  @media (prefers-reduced-motion: no-preference){
+    .reel-row-playing::before{animation:reel-pulse 1.1s ease-in-out infinite}
+  }
+  @keyframes reel-pulse{0%,100%{opacity:.55}50%{opacity:1}}
+  .reel-detail{padding:2px 14px 12px 38px;display:flex;flex-direction:column;gap:7px}
+  .reel-detail-row{display:flex;align-items:baseline;gap:8px;font-size:11px}
+  .reel-detail-label{flex:0 0 auto;width:48px;color:#8a94a3;
+    text-transform:uppercase;letter-spacing:.04em;font:700 9px ui-monospace,monospace}
+  .reel-detail-value{color:#35455C;word-break:break-word}
+  .reel-detail-path{font-family:ui-monospace,monospace}
+  .reel-detail-explain{margin:0;font-size:12px;line-height:1.4;color:#6b5f56;
+    padding:8px 10px;background:#fff;border:1px solid #E9E0CE;border-radius:7px}
+  .reel-replay-btn{align-self:flex-start;margin-top:2px;font:700 11px ui-monospace,monospace;
+    padding:5px 12px;border-radius:999px;border:1px solid #35455C;
+    background:#35455C;color:#F0ECE6;cursor:pointer}
+  .reel-replay-btn:hover{background:#4A1F3D;border-color:#4A1F3D}
+  .reel-replay-btn:disabled{background:#C3B39B;border-color:#C3B39B;cursor:default}
+  .reel-more{display:block;width:100%;font:600 11px ui-monospace,monospace;
+    padding:9px 14px;border:0;border-top:1px solid #E9E0CE;background:#FAF7F0;
+    color:#6b5f56;cursor:pointer;text-align:center}
+  .reel-more:hover{background:#F0ECE6;color:#35455C}
+
+  .reel-badge[data-rung="0"]{color:#8A94A3;background:#EEF0F3}
+  .reel-badge[data-rung="1"]{color:#5C8C74;background:#EAF2ED}
+  .reel-badge[data-rung="2"]{color:#B98F2A;background:#FBF2DE}
+  .reel-badge[data-rung="3"]{color:#C0762A;background:#FBEBDA}
+  .reel-badge[data-rung="4"]{color:#B0403A;background:#F9E5E3}
+
+  .reel-skin-glass{background:rgba(20,26,36,.78);border-color:rgba(255,255,255,.14);
+    backdrop-filter:blur(16px) saturate(150%);-webkit-backdrop-filter:blur(16px) saturate(150%);
+    box-shadow:0 16px 44px rgba(0,0,0,.5)}
+  .reel-skin-glass .reel-title{color:#F3F5F8}
+  .reel-skin-glass .reel-count{color:rgba(243,245,248,.5)}
+  .reel-skin-glass .reel-skin-btn{background:rgba(255,255,255,.08);
+    border-color:rgba(255,255,255,.18);color:rgba(243,245,248,.75)}
+  .reel-skin-glass .reel-skin-btn:hover{background:rgba(255,255,255,.16)}
+  .reel-skin-glass .reel-filters{border-color:rgba(255,255,255,.12)}
+  .reel-skin-glass .reel-chip{background:rgba(255,255,255,.06);
+    border-color:rgba(255,255,255,.18);color:rgba(243,245,248,.72)}
+  .reel-skin-glass .reel-chip:hover{background:rgba(255,255,255,.13)}
+  .reel-skin-glass .reel-chip.on{background:rgba(243,245,248,.92);color:#141A24;
+    border-color:rgba(243,245,248,.92)}
+  .reel-skin-glass .reel-human{background:rgba(255,255,255,.06);
+    border-color:rgba(255,255,255,.18);color:#F3F5F8}
+  .reel-skin-glass .reel-item{border-color:rgba(255,255,255,.08)}
+  .reel-skin-glass .reel-row:hover{background:rgba(255,255,255,.05)}
+  .reel-skin-glass .reel-row-open,.reel-skin-glass .reel-row-open:hover{
+    background:rgba(255,255,255,.09)}
+  .reel-skin-glass .reel-who{color:#F3F5F8}
+  .reel-skin-glass .reel-vs{color:rgba(243,245,248,.4)}
+  .reel-skin-glass .reel-src-live{background:rgba(127,224,168,.16);color:#8FE3B2}
+  .reel-skin-glass .reel-src-gen{background:rgba(255,255,255,.08);color:rgba(243,245,248,.55)}
+  .reel-skin-glass .reel-path{color:rgba(243,245,248,.72)}
+  .reel-skin-glass .reel-dot{color:rgba(243,245,248,.3)}
+  .reel-skin-glass .reel-res{color:rgba(243,245,248,.6)}
+  .reel-skin-glass .reel-time{color:rgba(243,245,248,.4)}
+  .reel-skin-glass .reel-empty{color:rgba(243,245,248,.45)}
+  .reel-skin-glass .reel-foot{border-color:rgba(255,255,255,.1);color:rgba(243,245,248,.5)}
+  .reel-skin-glass .reel-foot b{color:#F3F5F8}
+  .reel-skin-glass .reel-row-playing{background:rgba(214,180,92,.14)}
+  .reel-skin-glass .reel-row-playing::before{background:#E4BD5C}
+  .reel-skin-glass .reel-row-new{animation:reel-arrive-glass 1.6s ease-out}
+  @keyframes reel-arrive-glass{0%{background:rgba(127,224,168,.22)}100%{background:transparent}}
+  .reel-skin-glass .reel-detail-explain{background:rgba(255,255,255,.05);
+    border-color:rgba(255,255,255,.12);color:rgba(243,245,248,.72)}
+  .reel-skin-glass .reel-detail-label{color:rgba(243,245,248,.4)}
+  .reel-skin-glass .reel-detail-value{color:#F3F5F8}
+  .reel-skin-glass .reel-replay-btn{background:#F3F5F8;color:#141A24;border-color:#F3F5F8}
+  .reel-skin-glass .reel-replay-btn:hover{background:#DCE6F0}
+  .reel-skin-glass .reel-replay-btn:disabled{background:rgba(255,255,255,.18);
+    color:rgba(20,26,36,.6);border-color:rgba(255,255,255,.18)}
+  .reel-skin-glass .reel-more{background:rgba(255,255,255,.03);
+    border-color:rgba(255,255,255,.1);color:rgba(243,245,248,.5)}
+  .reel-skin-glass .reel-more:hover{background:rgba(255,255,255,.08);color:#F3F5F8}
+  .reel-skin-glass .reel-badge[data-rung="0"]{color:#B7C2D1;background:rgba(255,255,255,.08)}
+  .reel-skin-glass .reel-badge[data-rung="1"]{color:#7FE0A8;background:rgba(127,224,168,.14)}
+  .reel-skin-glass .reel-badge[data-rung="2"]{color:#F0C55C;background:rgba(240,197,92,.16)}
+  .reel-skin-glass .reel-badge[data-rung="3"]{color:#F3934D;background:rgba(243,147,77,.16)}
+  .reel-skin-glass .reel-badge[data-rung="4"]{color:#F1685E;background:rgba(241,104,94,.16)}
+
+  .reel-skin-ticker{background:#0A0E13;border:1px solid #1B2430;border-radius:4px;
+    box-shadow:none;font-family:ui-monospace,monospace}
+  .reel-skin-ticker .reel-head{border-bottom:1px solid #1B2430;padding:7px 10px 6px}
+  .reel-skin-ticker .reel-title{font-size:11px;letter-spacing:.08em;
+    text-transform:uppercase;color:#7FE0A8}
+  .reel-skin-ticker .reel-count{color:#4B5A6B}
+  .reel-skin-ticker .reel-skin-btn{background:#111820;border-color:#26313F;
+    color:#8291A3;border-radius:3px}
+  .reel-skin-ticker .reel-skin-btn:hover{background:#1B2430}
+  .reel-skin-ticker .reel-filters{padding:5px 10px;border-color:#1B2430}
+  .reel-skin-ticker .reel-chip{font-size:9px;padding:2px 5px;border-radius:3px;
+    border-color:#26313F;background:#111820;color:#8291A3}
+  .reel-skin-ticker .reel-chip:hover{background:#1B2430}
+  .reel-skin-ticker .reel-chip.on{background:#1B2430;color:#DCE6F0;border-color:#3A4B5E}
+  .reel-skin-ticker .reel-human{background:#111820;border-color:#26313F;
+    color:#DCE6F0;border-radius:3px}
+  .reel-skin-ticker .reel-item{border-color:#131A22}
+  .reel-skin-ticker .reel-row{padding:3px 10px;gap:7px;font-size:11px;align-items:baseline}
+  .reel-skin-ticker .reel-row:hover{background:#101720}
+  .reel-skin-ticker .reel-row-open,.reel-skin-ticker .reel-row-open:hover{background:#121B26}
+  .reel-skin-ticker .reel-badge{font-size:9px;padding:1px 4px;border-radius:3px;margin-top:0}
+  .reel-skin-ticker .reel-body{flex-direction:row;align-items:baseline;gap:6px;
+    min-width:0;overflow:hidden}
+  .reel-skin-ticker .reel-line1,.reel-skin-ticker .reel-line2{display:contents}
+  .reel-skin-ticker .reel-who{color:#DCE6F0;font-size:11px}
+  .reel-skin-ticker .reel-vs{color:#425063}
+  .reel-skin-ticker .reel-src{display:none}
+  .reel-skin-ticker .reel-path{color:#7FE0A8;max-width:120px}
+  .reel-skin-ticker .reel-dot{color:#2F3B48}
+  .reel-skin-ticker .reel-res{color:#8291A3}
+  .reel-skin-ticker .reel-time{color:#425063;font-size:10px}
+  .reel-skin-ticker .reel-empty{color:#425063}
+  .reel-skin-ticker .reel-foot{border-color:#1B2430;color:#5A6B7D}
+  .reel-skin-ticker .reel-row-playing{background:#1B2A1E}
+  .reel-skin-ticker .reel-row-playing::before{background:#7FE0A8}
+  .reel-skin-ticker .reel-row-new{animation:reel-arrive-ticker 1.6s ease-out}
+  @keyframes reel-arrive-ticker{0%{background:#12301F}100%{background:transparent}}
+  .reel-skin-ticker .reel-detail{padding:2px 10px 8px 32px}
+  .reel-skin-ticker .reel-detail-explain{background:#0F161D;border-color:#1B2430;
+    color:#8291A3;border-radius:4px}
+  .reel-skin-ticker .reel-detail-label{color:#425063}
+  .reel-skin-ticker .reel-detail-value{color:#DCE6F0}
+  .reel-skin-ticker .reel-replay-btn{background:#173B2A;border-color:#2B6B4A;
+    color:#7FE0A8;border-radius:3px}
+  .reel-skin-ticker .reel-replay-btn:hover{background:#1F4E38}
+  .reel-skin-ticker .reel-more{background:#0D1319;border-color:#1B2430;color:#5A6B7D}
+  .reel-skin-ticker .reel-more:hover{background:#101720;color:#8291A3}
+  .reel-skin-ticker .reel-badge[data-rung="0"]{color:#93A2B4;background:#151C24}
+  .reel-skin-ticker .reel-badge[data-rung="1"]{color:#66C990;background:#12251C}
+  .reel-skin-ticker .reel-badge[data-rung="2"]{color:#E4BD5C;background:#241D10}
+  .reel-skin-ticker .reel-badge[data-rung="3"]{color:#E08A4C;background:#26180E}
+  .reel-skin-ticker .reel-badge[data-rung="4"]{color:#E06860;background:#26120F}
+</style>
+</head>
+<body>
+<div id="note">
+  <h1>Reel skins</h1>
+  <p>Three mounts of the same <code>mountReel()</code> from <code>reel.js</code>,
+     same mock data (<code>SAMPLE_EVENTS</code> + <code>seedEvents()</code>), one
+     store per panel so each can carry its own open/filter state. Left panel
+     has a detail card open (<code>paper</code>, the default look). Middle
+     panel is a normal list (<code>glass</code>). Right panel is filtered down
+     to nothing, to check the empty state (<code>ticker</code>). Every panel's
+     own cycle button in its head still works — click it to see any skin
+     against any of the three states.</p>
+</div>
+<div id="grid">
+  <div class="col">
+    <h2>paper — default, detail card open</h2>
+    <p class="about">The original warm-card look. No skin CSS of its own —
+       it's everything above the "reel skins" section, unscoped.</p>
+    <div class="reel" id="p1"></div>
+  </div>
+  <div class="col">
+    <h2>glass — dark translucent, normal list</h2>
+    <p class="about">Sits over the 3D scene in office.html; this gradient
+       stands in for that so the blur has texture. Rung badges are the
+       only saturated color, everything else is white at varying opacity.</p>
+    <div class="reel" id="p2"></div>
+  </div>
+  <div class="col">
+    <h2>ticker — dense monospace log, empty filter</h2>
+    <p class="about">No card chrome, single-line rows, terminal feel.
+       Filtered to a human that matches nothing, to check the empty state
+       reads fine against a flat dark panel.</p>
+    <div class="reel" id="p3"></div>
+  </div>
+</div>
+
+<script type="module">
+import { ReelStore, SAMPLE_EVENTS, mountReel } from './reel.js'
+import { seedEvents } from './seed.js'
+
+const events = [...SAMPLE_EVENTS, ...seedEvents()]
+
+// Panel 1 — paper, with a detail card already open so the expanded state
+// is visible without a click.
+const s1 = new ReelStore(events)
+s1.toggleOpen(events[0].id)
+const r1 = mountReel(document.getElementById('p1'), s1, { skin: 'paper' })
+r1.setFoot('idle')
+
+// Panel 2 — glass, plain list.
+const s2 = new ReelStore(events)
+const r2 = mountReel(document.getElementById('p2'), s2, { skin: 'glass' })
+r2.setFoot('idle')
+
+// Panel 3 — ticker, filtered to a human nobody matches, to show the
+// empty state. setHumanFilter also resets the reveal cap, matching what a
+// real filter click does.
+const s3 = new ReelStore(events)
+s3.setHumanFilter('nobody-here')
+const r3 = mountReel(document.getElementById('p3'), s3, { skin: 'ticker' })
+r3.setFoot('idle')
+</script>
+</body>
+</html>
