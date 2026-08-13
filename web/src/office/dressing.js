@@ -363,10 +363,15 @@ export function deskHeat(parent, x, y, z) {
   glow.position.y = 0.012
   g.add(glow)
 
-  const wispGeo = new THREE.PlaneGeometry(0.045, 0.15)
+  // A thin box, not a flat plane: this scene's camera orbits a wide
+  // yaw/pitch range (office.html's YAW_MIN/MAX, top-down included), and a
+  // single-sided quad with a fixed facing goes edge-on invisible from
+  // some of those angles. Same reason agent.js's own paper stack is a
+  // BoxGeometry and not a card.
+  const wispGeo = new THREE.BoxGeometry(0.045, 0.15, 0.02)
   const wisps = [0, 1, 2].map(i => {
     const m = new THREE.MeshBasicMaterial({
-      color: HEAT_STEAM_COLOR, transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide,
+      color: HEAT_STEAM_COLOR, transparent: true, opacity: 0, depthWrite: false,
     })
     const mesh = new THREE.Mesh(wispGeo, m)
     mesh.userData.phase = i / 3
