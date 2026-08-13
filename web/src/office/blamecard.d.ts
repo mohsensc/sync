@@ -60,6 +60,45 @@ export interface RegionSummary {
 
 export function regionSummary(blame: BlameResult | null | undefined): RegionSummary | null
 
+export function isSingleOwner(blame: BlameResult | null | undefined): boolean
+
+export interface SingleOwnerSummary {
+  author: string
+  total: number
+  ageLabel: string | null
+}
+
+export function singleOwnerSummary(blame: BlameResult | null | undefined): SingleOwnerSummary | null
+
+export interface SourceResult {
+  ok: boolean
+  reason?: string
+  lines?: string[]
+}
+
+export interface LineBlameEntry {
+  n: number
+  author: string
+  ageDays: number | null
+}
+
+export interface LineBlameResult extends BlameResult {
+  lines?: LineBlameEntry[]
+}
+
+export interface GutterRow {
+  n: number
+  text: string
+  author: string | null
+  opacity: number
+}
+
+export function buildGutterRows(
+  sourceResp: SourceResult | null | undefined,
+  lineBlameResp: LineBlameResult | null | undefined,
+  opts?: { startLine?: number }
+): GutterRow[] | null
+
 export interface BlameCardHandle {
   show(agent: AgentLike | null | undefined): void
   hide(): void

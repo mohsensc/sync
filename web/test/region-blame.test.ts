@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { LiveDirector, regionFromMsg } from '../src/office/live.js'
 import {
-  hasUsableRegion, regionBlameUsable, regionGutterSegments, regionSummary,
+  hasUsableRegion, regionBlameUsable, regionGutterSegments, regionSummary, buildGutterRows,
 } from '../src/office/blamecard.js'
 
 // ---------------------------------------------------------------------
@@ -191,5 +191,84 @@ describe('regionSummary', () => {
   it('is null when there is nothing usable to summarise', () => {
     expect(regionSummary({ ok: false })).toBeNull()
     expect(regionSummary({ ok: true, total: 0, owners: [] })).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------
+// buildGutterRows — the "gutter" blame card variant's row model. Pairs
+// /api/git/source's plain text lines with blame's &lines=1 per-line
+// author/age, per the shared contract task 3 (gitapi.mjs) and task 4
+// (blamecard.js) both build against. Pure, so testable without either
+// endpoint actually existing yet.
+// ---------------------------------------------------------------------
+
+describe('buildGutterRows', () => {
+  const source = { ok: true, lines: ['const a = 1', 'const b = 2', 'return a + b'] }
+  const lineBlame = {
+    ok: true, total: 3,
+    owners: [{ author: 'mohsensc', lines: 2, share: 2 / 3 }, { author: 'agentai', lines: 1, share: 1 / 3 }],
+    lines: [
+      { n: 10, author: 'mohsensc', ageDays: 0 },
+      { n: 11, author: 'agentai', ageDays: 40 },
+      { n: 12, author: 'mohsensc', ageDays: 400 },
+    ],
+  }
+
+  it('pairs each source line with its blame entry by line number', () => {
+    const rows = buildGutterRows(source, lineBlame, { startLine: 10 })
+    expect(rows).toEqual([
+      { n: 10, text: 'const a = 1', author: 'mohsensc', opacity: expect.any(Number) },
+      { n: 11, text: 'const b = 2', author: 'agentai', opacity: expect.any(Number) },
+      { n: 12, text: 'return a + b', author: 'mohsensc', opacity: expect.any(Number) },
+    ])
+  })
+
+  it('fades older lines toward a lower opacity than fresher ones', () => {
+    const rows = buildGutterRows(source, lineBlame, { startLine: 10 })!
+    expect(rows[0].opacity).toBeGreaterThan(rows[1].opacity) // today vs 40d
+    expect(rows[1].opacity).toBeGreaterThan(rows[2].opacity) // 40d vs 400d
+    rows.forEach((r) => {
+      expect(r.opacity).toBeGreaterThanOrEqual(0.28)
+      expect(r.opacity).toBeLessThanOrEqual(1)
+    })
+  })
+
+  it('defaults startLine to 1 when not given', () => {
+    const rows = buildGutterRows(
+      { ok: true, lines: ['x'] },
+      { ok: true, total: 1, owners: [], lines: [{ n: 1, author: 'a', ageDays: 0 }] },
+    )!
+    expect(rows[0].n).toBe(1)
+  })
+
+  it('leaves a line with no matching blame entry authorless, not thrown out', () => {
+    const rows = buildGutterRows(
+      { ok: true, lines: ['a', 'b'] },
+      { ok: true, total: 1, owners: [], lines: [{ n: 1, author: 'x', ageDays: 0 }] },
+      { startLine: 1 },
+    )!
+    expect(rows).toHaveLength(2)
+    expect(rows[1].author).toBeNull()
+  })
+
+  it('is null when the source route is missing, failed, or malformed', () => {
+    expect(buildGutterRows(null, lineBlame)).toBeNull()
+    expect(buildGutterRows({ ok: false, reason: 'not a tracked path' }, lineBlame)).toBeNull()
+    expect(buildGutterRows({ ok: true }, lineBlame)).toBeNull() // no `lines` array
+    expect(buildGutterRows({ ok: true, lines: [] }, lineBlame)).toBeNull() // empty range
+  })
+
+  it('is null when the line-blame side is missing, failed, or predates &lines=1', () => {
+    expect(buildGutterRows(source, null)).toBeNull()
+    expect(buildGutterRows(source, { ok: false })).toBeNull()
+    // server understands the route but is running before task 3's &lines=1
+    // landed — same aggregate shape as always, just no `lines` field
+    expect(buildGutterRows(source, { ok: true, total: 3, owners: [] })).toBeNull()
+  })
+
+  it('is null for a range beyond the 150-line cap the server itself omits `lines` for', () => {
+    // gitapi.mjs's contract: >150 lines keeps the aggregate but drops
+    // `lines` entirely rather than sending a partial/truncated array
+    expect(buildGutterRows(source, { ok: true, total: 500, owners: [] })).toBeNull()
   })
 })

@@ -8,14 +8,28 @@
 // or the endpoint not existing at all fall through to the same "no history
 // here yet" state. Never an empty box.
 //
-// Two switchable card layouts (press V while a card is open, or load with
-// ?bcVariant=classic): "graphic" (default) draws ownership as one tug-of-war
-// bar and history as a dot timeline; "classic" is the earlier per-author-row
-// + text-list treatment, kept around so the two can be compared side by
-// side rather than thrown away. See STATE.md round-2-task-3 for which one
-// the owner picked, if they picked.
+// Three switchable card layouts (press V while a card is open, cycling
+// graphic -> classic -> gutter, or load with ?bcVariant=classic|gutter):
+// "graphic" (default) draws ownership as one tug-of-war bar and history as
+// a dot timeline; "classic" is the earlier per-author-row + text-list
+// treatment, kept around so they can be compared side by side rather than
+// thrown away; "gutter" is real source lines from /api/git/source with a
+// per-line author gutter tinted from blame's &lines=1 shape — the closest
+// thing here to true line-by-line blame, falling back to the proportional
+// bar with no error when the server or the range doesn't support it (see
+// buildGutterRows). See STATE.md round-2-task-3 for which one the owner
+// picked, if they picked.
+//
+// Two more single-purpose treatments layer on top of whichever variant is
+// active: a file with exactly one author collapses the ownership section
+// to one sentence instead of a bar that would just say "name 100%"
+// (isSingleOwner/renderOwnershipSingle — relevant once gitapi.mjs's email
+// dedup lands, since that turns most of this demo repo into single-owner
+// files); and the history timeline stacks same-age commits into a badged
+// bucket instead of rendering eight commits as one dot
+// (stackTimelinePositions, in history-viz.js).
 
-import { colorForAuthor, parseRelativeAge, ageToX } from './history-viz.js'
+import { colorForAuthor, parseRelativeAge, stackTimelinePositions } from './history-viz.js'
 
 const CSS = `
 /* top:328px clears the #hud panel (office.html), which runs from 16px down
@@ -52,13 +66,17 @@ const CSS = `
 #bc .pct{color:#8A94A3;font:11px ui-monospace,monospace}
 
 /* --- graphic variant: history timeline --- */
-#bc .timeline{position:relative;height:34px;margin:2px 4px 0}
-#bc .timeline-track{position:absolute;left:0;right:0;top:16px;height:2px;background:#E9E0CE}
+/* height/track-top carry headroom for stacked collisions: same-age commits
+   pile upward off the axis (see stackTimelinePositions) instead of
+   overlapping on one pixel, up to 6 deep before they start overlapping
+   again — good enough, a 7th same-day commit reads as "very busy" either way */
+#bc .timeline{position:relative;height:44px;margin:2px 4px 0}
+#bc .timeline-track{position:absolute;left:0;right:0;top:38px;height:2px;background:#E9E0CE}
 #bc .timeline-axis{display:flex;justify-content:space-between;font:9px ui-sans-serif,sans-serif;
   color:#8A94A3;margin:2px 2px 0}
-#bc .timeline-dot{position:absolute;top:8px;width:10px;height:10px;margin-left:-5px;
+#bc .timeline-dot{position:absolute;width:10px;height:10px;margin-left:-5px;
   border-radius:50%;border:2px solid #fffdfa;cursor:pointer;transform:scale(0);opacity:0;
-  transition:transform .4s cubic-bezier(.34,1.56,.64,1), opacity .3s ease;
+  transition:transform .4s cubic-bezier(.34,1.56,.64,1), opacity .3s ease, top .3s ease;
   box-shadow:0 1px 3px #4a1f3d33}
 #bc .timeline-dot.in{transform:scale(1);opacity:1}
 #bc .timeline-dot:hover,#bc .timeline-dot:focus{transform:scale(1.35)}
@@ -68,6 +86,10 @@ const CSS = `
 #bc .timeline-tip.on{opacity:1}
 #bc .timeline-tip b{display:block;font-size:11px}
 #bc .timeline-tip .who2{opacity:.75}
+/* the "×N" collision badge on the topmost dot of a stacked bucket */
+#bc .timeline-badge{position:absolute;top:-7px;right:-7px;background:#C0762A;color:#fffdfa;
+  font:9px/1 ui-sans-serif,sans-serif;font-weight:700;border-radius:8px;padding:2px 4px;
+  pointer-events:none;box-shadow:0 1px 2px #4a1f3d40}
 
 /* --- classic variant: stacked per-author rows + text list --- */
 #bc .bar-row{display:flex;align-items:center;gap:7px;margin:0 0 6px}
@@ -104,6 +126,27 @@ const CSS = `
 #bc .region-seg.self{box-shadow:inset 0 0 0 2px #fffdfa99}
 #bc .region-legend{display:flex;flex-wrap:wrap;gap:4px 10px;margin:8px 0 0}
 #bc .region-note{margin:8px 0 0;font-size:10px;color:#8A94A3;font-style:italic}
+
+/* --- single-owner collapse: one quiet sentence instead of a full-width
+   bar that would just say "mohsensc 100%" --- */
+#bc .solo-line{margin:0;font-size:12px;color:#35455C;display:flex;align-items:center;gap:6px}
+#bc .solo-line b{color:#C0762A}
+#bc .solo-line .swatch{width:9px;height:9px}
+
+/* --- gutter variant: real source lines with a per-line author/age gutter,
+   the closest this card gets to true line-by-line blame. Monospace,
+   horizontally scrollable in its own box so a long line never pushes the
+   whole panel wide. Text content only — real source is set via
+   textContent, never innerHTML. --- */
+#bc .code-gutter{border-radius:6px;background:#2B2320;overflow-x:auto;overflow-y:hidden;
+  box-shadow:inset 0 0 0 1px #C3B39B55}
+#bc .code-row{display:flex;align-items:stretch;white-space:pre;
+  font:11px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace}
+#bc .code-mark{flex:none;width:4px}
+#bc .code-n{flex:none;width:30px;text-align:right;padding-right:7px;color:#8A94A3;
+  user-select:none}
+#bc .code-text{flex:none;padding-right:14px;color:#F0ECE6}
+#bc .gutter-legend{display:flex;flex-wrap:wrap;gap:4px 10px;margin:8px 0 0}
 `
 
 /** repo-relative path -> {blame, log} promise, so re-selecting the same agent
@@ -137,6 +180,32 @@ function loadRegion(path, start, end, fetchFn) {
   if (regionCache.has(key)) return regionCache.get(key)
   const p = fetchJSON(fetchFn, `/api/git/blame?path=${encodeURIComponent(path)}&start=${start}&end=${end}`)
   regionCache.set(key, p)
+  return p
+}
+
+/** path + line range -> {source, lineBlame} promise, for the gutter
+ *  variant. Separate from regionCache: the region strip only ever needs
+ *  the aggregate blame shape, the gutter needs the source route too and
+ *  the `lines=1` per-line shape, so keeping them apart means asking for
+ *  one doesn't force a fetch neither view needs. */
+const gutterCache = new Map()
+
+// Contract cap from gitapi.mjs's /api/git/source and blame's &lines=1: a
+// range over 150 lines omits `lines` from blame, and source caps at 200.
+// Don't even round-trip for a range we know the server will trim — same
+// "no error, just degrade" rule as everything else in this file.
+const GUTTER_LINE_CAP = 150
+
+function loadGutter(path, start, end, fetchFn) {
+  if (!path || !Number.isFinite(start) || !Number.isFinite(end)) return Promise.resolve(null)
+  if (end - start > GUTTER_LINE_CAP) return Promise.resolve(null)
+  const key = `${path}#${start}-${end}`
+  if (gutterCache.has(key)) return gutterCache.get(key)
+  const p = Promise.all([
+    fetchJSON(fetchFn, `/api/git/source?path=${encodeURIComponent(path)}&start=${start}&end=${end}`),
+    fetchJSON(fetchFn, `/api/git/blame?path=${encodeURIComponent(path)}&start=${start}&end=${end}&lines=1`),
+  ]).then(([source, lineBlame]) => ({ source, lineBlame }))
+  gutterCache.set(key, p)
   return p
 }
 
@@ -206,6 +275,66 @@ export function regionSummary(blame) {
 }
 
 // ---------------------------------------------------------------------
+// single-owner rendering — the demo repo's actual shape post email-dedup
+// (see gitapi.mjs task 3): once mohsensc/Mohsen Sarrafan Chaharsoughi merge
+// into one identity, most files here are 100% one author. A full-width
+// gold bar and a one-row legend saying "mohsensc 100%" convey nothing —
+// collapse to a sentence instead and hand the freed vertical space to the
+// commit list.
+// ---------------------------------------------------------------------
+
+export function isSingleOwner(blame) {
+  return !!(blame && blame.ok && Array.isArray(blame.owners) && blame.owners.length === 1 && blame.total > 0)
+}
+
+/** "all mohsensc, 210 lines, newest today" — collapsed sentence data for
+ *  the single-owner case. null when there's more than one owner (or no
+ *  usable blame at all), same shape-of-nullness as regionSummary. */
+export function singleOwnerSummary(blame) {
+  if (!isSingleOwner(blame)) return null
+  const owner = blame.owners[0]
+  return {
+    author: owner.author,
+    total: blame.total,
+    ageLabel: formatAge(blame.newestLineAgeDays),
+  }
+}
+
+// ---------------------------------------------------------------------
+// gutter variant — real source lines from /api/git/source paired with the
+// per-line author from blame's &lines=1 shape (gitapi.mjs, task 3's
+// contract). Pure row-model builder: no DOM, so it's testable without a
+// server. Returns null (not an empty array) whenever either side is
+// missing/malformed/mismatched, which is the single signal the renderer
+// needs to fall back to the proportional bar with no error — the server
+// predating this contract, a >150-line range the server itself omitted
+// `lines` for, or a plain fetch failure all collapse to the same null.
+// ---------------------------------------------------------------------
+
+export function buildGutterRows(sourceResp, lineBlameResp, opts = {}) {
+  if (!sourceResp || sourceResp.ok !== true || !Array.isArray(sourceResp.lines)) return null
+  if (!lineBlameResp || lineBlameResp.ok !== true || !Array.isArray(lineBlameResp.lines)) return null
+  if (sourceResp.lines.length === 0) return null
+  const startLine = Number.isFinite(opts.startLine) ? opts.startLine : 1
+  const byLine = new Map(lineBlameResp.lines.map((l) => [l.n, l]))
+  const knownAges = lineBlameResp.lines.map((l) => l.ageDays).filter((d) => typeof d === 'number')
+  const maxAge = knownAges.length ? Math.max(...knownAges, 1) : 1
+  return sourceResp.lines.map((text, i) => {
+    const n = startLine + i
+    const b = byLine.get(n)
+    const age = b && typeof b.ageDays === 'number' ? b.ageDays : null
+    return {
+      n,
+      text: String(text),
+      author: (b && b.author) || null,
+      // fresher lines read stronger, older lines fade toward the gutter
+      // background instead of disappearing entirely
+      opacity: age == null ? 0.3 : Math.max(0.28, 1 - Math.min(1, age / maxAge) * 0.68),
+    }
+  })
+}
+
+// ---------------------------------------------------------------------
 // graphic variant
 // ---------------------------------------------------------------------
 
@@ -260,6 +389,10 @@ function renderHistoryGraphic(host, log) {
   const entries = log.entries.map(e => ({ ...e, ageDays: parseRelativeAge(e.when) }))
   const known = entries.map(e => e.ageDays).filter(d => d != null)
   const maxDays = known.length ? Math.max(...known) : 1
+  // ages fed straight to stackTimelinePositions in the same order as
+  // entries, so out[i] lines up with entries[i]
+  const ages = entries.map(e => e.ageDays == null ? 0.5 : e.ageDays)
+  const slots = stackTimelinePositions(ages, maxDays)
 
   const wrap = document.createElement('div')
   wrap.className = 'timeline'
@@ -271,15 +404,17 @@ function renderHistoryGraphic(host, log) {
   wrap.appendChild(tip)
 
   entries.forEach((e, i) => {
-    const d = e.ageDays == null ? 0.5 : e.ageDays
-    const x = ageToX(d, maxDays)
+    const { x, bucketSize, bucketPos } = slots[i]
     const dot = document.createElement('div')
     dot.className = 'timeline-dot'
     dot.tabIndex = 0
     dot.style.left = `${(x * 100).toFixed(1)}%`
+    // collisions stack upward off the axis rather than piling on one pixel
+    dot.style.top = `${30 - Math.min(bucketPos, 5) * 6}px`
     dot.style.background = colorForAuthor(e.author)
     const showTip = () => {
-      tip.innerHTML = `<b>${e.subject || '(no subject)'}</b><span class="who2">${e.author || ''} · ${e.when || ''}</span>`
+      const countTip = bucketSize > 1 ? ` <span class="who2">(1 of ${bucketSize} near this age)</span>` : ''
+      tip.innerHTML = `<b>${e.subject || '(no subject)'}</b>${countTip}<span class="who2">${e.author || ''} · ${e.when || ''}</span>`
       tip.style.left = dot.style.left
       tip.classList.add('on')
     }
@@ -288,6 +423,14 @@ function renderHistoryGraphic(host, log) {
     dot.addEventListener('focus', showTip)
     dot.addEventListener('mouseleave', hideTip)
     dot.addEventListener('blur', hideTip)
+    // badge the last dot placed in a bucket (paints on top of its siblings)
+    // with the collision count instead of silently rendering 8 commits as 1
+    if (bucketSize > 1 && bucketPos === bucketSize - 1) {
+      const badge = document.createElement('span')
+      badge.className = 'timeline-badge'
+      badge.textContent = `×${bucketSize}`
+      dot.appendChild(badge)
+    }
     wrap.appendChild(dot)
     setTimeout(() => dot.classList.add('in'), 120 + i * 55)
   })
@@ -362,6 +505,99 @@ function renderRegionStrip(host, regionBlame, agent, range) {
   })
 }
 
+/** Single-owner collapse: no bar, no legend, one sentence. Used by the
+ *  graphic variant in place of renderOwnershipGraphic whenever
+ *  isSingleOwner(blame) is true — a full-width bar with one legend row
+ *  saying "mohsensc 100%" conveys nothing a sentence doesn't say faster. */
+function renderOwnershipSingle(host, blame) {
+  const s = singleOwnerSummary(blame)
+  if (!s) { host.innerHTML = '<p class="empty">no history here yet</p>'; return }
+  const age = s.ageLabel ? `, newest ${s.ageLabel} old` : ''
+  const p = document.createElement('p')
+  p.className = 'solo-line'
+  p.innerHTML = `<span class="swatch" style="background:${colorForAuthor(s.author)}"></span>` +
+    `all <b>${s.author}</b> — ${s.total} lines, all theirs${age}`
+  host.innerHTML = ''
+  host.appendChild(p)
+}
+
+// ---------------------------------------------------------------------
+// gutter variant: real source + real per-line blame, rendered as an
+// editor-style gutter. Rows come from buildGutterRows; this is the DOM
+// half. Every line of source is set with textContent, never innerHTML —
+// it's real code from the repo going on screen, not markup this file wrote.
+// ---------------------------------------------------------------------
+
+function renderGutter(host, rows) {
+  const wrap = document.createElement('div')
+  wrap.className = 'code-gutter'
+  const authors = new Map()
+  rows.forEach(r => {
+    const row = document.createElement('div')
+    row.className = 'code-row'
+
+    const mark = document.createElement('span')
+    mark.className = 'code-mark'
+    if (r.author) {
+      mark.style.background = colorForAuthor(r.author)
+      mark.style.opacity = String(r.opacity)
+      mark.title = r.author
+      if (!authors.has(r.author)) authors.set(r.author, colorForAuthor(r.author))
+    }
+
+    const n = document.createElement('span')
+    n.className = 'code-n'
+    n.textContent = String(r.n)
+
+    const code = document.createElement('span')
+    code.className = 'code-text'
+    code.textContent = r.text   // never innerHTML: this is real source
+
+    row.appendChild(mark)
+    row.appendChild(n)
+    row.appendChild(code)
+    wrap.appendChild(row)
+  })
+
+  const legend = document.createElement('div')
+  legend.className = 'gutter-legend'
+  authors.forEach((color, author) => {
+    const who = document.createElement('span')
+    who.className = 'who'
+    who.innerHTML = `<span class="swatch" style="background:${color}"></span>${author}`
+    legend.appendChild(who)
+  })
+
+  host.innerHTML = ''
+  host.appendChild(wrap)
+  host.appendChild(legend)
+}
+
+/** Ownership slot for the gutter variant: real per-line rows when the
+ *  server has the &lines=1 / /api/git/source contract and the range fetched
+ *  clean, otherwise fall straight back to whatever the non-gutter view
+ *  would have shown — region strip, single-owner sentence, or the
+ *  proportional bar — with no error state in between. */
+function renderGutterSection(host, current, agent) {
+  if (current.gutterRows && current.gutterRows.length) {
+    renderGutter(host, current.gutterRows)
+    return
+  }
+  if (current.hasRegion) {
+    renderRegionStrip(host, current.regionData, agent, current.range)
+  } else if (isSingleOwner(current.data.blame)) {
+    renderOwnershipSingle(host, current.data.blame)
+  } else {
+    renderOwnershipGraphic(host, current.data.blame, agent)
+  }
+  const note = document.createElement('p')
+  note.className = 'region-note'
+  note.textContent = current.wantedGutter
+    ? 'line-by-line detail unavailable for this range — showing proportional view'
+    : 'select an agent holding a line range to see line-by-line detail'
+  host.appendChild(note)
+}
+
 // ---------------------------------------------------------------------
 // classic variant (the earlier per-row/list treatment, kept for comparison)
 // ---------------------------------------------------------------------
@@ -411,6 +647,11 @@ function renderHistoryClassic(host, log) {
 const VARIANTS = {
   graphic: { ownership: renderOwnershipGraphic, history: renderHistoryGraphic, label: 'graphic' },
   classic: { ownership: renderOwnershipClassic, history: renderHistoryClassic, label: 'classic' },
+  // gutter's ownership slot is special-cased in renderBody (it needs the
+  // fetched source/line-blame pair, not just the aggregate blame object
+  // the other two variants' ownership fns take) — .ownership here is
+  // unused but kept so Object.keys(VARIANTS) still drives the V cycle.
+  gutter: { ownership: null, history: renderHistoryClassic, label: 'gutter' },
 }
 
 function initialVariant() {
@@ -457,25 +698,34 @@ export function attachBlameCard(cfg = {}) {
     const body = el.querySelector('#bcBody')
     body.innerHTML = ''
 
-    const showRegion = current.hasRegion && current.regionMode
-    el.querySelector('#bcPath').textContent = showRegion
+    const isGutter = variant === 'gutter'
+    const showRegion = !isGutter && current.hasRegion && current.regionMode
+    const showRange = isGutter ? !!current.range : showRegion
+    el.querySelector('#bcPath').textContent = showRange
       ? `${agent.gitPath} : lines ${current.range.start}–${current.range.end}`
       : (agent.gitPath || 'no file tracked yet')
 
     const ownH3 = document.createElement('h3')
-    const toggleBtn = current.hasRegion
+    // the region/whole-file toggle only makes sense outside gutter mode —
+    // gutter always shows whatever range the agent holds (or a fallback
+    // note explaining why it can't)
+    const toggleBtn = (current.hasRegion && !isGutter)
       ? `<button class="variant-btn" id="bcRegionBtn" title="press R to switch between region and whole file">${showRegion ? 'this region' : 'whole file'}</button>`
       : ''
     ownH3.innerHTML = `<span>whose lines these are</span>` +
       toggleBtn +
       `<button class="variant-btn" id="bcVariantBtn" title="press V to switch view">${VARIANTS[variant].label}</button>`
-    if (current.hasRegion) ownH3.querySelector('#bcRegionBtn').addEventListener('click', () => toggleRegion())
+    if (current.hasRegion && !isGutter) ownH3.querySelector('#bcRegionBtn').addEventListener('click', () => toggleRegion())
     ownH3.querySelector('#bcVariantBtn').addEventListener('click', () => cycleVariant())
     body.appendChild(ownH3)
     const ownBody = document.createElement('div')
     body.appendChild(ownBody)
-    if (showRegion) {
+    if (isGutter) {
+      renderGutterSection(ownBody, current, agent)
+    } else if (showRegion) {
       renderRegionStrip(ownBody, current.regionData, agent, current.range)
+    } else if (variant === 'graphic' && isSingleOwner(data.blame)) {
+      renderOwnershipSingle(ownBody, data.blame)
     } else {
       VARIANTS[variant].ownership(ownBody, data.blame, agent)
     }
@@ -485,7 +735,11 @@ export function attachBlameCard(cfg = {}) {
     body.appendChild(histH3)
     const histBody = document.createElement('div')
     body.appendChild(histBody)
-    VARIANTS[variant].history(histBody, data.log)
+    // single-owner reclaims the vertical space the collapsed sentence
+    // freed up by using the classic commit list instead of the dot
+    // timeline; gutter is code-focused throughout so it gets the list too
+    const useListHistory = isGutter || (variant === 'graphic' && isSingleOwner(data.blame))
+    ;(useListHistory ? renderHistoryClassic : VARIANTS[variant].history)(histBody, data.log)
   }
 
   function cycleVariant() {
@@ -495,7 +749,7 @@ export function attachBlameCard(cfg = {}) {
   }
 
   function toggleRegion() {
-    if (!current || !current.hasRegion) return
+    if (!current || !current.hasRegion || variant === 'gutter') return
     current.regionMode = !current.regionMode
     renderBody()
   }
@@ -523,16 +777,25 @@ export function attachBlameCard(cfg = {}) {
     el.querySelector('#bcBody').innerHTML =
       path ? '<p class="empty">loading…</p>' : '<p class="empty">no history here yet</p>'
     if (!path) return
+    // gutter data is only worth fetching when there's a real region to ask
+    // for — no point round-tripping /api/git/source for a whole-file agent
     Promise.all([
       loadFor(path, fetchFn),
       wantsRegion ? loadRegion(path, agent.gitStart, agent.gitEnd, fetchFn) : Promise.resolve(null),
-    ]).then(([data, regionBlame]) => {
+      wantsRegion ? loadGutter(path, agent.gitStart, agent.gitEnd, fetchFn) : Promise.resolve(null),
+    ]).then(([data, regionBlame, gutter]) => {
       if (myReq !== reqId) return   // a later select() beat this fetch home
       const hasRegion = wantsRegion && regionBlameUsable(regionBlame)
+      const gutterRows = gutter
+        ? buildGutterRows(gutter.source, gutter.lineBlame, { startLine: agent.gitStart })
+        : null
+      const hasKnownRange = hasRegion || !!(gutterRows && gutterRows.length)
       current = {
         agent, data, regionData: regionBlame, hasRegion,
         regionMode: hasRegion,   // default to the region view when there is one — it's the more specific answer
-        range: hasRegion ? { start: agent.gitStart, end: agent.gitEnd } : null,
+        range: hasKnownRange ? { start: agent.gitStart, end: agent.gitEnd } : null,
+        gutterRows,
+        wantedGutter: wantsRegion,
       }
       renderBody()
     })

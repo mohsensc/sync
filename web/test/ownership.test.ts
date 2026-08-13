@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { ownershipShare } from '../src/office/interact.js'
+import { isSingleOwner, singleOwnerSummary } from '../src/office/blamecard.js'
 
 const blame = (owners: { author: string; lines: number; share: number }[]) =>
   ({ ok: true, total: owners.reduce((s, o) => s + o.lines, 0), owners })
@@ -38,5 +39,50 @@ describe('ownershipShare', () => {
     const b = blame([{ author: 'mohsensc', lines: 10, share: 1 }])
     expect(ownershipShare(b, undefined)).toMatchObject({ matched: false })
     expect(ownershipShare(b, '')).toMatchObject({ matched: false })
+  })
+})
+
+// ---------------------------------------------------------------------
+// isSingleOwner / singleOwnerSummary — the blame card's single-owner
+// collapse decision. Matters most once gitapi.mjs's email dedup lands
+// (task 3): mohsensc and Mohsen Sarrafan Chaharsoughi merging into one
+// identity turns most of this demo repo's files from "two owners" into
+// exactly this case, and a full-width bar saying "100%" is the reviewer's
+// confirmed bad state this exists to replace.
+// ---------------------------------------------------------------------
+
+describe('isSingleOwner', () => {
+  it('is true for exactly one author with lines', () => {
+    expect(isSingleOwner(blame([{ author: 'mohsensc', lines: 40, share: 1 }]))).toBe(true)
+  })
+
+  it('is false for two or more authors', () => {
+    expect(isSingleOwner(blame([
+      { author: 'mohsensc', lines: 10, share: 0.5 },
+      { author: 'agentai', lines: 10, share: 0.5 },
+    ]))).toBe(false)
+  })
+
+  it('is false for no history, ok:false, or an empty owners list', () => {
+    expect(isSingleOwner(null)).toBe(false)
+    expect(isSingleOwner({ ok: false, reason: 'no blame available' })).toBe(false)
+    expect(isSingleOwner({ ok: true, total: 0, owners: [] })).toBe(false)
+  })
+})
+
+describe('singleOwnerSummary', () => {
+  it('names the sole author, total lines, and a readable age', () => {
+    const s = singleOwnerSummary({
+      ok: true, total: 245, newestLineAgeDays: 0, oldestLineAgeDays: 900,
+      owners: [{ author: 'mohsensc', lines: 245, share: 1 }],
+    })
+    expect(s).toEqual({ author: 'mohsensc', total: 245, ageLabel: 'today' })
+  })
+
+  it('is null whenever isSingleOwner is false', () => {
+    expect(singleOwnerSummary(blame([
+      { author: 'a', lines: 1, share: 0.5 }, { author: 'b', lines: 1, share: 0.5 },
+    ]))).toBeNull()
+    expect(singleOwnerSummary({ ok: false })).toBeNull()
   })
 })
