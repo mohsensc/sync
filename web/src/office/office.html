@@ -960,6 +960,19 @@ setInterval(() => {
   if (sel) histShelf.show(sel); else histShelf.hide()
 }, 150)
 window.__histShelf = histShelf
+
+// --- zoneowner wiring ---
+import { attachZoneOwner } from './zoneowner.js'
+import { ZONE_DIRS } from './gitsignals.js'
+
+// Runs its own shortlog poll rather than piggybacking the attachGitSignals()
+// call above: that call sits outside this round's append-only slice of this
+// file and can't be edited to add a new sink this round. gitsignals.js grew
+// an `ownership` option for a future round to collapse this into — see its
+// own note. Same "a few independent, all-cheap git fetchers" tradeoff
+// STATE.md has documented since round 2, not new debt.
+const zoneOwner = attachZoneOwner({ scene, zoneDirs: ZONE_DIRS })
+window.__zoneOwner = zoneOwner
 </script>
 </body>
 </html>

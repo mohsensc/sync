@@ -178,3 +178,114 @@ opened a second tab, wasn't holding the lock when giving up (never got
 it), didn't leave a stale lock behind (`mkdir` never succeeded, so there
 was nothing to clean up). Full 20-minute wait spent honestly, documented
 above rather than silently skipped.
+
+## Round 3, task 1: file history as a bookshelf (`histshelf.js`)
+
+Built the seed idea's "look at a file's history in-scene" piece: when an
+agent is selected, their file's commit log renders as a physical shelf of
+book spines — one per commit, colour by author (same hash as
+`colorForAuthor`), height/lean by age, newest nearest the agent. Two full
+treatments behind one key toggle, per the brief.
+
+**New files**, all mine this round:
+- `web/src/office/histshelf.js` — pure layout (`spineFor`, `layoutShelf`,
+  `spineOffset`, `shelfWidth`) plus two renderers: `buildSpines3D()` (thin
+  `THREE.Mesh` boxes on a shared plank, shared `BoxGeometry` scaled per
+  instance — same pattern `dressing.js` uses for its ~120 meshes) and a DOM
+  film-strip (`renderFilmStrip`, screen-projected every frame via the
+  module's own small `requestAnimationFrame` loop, not office.html's
+  `tick()`). `attachHistShelf({ scene, camera, canvas, fetchFn })` ties both
+  to one `show(agent)`/`hide()`/`setMode()` API, fetches
+  `/api/git/log?path=...&n=12` with a per-path cache (same shape
+  `blamecard.js` already consumes), and degrades explicitly: 0 commits
+  renders nothing, exactly 1 renders a single "dusty tome" lying flat
+  instead of a shelf with one spine on it looking broken.
+- `web/src/office/histshelf.d.ts` — hand types for the layout surface,
+  following the `history-viz.d.ts`/`agent.d.ts` pattern so a typechecked
+  test can import a plain-JS office file.
+- `web/src/office/histshelf-test.html` — fixture harness, same shape as
+  `blamecard-test.html`: canned `/api/git/log` JSON, a real (small) THREE
+  scene with a marker cube standing in for the selected agent, five
+  fixtures (12-commit, 3-commit, 6-commit/3-author, 1-commit, 0-commit),
+  drag-to-orbit camera, mode button plus the same key toggle office.html
+  wires up.
+- `web/test/histshelf.test.ts` — 16 pure-function tests: empty/single/
+  normal degrade paths, maxSpines capping and ordering, age-to-height/lean
+  mapping at both ends of the band and mid-band, missing-author fallback,
+  spine spacing/row-width math, author colour determinism and spread.
+
+**Key toggle collision, caught and fixed mid-round**: picked H first
+(mnemonic: history), then a `git pull --rebase` pulled in task 3's
+concurrent `interact.js` change, which had *also* claimed H that same
+round for cycling the three hover-card treatments. Moved histshelf to B
+(bookshelf) before pushing — `?hsMode=strip` param, the in-file comment,
+the fixture harness's button label, and the README line all updated
+together in one follow-up commit. Grepped every `e.key ===`/`e.key !==` in
+`web/src/office/*.{js,html}` after the fix; full live set now is B/H/R/T/
+U/V/Z/Escape, one owner each, no other collisions.
+
+**office.html wiring** (append-only, per the file-ownership split this
+round): one `// --- histshelf wiring ---` fence at the very end of the
+main module script, after task 3's `window.__zoomAgent` block and before
+task 2's later `// --- zoneowner wiring ---` fence. Couldn't hook the
+existing `interaction.select()` -> `onSelect` callback directly (that
+callback is defined earlier in the shared file, inside `setupCast()`,
+out of this round's append-only slice — reassigning it here would just
+clobber whatever it already does). Instead the wiring block polls
+`interaction.selected` every 150ms and diffs against the last agent it
+showed a shelf for, calling `show()`/`hide()` on change. Cheap (one
+reference comparison), and catches every selection path uniformly —
+real clicks, Escape/deselect, and the console's `__zoomAgent()` — since
+all three already funnel through `interaction.select()`.
+
+**README**: was 73 lines and missing every round-2/3 file per round 3's
+integrator note. Rewrote to exactly 50 lines (the cap), added one-line
+entries for `gitapi.mjs`, `history-viz.js`, `blamecard.js`,
+`gitsignals.js` and `histshelf.js` alongside the existing rig/trap notes,
+trimmed the old "Seen working in a browser" prose section down since it
+was changelog, not reference.
+
+**Browser: not done this round**, per the task assignment (BROWSER: NO,
+vitest + typecheck only). What a browser round should check first:
+1. Both treatments actually rendering — `histshelf-test.html` exercises
+   the layout math and a synthetic THREE scene, but nobody has looked at
+   the 3D spines or the DOM strip positioned against a *real* character
+   and desk in `office.html` itself. The shelf-position heuristic
+   (`SHELF_Z_PUSH`, comment in `histshelf.js`) pushes away from the
+   room's centre aisle as a stand-in for "behind the desk" — reasonable
+   on paper for the two existing desk rows, unverified in the room.
+2. The DOM strip's screen-projection math (`projectToScreen`, same
+   formula as `interact.js`'s own `project()`) — only unit-testable
+   indirectly through the pure layout functions, the actual screen
+   placement needs eyes on a running scene.
+3. Whether B, layered on top of V (blame card variant), R (blame card
+   region — task 4), T (desk tint) and U (zoneowner) all firing from the
+   same keyboard at once, reads as "one coherent set of toggles" or as
+   keyboard soup. Nobody's looked at the room with all five live
+   together yet.
+4. Noticed but did not chase: `office.html`'s own importmap still reads
+   `"three":"./vendor/three.module.js"` (resolves to
+   `/src/office/vendor/three.module.js` from that document's URL, which
+   doesn't exist on disk — only `web/public/vendor/three.module.js`
+   does). The devtools-protocol scratchpad already documents an
+   identical relative-path bug for the GLB assets that a prior round
+   fixed with an absolute `/glb/...` path; this looks like the same
+   class of bug still sitting in the vendor import, just never
+   triggered because nobody's checked `list_console_messages` for a
+   `three.module.js` 404 specifically — every browser round so far
+   apparently got characters on screen, which shouldn't be possible if
+   this import 404s. Not touching `office.html`'s importmap this round
+   (outside this task's ownership slice and outside BROWSER: NO), and
+   not filing an issue on a bug inferred from reading paths rather than
+   reproduced in a browser — but the next browser slot should check
+   `list_console_messages` for a `three.module.js` load failure early,
+   since if it's real it would explain as a red herring any prop that
+   "doesn't render" for an unrelated reason. Used a root-absolute
+   `/vendor/...` path in `histshelf-test.html`'s own importmap to sidestep
+   it either way.
+
+**Tests**: `pnpm test` 182/182 passing (12 files, up from 111/9 at the
+start of this round — task 2/3/4's tests landed alongside mine via
+rebase). `pnpm typecheck` clean. No GitHub issues filed this round —
+nothing hit that needed one; the importmap question above is flagged in
+prose rather than filed, since it's unverified.
