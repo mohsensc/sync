@@ -147,3 +147,55 @@ waited it out rather than stealing it early. Took it once free, ran vite
 from this worktree on 5173, drove the existing tab (id 6, "Agent Presence —
 the office"), killed the server and released the lock when done. Same
 protocol file as before, nothing about it changed this round.
+
+## round 2 task 1 — churn endpoint and blame line ranges
+
+Server-seam work, no browser needed. Extended `web/gitapi.mjs`:
+
+- **`GET /api/git/churn?path=`** — new route. Runs `git log --since=14.days
+  --numstat --format=%H` (recent commits touching the path) and `git diff
+  --numstat HEAD` (uncommitted churn) in parallel, sums added/deleted from
+  the numstat rows, counts commits from the sha lines. Binary files print
+  `-` for added/deleted in numstat output — treated as 0, checked against
+  real git output before writing the parser rather than guessed at. Response
+  shape matches the contract task 2 needed: `{ ok: true, recent: {commits,
+  added, deleted, windowDays: 14}, working: {added, deleted} }`. Verified
+  with a real call against `web/src/office/office.html` (edited a lot this
+  week): `{"recent":{"commits":9,"added":1101,"deleted":237,"windowDays":14},
+  "working":{"added":0,"deleted":0}}` — real, nonzero.
+- **`blame` route** now accepts optional `start`/`end` query params, clamped
+  to `1..500000`, passed as `['-L', 'start,end']` to `git blame --porcelain`
+  when both parse as plain non-negative integers. Malformed or partial
+  input (one present, one missing, non-numeric, negative, decimal) is
+  ignored entirely rather than half-applied — falls back to whole-file
+  blame, same as no range param at all. Unblocks symbol-level blame for a
+  later round; nothing calls it with a range yet since the presence
+  protocol still doesn't carry a line range.
+- New pure parsers: `parseChurnLog`, `parseNumstat`, `blameRangeArgs` — same
+  house pattern as `parseStatLog` etc., no process-spawning, unit tested
+  with canned text shaped after real git output.
+
+Files touched: `web/gitapi.mjs`, `web/gitapi.d.mts`, `web/test/gitapi.test.ts`.
+Nothing under `web/src/office/` touched.
+
+Verified: `pnpm test` and `pnpm typecheck` both clean at commit time.
+`pnpm typecheck` failed once later in the same session on
+`test/history-viz.test.ts` (task 3's file, missing a `.d.ts` for
+`history-viz.js`) — not mine, flagging so it's not missed before merge.
+
+Worth noting for whoever reads this: this worktree is shared live across
+all four round-2 builders on the same filesystem, not isolated per-agent.
+`git pull --rebase` failed mid-task on unstaged changes that turned out to
+be another builder's in-progress files, updated on disk between edits.
+Stashed only my own files by explicit pathspec (never a bare `git stash`),
+rebased cleanly, and dropped the other stash without applying it once
+diffing showed the on-disk copy was newer than what I'd captured. Also: a
+first attempt at appending this section to STATE.md got wiped by what
+looks like another builder's `git reset --hard` running concurrently
+mid-stash-dance (visible in `git reflog` as two consecutive "reset: moving
+to HEAD" entries) — redone here. If your STATE.md edit vanishes right
+after you write it, check reflog before assuming you imagined it.
+
+Not filed as an issue: nothing here hit the "expensive edge case" bar. The
+churn windowDays is hardcoded to 14 per the task contract; making it
+configurable is a small follow-up if a future round wants it, not done here.
