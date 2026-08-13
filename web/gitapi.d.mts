@@ -49,6 +49,23 @@ export interface StatResult {
 
 export function parseStatLog(text: string, now?: number): StatResult | null
 
+export interface ChurnLogResult {
+  commits: number
+  added: number
+  deleted: number
+}
+
+export function parseChurnLog(text: string): ChurnLogResult
+
+export interface NumstatResult {
+  added: number
+  deleted: number
+}
+
+export function parseNumstat(text: string): NumstatResult
+
+export function blameRangeArgs(startRaw: string | null | undefined, endRaw: string | null | undefined): string[]
+
 export type GitApiHandler = (req: { url?: string }, res: unknown, next: () => void) => void | Promise<void>
 
 export function gitApiMiddleware(repoRoot: string): GitApiHandler

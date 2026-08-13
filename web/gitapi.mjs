@@ -127,6 +127,58 @@ export function parseStatLog(text, now = Date.now()) {
   }
 }
 
+// `git log --since=<n>.days --numstat --format=%H -- <path>` — one commit
+// sha line per commit, then a blank line, then zero or more
+// `<added>\t<deleted>\t<path>` numstat rows (one per file the commit
+// touched). Binary files print `-` in place of a number; treated as 0 so a
+// binary-heavy commit doesn't turn the sum into NaN.
+const SHA_LINE = /^[0-9a-f]{40}$/
+const NUMSTAT_LINE = /^(\d+|-)\t(\d+|-)\t.+$/
+
+function sumNumstat(text) {
+  let added = 0
+  let deleted = 0
+  for (const line of text.split('\n')) {
+    const m = NUMSTAT_LINE.exec(line)
+    if (!m) continue
+    added += m[1] === '-' ? 0 : parseInt(m[1], 10)
+    deleted += m[2] === '-' ? 0 : parseInt(m[2], 10)
+  }
+  return { added, deleted }
+}
+
+export function parseChurnLog(text) {
+  let commits = 0
+  for (const line of text.split('\n')) {
+    if (SHA_LINE.test(line)) commits++
+  }
+  return { commits, ...sumNumstat(text) }
+}
+
+// `git diff --numstat HEAD -- <path>` — uncommitted churn, same numstat row
+// shape, no sha lines since it's a single working-tree diff.
+export function parseNumstat(text) {
+  return sumNumstat(text)
+}
+
+// start/end from query params, both optional. Clamp into git's own line
+// range (git rejects 0 and negative starts), ignore anything that isn't a
+// plain non-negative integer rather than half-parsing it — malformed input
+// falls back to whole-file blame, same as no range at all.
+function clampLine(raw) {
+  if (raw == null) return null
+  const s = String(raw).trim()
+  if (!/^\d+$/.test(s)) return null
+  return Math.min(500000, Math.max(1, parseInt(s, 10)))
+}
+
+export function blameRangeArgs(startRaw, endRaw) {
+  const start = clampLine(startRaw)
+  const end = clampLine(endRaw)
+  if (start == null || end == null) return []
+  return ['-L', `${start},${end}`]
+}
+
 // ---------------------------------------------------------------------
 // Path/dir validation. The allowlist is "actually a tracked path in this
 // repo right now" — nothing else gets near execFile's argv.
@@ -183,14 +235,38 @@ export function gitApiMiddleware(repoRoot) {
       if (route === 'blame') {
         const p = url.searchParams.get('path')
         if (!isTrackedPath(p, files)) return sendJson(res, { ok: false, reason: 'not a tracked path' })
+        const rangeArgs = blameRangeArgs(url.searchParams.get('start'), url.searchParams.get('end'))
         try {
-          const { stdout } = await execFileP('git', ['blame', '--porcelain', '--', p], { cwd: repoRoot })
+          const { stdout } = await execFileP(
+            'git', ['blame', '--porcelain', ...rangeArgs, '--', p], { cwd: repoRoot }
+          )
           return sendJson(res, { ok: true, ...parseBlamePorcelain(stdout) })
         } catch {
           // untracked, binary, or empty file — git blame exits non-zero for
-          // all of these. Design for it, don't special-case it.
+          // all of these. Design for it, don't special-case it. A bogus
+          // range (start past EOF) also lands here; same fallback.
           return sendJson(res, { ok: false, reason: 'no blame available' })
         }
+      }
+
+      if (route === 'churn') {
+        const p = url.searchParams.get('path')
+        if (!isTrackedPath(p, files)) return sendJson(res, { ok: false, reason: 'not a tracked path' })
+        const windowDays = 14
+        const [recentLog, workingDiff] = await Promise.all([
+          execFileP(
+            'git',
+            ['log', `--since=${windowDays}.days`, '--numstat', '--format=%H', '--', p],
+            { cwd: repoRoot }
+          ),
+          // uncommitted churn — what an agent is literally doing right now
+          execFileP('git', ['diff', '--numstat', 'HEAD', '--', p], { cwd: repoRoot }),
+        ])
+        return sendJson(res, {
+          ok: true,
+          recent: { ...parseChurnLog(recentLog.stdout), windowDays },
+          working: parseNumstat(workingDiff.stdout),
+        })
       }
 
       if (route === 'log') {

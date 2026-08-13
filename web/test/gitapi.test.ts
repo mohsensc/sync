@@ -5,6 +5,9 @@ import {
   parseLog,
   parseShortlog,
   parseStatLog,
+  parseChurnLog,
+  parseNumstat,
+  blameRangeArgs,
   gitApiMiddleware,
 } from '../gitapi.mjs'
 
@@ -75,6 +78,30 @@ const CANNED_STAT_LOG = [
   ['sara', '1750000000', 'fix the thing'].join(US),
   ['dev', '1700000000', 'add the thing'].join(US),
 ].join('\n') + '\n'
+
+// shaped after real `git log --numstat --format=%H` output: sha line,
+// blank line, one numstat row per file touched, repeat per commit.
+const CANNED_CHURN_LOG = [
+  SHA_A,
+  '',
+  '17\t9\tf.ts',
+  '',
+  SHA_B,
+  '',
+  '5\t0\tf.ts',
+  '3\t1\tother.ts',
+  '',
+].join('\n')
+
+const CANNED_CHURN_LOG_WITH_BINARY = [
+  SHA_A,
+  '',
+  '-\t-\timage.png',
+  '4\t2\tf.ts',
+  '',
+].join('\n')
+
+const CANNED_NUMSTAT = '6\t2\tf.ts\n'
 
 describe('ageDays', () => {
   it('is zero for something that just happened', () => {
@@ -163,6 +190,54 @@ describe('parseStatLog', () => {
   })
 })
 
+describe('parseChurnLog', () => {
+  it('counts commits and sums added/deleted across all numstat rows', () => {
+    const r = parseChurnLog(CANNED_CHURN_LOG)
+    expect(r).toEqual({ commits: 2, added: 17 + 5 + 3, deleted: 9 + 0 + 1 })
+  })
+
+  it('treats binary "-" rows as zero instead of NaN', () => {
+    const r = parseChurnLog(CANNED_CHURN_LOG_WITH_BINARY)
+    expect(r).toEqual({ commits: 1, added: 4, deleted: 2 })
+  })
+
+  it('is zero-commits for a path with no recent history', () => {
+    expect(parseChurnLog('')).toEqual({ commits: 0, added: 0, deleted: 0 })
+  })
+})
+
+describe('parseNumstat', () => {
+  it('sums added/deleted with no commit lines to skip', () => {
+    expect(parseNumstat(CANNED_NUMSTAT)).toEqual({ added: 6, deleted: 2 })
+  })
+
+  it('is zero for a clean working tree', () => {
+    expect(parseNumstat('')).toEqual({ added: 0, deleted: 0 })
+  })
+})
+
+describe('blameRangeArgs', () => {
+  it('builds -L start,end when both are present and valid', () => {
+    expect(blameRangeArgs('10', '20')).toEqual(['-L', '10,20'])
+  })
+
+  it('clamps into 1..500000', () => {
+    expect(blameRangeArgs('0', '999999')).toEqual(['-L', '1,500000'])
+  })
+
+  it('falls back to whole-file when either value is missing', () => {
+    expect(blameRangeArgs('10', null)).toEqual([])
+    expect(blameRangeArgs(undefined, '20')).toEqual([])
+    expect(blameRangeArgs(null, null)).toEqual([])
+  })
+
+  it('ignores malformed values rather than half-parsing them', () => {
+    expect(blameRangeArgs('abc', '20')).toEqual([])
+    expect(blameRangeArgs('10', '-5')).toEqual([])
+    expect(blameRangeArgs('1.5', '20')).toEqual([])
+  })
+})
+
 // --- middleware, invoked directly against the real repo on disk ---
 
 describe('gitApiMiddleware against the real repo', () => {
@@ -242,5 +317,47 @@ describe('gitApiMiddleware against the real repo', () => {
   it('shortlog: gives ok:false for a made-up dir', async () => {
     const r: any = await callMiddleware(mw, '/api/git/shortlog?dir=does/not/exist')
     expect(r.json).toEqual({ ok: false, reason: 'not a tracked dir' })
+  })
+
+  it('blame: honors start/end to scope the porcelain call to a range', async () => {
+    const r: any = await callMiddleware(
+      mw, `/api/git/blame?path=${encodeURIComponent(REAL_PATH)}&start=1&end=5`
+    )
+    expect(r.json.ok).toBe(true)
+    expect(r.json.total).toBeGreaterThan(0)
+    expect(r.json.total).toBeLessThanOrEqual(5)
+  })
+
+  it('blame: ignores malformed start/end and blames the whole file', async () => {
+    const whole: any = await callMiddleware(mw, `/api/git/blame?path=${encodeURIComponent(REAL_PATH)}`)
+    const bogus: any = await callMiddleware(
+      mw, `/api/git/blame?path=${encodeURIComponent(REAL_PATH)}&start=abc&end=5`
+    )
+    expect(bogus.json.total).toBe(whole.json.total)
+  })
+
+  it('churn: gives real nonzero numbers for a recently-edited path', async () => {
+    // this file is under active development this round — real recent commits
+    // with real added/deleted line counts, not a canned stub.
+    const r: any = await callMiddleware(
+      mw, `/api/git/churn?path=${encodeURIComponent('web/src/office/office.html')}`
+    )
+    expect(r.status).toBe(200)
+    expect(r.json.ok).toBe(true)
+    expect(r.json.recent.windowDays).toBe(14)
+    expect(r.json.recent.commits).toBeGreaterThan(0)
+    expect(r.json.recent.added).toBeGreaterThan(0)
+    expect(typeof r.json.working.added).toBe('number')
+    expect(typeof r.json.working.deleted).toBe('number')
+  })
+
+  it('churn: gives ok:false for a made-up path', async () => {
+    const r: any = await callMiddleware(mw, `/api/git/churn?path=${encodeURIComponent(FAKE_PATH)}`)
+    expect(r.json).toEqual({ ok: false, reason: 'not a tracked path' })
+  })
+
+  it('churn: rejects a flag-shaped path instead of handing it to git', async () => {
+    const r: any = await callMiddleware(mw, '/api/git/churn?path=--upload-pack')
+    expect(r.json).toEqual({ ok: false, reason: 'not a tracked path' })
   })
 })
