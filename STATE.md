@@ -705,3 +705,121 @@ Not touched: `agent.js`, `live.js`, `live.d.ts`, `clips/*`,
 files and tests this round, left alone. No issue filed this task — nothing
 hit was expensive enough to defer; the row-click behavior change is a
 deliberate spec change, not an edge case being punted.
+
+## Round 4, task 3 — closed #60: live decisions now drive the actual beat
+
+No browser this task (scoped that way). Owned `web/src/office/live.js`,
+`live.d.ts`, `web/test/office-live-decisions.test.ts`,
+`web/test/office-live.test.ts` (read, not touched — nothing there needed
+changing), and only the `initLive()`/`onLiveReelFrame` region of
+`office.html`. Left `replayEvent`, the camera block, the reel CSS,
+`agent.js`, `reel.js` alone, per the round's split.
+
+**What #60 was**: a real relay contest resolving live never played
+handshake/shove in the scene — `onLivePresence` just called
+`world.resolveContest()` and dropped both agents to idle. The `decision`
+field that explains *why* (wait vs abort) only reached the reel panel,
+because `negotiate`/`claim_result` frames don't carry the requester's own
+identity — the relay assumes the recipient already knows who it is. Round
+3's writeup scoped two options: client-side "remember my own last claim"
+bookkeeping, or a relay-side change to add identity to those frames. Took
+the client-side option — no relay change needed.
+
+**What changed in `live.js`**:
+- `LiveDirector` now keeps a second map, `contestPairs` (agent id -> shared
+  `{path, aId, bId}` object, both directions) alongside the existing
+  `contests` map. Filled in by `markContest` (path comes off whichever
+  side already has a presence record — never guessed), cleared by
+  `clearContest` right alongside the existing cleanup, so a stale pair can
+  never outlive the contest it described.
+- `resolutionFor(frame)` — new method, the actual matching logic. Takes a
+  `negotiate`/`claim_result` frame, tries to match its `holder_agent` (or
+  `held_by`) or `handover_to` against a tracked pair's `aId`/`bId`, and if
+  the frame also names a path that contradicts the pair's, backs off
+  rather than cross-wiring two different contests that happen to share an
+  agent id. Returns `{winnerId, loserId, kind: 'wait'|'abort'}` or `null`
+  — null is the honest default for a frame naming nobody we're tracking,
+  a frame with no active pair at all, or a granted claim_result (no
+  `decision` field). Never guesses.
+- `humanOf(id)` — small accessor, the human for a tracked live agent id or
+  `''`. Used to fill in the requester's name once `resolutionFor` names
+  their agent id.
+- `toReelEvent` takes an optional third `requester` param
+  (`{agent, human}`). When given a non-empty agent, it fills the `a` side
+  instead of leaving it blank — so a live reel row for a contest this
+  viewer actually tracked now names both parties, not just the holder.
+  Everything else about `toReelEvent` (rung defaulting, path extraction,
+  the `redundant_work` branch) is unchanged; an omitted or empty-agent
+  `requester` behaves exactly like before this change.
+
+**What changed in `office.html`**: `onLiveReelFrame` now calls
+`director.resolutionFor(msg)` on every decision frame. If it matches: pulls
+`humanOf` for the requester, passes both into `toReelEvent` so the reel row
+names both sides, then — this is the actual scene fix — finds the live
+`contest` encounter for the matched pair, calls the existing
+`world.resolveContest(enc)` on it, and dispatches to `world.handshake`
+(kind `wait`) or `world.shove` (kind `abort`, winner first, matching
+`shove`'s own "first argument always wins" convention). If one side isn't
+currently a spawned live character (despawned mid-contest, or this
+viewer's presence view never spawned it), it still clears the standoff
+pose via the existing `endContestFor` helper rather than leaving it
+looping forever, just without a resolution beat to play between nobody.
+No new World methods, no edits to World — this only calls what tasks 2/3
+already built in earlier rounds (`world.handshake`, `world.shove`,
+`world.resolveContest`).
+
+**Tests**: 16 new cases in `office-live-decisions.test.ts` — `contestPairs`
+populated on `markContest` and shared by both keys; matching by
+`holder_agent`; matching by `held_by` (claim_result's field name);
+matching by `handover_to` when holder_agent names nobody tracked; null
+when neither field names a tracked id; null with no active contest at
+all; null for a frame with no `decision` (granted claim_result); null
+when an identity match is contradicted by a mismatched path; a stale pair
+cleaned up by `clearContest` no longer matching; `humanOf` for a known
+and an unknown id; a second `markContest` on an already-contesting agent
+correctly replacing the tracked pair; plus 4 cases on `toReelEvent`'s new
+`requester` param (fills `a`, fills agent-only with blank human, an
+empty-agent requester is ignored same as none, `redundant_work` is
+unaffected since it already names both sides). `pnpm test` — 127/127
+across the whole branch (111 from this task's own files run standalone,
+same total task 4 reported — the two rounds' work is additive, not
+overlapping). `pnpm typecheck` — clean; had to add `contestPairs` and
+`resolutionFor`/`humanOf` to `live.d.ts` for the new tests to typecheck
+against, plus a `ContestPair`/`ContestResolution` interface pair.
+
+**Worktree hazard hit and recovered from, worth flagging for future
+rounds**: this is a single shared working tree, not one worktree per
+builder — all four tasks are editing files on disk in the same directory
+at the same time, and at least one mid-round `git commit` by another task
+briefly reset `office.html` to a pre-my-edit state (a commit that touched
+unrelated lines evidently raced a stale in-memory copy of the file).
+Lost the `onLiveReelFrame` edit once, caught it because a post-commit
+`grep` for `resolutionFor` in `office.html` came back empty, redid the
+edit, and this time hand-built a single-hunk patch (`git apply --cached`
+on a hand-trimmed diff) to commit only my own hunk instead of the whole
+file, leaving task 2's concurrent, uncommitted camera-framing code
+untouched on disk rather than either dropping it or committing it under
+this task's name. Also found that my earlier `live.js`/`live.d.ts`/test
+edits had already been swept into task 4's `8b1b8da` commit (their `git
+add` was broader than their own file list) — content was intact, just
+misattributed in that commit's message. Didn't try to rewrite history to
+fix the attribution; not worth the risk in a branch four agents are
+actively pushing to. **If a future round keeps using one shared tree for
+concurrent builders: commit early and often, and after any commit made by
+someone else lands, re-grep for your own recent symbols in the files you
+touched before assuming they're still there.**
+
+**Filed / closed**: commented on and closed
+[#60](https://github.com/mohsensc/sync/issues/60) — stated plainly in the
+comment that this only resolves contests the viewer's own `LiveDirector`
+actually tracked locally (both sides seen via `markContest`); a decision
+frame for a contest this viewer never saw form (joined mid-contest, a
+presence frame got dropped) still returns `null` from `resolutionFor` and
+resolves silently in the scene, same as before — the reel panel itself is
+unaffected either way, this fix is scene-only. If that residual gap
+matters later, the relay-side identity change from the original issue is
+still the more complete answer.
+
+Not touched: `replayEvent`, the camera/demo-cam block, `.reel`/`.reel-*`
+CSS, `reel.js`, `clips/*`, `agent.js` — other tasks' regions this round,
+left alone.
