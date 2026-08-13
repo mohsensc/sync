@@ -289,3 +289,20 @@ start of this round — task 2/3/4's tests landed alongside mine via
 rebase). `pnpm typecheck` clean. No GitHub issues filed this round —
 nothing hit that needed one; the importmap question above is flagged in
 prose rather than filed, since it's unverified.
+
+**Shared-worktree hazard worth naming for later rounds**: all four tasks
+this round commit from the *same* working directory against the *same*
+`.git`, not separate worktrees — so `git add`/`git commit` race on one
+shared index, not just the branch tip. Caught this happening once: the
+commit that carries this very STATE.md section (look for "state: log
+task 1 histshelf build notes" in the log) also swept up
+`web/src/office/zoneowner-test.html` and `web/test/zoneowner.test.ts` —
+task 2's files, already `git add`ed by that task's own in-flight process
+when my `git commit` ran a moment later, before task 2 got to their own
+commit. Nothing lost or corrupted — the content is exactly what task 2
+wrote, just filed under the wrong commit message and with no separate
+commit of its own for those two files. Didn't rewrite history to fix the
+attribution; rewriting shared branch history mid-round is worse than a
+mislabeled commit. If a future round sees a file show up in an unrelated
+commit, this is why — check `git log --all -- <path>` before assuming
+something's missing.
