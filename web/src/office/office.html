@@ -191,7 +191,14 @@ const reel = mountReel(document.getElementById('reel'), reelStore, {
   onSelect: (e) => replayEvent(e),
 })
 reel.setFoot('idle')
-const renderer = new THREE.WebGLRenderer({ canvas, antialias:true })
+// preserveDrawingBuffer: canvas.toDataURL() is how the browser-lock
+// verification workflow grabs a mid-animation frame in one round trip
+// (trigger a beat, poll world state, capture — all inside a single
+// evaluate_script call, since separate tool calls cost enough latency to
+// miss short beats entirely). Without this flag the drawing buffer gets
+// cleared right after compositing and toDataURL comes back solid black.
+// Trivial GPU memory cost, no visible behavior change.
+const renderer = new THREE.WebGLRenderer({ canvas, antialias:true, preserveDrawingBuffer:true })
 renderer.setPixelRatio(Math.min(devicePixelRatio,2))
 renderer.shadowMap.enabled = true
 renderer.shadowMap.type = THREE.PCFSoftShadowMap
