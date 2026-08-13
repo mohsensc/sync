@@ -356,3 +356,61 @@ write, before syncing back to the correct content. Nothing was lost this
 round, but future rounds running the same way should `git diff --stat` on
 their own files right before committing, not trust an in-memory diff read
 several tool calls earlier.
+
+### task 1
+
+Built the git data seam: `web/gitapi.mjs` (parsers + `gitApiMiddleware`),
+`web/vite.config.js` (wires it into vite's dev server under `/api/git/*`),
+`web/test/gitapi.test.ts` (22 tests). All four endpoints match the shapes
+tasks 2-4 were written against — confirmed by reading their landed code
+above, nothing needed to change.
+
+- `parseBlamePorcelain` walks `git blame --porcelain` output line by line,
+  tracking `sha -> {author, time}` the first time a sha's full header block
+  appears (porcelain only repeats the bare header line after that), then
+  rolls per-line shas up into per-author `{lines, share}`. Also carries
+  `newestLineAgeDays`/`oldestLineAgeDays` off each sha's `author-time`.
+- `parseStatLog`/`parseLog`/`parseShortlog` are straight line-oriented
+  parsers over `\x1f`-delimited `git log`/`git shortlog -sn` output.
+  `ageDays(epochSeconds, now)` is the one date-math helper, shared by stat
+  and blame.
+- `gitApiMiddleware(repoRoot)` re-reads `git ls-files` on every request
+  (repo is small, dev-only tool, cheap — no staleness bugs from a cached
+  allowlist) and checks `path` for exact membership / `dir` for prefix
+  membership before either ever reaches `execFile('git', [...])`. Every
+  route is wrapped so any failure — untracked path, bad path, git erroring
+  — resolves `{ok:false, reason}` at HTTP 200, never a throw, never a
+  non-200. Non-`/api/git/*` requests call `next()` and fall through to
+  vite's normal handling.
+- Two extra files beyond the three assigned, both justified by an existing
+  pattern already in this codebase: `web/gitapi.d.mts` (hand-written types
+  for `gitapi.mjs`, same reasoning and shape as `office/live.d.ts` — no
+  `@types/node` in this project, so a `.ts` test importing an untyped `.mjs`
+  fails `tsc` without a companion declaration; `.d.mts` not `.d.ts` because
+  the source is `.mjs`, and TS's declaration-file matching cares). Also
+  `web/pnpm-workspace.yaml` showed up untracked in the shared worktree,
+  presumably from another agent's environment fix — didn't touch it, didn't
+  commit it, leaving it for whoever put it there.
+- Test file avoids `node:path`/`node:url` for the same missing-`@types/node`
+  reason — `repoRoot` in the middleware tests is just `'..'`, relying on the
+  documented invocation (`cd web && pnpm test`) rather than resolving an
+  absolute path from `import.meta.url`.
+
+`pnpm test` and `pnpm typecheck` as literal commands both fail before
+reaching any script — pnpm's own preflight deps-status check hits
+`ERR_PNPM_IGNORED_BUILDS` on esbuild's postinstall and refuses to proceed,
+even though `node_modules` already has the correct pinned binaries and
+nothing in this round touched `package.json`/`pnpm-lock.yaml`. This is a
+pnpm/environment issue, not code — tasks 3 and 4 independently hit the same
+thing. Verified with the equivalent direct invocation instead: `bash
+scripts/verify-toolchain.sh && node_modules/.bin/vitest run` (72 passed, 6
+files, including gitsignals and everyone else's suites) and `bash
+scripts/verify-toolchain.sh && node_modules/.bin/tsc --noEmit` (clean, zero
+errors) — both using the exact pinned binaries, never npx. Whoever picks up
+round 2 should either run `pnpm approve-builds` once (writes to
+`package.json`, so worth doing deliberately, not as a side effect of one
+task) or keep using the direct-binary invocation.
+
+Nothing filed as an issue this round — the endpoint shapes were locked in
+the plan already and matched what landed on the other three tasks with zero
+back-and-forth needed.
