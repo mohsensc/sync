@@ -28,15 +28,65 @@
     padding:11px 20px;font-size:15px;line-height:1.45;letter-spacing:-.005em;
     box-shadow:0 8px 30px #4a1f3d33;opacity:0;transition:opacity .35s;pointer-events:none}
   #caption.on{opacity:1}
-  #beat{position:fixed;right:18px;top:16px;background:#fffdfaee;border:1px solid #C3B39B;
-    border-radius:10px;padding:9px 12px;font:11px ui-monospace,monospace;color:#6b5f56}
-  #beat b{color:#35455C}
   #mode{position:fixed;left:50%;top:16px;transform:translateX(-50%);
     background:#35455Cf2;color:#F0ECE6;border-radius:999px;padding:6px 16px;
     font:600 11px ui-monospace,monospace;letter-spacing:.04em;text-transform:uppercase;
     box-shadow:0 4px 14px #4a1f3d22}
   #mode.demo{background:#C0762Af2}
   #mode.connecting{background:#8A94A3f2}
+
+  /* ---- highlight reel ----------------------------------------------
+     Top-right, over the scene — same HUD look as #hud (cream card,
+     taupe border), sized to sit well clear of #mode's centered pill.
+     Absorbs the old #beat readout as its footer line, see reel.js. */
+  #reel{position:fixed;right:18px;top:16px;width:308px;max-height:60vh;
+    background:#fffdfaee;border:1px solid #C3B39B;border-radius:10px;
+    box-shadow:0 6px 24px #4a1f3d18;display:flex;flex-direction:column;
+    overflow:hidden}
+  .reel-head{display:flex;align-items:baseline;justify-content:space-between;
+    padding:11px 14px 0}
+  .reel-title{font-size:14px;font-weight:600;letter-spacing:-.01em;color:#35455C}
+  .reel-count{font:11px ui-monospace,monospace;color:#8a94a3}
+  .reel-filters{display:flex;align-items:center;gap:6px;padding:8px 14px 10px;
+    border-bottom:1px solid #E9E0CE;flex-wrap:wrap}
+  .reel-chips{display:flex;gap:4px;flex-wrap:wrap}
+  .reel-chip{font:600 10px ui-monospace,monospace;padding:3px 7px;border-radius:999px;
+    border:1px solid #C3B39B;background:#fff;color:#6b5f56;cursor:pointer;
+    text-transform:uppercase;letter-spacing:.02em}
+  .reel-chip:hover{background:#E9E0CE}
+  .reel-chip.on{background:#35455C;color:#F0ECE6;border-color:#35455C}
+  .reel-human{font:11px ui-sans-serif,sans-serif;color:#35455C;background:#fff;
+    border:1px solid #C3B39B;border-radius:6px;padding:3px 6px;margin-left:auto;
+    max-width:110px}
+  .reel-list{overflow-y:auto;overflow-x:hidden}
+  .reel-row{display:flex;align-items:flex-start;gap:8px;width:100%;
+    text-align:left;font:inherit;border:0;border-bottom:1px solid #F0ECE6;
+    background:none;cursor:pointer;padding:9px 14px}
+  .reel-row:hover{background:#F7F4EC}
+  .reel-row:last-child{border-bottom:0}
+  .reel-badge{flex:0 0 auto;font:700 10px ui-monospace,monospace;padding:2px 6px;
+    border-radius:5px;margin-top:1px}
+  .reel-body{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:2px}
+  .reel-line1{display:flex;align-items:center;gap:5px;font-size:12px;color:#35455C;
+    flex-wrap:wrap}
+  .reel-who{font-weight:600}
+  .reel-vs{color:#8a94a3;font-size:10px}
+  .reel-src{font:600 9px ui-monospace,monospace;padding:1px 5px;border-radius:4px;
+    text-transform:uppercase;letter-spacing:.03em}
+  .reel-src-live{background:#DCEFE3;color:#2E7D50}
+  .reel-src-gen{background:#EEF0F3;color:#6b5f56}
+  .reel-line2{display:flex;align-items:center;gap:5px;font-size:11px;color:#6b5f56;
+    min-width:0}
+  .reel-path{font-family:ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;
+    white-space:nowrap;max-width:150px}
+  .reel-dot{opacity:.6}
+  .reel-res{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .reel-time{flex:0 0 auto;font:11px ui-monospace,monospace;color:#8a94a3;
+    margin-top:1px}
+  .reel-empty{padding:22px 14px;text-align:center;font-size:12px;color:#8a94a3}
+  .reel-foot{padding:7px 14px;font:11px ui-monospace,monospace;color:#6b5f56;
+    border-top:1px solid #E9E0CE}
+  .reel-foot b{color:#35455C}
 </style>
 </head>
 <body>
@@ -59,7 +109,7 @@
     <button id="bWire" aria-pressed="false">Wireframe</button>
   </div>
 </div>
-<div id="beat">idle</div>
+<div id="reel"></div>
 <div id="mode" class="connecting">connecting…</div>
 <div id="caption"></div>
 <div id="log">loading…</div>
@@ -78,6 +128,7 @@ import { attachInteraction } from './interact.js'
 import { runDemo } from './demo.js'
 import { buildDressing } from './dressing.js'
 import * as Live from './live.js'
+import { ReelStore, SAMPLE_EVENTS, mountReel } from './reel.js'
 
 const P = { cream:0xF0ECE6, sand:0xE9E0CE, taupe:0xC3B39B, sage:0xE5E1D2, butter:0xF7DFAF,
             mustard:0xD6B45C, caramel:0xC0762A, coffee:0xB0674F, terracotta:0xD9714F,
@@ -86,8 +137,18 @@ const P = { cream:0xF0ECE6, sand:0xE9E0CE, taupe:0xC3B39B, sage:0xE5E1D2, butter
 const canvas = document.getElementById('c')
 const logEl = document.getElementById('log')
 const capEl = document.getElementById('caption')
-const beatEl = document.getElementById('beat')
 const modeEl = document.getElementById('mode')
+
+// ---- highlight reel -----------------------------------------------------
+// Panel lives top-right, over the scene (see #reel's CSS). Seeded with
+// reel.js's own sample events so it's never empty on a fresh checkout —
+// seed.js's larger generated history and the live decision feed both wire
+// in later rounds; for now selecting a row just captions who it was.
+const reelStore = new ReelStore(SAMPLE_EVENTS)
+const reel = mountReel(document.getElementById('reel'), reelStore, {
+  onSelect: (e) => caption(`replay: ${e.a.human}/${e.a.agent} vs ${e.b.human}/${e.b.agent}`),
+})
+reel.setFoot('idle')
 const renderer = new THREE.WebGLRenderer({ canvas, antialias:true })
 renderer.setPixelRatio(Math.min(devicePixelRatio,2))
 renderer.shadowMap.enabled = true
@@ -225,28 +286,28 @@ const PLAN = [
   // Faces +X in mesh space (bbox x=0.566 y=1.000 z=0.998), so it needs -PI/2
   // to look into the room. Centre sits half its depth off the wall plane
   // (-6.625) so the back touches rather than intersects: 0.566*2.6/2 = 0.736.
-  { id:'vault',   url:'glb/vault-door.glb',   h:2.6,  pos:[-6.0,0,-5.889], rot:-Math.PI/2, facing:'+z' },
+  { id:'vault',   url:'/glb/vault-door.glb',   h:2.6,  pos:[-6.0,0,-5.889], rot:-Math.PI/2, facing:'+z' },
   // bbox x=0.247 y=1.000 z=0.645. Same -PI/2; depth 0.247*2.0/2 = 0.247.
-  { id:'phones',  url:'glb/phone-wall.glb',   h:2.0,  pos:[ 5.4,1.1,-6.378], rot:-Math.PI/2, facing:'+z', air:true },
-  { id:'cables',  url:'glb/cable-ball.glb',   h:1.1,  pos:[-7.3,0, 4.7], rot:0.6          },
-  { id:'tortoise',url:'glb/tortoise-v2.glb',  h:0.55, pos:[ 2.0,0, 4.3], rot:-0.9         },
+  { id:'phones',  url:'/glb/phone-wall.glb',   h:2.0,  pos:[ 5.4,1.1,-6.378], rot:-Math.PI/2, facing:'+z', air:true },
+  { id:'cables',  url:'/glb/cable-ball.glb',   h:1.1,  pos:[-7.3,0, 4.7], rot:0.6          },
+  { id:'tortoise',url:'/glb/tortoise-v2.glb',  h:0.55, pos:[ 2.0,0, 4.3], rot:-0.9         },
   // Desks are click targets. The seat is the zone slot in front of the desk,
   // pulled SEAT_PULL closer so the knees end up under it: the sit clip walks
   // the pelvis 22cm back on the way down (anim.js SEAT_SETBACK).
-  { url:'glb/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[-2.6,0,-2.4], rot:0, desk:'desk 1', slot:Z.ZONES.desks.slots[0] },
-  { url:'glb/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[ 0.4,0,-2.4], rot:0, desk:'desk 2', slot:Z.ZONES.desks.slots[1] },
-  { url:'glb/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[ 3.4,0,-2.4], rot:0, desk:'desk 3', slot:Z.ZONES.desks.slots[2] },
-  { url:'glb/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[-2.6,0, 1.4], rot:Math.PI, desk:'desk 4', slot:Z.ZONES.desks.slots[3] },
-  { url:'glb/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[ 0.4,0, 1.4], rot:Math.PI, desk:'desk 5', slot:Z.ZONES.desks.slots[4] },
-  { url:'glb/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[ 3.4,0, 1.4], rot:Math.PI, desk:'desk 6', slot:Z.ZONES.desks.slots[5] },
-  { url:'glb/desk-tripo-12k.glb', h:0.95, pos:[-6.9,0, 1.0], rot:Math.PI/2, sx:1.45,
+  { url:'/glb/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[-2.6,0,-2.4], rot:0, desk:'desk 1', slot:Z.ZONES.desks.slots[0] },
+  { url:'/glb/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[ 0.4,0,-2.4], rot:0, desk:'desk 2', slot:Z.ZONES.desks.slots[1] },
+  { url:'/glb/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[ 3.4,0,-2.4], rot:0, desk:'desk 3', slot:Z.ZONES.desks.slots[2] },
+  { url:'/glb/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[-2.6,0, 1.4], rot:Math.PI, desk:'desk 4', slot:Z.ZONES.desks.slots[3] },
+  { url:'/glb/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[ 0.4,0, 1.4], rot:Math.PI, desk:'desk 5', slot:Z.ZONES.desks.slots[4] },
+  { url:'/glb/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[ 3.4,0, 1.4], rot:Math.PI, desk:'desk 6', slot:Z.ZONES.desks.slots[5] },
+  { url:'/glb/desk-tripo-12k.glb', h:0.95, pos:[-6.9,0, 1.0], rot:Math.PI/2, sx:1.45,
     desk:'reception', slot:Z.ZONES.reception.slots[0] },
   // Cups were 0.14 m and read as specks. Up to 0.20 and cut from four to three,
   // placed at the desks that actually have someone at them plus reception, near
   // the front edge where they catch the key light.
-  { url:'glb/coffee-cup-v2.glb', h:0.20, pos:[ 0.95,DESK_TOP,-2.05], rot:1.1 },
-  { url:'glb/coffee-cup-v2.glb', h:0.20, pos:[ 0.95,DESK_TOP, 1.05], rot:2.2 },
-  { url:'glb/coffee-cup-v2.glb', h:0.20, pos:[-6.55,0.95, 1.55], rot:0.2 },
+  { url:'/glb/coffee-cup-v2.glb', h:0.20, pos:[ 0.95,DESK_TOP,-2.05], rot:1.1 },
+  { url:'/glb/coffee-cup-v2.glb', h:0.20, pos:[ 0.95,DESK_TOP, 1.05], rot:2.2 },
+  { url:'/glb/coffee-cup-v2.glb', h:0.20, pos:[-6.55,0.95, 1.55], rot:0.2 },
 ]
 
 const loader = new GLTFLoader()
@@ -457,7 +518,7 @@ function setupCast() {
 }
 
 pending++
-loader.load('glb/character.glb', gltf => {
+loader.load('/glb/character.glb', gltf => {
   charGLTF = gltf
   done++; tally()
 }, undefined, (e) => { console.warn('character failed', e); done++; tally() })
@@ -678,7 +739,7 @@ function startDemo() {
   let n = 0
   demo = runDemo({
     agents, world, tortoise: props.tortoise, scene, caption, focus, zoneUI,
-    onBeat: (t) => { n++; beatEl.innerHTML = `beat <b>${n}</b> / 6` },
+    onBeat: (t) => { n++; reel.setFoot(`beat <b>${n}</b> / 6`) },
   })
   window.__demo = demo
   // Capture the run. A cancelled run still settles, and without this check its
@@ -687,7 +748,7 @@ function startDemo() {
   const run = demo
   demo.promise.then(r => {
     if (demo !== run) return
-    beatEl.innerHTML = `demo <b>${r}</b>`
+    reel.setFoot(`demo <b>${r}</b>`)
     world.greetings = true; setB(bGreet, true)
   })
 }
