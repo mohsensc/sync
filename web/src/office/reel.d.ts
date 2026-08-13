@@ -41,6 +41,8 @@ export declare class ReelStore {
   readonly rungFilter: Rung | 'all'
   setHumanFilter(human: string): void
   readonly humanFilter: string
+  setSortMode(mode: ReelSortMode): void
+  readonly sortMode: ReelSortMode
   humans(): string[]
   all(): ReelEvent[]
   visible(): ReelEvent[]
@@ -58,6 +60,10 @@ export declare class ReelStore {
 }
 
 export const SAMPLE_EVENTS: ReelEvent[]
+
+export type ReelSortMode = 'new' | 'worst' | 'worst-grouped'
+
+export const SORT_MODES: ReelSortMode[]
 
 export function relTime(ts: number, now: number): string
 

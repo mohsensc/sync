@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { ReelStore, relTime } from '../src/office/reel.js'
+import { ReelStore, relTime, SAMPLE_EVENTS, SORT_MODES } from '../src/office/reel.js'
+import { seedEvents } from '../src/office/seed.js'
 import type { ReelEvent } from '../src/office/reel.js'
 
 function ev(over: Partial<ReelEvent> = {}): ReelEvent {
@@ -207,6 +208,128 @@ describe('ReelStore arrival marking', () => {
     s.add(ev({ id: 'live-1', source: 'live' }))
     s.add(ev({ id: 'live-2', source: 'live' }))
     expect(s.takeNewLiveIds().sort()).toEqual(['live-1', 'live-2'])
+  })
+})
+
+describe('ReelStore sort mode', () => {
+  it('defaults to "new" — chronological, unchanged behavior', () => {
+    const s = new ReelStore()
+    expect(s.sortMode).toBe('new')
+  })
+
+  it('falls back to "new" for anything unrecognized', () => {
+    const s = new ReelStore()
+    s.setSortMode('worst')
+    expect(s.sortMode).toBe('worst')
+    // @ts-expect-error deliberately passing a bad value, same posture as resolveSkin
+    s.setSortMode('deadliest')
+    expect(s.sortMode).toBe('new')
+  })
+
+  it('"new" sorts newest first regardless of rung', () => {
+    const s = new ReelStore()
+    s.add(ev({ id: 'a', ts: 1, rung: 4 }))
+    s.add(ev({ id: 'b', ts: 3, rung: 0 }))
+    s.add(ev({ id: 'c', ts: 2, rung: 2 }))
+    s.setSortMode('new')
+    expect(s.visible().map(e => e.id)).toEqual(['b', 'c', 'a'])
+  })
+
+  it('"worst" sorts by rung descending', () => {
+    const s = new ReelStore()
+    s.add(ev({ id: 'low', ts: 3, rung: 0 }))
+    s.add(ev({ id: 'high', ts: 1, rung: 4 }))
+    s.add(ev({ id: 'mid', ts: 2, rung: 2 }))
+    s.setSortMode('worst')
+    expect(s.visible().map(e => e.id)).toEqual(['high', 'mid', 'low'])
+  })
+
+  it('"worst" ties within a rung break newest-first', () => {
+    const s = new ReelStore()
+    s.add(ev({ id: 'r3-old', ts: 1, rung: 3 }))
+    s.add(ev({ id: 'r3-new', ts: 9, rung: 3 }))
+    s.add(ev({ id: 'r3-mid', ts: 5, rung: 3 }))
+    s.setSortMode('worst')
+    expect(s.visible().map(e => e.id)).toEqual(['r3-new', 'r3-mid', 'r3-old'])
+  })
+
+  it('"worst-grouped" sorts identically to "worst" — grouping is a render concern', () => {
+    const s1 = new ReelStore()
+    const s2 = new ReelStore()
+    for (const s of [s1, s2]) {
+      s.add(ev({ id: 'a', ts: 1, rung: 4 }))
+      s.add(ev({ id: 'b', ts: 3, rung: 0 }))
+      s.add(ev({ id: 'c', ts: 2, rung: 3 }))
+    }
+    s1.setSortMode('worst')
+    s2.setSortMode('worst-grouped')
+    expect(s2.visible().map(e => e.id)).toEqual(s1.visible().map(e => e.id))
+  })
+
+  it('sort respects the active filters, same as "new" does', () => {
+    const s = new ReelStore()
+    s.add(ev({ id: 'keep', ts: 1, rung: 4, a: { agent: 'agent-1', human: 'priya' } }))
+    s.add(ev({ id: 'drop', ts: 2, rung: 3, a: { agent: 'agent-1', human: 'someone-else' } }))
+    s.setHumanFilter('priya')
+    s.setSortMode('worst')
+    expect(s.visible().map(e => e.id)).toEqual(['keep'])
+  })
+
+  it('switching sort mode does not reset the reveal cap, unlike a filter change', () => {
+    const s = new ReelStore()
+    for (let i = 0; i < 55; i++) s.add(ev({ id: `e${i}`, ts: i }))
+    s.showMore()
+    expect(s.revealCount).toBe(80)
+    s.setSortMode('worst')
+    expect(s.revealCount).toBe(80)
+  })
+
+  it('every declared sort mode round-trips through setSortMode', () => {
+    const s = new ReelStore()
+    for (const mode of SORT_MODES) {
+      s.setSortMode(mode)
+      expect(s.sortMode).toBe(mode)
+    }
+  })
+})
+
+describe('ReelStore with the real seed history (reel.js SAMPLE_EVENTS + seed.js)', () => {
+  const build = () => new ReelStore([...SAMPLE_EVENTS, ...seedEvents(1_700_000_000_000)])
+
+  it('has enough rows that paging actually triggers', () => {
+    const s = build()
+    const { shown, remaining } = s.page()
+    expect(shown.length).toBe(40) // REVEAL_STEP
+    expect(remaining).toBeGreaterThan(0)
+  })
+
+  it('showMore eventually reveals everything', () => {
+    const s = build()
+    while (s.page().remaining > 0) s.showMore()
+    expect(s.page().shown.length).toBe(s.visible().length)
+  })
+
+  it('has at least one human×rung combo that filters down to empty', () => {
+    const s = build()
+    s.setRungFilter(4)
+    s.setHumanFilter('sara')
+    expect(s.visible()).toEqual([])
+  })
+
+  it('is not the case that every human×rung combo is populated', () => {
+    // The failure mode the brief called out by name: if this ever comes
+    // back true, the seed data got too dense again to reach the empty
+    // state through the filters.
+    const s = build()
+    let sawEmpty = false
+    for (const human of s.humans()) {
+      for (const rung of [0, 1, 2, 3, 4] as const) {
+        s.setRungFilter(rung)
+        s.setHumanFilter(human)
+        if (s.visible().length === 0) sawEmpty = true
+      }
+    }
+    expect(sawEmpty).toBe(true)
   })
 })
 

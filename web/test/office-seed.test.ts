@@ -18,8 +18,8 @@ describe('seedEvents', () => {
     expect(a.length).toBe(b.length)
   })
 
-  it('returns about 25 events', () => {
-    expect(seedEvents(NOW).length).toBe(25)
+  it('returns 75 events — enough to actually page and hit the empty state', () => {
+    expect(seedEvents(NOW).length).toBe(75)
   })
 
   it('every event is tagged generated, never live', () => {
@@ -68,5 +68,27 @@ describe('seedEvents', () => {
   it('has no duplicate ids', () => {
     const ids = seedEvents(NOW).map(e => e.id)
     expect(new Set(ids).size).toBe(ids.length)
+  })
+
+  it('is skewed toward low rungs, like real life', () => {
+    const rungs = seedEvents(NOW).map(e => e.rung)
+    const count = (r: number) => rungs.filter(x => x === r).length
+    // Not a strict ladder (the RNG can tie adjacent rungs), just the shape
+    // the brief asked for: rung 0 the most common, rung 4 the least.
+    expect(count(0)).toBeGreaterThan(count(3))
+    expect(count(0)).toBeGreaterThan(count(4))
+    expect(count(4)).toBeLessThan(rungs.length / 4)
+  })
+
+  it('spreads timestamps from minutes to days ago, not one flat window', () => {
+    const ages = seedEvents(NOW).map(e => (NOW - e.ts) / 60_000)
+    expect(Math.min(...ages)).toBeLessThan(60)          // something within the last hour
+    expect(Math.max(...ages)).toBeGreaterThan(24 * 60)  // something more than a day back
+  })
+
+  it('leaves sara entirely out of rung 4 — a guaranteed-empty filter combo', () => {
+    const hits = seedEvents(NOW).filter(e =>
+      e.rung === 4 && (e.a.human === 'sara' || e.b.human === 'sara'))
+    expect(hits).toEqual([])
   })
 })

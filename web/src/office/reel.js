@@ -27,6 +27,18 @@
 
 const RUNGS = [0, 1, 2, 3, 4]
 
+// Sort treatments for the panel. 'new' is the original chronological order
+// and stays the default — a fresh checkout looks exactly like it always
+// has. 'worst' answers the brief's "ranked by severity" literally: rung
+// descending, newest-first as the tiebreak within a rung so it doesn't
+// just become a second chronological view. 'worst-grouped' is the same
+// order with a rung divider between groups — cheap once 'worst' exists
+// (see groupHeadHtml below), and worth having as its own option since a
+// long worst-first list without dividers reads like one undifferentiated
+// wall of red/orange badges.
+export const SORT_MODES = ['new', 'worst', 'worst-grouped']
+const SORT_LABEL = { new: 'newest', worst: 'worst', 'worst-grouped': 'worst · grouped' }
+
 // Visual treatments for the panel. Colors live entirely in CSS now (see
 // office.html's reel CSS block and reel-skins-test.html's copy of it) keyed
 // off `.reel-badge[data-rung]` — rowHtml below only ever writes the rung
@@ -72,6 +84,7 @@ export class ReelStore {
     this._events = []
     this._rungFilter = 'all'
     this._humanFilter = 'all'
+    this._sortMode = 'new'
     this._openId = null
     this._playingId = null
     this._revealCount = REVEAL_STEP
@@ -98,6 +111,14 @@ export class ReelStore {
   setHumanFilter(human) { this._humanFilter = human; this.resetReveal() }
   get humanFilter() { return this._humanFilter }
 
+  /** Unrecognized values fall back to 'new' rather than silently keeping
+   *  whatever was set before — same "don't render broken" posture as
+   *  resolveSkin(). Changing sort doesn't reset the reveal cap: unlike a
+   *  filter, re-sorting the same set of rows shouldn't punt you back to
+   *  the top of a long list you'd already paged into. */
+  setSortMode(mode) { this._sortMode = SORT_MODES.includes(mode) ? mode : 'new' }
+  get sortMode() { return this._sortMode }
+
   /** Every human named on either side of any event, sorted, for the filter UI. */
   humans() {
     const set = new Set()
@@ -109,13 +130,19 @@ export class ReelStore {
   all() { return this._events.slice() }
 
   /** The filtered, sorted view — every match, uncapped. `page()` is what
-   *  the panel actually renders; this stays around for counts and tests. */
+   *  the panel actually renders; this stays around for counts and tests.
+   *  `_events` is always maintained newest-first (see add()), so 'new'
+   *  returns the filtered slice as-is; 'worst'/'worst-grouped' re-sort by
+   *  rung descending with newest-first as the tiebreak, on a copy —
+   *  `_events`'s own order is never touched by which sort mode is active. */
   visible() {
-    return this._events.filter(e => {
+    const filtered = this._events.filter(e => {
       if (this._rungFilter !== 'all' && e.rung !== this._rungFilter) return false
       if (this._humanFilter !== 'all' && e.a.human !== this._humanFilter && e.b.human !== this._humanFilter) return false
       return true
     })
+    if (this._sortMode === 'new') return filtered
+    return filtered.sort((x, y) => (y.rung - x.rung) || (y.ts - x.ts))
   }
 
   // ---- detail row -------------------------------------------------------
@@ -302,6 +329,21 @@ function rowHtml(e, now, state) {
   </div>`
 }
 
+/** A rung divider for 'worst-grouped' mode. Reuses `.reel-badge` (already
+ *  themed per-rung by every skin, see the badge rules at the bottom of
+ *  office.html's base CSS and each skin's own copy) instead of adding a
+ *  new class, so this needs zero CSS of its own — the layout below is
+ *  inline because this file doesn't own office.html's markup-adjacent
+ *  CSS, only the skins block, and a divider is cheap enough as inline
+ *  style that it isn't worth asking for a CSS home. */
+function groupHeadHtml(rung) {
+  return `<div class="reel-group-head" style="display:flex;align-items:center;
+    gap:8px;padding:8px 14px 3px;opacity:.9">
+    <span class="reel-badge" data-rung="${rung}" style="margin-top:0">R${rung}</span>
+    <span style="flex:1 1 auto;height:1px;background:currentColor;opacity:.14"></span>
+  </div>`
+}
+
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]))
 }
@@ -318,6 +360,12 @@ function escapeAttr(s) { return escapeHtml(s) }
  * this round asked for that split explicitly, so the two-act replay work
  * has a single entry point to drive instead of guessing which click meant
  * "tell me more" vs "play it").
+ *
+ * Sort is a second cycle button next to the skin one — 'new' (default,
+ * today's chronological order), 'worst' (rung descending, ranked-by-
+ * severity per the brief), 'worst-grouped' (same order with a rung
+ * divider between groups). Store-side state (`ReelStore.sortMode`), same
+ * split as skin: this function just draws whatever the store says.
  *
  * Skin is a class on `container`, not a prop threaded through every draw
  * call — `reel-skin-<name>`, one of `SKINS`. `opts.skin` sets the initial
@@ -342,6 +390,7 @@ export function mountReel(container, store, opts = {}) {
       <span class="reel-title">highlight reel</span>
       <span class="reel-head-right">
         <span class="reel-count"></span>
+        <button class="reel-skin-btn" data-role="sort-btn" type="button"></button>
         <button class="reel-skin-btn" data-role="skin-btn" type="button"></button>
       </span>
     </div>
@@ -359,6 +408,19 @@ export function mountReel(container, store, opts = {}) {
   const listEl = container.querySelector('[data-role="list"]')
   const footEl = container.querySelector('[data-role="foot"]')
   const skinBtn = container.querySelector('[data-role="skin-btn"]')
+  const sortBtn = container.querySelector('[data-role="sort-btn"]')
+
+  function applySortLabel() {
+    const mode = store.sortMode
+    const next = SORT_MODES[(SORT_MODES.indexOf(mode) + 1) % SORT_MODES.length]
+    sortBtn.textContent = SORT_LABEL[mode]
+    sortBtn.title = `sort: ${SORT_LABEL[mode]} — click for ${SORT_LABEL[next]}`
+    sortBtn.setAttribute('aria-label', sortBtn.title)
+  }
+  sortBtn.onclick = () => {
+    store.setSortMode(SORT_MODES[(SORT_MODES.indexOf(store.sortMode) + 1) % SORT_MODES.length])
+    render()
+  }
 
   function applySkinClass() {
     for (const s of SKINS) container.classList.remove(`reel-skin-${s}`)
@@ -402,6 +464,7 @@ export function mountReel(container, store, opts = {}) {
   function render() {
     renderChips()
     renderHumans()
+    applySortLabel()
     const now = Date.now()
     const visible = store.visible()
     const { shown, remaining } = store.page()
@@ -412,7 +475,13 @@ export function mountReel(container, store, opts = {}) {
       return
     }
     const state = { openId: store.openId, playingId: store.playingId, newIds }
-    const rows = shown.map(e => rowHtml(e, now, state)).join('')
+    const grouped = store.sortMode === 'worst-grouped'
+    let lastRung = null
+    const rows = shown.map(e => {
+      const head = grouped && e.rung !== lastRung ? groupHeadHtml(e.rung) : ''
+      lastRung = e.rung
+      return head + rowHtml(e, now, state)
+    }).join('')
     const more = remaining > 0
       ? `<button class="reel-more" data-more="1">show ${Math.min(remaining, REVEAL_STEP)} older</button>`
       : ''

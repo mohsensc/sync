@@ -2,7 +2,7 @@
 
 import type { ReelParty, Rung } from './reel.js'
 
-export type ReplayCardVariant = 'split' | 'strip'
+export type ReplayCardVariant = 'split' | 'strip' | 'ticket' | 'bout'
 
 export interface ReplayCardShowInfo {
   a: ReelParty
