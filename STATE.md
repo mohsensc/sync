@@ -272,3 +272,75 @@ branch as of this commit).
   each, ACTS entries `yielding: { clip:'yieldStep', ... }` /
   `keeping: { clip:'yieldKeep', ... }` / `doubletaking: { clip:'doubletake',
   ... }`). Genuinely close to the five-line job the brief describes.
+
+## Round 2, task 1 — the reel panel on screen
+
+Built `web/src/office/reel.js` and wired it into `office.html`, top-right,
+in the corner `#beat` used to own. Browser-verified (see below).
+
+- `ReelStore` — pure logic, no DOM. `add(event)` keeps the list sorted
+  newest-first (stable sort, ties keep insertion order); `setRungFilter`
+  (`0-4` or `'all'`), `setHumanFilter` (a name or `'all'`, matches either
+  side of the pair), `visible()` for the filtered view, `humans()` for the
+  filter dropdown's options. Severity rank is just the rung, per the brief.
+  Tested in `web/test/office-reel.test.ts`, same no-DOM style as
+  `office-live.test.ts` (ordering, single/combined filters, empty-result
+  behavior, human dedup).
+- `mountReel(container, store, {onSelect})` — the render layer. Draws a
+  header (title + `n/total` count), rung filter chips (`ALL`/`R0`-`R4`),
+  a human `<select>`, the scrollable row list, and a footer line the caller
+  drives independently (`setFoot(html)` — this is what replaced `#beat`).
+  Each row: rung badge color-graded cool-to-hot (slate R0 → sage R1 →
+  mustard R2 → caramel R3 → red R4), `human/agent vs human/agent`, a
+  live/generated source tag (`.reel-src-live` green, `.reel-src-gen`
+  neutral grey — never unlabeled, per the brief), truncated path, a
+  human-readable resolution phrase, and relative time. Empty-filter state
+  reads "nothing here — try a wider filter" instead of a blank box.
+- 12 hardcoded `SAMPLE_EVENTS`, all `source:'generated'`, spread 1 minute to
+  ~3 hours back, one per rung repeated across a few pairs/paths so the panel
+  reads full without being empty on a fresh checkout. `seed.js` (built in
+  parallel this round, not imported here) is the real generated-history
+  generator for next round — swapping `SAMPLE_EVENTS` for `seedEvents(...)`
+  in office.html is a one-line change once it's wired.
+- `reel.d.ts` added alongside, same reason `live.d.ts` exists — office/ is
+  outside tsconfig's `allowJs`, so the vitest file needs a hand-written
+  declaration to import against.
+- office.html: `#beat` div removed, replaced with `#reel` (CSS in the
+  existing `<style>` block, matching `#hud`'s card look — `#fffdfaee` bg,
+  `#C3B39B` border, `0 6px 24px #4a1f3d18` shadow). Capped at `60vh` with
+  `overflow-y:auto` on the row list so a long history scrolls inside the
+  panel instead of pushing it off-screen. `onSelect` currently just calls
+  the existing `caption()` with "replay: who vs who" — actual playback
+  through `World`'s encounter machinery is next round's job, once a task
+  owns `agent.js` again.
+- Also fixed a pre-existing bug flagged in the browser protocol doc:
+  office.html's prop/character `url:'glb/...'` references are relative,
+  which 404s under `/src/office/office.html` (resolves to
+  `/src/office/glb/...`, doesn't exist). Changed every `glb/...` reference
+  to `/glb/...`. This is a real fix, not scaffolding — worth calling out in
+  the PR body. Whoever reads this next: it's done, don't redo it.
+- Filed #59: `coffee-cup-v2.glb` is referenced three times in `PROPS` but
+  was never in `web/public/glb/` — unrelated to the path fix above (it's
+  genuinely missing, not misresolved). Doesn't block anything, the scene
+  just quietly has no coffee cups; console shows three 404-as-JSON parse
+  errors per load.
+
+Browser-verified with the shared lock (port 5173, tab 6): screenshot with
+the demo running and the reel populated over the scene reads clean —
+contrast is good against both the cream scene background and the busy
+character/prop area behind it, chips filter correctly (`ALL`→`R3`→`R4`
+checked live, counts updated `12/12`→`4/12`→`2/12`), the human `<select>`
+combined with `R4` + `sara` produced the empty state correctly, and the
+demo's own beat/done text kept updating in the panel's footer exactly like
+the old `#beat` did. Only console noise was the expected relay-unreachable
+WebSocket error (no relay running) and the three coffee-cup 404s (#59).
+
+Not touched: `live.js`, `live.d.ts`, `agent.js`, `seed.js`,
+`clips/*` — other tasks' files, left alone.
+
+What's next for the reel specifically: wire `seed.js`'s `seedEvents()` in
+as the real generated history (swap for `SAMPLE_EVENTS`), wire `live.js`'s
+`onDecision`/`onRedundant`/`toReelEvent` in as the real feed once `agent.js`
+exposes enough of `World` to actually replay a clip from a click, and swap
+`onSelect`'s caption stand-in for real playback once `World.handshake`/
+`World.shove`/etc. exist to drive it.
