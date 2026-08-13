@@ -158,19 +158,29 @@ const WINDUP = milestone({
   lean: -6, nod: -2, twist: -22,
   arm: rightArm(2, 60, -85, 10, 12, 60, -10, 8, [0.15, 0.35, 0.4]),
 })
-// Contact numbers, like shove.js's THRUST, are a fitted solve (see
-// measureContact()/CONTACT_Y_CM/CONTACT_Z_CM below): the right palm lands on
-// the character's own midline at HEAD height, not chest — this is a slap,
-// not a shove.
+// Contact numbers are a fitted solve, browser-verified against the running
+// harness (slap-test.html), not a guess: gridded over lean/twist/hips-Z and
+// the arm's own shoulder/elbow/hand angles for the combination that lands
+// the right palm nearest the LOSER'S OWN HEAD BONE (not the winner's own
+// midline the way shove.js's chest-height THRUST does — a slap needs the
+// actual target, since a fixed midline point is nowhere near head height
+// once you're checking against a real skull position). A chunk of the
+// closing distance is a forward hips lunge (hips-Z) rather than pure arm
+// reach — a cartoon slap commits the whole body, not just the hand.
+// Landed at ~10cm palm-to-head at SLAP_SPACING — see slap-test.html's
+// palm→cheek column. That residual is expected: there is nothing on this
+// rig to represent cheek depth (same BODY_DEPTH_CM situation shove.js
+// documents for the chest), and 10cm reads as a real hit once the loser's
+// own head is whipping toward the hand on contact.
 const CONTACT = milestone({
-  lean: 4, nod: 2, twist: 20,
-  hips: [0, 0, 2],
-  arm: rightArm(20, 4, -12, 118, 8, 18, -2, 4, [-0.1, 0.05, 0.96]),
+  lean: 6, nod: 2, twist: 8,
+  hips: [0, 0, 20],
+  arm: rightArm(15, 5, -8, 80, 15, 20, -4, 6, [-0.08, 0.05, 0.97]),
 })
 const FOLLOW = milestone({
-  lean: 8, nod: 4, twist: 34,
-  hips: [0, 0, 2],
-  arm: rightArm(24, -2, -6, 122, -8, 14, -4, 2, [-0.2, -0.05, 0.85]),
+  lean: 8, nod: 4, twist: 16,
+  hips: [0, 0, 20],
+  arm: rightArm(20, -2, -4, 88, -6, 16, -6, 2, [-0.2, -0.05, 0.9]),
 })
 const SETTLE = milestone({
   lean: -6, nod: -8, twist: 12,
@@ -279,7 +289,17 @@ function slapReactPose(t) {
 // ---------------------------------------------------------------------------
 // Specs / registry
 // ---------------------------------------------------------------------------
-const SLAP_KEYS = 60
+// 81 keys, not a round number: chosen so (keys-1) * SLAP_CONTACT_T is an
+// integer (80 * 0.5 = 40), which lands an actual sample exactly ON the
+// contact frame instead of straddling it. This matters more here than in
+// shove.js: the windup->contact swing is a pow(u,3) curve, almost all of it
+// packed into the last few percent, so a sample landing even one step off
+// SLAP_CONTACT_T badly undershoots the full extension — measured in the
+// browser harness (holdContact() froze the pose ~15cm short of the fitted
+// CONTACT pose at 60 keys, purely from keyframe straddling, not a bad fit).
+// At 81 keys the ~0.108s windup-hold->contact window still gets ~6.4
+// samples, comfortably over doubletake.js's own "~4 or it mushes" rule.
+const SLAP_KEYS = 81
 export const SLAP_SPEC = { fn: slapPose, dur: SL_DUR, keys: SLAP_KEYS, loop: false }
 export const SLAP_REACT_SPEC = { fn: slapReactPose, dur: SL_DUR, keys: SLAP_KEYS, loop: false }
 
@@ -300,8 +320,8 @@ export function getClip(name) {
 // reach does all the travelling. See shove.js's own note on why doubling a
 // one-sided reach overshoots.
 // ---------------------------------------------------------------------------
-export const CONTACT_Y_CM = 148.6
-export const CONTACT_Z_CM = 61.4
+export const CONTACT_Y_CM = 119.1
+export const CONTACT_Z_CM = 68.8
 
 // Same BODY_DEPTH_CM stand-in as shove.js — there is nothing on this rig to
 // measure a face's depth off, so this is chosen to keep the two heads from

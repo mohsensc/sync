@@ -113,7 +113,7 @@ function rightArm(shY, shZ, armX, armY, armZ, elbow, flex, dev, palm) {
  *  onto the left arm — a one-armed dismissive wave loses its whole character
  *  if the other arm mirrors along with it. The left arm is authored
  *  separately per milestone (usually just resting). */
-function milestone({ hips = [0, 0, 0], Hips = [0, 0, 0], lean = 0, twist = 0, nod = 0, tilt = 0, rightArm: ra, leftArm: la, legs = {} }) {
+function milestone({ hips = [0, 0, 0], Hips = [0, 0, 0], lean = 0, twist = 0, nod = 0, tilt = 0, ra, la, legs = {} }) {
   return {
     hips, Hips,
     Spine02: [lean * 0.45, twist * 0.34, 0],
