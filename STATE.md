@@ -218,3 +218,130 @@ was the one-line `preserveDrawingBuffer` fix in `office.html`.
 `web/pnpm-workspace.yaml` is still untracked in this worktree (local
 toolchain artifact from `pnpm approve-builds esbuild`, per round 1) — left
 untracked again, consistent with every prior round.
+
+## Round 6 task 4 — replay presentation: caption arbiter, variant dispatch, versus card
+
+Three connected pieces in the replay-presentation region of `office.html`,
+plus two new standalone modules. No browser access this round (task
+scoped BROWSER: no) — everything below is code-level/test-verified only;
+see the flag at the end.
+
+**(a) #63 fixed.** New `web/src/office/caption.js`: a pure priority
+holder (`set(text, {priority})`, `hold(priority)` → token, `release
+(token)`, `isHeld()`). Replay priority beats demo priority; while a replay
+hold is active, demo writes are silently dropped rather than queued —
+that's the whole fix, the race was purely "last write wins with no
+concept of who currently owns the line." `office.html`'s `caption()` and
+the caption handle passed to `runDemo` are the same function now, both
+routed through the arbiter at demo priority. `replayEvent()` takes a hold
+at replay priority the moment it starts a beat, stores the token in a new
+module-level `replayCaptionToken`, and the render-loop's existing
+`replayEnc.phase === 'done'` check (already there from round 4 task 2)
+now also releases that hold and hides the versus card. Unit tested in
+`web/test/office-caption.test.ts` (5 cases: plain write-through, hold
+blocks lower priority, same-priority write while held still lands, a
+stale token can't release a newer hold, `isHeld()` state). Closed
+[#63](https://github.com/mohsensc/sync/issues/63) with a comment pointing
+at the fix and the test file.
+
+**(b) Variant dispatch in `replayEvent()`.** `share` resolutions now pick
+among `world.highfive` / `world.chestbump` / `world.fistbump`; `abort`
+among `world.shove` / `world.waveoff` / `world.slap`. Every non-base name
+is gated on `typeof world[name] === 'function'` — this tree may or may not
+have tasks 1/2's clips landed depending on merge order, and the dispatch
+falls all the way back to the existing `world.replay(a, b, kind)` two-act
+chain (clash then resolution) when a variant name doesn't exist, so
+nothing regresses if those land after this or not at all. Selection order:
+`?beat=<name>` forces one (only if it names a real function); otherwise a
+small FNV-ish hash of `event.id` + how many times that exact event has
+been replayed this session picks deterministically, so clicking replay
+twice on the same row shows a different take but a fresh page load always
+shows the same first take for a given id.
+
+One subtlety worth flagging for whoever touches this next: a **non-base**
+variant call bypasses `world.replay()`'s two-stage chain entirely and
+calls the standalone `World` method directly (`world.chestbump(a,b)`,
+`world.waveoff(b,a)`, etc.) — those are already complete self-contained
+beats (own approach + contact), same shape as `world.highfive`/
+`world.shove` today, so this was the honest way to reach them without
+reaching into `agent.js`'s `REPLAY_CHAINS` (owned by tasks 1/2 this round,
+append-only). The cost: picking a non-base variant means the replay skips
+the leading "clash" stage (the arguing/reacting standoff) and goes
+straight to the alternate resolution beat — so `?beat=waveoff` looks like
+"they just resolve it," not "they argue, then one waves the other off."
+Filed nothing for this — it's a known, cheap-to-explain tradeoff, not a
+bug, and fixing it properly means teaching `agent.js`'s chain builder
+about variants, which is out of this task's file ownership. Worth a look
+if a future round wants every variant to keep the clash lead-in.
+
+Also: the `abort` family's direct-call branch swaps argument order
+(`world[variant](b, a)`) because the reel's own convention through this
+whole function is `a` = stands down, `b` = prevails, while `shove()`'s
+(and by the same fixed contract, `waveoff()`/`slap()`'s) standalone
+convention is `(winner, loser)`. Easy to get backwards; flagging in case
+it trips someone up reading the diff.
+
+**(c) Versus card.** New `web/src/office/replay-card.js`:
+`createReplayCard(container, variant)` where `variant` is `'split'`,
+`'strip'`, or falsy (falsy returns a no-op `{show(){}, hide(){}}` — the
+feature is off by default, plain caption is still what plays unless
+`?vcard=split|strip` is on the URL, so a normal checkout is unchanged).
+`split` renders a lower-third that slides two named-party halves in from
+the left/right edges with a rung badge and verdict line in the middle;
+`strip` is one dense single line with an inline badge. Rung colors are a
+five-entry copy of `reel.js`'s `RUNG_INFO` hex pairs (deliberately not
+imported — same small-copy-across-the-boundary pattern `office.html`
+already uses for `RESOLUTION_LABEL`, live.js's `HAIR`, zones.js's
+`PALETTE`). Wired into `office.html`: a `#replayCard` div next to
+`#caption`, CSS appended right beside `#caption`'s own block (not
+touching the reel CSS block, which is task 3's), `replayEvent()` calls
+`replayCard.show({a, b, rung, label})` alongside the caption hold, the
+render-loop `done` check calls `replayCard.hide()`.
+
+**Files added:** `web/src/office/caption.js`, `caption.d.ts`,
+`replay-card.js`, `replay-card.d.ts`, `web/test/office-caption.test.ts`.
+**Files touched (append/edit within owned regions only):** `office.html`
+— imports, `#caption`/new-card CSS, the `#replayCard` div, `caption()`,
+the `runDemo` caption wiring (already flowed through `caption()`, no
+separate change needed there), `replayEvent()` and its
+`RESOLUTION_LABEL`/variant-dispatch neighborhood, the render-loop `done`
+check.
+
+Note on how this landed in git: this worktree is shared live across all
+four of this round's tasks (one working tree, not one per task), so by
+the time this task's `office.html` edits were ready to commit, task 3 had
+already run `git add`/`git commit` over the same file and picked up this
+task's in-progress edits along with its own (commit `19fa985`, "add glass
+and ticker reel skins, cycle button" — that commit's diff includes both
+the reel-skin work and this task's caption/dispatch/card wiring in
+`office.html`, even though the message only names the former). Confirmed
+by inspecting that commit's diff before pushing further work: no
+duplication, no missing pieces, both features intact side by side. Only
+the new standalone files above landed in this task's own commit
+(`ece6cb4`, "add caption arbiter and versus-card module (#63)") since
+those were untracked and task 3's `git add` didn't reach them. Flagging
+so nobody reads the commit graph and assumes task 4's `office.html` work
+is missing — it isn't, it's just filed under someone else's commit
+message.
+
+**Verified:** `pnpm test` (144 passed, up from 137 at round start — 7 new:
+5 caption-arbiter cases plus 2 from task 3's `office-reel-skin.test.ts`)
+and `pnpm typecheck` both clean. Dispatch fallback logic (base-variant
+selection, `typeof` guards) reasoned through by hand against the current
+`agent.js` — `world.highfive`/`world.shove` both exist, so the base path
+is exercised correctly regardless of whether tasks 1/2 landed their new
+clips in this tree yet.
+
+**Not verified — flagging for the next round/integrator:** everything
+under (c), and the non-base branch of (b), is browser-unverified. Nobody
+has looked at the versus card render in an actual page load, in either
+variant, nor confirmed the slide-in animation reads as intended, nor
+clicked a reel row with `?beat=chestbump` (etc.) once tasks 1/2's clips
+exist to confirm the direct-dispatch path actually plays a visible beat
+end-to-end (only the fallback path — `world.replay()` — has multi-round
+history of being seen working). First stop for whoever has the browser
+lock next: load `office.html?vcard=split` and `?vcard=strip`, click a
+rung-2 and a rung-3 reel row a few times each to see the beat cycle, and
+check contrast of the split card's white-on-navy text against the actual
+3D scene behind it (same class of check task 3 did for the glass reel
+skin).
