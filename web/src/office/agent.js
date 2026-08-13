@@ -44,6 +44,10 @@ import { doubletakeMarks, spacingFor as doubletakeSpacingFor, registry as DOUBLE
 // clips/chestbump.js / clips/fistbump.js headers.
 import { chestbumpMarks, spacingFor as chestbumpSpacingFor, registry as CHESTBUMP_CLIPS } from './clips/chestbump.js'
 import { fistbumpMarks, spacingFor as fistbumpSpacingFor, registry as FISTBUMP_CLIPS } from './clips/fistbump.js'
+// Rung-3 "abort"/out-authoritied beat family — alternates to shove. See
+// clips/waveoff.js / clips/slap.js headers.
+import { waveoffMarks, spacingFor as waveoffSpacingFor, registry as WAVEOFF_CLIPS } from './clips/waveoff.js'
+import { slapMarks, spacingFor as slapSpacingFor, registry as SLAP_CLIPS } from './clips/slap.js'
 
 // Fold the paired-action clips into anim.js's own table, once, at import
 // time — before any agent has crossfaded into anything and cached the clip
@@ -55,6 +59,8 @@ Object.assign(ANIM.CLIPS, YIELD_CLIPS)
 Object.assign(ANIM.CLIPS, DOUBLETAKE_CLIPS)
 Object.assign(ANIM.CLIPS, CHESTBUMP_CLIPS)
 Object.assign(ANIM.CLIPS, FISTBUMP_CLIPS)
+Object.assign(ANIM.CLIPS, WAVEOFF_CLIPS)
+Object.assign(ANIM.CLIPS, SLAP_CLIPS)
 
 export const YAW_OFFSET = Math.PI
 
@@ -102,6 +108,13 @@ const ACTS = {
   // clips/shove.js — `shoving` is the winner, `shoveReacting` the loser.
   shoving:        { clip: 'shove',      fade: 0.18, oneShot: true, next: 'idle' },
   shoveReacting:  { clip: 'shoveReact', fade: 0.18, oneShot: true, next: 'idle' },
+  // Rung 3 "abort" beat family, alternates to shoving/shoveReacting above:
+  // same asymmetric a-wins convention, different beats. clips/waveoff.js
+  // (no contact, all contempt) / clips/slap.js (cartoon wind-up and hit).
+  wavingOff:       { clip: 'waveoff',      fade: 0.20, oneShot: true, next: 'idle' },
+  waveoffReacting: { clip: 'waveoffReact', fade: 0.20, oneShot: true, next: 'idle' },
+  slapping:        { clip: 'slap',         fade: 0.14, oneShot: true, next: 'idle' },
+  slapReacting:    { clip: 'slapReact',    fade: 0.14, oneShot: true, next: 'idle' },
   // Rung 1: the reader notices the editor is already in there and steps
   // back. clips/yield.js — `yielding` is the reader, `keeping` the editor.
   yielding: { clip: 'yieldStep', fade: 0.18, oneShot: true, next: 'idle' },
@@ -127,6 +140,8 @@ const ACT_OF_CLIP = {
   handshake: 'handshaking', shove: 'shoving', shoveReact: 'shoveReacting',
   yieldStep: 'yielding', yieldKeep: 'keeping', doubletake: 'doubletaking',
   chestbump: 'chestbumping', fistbump: 'fistbumping',
+  waveoff: 'wavingOff', waveoffReact: 'waveoffReacting',
+  slap: 'slapping', slapReact: 'slapReacting',
 }
 
 const DOING = {
@@ -136,6 +151,8 @@ const DOING = {
   highfiving: 'high fiving', arguing: 'arguing over it', reacting: 'not having it',
   handshaking: 'shaking on it', shoving: 'pulling rank', shoveReacting: 'shoved aside',
   yielding: 'stepping back', keeping: 'keeping at it', doubletaking: 'wait, you too?',
+  wavingOff: 'waving them off', waveoffReacting: 'brushed off',
+  slapping: 'making a point', slapReacting: 'seeing stars',
 }
 
 const TONE = {
@@ -509,6 +526,8 @@ const STAGE_MARKS = {
   doubletake: (pa, pb, h) => doubletakeMarks(pa, pb, doubletakeSpacingFor(h)),
   chestbump:  (pa, pb, h) => chestbumpMarks(pa, pb, chestbumpSpacingFor(h)),
   fistbump:   (pa, pb, h) => fistbumpMarks(pa, pb, fistbumpSpacingFor(h)),
+  waveoff:    (pa, pb, h) => waveoffMarks(pa, pb, waveoffSpacingFor(h)),
+  slap:       (pa, pb, h) => slapMarks(pa, pb, slapSpacingFor(h)),
 }
 
 /**
@@ -773,6 +792,55 @@ export class World {
   }
 
   /**
+   * The rung-3 "abort" beat, alternate to shove(): `a` still always wins,
+   * same convention, but spends nothing on it — a slow, barely-turned
+   * back-of-hand wave instead of a push. No contact, all contempt. See
+   * clips/waveoff.js.
+   */
+  waveoff(a, b) {
+    if (!a || !b || a === b || a.busy || b.busy) return null
+    const height = (a.height + b.height) / 2
+    const marks = waveoffMarks(
+      new THREE.Vector3(a.pos.x, 0, a.pos.z),
+      new THREE.Vector3(b.pos.x, 0, b.pos.z),
+      waveoffSpacingFor(height))
+    const ax = marks.a.pos.x, az = marks.a.pos.z
+    const bx = marks.b.pos.x, bz = marks.b.pos.z
+
+    a.busy = b.busy = true
+    a.goTo(ax, az, { yaw: yawToward(ax, az, bx, bz), label: 'waving off ' + b.name })
+    b.goTo(bx, bz, { yaw: yawToward(bx, bz, ax, az), label: 'waved off by ' + a.name })
+
+    const e = { a, b, kind: 'waveoff', phase: 'approach', t: 0, marks: { a:[ax, az], b:[bx, bz] } }
+    this.encounters.push(e)
+    return e
+  }
+
+  /**
+   * The rung-3 "abort" beat, alternate to shove(): `a` still always wins,
+   * same convention, but this one is the cartoon version — big wind-up,
+   * fast contact. See clips/slap.js.
+   */
+  slap(a, b) {
+    if (!a || !b || a === b || a.busy || b.busy) return null
+    const height = (a.height + b.height) / 2
+    const marks = slapMarks(
+      new THREE.Vector3(a.pos.x, 0, a.pos.z),
+      new THREE.Vector3(b.pos.x, 0, b.pos.z),
+      slapSpacingFor(height))
+    const ax = marks.a.pos.x, az = marks.a.pos.z
+    const bx = marks.b.pos.x, bz = marks.b.pos.z
+
+    a.busy = b.busy = true
+    a.goTo(ax, az, { yaw: yawToward(ax, az, bx, bz), label: 'settling it with ' + b.name })
+    b.goTo(bx, bz, { yaw: yawToward(bx, bz, ax, az), label: 'slapped by ' + a.name })
+
+    const e = { a, b, kind: 'slap', phase: 'approach', t: 0, marks: { a:[ax, az], b:[bx, bz] } }
+    this.encounters.push(e)
+    return e
+  }
+
+  /**
    * The rung-1 beat: `a` is the reader, noticing `b` (the editor) is
    * already in there, and gets out of the way. Asymmetric like shove() —
    * two different clips, phase-matched — but there's no winner/loser
@@ -938,6 +1006,16 @@ export class World {
           // but this one has a fixed length; see clips/shove.js.
           a.act('shoving')
           b.act('shoveReacting')
+        } else if (e.kind === 'waveoff') {
+          // Same abort-family shape as shove — `a` always wins — different
+          // beat; see clips/waveoff.js.
+          a.act('wavingOff')
+          b.act('waveoffReacting')
+        } else if (e.kind === 'slap') {
+          // Same abort-family shape as shove — `a` always wins — different
+          // beat; see clips/slap.js.
+          a.act('slapping')
+          b.act('slapReacting')
         } else if (e.kind === 'yield') {
           // Asymmetric like shove — reader and editor play different
           // clips — but neither one "wins"; see clips/yield.js.
@@ -976,12 +1054,13 @@ export class World {
       }
       // A contest has no clip-length end: it lasts until resolveContest()
       // says the region is free. Everything else (highfive, handshake,
-      // shove, yield, doubletake, chestbump, fistbump) plays out once and
-      // ends on its own clip's length.
+      // shove, yield, doubletake, chestbump, fistbump, waveoff, slap) plays
+      // out once and ends on its own clip's length.
       const CLIP_OF_KIND = {
         highfive: 'highfive', handshake: 'handshake', shove: 'shove',
         yield: 'yieldStep', doubletake: 'doubletake',
         chestbump: 'chestbump', fistbump: 'fistbump',
+        waveoff: 'waveoff', slap: 'slap',
       }
       const clipName = CLIP_OF_KIND[e.kind]
       if (clipName && e.t >= ANIM.getClip(clipName).duration + 0.2) {
