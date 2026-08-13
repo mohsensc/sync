@@ -14,12 +14,35 @@ export interface ConnectOptions {
   human: string
   url?: string
   onPresence?: (msg: unknown) => void
+  onDecision?: (msg: unknown) => void
+  onRedundant?: (msg: unknown) => void
   onOpen?: () => void
   onClose?: () => void
 }
 
 export function connect(opts: ConnectOptions): { close(): void }
 export function hairFor(human: string): number
+
+// Mirrors reel.d.ts's ReelEvent shape. Duplicated by hand rather than
+// imported for the same reason live.js keeps its own copy of the hair
+// palette: office/*.js modules don't import each other's types across this
+// boundary, on purpose, so each stays independently buildable.
+export type ReelRung = 0 | 1 | 2 | 3 | 4
+export type ReelResolutionKind = 'wait' | 'abort' | 'share' | 'redundant' | 'read-yield'
+export interface ReelParty { agent: string; human: string }
+export interface ReelResolution { kind: ReelResolutionKind; detail?: string }
+export interface ReelEvent {
+  id: string
+  ts: number
+  rung: ReelRung
+  a: ReelParty
+  b: ReelParty
+  path: string
+  resolution: ReelResolution | null
+  source: 'live' | 'generated'
+}
+
+export function toReelEvent(frame: unknown, now?: number): ReelEvent | null
 
 export interface PresenceInfo {
   id: string
