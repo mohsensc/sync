@@ -23,6 +23,13 @@ export interface ConnectOptions {
 export function connect(opts: ConnectOptions): { close(): void }
 export function hairFor(human: string): number
 
+export const LIVE_ABORT_VARIANTS: string[]
+export function pickLiveVariant(
+  kind: 'wait' | 'abort',
+  winnerId: string,
+  loserId: string,
+): string | null
+
 // Mirrors reel.d.ts's ReelEvent shape. Duplicated by hand rather than
 // imported for the same reason live.js keeps its own copy of the hair
 // palette: office/*.js modules don't import each other's types across this

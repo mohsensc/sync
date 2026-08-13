@@ -217,6 +217,60 @@ export function hairFor(human) {
   return HAIR[h % HAIR.length]
 }
 
+// #60's other open question, settled this round: should a live decision
+// play one of the abort-family variants (shove/waveoff/slap) the way a
+// reel replay already can, or should live stay literal (always shove)?
+//
+// The call: give live the same variety. A live "abort" and a replayed one
+// are the same underlying event — the only difference is *when* you're
+// watching it, not what happened — so there's no honesty reason for live
+// to be flatter than its own highlight later. The literal-live argument
+// (live = "the actual event", replay = "a highlight reel take on it") only
+// holds up if the variant were somehow fictional, and it isn't: waveoff
+// and slap are exactly as much "what happened" as shove is, just a
+// different flavor of the same wait-die abort. So: wired, not documented-
+// as-a-non-fix.
+//
+// 'wait' has no variant family to pick from — REPLAY_CHAINS' own 'wait'
+// chain only ever ends in handshake (see agent.js), so there is nothing
+// to vary there; this only ever returns non-null for 'abort'.
+//
+// Deterministic on the pair, not the frame: the same two agent ids
+// clashing again should read as "them, doing their thing again", not a
+// coin flip every time, the same reasoning office.html's own
+// pickReplayVariant applies per event id. No event id exists at this
+// layer (a raw decision frame, not a reel row), so the pair's own ids are
+// the next best stable key.
+export const LIVE_ABORT_VARIANTS = ['shove', 'waveoff', 'slap']
+
+function hashPair(s) {
+  let h = 2166136261
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) }
+  return h >>> 0
+}
+
+/**
+ * Which World method a live "abort" decision should play. Pure and
+ * world-agnostic on purpose — office.html is the one place that knows
+ * whether `world[variant]` actually exists this session (clip landing
+ * order isn't guaranteed), so it still needs its own
+ * `typeof world[variant] === 'function'` guard with `shove` as the
+ * fallback, same shape as pickReplayVariant's own family-availability
+ * check. This function only ever answers "which name", never calls
+ * anything.
+ *
+ * @param {'wait'|'abort'} kind
+ * @param {string} winnerId
+ * @param {string} loserId
+ * @returns {string|null} an ABORT_VARIANTS member for 'abort', null for
+ *   'wait' (no family to pick from) or anything else
+ */
+export function pickLiveVariant(kind, winnerId, loserId) {
+  if (kind !== 'abort') return null
+  const i = hashPair(`${winnerId}:${loserId}`) % LIVE_ABORT_VARIANTS.length
+  return LIVE_ABORT_VARIANTS[i]
+}
+
 /**
  * Turns presence frames into zone-routed positions, without touching a
  * single THREE object. office.html asks it "what changed", then does the
