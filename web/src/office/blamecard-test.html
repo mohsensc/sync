@@ -22,10 +22,13 @@
 <div id="hud">
   <h1>Blame card fixtures</h1>
   <p>No THREE scene needed — blamecard.js is a plain DOM controller.
-     fetchFn below is stubbed with canned blame/log JSON matching gitapi.mjs's
-     real response shape. Press V (or the button in the card) to cycle
-     graphic → classic → gutter, R to flip region/whole-file when a fixture
-     carries a range (graphic/classic only — gutter always shows its range).</p>
+     fetchFn below is stubbed with canned blame/log/stat JSON matching
+     gitapi.mjs's real response shapes. Press V (or the button in the card)
+     to cycle graphic → classic → gutter → story, R to flip region/whole-file
+     when a fixture carries a range (graphic/classic only — gutter and story
+     always show the whole file / a fallback note). The two "auto-picks
+     story" fixtures load with the card already open on story, no V press
+     needed — that's pickDefaultVariant firing on a single-author blame.</p>
   <div class="row">
     <button data-f="skewed">skewed ownership</button>
     <button data-f="even">even split, 3 authors</button>
@@ -43,6 +46,12 @@
   <div class="row">
     <button data-f="gutter">gutter: real lines + source</button>
     <button data-f="gutterFallback">gutter: server predates it</button>
+  </div>
+  <div class="row">
+    <button data-f="storySolo">story: single-author (auto-picked)</button>
+    <button data-f="storyMulti">story: multi-author, busy week</button>
+    <button data-f="storyOneCommit">story: single commit, no stat</button>
+    <button data-f="storyEmpty">story: untracked file</button>
   </div>
   <div class="row">
     <button id="bClose">close card</button>
@@ -220,6 +229,54 @@ const FIXTURES = {
     gutterSource: { ok: false, reason: 'not available at HEAD' },
     gutterLineBlame: { ok: true, total: 8, owners: [{ author: 'mohsensc', lines: 8, share: 1 }] }, // no `lines` field
   },
+  // story variant fixtures. `stat` mirrors gitapi.mjs's /api/git/stat body
+  // (parseStatLog's shape) — the story variant is the only view that reads
+  // it. This one has a single-author blame, so it should auto-pick story
+  // on load without pressing V — pickDefaultVariant's whole reason to exist.
+  storySolo: {
+    blame: { ok: true, total: 340, owners: [{ author: 'mohsensc', lines: 340, share: 1 }],
+      newestLineAgeDays: 2, oldestLineAgeDays: 42 },
+    log: { ok: true, entries: [
+      { sha: 'a1a1a1a', author: 'mohsensc', when: '2 days ago', subject: 'tune heat wisp opacity' },
+      { sha: 'b2b2b2b', author: 'mohsensc', when: '4 days ago', subject: 'add cold-day override' },
+      { sha: 'c3c3c3c', author: 'mohsensc', when: '6 weeks ago', subject: 'first cut of the churn view' },
+    ] },
+    stat: { ok: true, commits: 8, authorCount: 1, lastAuthor: 'mohsensc', lastAgeDays: 2, firstAgeDays: 42, lastSummary: 'tune heat wisp opacity' },
+  },
+  // multi-author with a real cluster in the fetched log, so the busiest-
+  // stretch sentence has something to say.
+  storyMulti: {
+    blame: { ok: true, total: 500, owners: [
+      { author: 'mohsensc', lines: 350, share: 0.7 },
+      { author: 'agentai', lines: 150, share: 0.3 },
+    ], newestLineAgeDays: 1, oldestLineAgeDays: 60 },
+    log: { ok: true, entries: [
+      { sha: 'd4d4d4d', author: 'mohsensc', when: '1 day ago', subject: 'wire board poll' },
+      { sha: 'e5e5e5e', author: 'agentai', when: '2 days ago', subject: 'ticker treatment' },
+      { sha: 'f6f6f6f', author: 'mohsensc', when: '3 days ago', subject: 'sticky note colours' },
+      { sha: 'a7a7a7a', author: 'mohsensc', when: '20 days ago', subject: 'departures animation' },
+      { sha: 'b8b8b8b', author: 'agentai', when: '35 days ago', subject: 'first commit board pass' },
+    ] },
+    stat: { ok: true, commits: 14, authorCount: 2, lastAuthor: 'mohsensc', lastAgeDays: 1, firstAgeDays: 60, lastSummary: 'wire board poll' },
+  },
+  // Single commit and no /api/git/stat data at all (older server, or the
+  // fetch failed) — composeStory has to fall back to the log entry alone.
+  storyOneCommit: {
+    blame: { ok: true, total: 6, owners: [{ author: 'rae', lines: 6, share: 1 }],
+      newestLineAgeDays: 3, oldestLineAgeDays: 3 },
+    log: { ok: true, entries: [
+      { sha: 'c9c9c9c', author: 'rae', when: '3 days ago', subject: 'stub the ghost fixture' },
+    ] },
+    stat: { ok: false, reason: 'no history' },
+  },
+  // No history at all anywhere — story degrades to the single "no history
+  // here yet" line, same wording every other variant uses, never a blank
+  // panel or a stack trace in the console.
+  storyEmpty: {
+    blame: { ok: false, reason: 'no blame available' },
+    log: { ok: false, reason: 'no history' },
+    stat: { ok: false, reason: 'no history' },
+  },
 }
 
 let current = 'skewed'
@@ -228,6 +285,9 @@ function stubFetch(url) {
   const data = FIXTURES[current]
   if (u.pathname.endsWith('/source')) {
     return Promise.resolve({ json: async () => data.gutterSource ?? { ok: false, reason: 'no fixture' } })
+  }
+  if (u.pathname.endsWith('/stat')) {
+    return Promise.resolve({ json: async () => data.stat ?? { ok: false, reason: 'no fixture' } })
   }
   const isBlame = u.pathname.endsWith('/blame')
   const isLines = isBlame && u.searchParams.get('lines') === '1'
