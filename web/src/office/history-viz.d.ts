@@ -6,3 +6,15 @@ export function hueForAuthor(name: string): number
 export function colorForAuthor(name: string, opts?: { light?: number; sat?: number }): string
 export function parseRelativeAge(when: string | null | undefined): number | null
 export function ageToX(days: number | null | undefined, maxDays: number | null | undefined): number
+
+export interface TimelineSlot {
+  x: number
+  bucketSize: number
+  bucketPos: number
+}
+
+export function stackTimelinePositions(
+  ages: (number | null | undefined)[],
+  maxDays: number | null | undefined,
+  slop?: number
+): TimelineSlot[]

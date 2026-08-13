@@ -64,3 +64,35 @@ export function ageToX(days, maxDays) {
   const t = 1 - Math.log1p(d) / Math.log1p(m)
   return Math.max(0, Math.min(1, t))
 }
+
+// ageToX is deterministic, so a file with 8 commits all "2 days ago" maps
+// to eight dots at the exact same x — they render as one. This groups ages
+// that would land within `slop` of each other on the 0..1 axis into a
+// single bucket and hands back one entry per input age (same order), each
+// carrying which bucket it's in and its position inside it, so the caller
+// can offset colliding dots and badge the bucket with a count instead of
+// silently dropping commits on the floor.
+export function stackTimelinePositions(ages, maxDays, slop = 0.022) {
+  const items = (ages || []).map((d, i) => ({ i, x: ageToX(d, maxDays) }))
+  const sorted = [...items].sort((a, b) => a.x - b.x)
+  const buckets = []
+  for (const it of sorted) {
+    const last = buckets[buckets.length - 1]
+    // compare against the bucket's anchor (its first member), not the
+    // previous item, so a long run of close-but-not-identical ages can't
+    // chain into one giant bucket a slop-width at a time
+    if (last && it.x - last.items[0].x <= slop) {
+      last.items.push(it)
+    } else {
+      buckets.push({ items: [it] })
+    }
+  }
+  const out = new Array(items.length)
+  for (const b of buckets) {
+    const bucketX = b.items.reduce((s, it) => s + it.x, 0) / b.items.length
+    b.items.forEach((it, pos) => {
+      out[it.i] = { x: bucketX, bucketSize: b.items.length, bucketPos: pos }
+    })
+  }
+  return out
+}

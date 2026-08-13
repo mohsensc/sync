@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest'
-import { hashString, hueForAuthor, colorForAuthor, parseRelativeAge, ageToX } from '../src/office/history-viz.js'
+import {
+  hashString, hueForAuthor, colorForAuthor, parseRelativeAge, ageToX, stackTimelinePositions,
+} from '../src/office/history-viz.js'
 
 describe('hashString / hueForAuthor', () => {
   it('is deterministic for the same input', () => {
@@ -62,5 +64,51 @@ describe('ageToX', () => {
   it('clamps to 0..1 for out-of-range input', () => {
     expect(ageToX(-5, 100)).toBeLessThanOrEqual(1)
     expect(ageToX(500, 100)).toBeGreaterThanOrEqual(0)
+  })
+})
+
+describe('stackTimelinePositions', () => {
+  it('returns one entry per input age, same order', () => {
+    const out = stackTimelinePositions([1, 2, 3], 3)
+    expect(out).toHaveLength(3)
+  })
+
+  it('groups ages that land within slop of each other into one bucket', () => {
+    // eight commits all "2 days ago" — ageToX(2, 400) is identical for
+    // every one of them, exactly the collision the reviewer saw render
+    // as a single dot for a 10-commit file
+    const ages = Array.from({ length: 8 }, () => 2)
+    const out = stackTimelinePositions(ages, 400)
+    expect(out.every((o) => o.bucketSize === 8)).toBe(true)
+    // positions within a bucket are unique 0..bucketSize-1, no two commits
+    // assigned the same stack slot
+    expect(new Set(out.map((o) => o.bucketPos)).size).toBe(8)
+  })
+
+  it('keeps well-separated ages in their own single-item buckets', () => {
+    const out = stackTimelinePositions([0, 200, 400], 400)
+    expect(out.every((o) => o.bucketSize === 1 && o.bucketPos === 0)).toBe(true)
+  })
+
+  it('does not let a long run of close-but-not-identical ages chain into one giant bucket', () => {
+    // each age is slop-adjacent to its neighbour but the run spans far
+    // more than slop end-to-end — anchoring on the bucket's first member
+    // (not the previous item) should split this into more than one bucket
+    const ages = Array.from({ length: 40 }, (_, i) => i * 2)
+    const out = stackTimelinePositions(ages, 400)
+    const sizes = new Set(out.map((o) => o.bucketSize))
+    expect(sizes.size).toBeGreaterThan(1)
+    expect(out.every((o) => o.bucketSize < 40)).toBe(true)
+  })
+
+  it('averages the bucket to one x position shared by every member', () => {
+    const out = stackTimelinePositions([5, 5, 5], 400)
+    expect(out[0].x).toBe(out[1].x)
+    expect(out[1].x).toBe(out[2].x)
+  })
+
+  it('is empty for an empty input, never throws', () => {
+    expect(stackTimelinePositions([], 100)).toEqual([])
+    expect(stackTimelinePositions(undefined as unknown as number[], 100)).toEqual([])
   })
 })
