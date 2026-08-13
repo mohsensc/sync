@@ -38,7 +38,10 @@
 </div>
 
 <script type="module">
-import { attachBlameCard } from './blamecard.js?v=' + Date.now()
+// Cache-busted so an edit to blamecard.js always shows up on reload —
+// static `import ... from` can't take a computed specifier, so this has to
+// be a dynamic import (same pattern as clips/argue-test.html).
+const { attachBlameCard } = await import('./blamecard.js?v=' + Date.now())
 
 // Canned data shaped exactly like gitapi.mjs's real response bodies —
 // {ok:true, total, owners:[{author,lines,share}], newestLineAgeDays,
