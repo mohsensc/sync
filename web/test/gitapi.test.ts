@@ -4,10 +4,13 @@ import {
   parseBlamePorcelain,
   parseLog,
   parseShortlog,
+  parseCanonicalNames,
+  mergeAuthorsByEmail,
   parseStatLog,
   parseChurnLog,
   parseNumstat,
   blameRangeArgs,
+  sliceSourceLines,
   gitApiMiddleware,
 } from '../gitapi.mjs'
 
@@ -63,12 +66,54 @@ const CANNED_BLAME = [
   '\tline three',
 ].join('\n') + '\n'
 
+// two shas, same author-mail, different display name and time — the
+// porcelain equivalent of the shortlog split-identity fixture above.
+const CANNED_BLAME_SPLIT_IDENTITY = [
+  `${SHA_A} 1 1 1`,
+  'author mohsensc',
+  'author-mail <mohsensarrafanc@ucla.edu>',
+  'author-time 1700000000',
+  'author-tz -0700',
+  'committer mohsensc',
+  'committer-mail <mohsensarrafanc@ucla.edu>',
+  'committer-time 1700000000',
+  'committer-tz -0700',
+  'summary older commit, old spelling',
+  'filename f.ts',
+  '\tline one',
+  `${SHA_B} 2 2 1`,
+  'author Mohsen Sarrafan Chaharsoughi',
+  'author-mail <mohsensarrafanc@ucla.edu>',
+  'author-time 1750000000',
+  'author-tz -0700',
+  'committer Mohsen Sarrafan Chaharsoughi',
+  'committer-mail <mohsensarrafanc@ucla.edu>',
+  'committer-time 1750000000',
+  'committer-tz -0700',
+  'summary newer commit, new spelling',
+  'filename f.ts',
+  '\tline two',
+].join('\n') + '\n'
+
 const CANNED_SHORTLOG = [
-  '    19\tmohsensc',
-  '     3\tMohsen Sarrafan Chaharsoughi',
+  '    19\tsara <sara@example.com>',
+  '     3\tdev <dev@example.com>',
+].join('\n') + '\n'
+
+// same shape as this repo's own history: one person, two name
+// spellings, same inbox — the exact case the dedup exists for.
+const CANNED_SHORTLOG_SPLIT_IDENTITY = [
+  '   243\tmohsensc <mohsensarrafanc@ucla.edu>',
+  '    35\tMohsen Sarrafan Chaharsoughi <mohsensarrafanc@ucla.edu>',
 ].join('\n') + '\n'
 
 const US = '\x1f'
+
+const CANNED_CANONICAL_NAMES = [
+  ['mohsensarrafanc@ucla.edu', 'mohsensc'].join(US), // newest commit uses this spelling
+  ['sara@example.com', 'sara'].join(US),
+].join('\n') + '\n'
+
 const CANNED_LOG = [
   ['abc1234', 'sara', '2 days ago', 'fix the thing'].join(US),
   ['def5678', 'dev', '3 weeks ago', 'add the thing'].join(US),
@@ -142,6 +187,36 @@ describe('parseBlamePorcelain', () => {
     const r = parseBlamePorcelain('')
     expect(r).toEqual({ total: 0, owners: [], newestLineAgeDays: null, oldestLineAgeDays: null })
   })
+
+  it('merges two name spellings under one author-mail into one owner', () => {
+    const r = parseBlamePorcelain(CANNED_BLAME_SPLIT_IDENTITY, 1_750_000_000_000)
+    expect(r.owners).toEqual([
+      { author: 'Mohsen Sarrafan Chaharsoughi', lines: 2, share: 1 },
+    ])
+  })
+
+  it('omits the lines field unless includeLines is requested', () => {
+    const r = parseBlamePorcelain(CANNED_BLAME, 1_750_000_000_000)
+    expect(r.lines).toBeUndefined()
+  })
+
+  it('includes a per-line breakdown, canonical name and age, when asked', () => {
+    const now = 1_750_000_000_000
+    const r = parseBlamePorcelain(CANNED_BLAME, now, { includeLines: true })
+    expect(r.lines).toEqual([
+      { n: 1, author: 'sara', ageDays: ageDays(1700000000, now) },
+      { n: 2, author: 'sara', ageDays: ageDays(1700000000, now) },
+      { n: 3, author: 'dev', ageDays: ageDays(1750000000, now) },
+    ])
+  })
+
+  it('dedups per-line author names to the canonical spelling too', () => {
+    const r = parseBlamePorcelain(CANNED_BLAME_SPLIT_IDENTITY, 1_750_000_000_000, { includeLines: true })
+    expect(r.lines).toEqual([
+      { n: 1, author: 'Mohsen Sarrafan Chaharsoughi', ageDays: expect.any(Number) },
+      { n: 2, author: 'Mohsen Sarrafan Chaharsoughi', ageDays: expect.any(Number) },
+    ])
+  })
 })
 
 describe('parseLog', () => {
@@ -159,15 +234,54 @@ describe('parseLog', () => {
 })
 
 describe('parseShortlog', () => {
-  it('parses "<count>\\t<name>" lines, whitespace and all', () => {
+  it('parses "<count>\\t<name> <email>" lines, whitespace and all', () => {
     expect(parseShortlog(CANNED_SHORTLOG)).toEqual([
-      { author: 'mohsensc', commits: 19 },
-      { author: 'Mohsen Sarrafan Chaharsoughi', commits: 3 },
+      { author: 'sara', email: 'sara@example.com', commits: 19 },
+      { author: 'dev', email: 'dev@example.com', commits: 3 },
     ])
   })
 
   it('returns an empty array for a directory with no commits', () => {
     expect(parseShortlog('')).toEqual([])
+  })
+})
+
+describe('parseCanonicalNames', () => {
+  it('keeps the first (newest) name seen per email', () => {
+    const names = parseCanonicalNames(CANNED_CANONICAL_NAMES)
+    expect(names.get('mohsensarrafanc@ucla.edu')).toBe('mohsensc')
+    expect(names.get('sara@example.com')).toBe('sara')
+  })
+
+  it('is empty for no history', () => {
+    expect(parseCanonicalNames('').size).toBe(0)
+  })
+})
+
+describe('mergeAuthorsByEmail', () => {
+  it('merges two name spellings under one email, summing counts', () => {
+    const rows = parseShortlog(CANNED_SHORTLOG_SPLIT_IDENTITY)
+    const names = parseCanonicalNames(CANNED_CANONICAL_NAMES)
+    expect(mergeAuthorsByEmail(rows, names)).toEqual([
+      { author: 'mohsensc', commits: 278 },
+    ])
+  })
+
+  it('leaves distinct emails as distinct owners', () => {
+    const rows = parseShortlog(CANNED_SHORTLOG)
+    const names = parseCanonicalNames(CANNED_CANONICAL_NAMES)
+    expect(mergeAuthorsByEmail(rows, names)).toEqual([
+      { author: 'sara', commits: 19 },
+      { author: 'dev', commits: 3 },
+    ])
+  })
+
+  it('falls back to the row name when no canonical map is given', () => {
+    const rows = parseShortlog(CANNED_SHORTLOG)
+    expect(mergeAuthorsByEmail(rows, undefined)).toEqual([
+      { author: 'sara', commits: 19 },
+      { author: 'dev', commits: 3 },
+    ])
   })
 })
 
@@ -235,6 +349,46 @@ describe('blameRangeArgs', () => {
     expect(blameRangeArgs('abc', '20')).toEqual([])
     expect(blameRangeArgs('10', '-5')).toEqual([])
     expect(blameRangeArgs('1.5', '20')).toEqual([])
+  })
+})
+
+describe('sliceSourceLines', () => {
+  const FILE_10_LINES = Array.from({ length: 10 }, (_, i) => `line ${i + 1}`).join('\n') + '\n'
+
+  it('slices a plain range', () => {
+    expect(sliceSourceLines(FILE_10_LINES, '3', '5')).toEqual({
+      ok: true, lines: ['line 3', 'line 4', 'line 5'],
+    })
+  })
+
+  it('defaults to the whole file when start/end are missing', () => {
+    const r = sliceSourceLines(FILE_10_LINES, null, null)
+    expect(r.ok).toBe(true)
+    expect((r as any).lines.length).toBe(10)
+  })
+
+  it('caps a huge range at 200 lines', () => {
+    const big = Array.from({ length: 1000 }, (_, i) => `line ${i + 1}`).join('\n') + '\n'
+    const r = sliceSourceLines(big, '1', '1000')
+    expect(r.ok).toBe(true)
+    expect((r as any).lines.length).toBe(200)
+    expect((r as any).lines[0]).toBe('line 1')
+    expect((r as any).lines[199]).toBe('line 200')
+  })
+
+  it('rejects binary content instead of slicing garbage', () => {
+    const r = sliceSourceLines('abc\x00def', '1', '1')
+    expect(r).toEqual({ ok: false, reason: 'binary file' })
+  })
+
+  it('gives ok:false for an empty file', () => {
+    expect(sliceSourceLines('', '1', '1')).toEqual({ ok: false, reason: 'empty file' })
+  })
+
+  it('gives ok:false when start is past the end of the file', () => {
+    expect(sliceSourceLines(FILE_10_LINES, '50', '60')).toEqual({
+      ok: false, reason: 'start beyond end of file',
+    })
   })
 })
 
@@ -319,6 +473,16 @@ describe('gitApiMiddleware against the real repo', () => {
     expect(r.json).toEqual({ ok: false, reason: 'not a tracked dir' })
   })
 
+  it('shortlog: dedups this repo\'s own split identity into one owner', async () => {
+    // real regression case: this repo's history has "mohsensc" and
+    // "Mohsen Sarrafan Chaharsoughi" as separate git-log identities that
+    // share one email — before dedup, shortlog listed both as owners.
+    const r: any = await callMiddleware(mw, '/api/git/shortlog?dir=web/src/office')
+    expect(r.json.ok).toBe(true)
+    const names = r.json.owners.map((o: any) => o.author)
+    expect(names.filter((n: string) => n.toLowerCase().includes('mohsen')).length).toBeLessThanOrEqual(1)
+  })
+
   it('blame: honors start/end to scope the porcelain call to a range', async () => {
     const r: any = await callMiddleware(
       mw, `/api/git/blame?path=${encodeURIComponent(REAL_PATH)}&start=1&end=5`
@@ -359,5 +523,68 @@ describe('gitApiMiddleware against the real repo', () => {
   it('churn: rejects a flag-shaped path instead of handing it to git', async () => {
     const r: any = await callMiddleware(mw, '/api/git/churn?path=--upload-pack')
     expect(r.json).toEqual({ ok: false, reason: 'not a tracked path' })
+  })
+
+  it('blame: adds a lines[] breakdown when lines=1 and the range is small', async () => {
+    const r: any = await callMiddleware(
+      mw, `/api/git/blame?path=${encodeURIComponent(REAL_PATH)}&start=1&end=5&lines=1`
+    )
+    expect(r.json.ok).toBe(true)
+    expect(Array.isArray(r.json.lines)).toBe(true)
+    expect(r.json.lines.length).toBeGreaterThan(0)
+    for (const row of r.json.lines) {
+      expect(typeof row.n).toBe('number')
+      expect(typeof row.author).toBe('string')
+      expect(row.ageDays === null || typeof row.ageDays === 'number').toBe(true)
+    }
+  })
+
+  it('blame: omits lines[] when lines=1 is missing (unchanged today behavior)', async () => {
+    const r: any = await callMiddleware(
+      mw, `/api/git/blame?path=${encodeURIComponent(REAL_PATH)}&start=1&end=5`
+    )
+    expect(r.json.ok).toBe(true)
+    expect(r.json.lines).toBeUndefined()
+  })
+
+  it('blame: omits lines[] when the requested range is over 150 lines', async () => {
+    const r: any = await callMiddleware(
+      mw, `/api/git/blame?path=${encodeURIComponent(REAL_PATH)}&start=1&end=200&lines=1`
+    )
+    expect(r.json.ok).toBe(true)
+    expect(r.json.lines).toBeUndefined()
+  })
+
+  it('blame: omits lines[] when lines=1 but no range is given', async () => {
+    const r: any = await callMiddleware(mw, `/api/git/blame?path=${encodeURIComponent(REAL_PATH)}&lines=1`)
+    expect(r.json.ok).toBe(true)
+    expect(r.json.lines).toBeUndefined()
+  })
+
+  it('source: returns real source lines for a tracked path and range', async () => {
+    const r: any = await callMiddleware(
+      mw, `/api/git/source?path=${encodeURIComponent(REAL_PATH)}&start=1&end=3`
+    )
+    expect(r.json.ok).toBe(true)
+    expect(r.json.lines.length).toBe(3)
+    for (const line of r.json.lines) expect(typeof line).toBe('string')
+  })
+
+  it('source: gives ok:false for a made-up path', async () => {
+    const r: any = await callMiddleware(mw, `/api/git/source?path=${encodeURIComponent(FAKE_PATH)}&start=1&end=3`)
+    expect(r.json).toEqual({ ok: false, reason: 'not a tracked path' })
+  })
+
+  it('source: rejects a flag-shaped path instead of handing it to git', async () => {
+    const r: any = await callMiddleware(mw, '/api/git/source?path=--upload-pack&start=1&end=3')
+    expect(r.json).toEqual({ ok: false, reason: 'not a tracked path' })
+  })
+
+  it('source: caps a huge range at 200 lines', async () => {
+    const r: any = await callMiddleware(
+      mw, `/api/git/source?path=${encodeURIComponent(REAL_PATH)}&start=1&end=100000`
+    )
+    expect(r.json.ok).toBe(true)
+    expect(r.json.lines.length).toBeLessThanOrEqual(200)
   })
 })
