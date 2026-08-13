@@ -185,7 +185,15 @@
      36,.78) plus blur, so effectively a near-opaque dark ground regardless
      of what's moving underneath) — rung badges are the only saturated
      color, everything else is white at varying opacity. */
-  .reel-skin-glass{background:rgba(20,26,36,.78);border-color:rgba(255,255,255,.14);
+  /* #reel qualifier, not just .reel-skin-glass: the skin class lands on
+     the #reel element itself (see mountReel's classList.add), and #reel's
+     own background/border/box-shadow above are an ID selector — a bare
+     class selector here loses that specificity fight and silently no-ops,
+     which is exactly what happened until this was caught in the browser
+     (round 7 integration: glass rendered as plain cream paper, only the
+     rung badges took the glass colors, because badge rules are
+     descendant selectors and aren't fighting the #reel rule directly). */
+  #reel.reel-skin-glass{background:rgba(20,26,36,.78);border-color:rgba(255,255,255,.14);
     backdrop-filter:blur(16px) saturate(150%);-webkit-backdrop-filter:blur(16px) saturate(150%);
     box-shadow:0 16px 44px rgba(0,0,0,.5)}
   .reel-skin-glass .reel-title{color:#F3F5F8}
@@ -243,7 +251,8 @@
      so the markup stays identical to the other two skins and only the
      layout changes. Source tags are dropped here — R-badge + who + path +
      resolution + time is already dense enough without them. */
-  .reel-skin-ticker{background:#0A0E13;border:1px solid #1B2430;border-radius:4px;
+  /* same #reel-specificity fix as glass, above. */
+  #reel.reel-skin-ticker{background:#0A0E13;border:1px solid #1B2430;border-radius:4px;
     box-shadow:none;font-family:ui-monospace,monospace}
   .reel-skin-ticker .reel-head{border-bottom:1px solid #1B2430;padding:7px 10px 6px}
   .reel-skin-ticker .reel-title{font-size:11px;letter-spacing:.08em;
@@ -267,12 +276,21 @@
   .reel-skin-ticker .reel-body{flex-direction:row;align-items:baseline;gap:6px;
     min-width:0;overflow:hidden}
   .reel-skin-ticker .reel-line1,.reel-skin-ticker .reel-line2{display:contents}
-  .reel-skin-ticker .reel-who{color:#DCE6F0;font-size:11px}
-  .reel-skin-ticker .reel-vs{color:#425063}
+  /* who/vs/res need their own overflow+nowrap here (not just inherited)
+     because reel-line1/line2's display:contents makes them direct flex
+     items of the row-direction reel-body — without overflow:hidden the
+     browser falls back to each item's min-content size, which for "who"
+     breaks at the "/" in "priya/agent-2" and wraps to two lines instead
+     of shrinking. Caught in the browser at the real 308px panel width;
+     reel-skins-test.html's wider layout never showed it. */
+  .reel-skin-ticker .reel-who{color:#DCE6F0;font-size:11px;white-space:nowrap;
+    overflow:hidden;text-overflow:ellipsis;max-width:78px}
+  .reel-skin-ticker .reel-vs{color:#425063;white-space:nowrap;flex:0 0 auto}
   .reel-skin-ticker .reel-src{display:none}
   .reel-skin-ticker .reel-path{color:#7FE0A8;max-width:120px}
   .reel-skin-ticker .reel-dot{color:#2F3B48}
-  .reel-skin-ticker .reel-res{color:#8291A3}
+  .reel-skin-ticker .reel-res{color:#8291A3;white-space:nowrap;overflow:hidden;
+    text-overflow:ellipsis;max-width:96px}
   .reel-skin-ticker .reel-time{color:#425063;font-size:10px}
   .reel-skin-ticker .reel-empty{color:#425063}
   .reel-skin-ticker .reel-foot{border-color:#1B2430;color:#5A6B7D}
@@ -1095,7 +1113,16 @@ function replayEvent(e) {
   const label = RESOLUTION_LABEL[kind] || kind
   const token = captionArbiter.hold(PRIORITY.replay)
   replayCaptionToken = token
-  captionArbiter.set(`replay: ${pair} — ${label}`, { priority: PRIORITY.replay })
+  // With a versus card on (?vcard=split|strip) it IS the replay caption —
+  // the plain #caption line and the card sit at the same fixed bottom-
+  // center spot, so leaving #caption's text set too doubled up as two
+  // stacked, overlapping captions (found in the browser, round 7
+  // integration). Writing '' still takes the hold at replay priority
+  // (still blocks the demo's own captions per #63) but text.toggle('on',
+  // false) on an empty string is what actually hides the plain line —
+  // see caption.js's write callback in office.html.
+  captionArbiter.set(replayCard.variant ? '' : `replay: ${pair} — ${label}`,
+    { priority: PRIORITY.replay })
   replayCard.show({ a: e.a, b: e.b, rung: e.rung, label })
   focusPair(a, b, enc)
 }
