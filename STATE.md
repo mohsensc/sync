@@ -539,3 +539,206 @@ boundary), `web/src/office/interact.js` (hover treatments, H toggle, CSS for
 `nameplate`/`rich`). No new files. `interact.d.ts` untouched — no new
 exported pure function this round, `ownershipShare`'s signature didn't
 change.
+
+## Round 3 task 4 (browser slot B) — region blame end to end
+
+The seed idea's actual core: not "what file is this agent touching" but
+"which lines does it hold, right now, and whose work is under it." Wired
+the whole pipe demo → blame card, and as far into live → blame card as the
+file-ownership boundary this round drew would allow.
+
+### What's built
+
+**`web/src/office/demo.js`** — a `REGIONS` map (`a2` → `cpp/hook/hook.cpp`
+120-150, `a3` → `web/src/office/anim.js` 200-230, `a4` →
+`go/cmd/gorelay/main.go` 15-40), stamped onto `.gitStart`/`.gitEnd` on the
+live `agents` array objects at the top of `script()` — same instances
+office.html already assigned `.gitPath` to, so this never duplicates or
+overrides the path, just adds the range. Deliberately left two cast members
+without a range: `a1`'s file
+(`python/src/agent_presence/__init__.py`) is a genuinely empty stub — zero
+lines, `git blame` returns nothing — so selecting it exercises the "no
+history at all" fallback for real rather than a faked one; `a5`
+(`README.md`) stays whole-file-only on purpose so there's always at least
+one demo agent to compare the region view against the plain ownership bar
+without needing the toggle. All three ranges verified against real `wc -l`
+output while writing this (813/1094/100 lines respectively) and picked well
+inside each file, per the round plan's own drift warning. If a future
+change to those files ever pushes a range past EOF, nothing breaks —
+gitapi.mjs's blame route already returns `{ok:false}` for a bogus range,
+and blamecard.js's fallback (below) treats that exactly like "no history",
+never an empty box. Didn't file an issue for this; the endpoint's own
+design already covers it, so there was nothing left to flag.
+
+**`web/src/office/live.js`** — `regionFromMsg(msg)`, a pure guard that
+pulls `region.start`/`region.end` off a presence frame and returns
+`{start, end}` only when both are finite and `end > start`; anything else
+(absent, partial, malformed, inverted) reads as `null`, same as no region
+at all. `LiveDirector.onPresence` now folds this into its per-agent
+`records` (adds a `region` field) and returns `start`/`end` on the info
+object it hands back — `null` when there's no usable range, so a consumer
+that never reads those two fields sees zero behavioural change. Exported
+and typed in `live.d.ts`.
+
+**Known gap, not silently dropped: the live → `Agent` hop.**
+office.html's `onLivePresence` still only does `a.gitPath = info.path`; it
+never reads the two new fields `LiveDirector` now returns. Wiring that up
+is a genuine one-line follow-up (`a.gitStart = info.start; a.gitEnd =
+info.end` right next to the existing `gitPath` line) but `office.html` was
+explicitly off-limits to this task this round — the same shape of problem
+round 2 task 2 hit with the `gitPath`-staleness bug, which round 3's
+integrator fixed once it owned the whole tree. Flagging it here the same
+way so whoever next has `office.html` open doesn't have to rediscover it.
+Everything on the live.js side is unit-tested and ready; only that one
+line in office.html is missing. Demo mode, which does not go through
+`onLivePresence` at all, is unaffected and fully wired — see the browser
+verification below.
+
+**`web/src/office/blamecard.js`** — the actual feature. New exports,
+pure and covered directly by `web/test/region-blame.test.ts`:
+`hasUsableRegion(agent)` (does this agent carry a real path + well-formed
+range), `regionBlameUsable(regionBlame)` (did the ranged endpoint actually
+find lines there — the fallback gate), `regionGutterSegments(blame,
+agent)` (the `owners` aggregate turned into sorted, rounded, self-tagged
+segments), `regionSummary(blame)` (the "these N lines: mostly X, newest Yh
+ago" line, `null` when there's nothing to summarise). `show(agent)` now
+fetches ranged blame alongside the existing whole-file blame+log when
+`hasUsableRegion` is true, in parallel, with its own cache
+(`path#start-end` key) separate from the whole-file one so re-selecting or
+toggling never refetches either. Defaults to the region view when one is
+usable, falls back to the whole-file ownership bar silently when it isn't
+(bogus range, 0-line result, or no range declared at all — three different
+inputs, one fallback path). New key: **R** toggles region ↔ whole-file when
+an agent has both (button in the card does the same thing, same pattern as
+the existing V/graphic-classic toggle); the button and the R handler are
+both scoped to blamecard.js's own listener, so they never touch
+office.html or interact.js's key bindings. Checked the full grep of
+`addEventListener('keydown'` across office/*.js before picking R — clear.
+
+**Honest limitation, documented rather than papered over:** the region
+strip is a proportional colour gutter (segments sized by author share),
+*not* literal per-line source text with a real editor-style gutter next to
+each line. `parseBlamePorcelain` (gitapi.mjs, not owned this round)
+collapses straight to `{total, owners: [{author, lines, share}], ...}` —
+it never returns per-line author or the actual line content, by design
+(that's the "reuse the output shape as-is" constraint the round plan set).
+So "these 14 lines: mostly mohsensc, newest 2h ago" is real and accurate;
+a literal blamed-code view with real text per line would need
+`parseBlamePorcelain` to keep per-line data instead of aggregating, which
+is a `gitapi.mjs` change and genuinely out of this round's file-ownership
+scope. Not filing an issue for this — it's a known, deliberate trade-off
+inside the constraint the plan itself set, not a bug or an oversight.
+
+**`web/src/office/blamecard-test.html`** — two new fixtures, `region`
+(14 lines, mixed 11/3 split, fresh) and `regionFallback` (a range past EOF,
+`regionBlame: {ok:false}`, exercises the silent fallback). `stubFetch` now
+branches on whether the blame request carries a `start` param. `show()`
+stamps `gitStart`/`gitEnd` from the fixture's `range` onto the fake agent
+when present.
+
+**`web/src/office/blamecard.d.ts`** — new file (blamecard.js had none
+before this round). Types the pure region exports plus the existing
+`attachBlameCard` shape loosely, same pattern as `live.d.ts`/
+`histshelf.d.ts` — needed once `region-blame.test.ts` imported a `.js`
+file typecheck couldn't otherwise see into.
+
+**`web/test/region-blame.test.ts`** — new, 27 tests: `regionFromMsg`'s
+guard logic (well-formed, absent, partial, inverted, non-finite, no region
+object at all), `LiveDirector.onPresence` carrying start/end through per
+agent without cross-contamination between two different agents' frames,
+`hasUsableRegion`/`regionBlameUsable`'s fallback gates, `regionGutterSegments`
+(ordering, rounding, self-tagging, empty-on-unusable), `regionSummary`
+(top author/share/age formatting across day/month/year buckets,
+multi-vs-single-author, null-on-unusable).
+
+### Browser verification — done, not skipped
+
+Got the lock (~15s wait, `builder3-featA-zoomhover2` had just released it),
+started the dev server from this worktree, hit the known first-attempt
+snag (backgrounding the vite process with a bare `&` inside one Bash call
+got it reaped when that call returned — restarted with `nohup … & disown`
+and it stayed up for the rest of the session), reused the existing tab
+(page 6), never opened a second one.
+
+Checked, in demo mode (`?demo=1` default — relay unreachable banner, as
+expected):
+- `window.__cast` confirms all three regioned agents carry real
+  `gitStart`/`gitEnd` (`a2` 120-150, `a3` 200-230, `a4` 15-40) and the
+  other two don't.
+- Selected `a2` (`cpp/hook/hook.cpp`): card opens straight into the region
+  view — `cpp/hook/hook.cpp : lines 120–150`, `these 31 lines: mohsensc,
+  newest 5 days old`, a solid single-author gutter bar, an R-labelled
+  toggle button reading "this region". Pressed R (dispatched a real
+  `keydown`) — flipped to `whole file`, path label dropped the range
+  suffix, ownership bar re-rendered with the whole-file numbers (`newest
+  line 2d old · oldest line 5d old` — genuinely different from the
+  region's `5 days old`, which is the whole point). Toggled back, clean.
+- Selected `a1` (`python/src/agent_presence/__init__.py`, no region, empty
+  file): card shows `no history here yet`, no region toggle button at all
+  — confirms `hasUsableRegion` correctly reads "no range" and
+  `regionBlameUsable` never gets a chance to matter here since the
+  whole-file blame is empty too. No empty box, no crash.
+- Selected `a3` (`web/src/office/anim.js`, 200-230): same shape as `a2`,
+  `these 31 lines: mohsensc, newest 1 day old` — real, different numbers
+  from `a2`, confirming this isn't a cached/stale render.
+- Selected `a5` (`README.md`, no region, real whole-file history): only
+  the graphic/classic variant button shows, no region toggle — confirms
+  the toggle only appears when a region actually exists, not just when
+  blame data exists.
+- `list_console_messages` (error+warn): exactly the two known
+  pre-existing ones — `coffee-cup-v2.glb` 404 (issue #59, not this
+  branch's to fix) and the demo-mode relay `ECONNREFUSED`. Nothing new
+  from this round's work.
+
+Screenshots taken at each step (not saved to disk, reviewed inline).
+Didn't test the live-mode path in the browser since there is no relay
+running in this environment and, per the known gap above, office.html
+doesn't forward `info.start`/`info.end` onto the agent yet anyway — that
+half of the pipe is unit-tested only, honestly reflected as such rather
+than claimed as browser-verified.
+
+Killed the server (`pkill -f 'vite.*5173'`) and released the lock
+immediately after.
+
+### Tests / typecheck
+
+`pnpm test` — 182/182 passing, 12 files (picked up task 1's `histshelf`
+and task 2's `zoneowner` test files mid-session via the shared worktree,
+nothing broken by either). `pnpm typecheck` — clean.
+
+### A note on the shared worktree
+
+All four of this round's tasks ran in the *same* physical directory
+(`sync-featA`), not isolated worktrees per task, despite the per-task
+briefs saying "your worktree" individually — meaning a shared git index as
+well as a shared filesystem. Caught this the hard way: an early `git add
+web/src/office/live.js` staged my change, and a concurrent agent's next
+`git commit` (for an unrelated zone-ownership feature) swept my staged
+`live.js`/`live.d.ts` changes into *their* commit
+(`2a8910b add zone-ownership sink to gitsignals pollZone`) before I could
+commit it myself under its own message. The content is correct and safely
+on `origin/feat/git-aware-characters` either way — verified via `git diff
+<before> HEAD -- live.js` coming back empty — but the commit message
+doesn't describe what it contains. Not fixable after the fact without
+rewriting shared history mid-round, so leaving it as-is and flagging it:
+if a future round needs `git blame` on `live.js`'s `regionFromMsg`
+addition, look in `2a8910b`, not a commit that mentions region blame.
+Lesson for later rounds sharing this worktree: commit fast after staging,
+or use `git commit <pathspec>` without a prior `git add` at all (which is
+what every commit after this one in this session did) — it stages and
+commits only the named paths in one atomic step, closing the window
+entirely.
+
+### What's next
+
+- The office.html one-liner above (`a.gitStart = info.start; a.gitEnd =
+  info.end` in `onLivePresence`) — small, ready, blocked only on file
+  ownership.
+- True per-line region rendering (real source text + real per-line
+  gutter) would need `parseBlamePorcelain` to keep per-line author instead
+  of collapsing to aggregate totals — a `gitapi.mjs` change, deliberately
+  out of scope this round.
+- Nothing filed as a GitHub issue this round — every edge case
+  (empty file, bogus range, no region at all) already degrades through
+  existing, tested fallback paths; there was nothing left over that
+  needed a ticket instead of a fix.
