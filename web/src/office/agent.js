@@ -118,6 +118,22 @@ const FRESH = {
   stale:  { color: '#3E4A5E', radius: 0.86, pulse: 0.35, opacity: 0.24 }, // >=180d: cold, small, slow
 }
 
+// Churn is the third signal, separate from both TONE and FRESH: freshness
+// says how OLD the ground under an agent is, churn says how FAST it is
+// moving right now (gitsignals.js's churnToIntensity, working-tree diff
+// weighted over 14-day history). It shows up two ways — see setChurn() and
+// update() below — a subtle typing-speed bump and a paper stack that grows
+// on the desk beside them. Ranges picked to read as "busier", never
+// "broken": the fastest typing is 1.6x, not a caffeinated blur.
+const CHURN_TYPE_SPEED = [1.0, 1.6]   // idle..maxed-out typing timeScale
+const CHURN_EASE = 2.2                 // 1/s, how fast _churn chases its target
+const CHURN_MAX_H = 0.22               // metres, tallest the paper stack gets
+// Desk surfaces sit at office.html's DESK_TOP (0.76m). The stack is a decoration
+// riding the agent root, not a real desk-relative object (agent.js has no
+// reference to which desk mesh an agent is at), so this is a fixed guess at
+// "about desk height, off to one side" rather than a measured position.
+const CHURN_BASE_Y = 0.74
+
 /** ageDays -> a FRESH bucket name, or null for "no signal, show nothing".
  *  Pure so it's unit-testable without a THREE scene. */
 export function freshnessBucket(ageDays) {
@@ -230,10 +246,32 @@ export class Agent {
     this._freshness = null
     this._freshPulse = 0
 
+    // Churn prop: a tray plus a block whose height IS the eased churn value,
+    // so it grows continuously instead of popping in sheet by sheet. Both
+    // start fully transparent (0 papers at intensity 0) and scale up from
+    // the tray's surface, never from the block's own center, so it reads as
+    // stacking UP rather than swelling from the middle.
+    this._churn = 0
+    this._churnTarget = 0
+    this.churnGroup = new THREE.Group()
+    this.churnGroup.position.set(0.34 * scale, 0, 0.22 * scale)
+    this.churnGroup.userData.decor = true
+    this.churnTray = new THREE.Mesh(
+      new THREE.BoxGeometry(0.30, 0.03, 0.22),
+      new THREE.MeshStandardMaterial({ color: 0xC3B39B, roughness: 0.9, transparent: true, opacity: 0, depthWrite: false }))
+    this.churnTray.position.y = CHURN_BASE_Y * scale
+    this.churnPapers = new THREE.Mesh(
+      new THREE.BoxGeometry(0.26, 1, 0.18), // unit height; scale.y IS the stack height in metres
+      new THREE.MeshStandardMaterial({ color: 0xFFFDFA, roughness: 0.85, transparent: true, opacity: 0, depthWrite: false }))
+    this.churnPapers.position.y = CHURN_BASE_Y * scale + 0.02
+    this.churnPapers.scale.y = 0.0001
+    this.churnGroup.add(this.churnTray, this.churnPapers)
+
     if (root) {
       root.add(this.badge)
       root.add(this.halo)
       root.add(this.freshHalo)
+      root.add(this.churnGroup)
       root.position.set(this.pos.x, 0, this.pos.z)
       root.rotation.y = this.yaw + YAW_OFFSET
       ANIM.crossfade(root, 'idle', 0)
@@ -328,6 +366,15 @@ export class Agent {
     return this
   }
 
+  /** intensity 0..1 from gitsignals.js's churnToIntensity: how much this
+   *  agent's current file has moved lately. Only sets a target — update()
+   *  eases toward it every frame (CHURN_EASE), so a poll landing mid-typing
+   *  never snaps the animation speed or the paper stack. */
+  setChurn(intensity) {
+    this._churnTarget = clamp(Number.isFinite(intensity) ? intensity : 0, 0, 1)
+    return this
+  }
+
   stop() {
     this._move = null
     this._turn = null
@@ -419,6 +466,28 @@ export class Agent {
       const k = 0.5 + 0.5 * Math.sin(this._freshPulse)
       this.freshHalo.material.opacity = cfg.opacity * (0.7 + 0.3 * k)
       this.freshHalo.scale.setScalar(cfg.radius * (0.96 + 0.06 * k))
+    }
+
+    // Ease _churn toward whatever setChurn() last requested — never snap it,
+    // a poll landing mid-keystroke should not visibly jump the typing speed.
+    this._churn += (this._churnTarget - this._churn) * Math.min(1, dt * CHURN_EASE)
+    if (this._churn > 0.004) {
+      const h = CHURN_MAX_H * this._churn
+      this.churnPapers.visible = true
+      this.churnTray.visible = true
+      this.churnPapers.scale.y = h
+      this.churnPapers.position.y = this.churnTray.position.y + 0.02 + h / 2
+      this.churnPapers.material.opacity = 0.25 + 0.65 * this._churn
+      this.churnTray.material.opacity = 0.2 + 0.5 * this._churn
+    } else {
+      this.churnPapers.visible = false
+      this.churnTray.visible = false
+    }
+    // Typing reads faster on a hot file — only while actually typing, so an
+    // idle/walking agent doesn't carry a phantom speed-up. See CHURN_TYPE_SPEED.
+    if (this.activity === 'typing') {
+      const [lo, hi] = CHURN_TYPE_SPEED
+      ANIM.setTimeScale(this.root, 'type', lo + (hi - lo) * this._churn)
     }
 
     this.root.position.set(this.pos.x, 0, this.pos.z)

@@ -22,11 +22,23 @@ export interface GitShortlogBody {
   reason?: string
 }
 
+export interface GitChurnBody {
+  ok: boolean
+  recent?: { commits: number; added: number; deleted: number; windowDays: number }
+  working?: { added: number; deleted: number }
+  reason?: string
+}
+
 export function statToAgeDays(data: GitStatBody | null | undefined): number | null
 export function shortlogToOwner(data: GitShortlogBody | null | undefined): string | null
+export function churnToIntensity(data: GitChurnBody | null | undefined): number | null
 
 export interface AttachGitSignalsOptions {
-  world: { agents: Array<{ gitPath?: string; setFreshness?: (ageDays: number | null) => void }> }
+  world: { agents: Array<{
+    gitPath?: string
+    setFreshness?: (ageDays: number | null) => void
+    setChurn?: (intensity: number) => void
+  }> }
   zones: { setOwner?: (zoneName: string, owner: string) => void }
   fetchFn?: typeof fetch
   intervalMs?: number
