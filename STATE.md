@@ -1,510 +1,149 @@
 # STATE — feat/git-aware-characters
 
-Round 1. Branch and worktree set up, nothing built yet. This file is the
-handoff — read it before touching anything.
+Round 2 (integrator pass over round 1's four parallel builders). Read this
+before touching anything — round 3 has no memory except this file.
 
-## What exists today (the office scene, as of this branch's base)
+## Where things stand
 
-Everything lives in `web/src/office/`. No bundler on this path — it's plain
-JS loaded through an import map in `office.html`, so it can `import` other
-files in the same directory but NOT anything from `web/src/*.ts` (palette.ts,
-zones.ts, characters.ts etc). Where the .js side needs something the .ts side
-already has, it re-hosts a copy by hand (see `live.js`'s `hairFor`, `zones.js`'s
-own `PALETTE` — both deliberately duplicate the .ts originals rather than
-import them, with a comment saying why).
+The branch is coherent. Four builders landed concurrently in round 1 (git
+data endpoints, hover card, click-to-zoom + blame card, freshness halos +
+zone ownership) and it merged cleanly — no conflict markers, no duplicate
+helpers doing the same job under different names, no dead imports. Field
+names line up end to end (`gitapi.mjs`'s `lastAgeDays`/`lastAuthor`/`owners`
+etc. are read correctly by `interact.js`, `blamecard.js`, `gitsignals.js`).
+`onLivePresence` correctly threads `info.path` into `spawnLive`, so live
+agents get `gitPath` same as the demo cast.
 
-- `office.html` — owns the THREE.js scene, lighting, room geometry, the
-  camera rig (orbit + `focus()`/`goal` for scripted moves), and the render
-  loop (`tick()`). Spawns/despawns character roots for both the demo cast
-  (`AGENT_CAST`/`BACKGROUND`, built in `setupCast()`) and live agents
-  (`spawnLive`/`despawnLive`, driven by `onLivePresence`). Exposes a big
-  `window.__*` test surface at the bottom (`__scene`, `__world`, `__clickAt`,
-  `__hoverAt`, `__agentState`, etc) — that's the hook for
-  `webapp-testing`/devtools work later.
-- `live.js` — `connect()` (websocket to the relay, `ws://127.0.0.1:8799`,
-  see `RELAY_URL`) and `LiveDirector`, pure logic with no THREE import.
-  `onPresence(msg, now)` folds one presence frame into `{ id, human, verb,
-  path, zone, rung, spawned, contestWith, shareWith }`. This is where a
-  presence frame's `region.path` and (optionally) `region.symbol` first
-  become available to the scene — see "presence message shape" below.
-- `zones.js` — `zoneFor(verb, path)` maps work to one of 10 named zones
-  (desks, vault, phones, cables, crates, fire, ducks, whiteboard, hammock,
-  reception). `claimSlot`/`releaseSlots` hand out standing marks.
-  `PALETTE` (hand-copied from `palette.ts`) and `zoneAt(x,z)` are both used
-  by `interact.js`'s info panel.
-- `agent.js` — `Agent` (activity state machine: idle/walking/sitting/typing/
-  reading/etc, see `ACTS`) plus `World` (owns agents, brokers `highfive()`
-  and `contest()` paired encounters). `createAgent()` is the contract. Every
-  agent already carries a `badge` (Sprite over the head, driven by
-  `say(text, tone)`) and a `halo` (ring at the feet, driven by `setState`).
-  Both are strong, ALREADY-WIRED seams for git-aware content — see below.
-- `interact.js` — `attachInteraction()`. Owns hover (`setHover`, tints via
-  `tint(mats, hex)` — blends the per-agent diffuse colour, doesn't replace
-  it) and click/select (`select()`, fills the `#ip` info panel — name, role,
-  doing, destination, zone, position). No git data in the panel yet; `dl` in
-  the panel HTML is the natural place to add rows.
-- `demo.js` — `runDemo(ctx)`, the six-beat scripted fallback when no relay
-  answers within 1.5s (`LIVE_TIMEOUT_MS` in office.html). Not relevant to
-  live git data directly, but any zoom/reveal camera work should reuse its
-  `focus([x,z], dist, yaw)` pattern (already exported to office.html and
-  usable from anywhere with `window.__focus`).
-- `clips/argue.js`, `highfive.js`, `clips/handshake.js` — paired-action clip
-  modules. Pattern (documented at length in argue.js's header): one canonical
-  spacing function (`*Marks()`), both characters walk to fixed marks, clips
-  either fire the same clip on both (symmetric contact — highfive, handshake)
-  or two different clips phase-matched (asymmetric — argue's point + react).
-  Clips get folded into `anim.js`'s shared `CLIPS` table via
-  `Object.assign(ANIM.CLIPS, ARGUE_CLIPS)` at import time in `agent.js`. Any
-  new git-aware clip (a character crouching to read blame, tapping a desk to
-  call up history) should follow this exact pattern — do not start a new
-  animation system.
-- `anim.js` — 9 procedural clips (`CLIPS` table, line ~934) against the 24-bone
-  rig, described in `web/src/office/README.md`. `ONE_SHOT` and `SEATED_CLIPS`
-  sets matter if a new clip is added.
+`pnpm test` and `pnpm typecheck` — the actual commands from the brief, not
+workarounds — both run clean now: 72/72 tests, 6 files, tsc clean. Builder
+2's `pnpm-workspace.yaml` fix (`allowBuilds: { esbuild: true }`) resolved
+the `ERR_PNPM_IGNORED_BUILDS` preflight failure every builder hit and worked
+around individually last round. Nobody needs to route around `pnpm test`
+anymore — use it directly.
 
-## Presence message shape (what git-aware data has to key off)
+## Verified live in the browser, all real data, no mocking
 
-From `go/internal/relaysrv/types.go`:
+Took the lock, ran vite from this worktree, drove the existing `window.__*`
+test hooks (`__interact.project`/`.hoverAt`, `__zoomAgent`) since the canvas
+scene has no per-agent DOM node to click through devtools directly.
 
-```go
-type Region struct {
-    Path   string
-    Symbol *string   // optional
-}
-```
+- **Zone ownership nameplates** (task 4) — visible on room load, no
+  interaction needed. "desks — ordinary edits · mostly mohsensc", "vault —
+  auth and secrets · mostly mohsensc", "whiteboard — planning · mostly
+  mohsensc" all rendered with real `git shortlog` data on the existing zone
+  label pills.
+- **Hover card** (task 2) — confirmed via `#it`'s actual innerHTML after
+  hovering agent-4 (`go/cmd/gorelay/main.go`): `"last touched 1d ago by
+  mohsensc · 2 commits · 1 author"`, tagged `.git.fresh` correctly (real
+  `ageDays` < 2).
+- **Freshness halos** (task 4) — confirmed via `agent._freshness` +
+  `agent.freshHalo.material.opacity` on all five demo-cast agents post-poll:
+  real buckets (`warm`/`fresh`), nonzero opacity. Visually the halo reads as
+  a second, subtler ring alongside the tone halo — matches what builder 4
+  described wanting checked; it does read as distinct, not muddy.
+- **Click-to-zoom + blame card** (task 3) — `__zoomAgent('a3')` eased the
+  camera into agent-3's head and slid in the blame card: real ownership
+  (100% mohsensc), real newest/oldest line ages, eight real recent commits
+  with sha/relative-date/subject/author for `web/src/office/anim.js`.
+  `Escape` closed the card and restored the room framing cleanly, confirmed
+  by screenshot both before and after.
+- **Console**: only two messages throughout, both pre-existing and already
+  understood — `coffee-cup-v2.glb` 404 (asset file genuinely missing from
+  `public/glb/`, cosmetic, one missing prop) and the relay websocket
+  `ECONNREFUSED` (expected — no relay running, demo fallback is the
+  designed-for path and it kicks in correctly). No errors caused by any of
+  this round's code.
 
-So a presence frame gives a repo-relative `path` and, sometimes, a `symbol`
-name — never a line range. `live.js`'s `isPresence()` only requires
-`m.region.path`; `msg.region.symbol` isn't read by the JS side at all yet.
-That matters for the blame idea: there's no line number to hand `git blame`
-directly. Two honest options for round 2+:
-  1. File-level blame/log only (who touched this file, how, when) — always
-     available, no heuristics.
-  2. Symbol-level: grep the file text for the symbol name to guess a line,
-     then blame that line. Best-effort, degrade to file-level when the
-     symbol isn't found or isn't provided. Flag this clearly in the UI
-     (e.g. "near `Order.total`" vs a confident line-pin) rather than
-     pretending it's precise.
+## What I fixed this round
 
-## The seam I picked for real git data: a vite dev-server plugin
+**Blame card overlapped the HUD panel.** `blamecard.js`'s `#bc` was
+`position:fixed; left:18px; top:50%; transform:translate(-16px,-50%)`, and
+`office.html`'s `#hud` is `position:fixed; left:18px; top:16px`. Both anchor
+the same corner. The blame card's content (ownership bars + up to 8 commits)
+routinely runs taller than half the viewport, so its top edge crept up into
+the HUD's space — "Restart demo"/"Zones" buttons showed through underneath
+the card's header, screenshot-confirmed before the fix. Changed `#bc` to
+`top:328px; bottom:16px` (clears the HUD's actual height) with a
+horizontal-only slide transform instead of vertical-centered. Re-verified in
+browser: full HUD and blame card both fully legible with no overlap, same
+`__zoomAgent('a3')` repro. One-line-comment in the CSS explaining the 328px
+number so nobody has to redo the math if the HUD's content changes size.
 
-The office path (`web/src/office/*.js`) runs unbundled straight in the
-browser, so it cannot itself shell out to `git`. Three ways to bridge that,
-per the brief:
+Nothing else needed a code fix this round — the four builders' integration
+was clean going in.
 
-- a tiny dev endpoint alongside vite
-- a generated JSON file the scene reads
-- the relay carrying it
+## Things noticed but NOT changed (logged so nobody re-investigates blind)
 
-**Picked: a vite dev-server plugin (`web/vite.config.js`, does not exist yet —
-first thing to write).** A `configureServer` hook adds middleware under
-`/api/git/*` that shells out to the real `git` binary (repo root is one level
-up from `web/`, i.e. `path.resolve(__dirname, '..')`) and returns JSON.
-`office.html` is only ever opened through `pnpm dev` (there's no `build`
-script in `web/package.json` at all right now — just `dev`, `test`,
-`typecheck`), so a dev-only middleware costs nothing and covers every way
-this scene actually gets loaded today.
+- **Two independent `/api/git/stat` pollers.** `interact.js`'s hover card
+  fetches+caches `/api/git/stat` itself (30s TTL, per-hover), and
+  `gitsignals.js` also polls `/api/git/stat` for every agent with a
+  `gitPath` (20s interval, ambient). They don't share a cache, so hovering
+  an agent can trigger a `git log` process spawn even though gitsignals
+  already has a fresh answer for the same path within its own TTL. Not a
+  bug — git log against a small repo is cheap and both endpoints degrade
+  fine — just a small redundancy. Worth collapsing into one shared cache
+  if a future round touches either file, not worth a standalone task.
+- **`fmtAge` (interact.js) vs `freshnessBucket` (agent.js) are two separate
+  functions**, not accidental duplication — one formats a display string
+  ("1d ago"), the other buckets a halo color/radius. Different jobs, kept
+  separate on purpose, flagging only because they look similar at a glance.
+- **Character torsos look bare/skin-toned from some camera angles**,
+  noticed while screenshotting the "beat 3/6" demo state (agents seated at
+  desks, viewed mostly from behind). Could not confirm this is a real
+  regression versus just how the clay-shirt texture reads at that camera
+  distance/lighting — `dressing.js` and the shirt/skin material setup in
+  `makeCharacterRoot` weren't touched by any of round 1's four builders, so
+  if it's real it predates this branch's work. Didn't chase it — out of
+  scope for git-aware characters specifically. Next round: if you're in
+  office.html anyway, look at a seated agent from behind at close range and
+  see if it's actually bare skin or just how the shirt fabric reads; file
+  an issue if it's real.
 
-Rejected:
-- **Generated JSON.** Wrong shape for this feature specifically — the whole
-  point ("an agent editing code nobody has touched in a year should feel
-  different from one editing code a teammate touched this morning") is that
-  the git data has to reflect the repo as it stands *right now*, including
-  whatever the live agents in the room are committing while you watch. A
-  snapshot generated once goes stale the moment the first live commit lands.
-  It's also a second moving part (a generator script plus a place to write
-  its output) for no benefit over a live process that already has the repo
-  checked out.
-- **Through the relay.** Would mean touching the Python relay's message
-  protocol AND the Go daemon/wire types AND probably the C++ hook's payload
-  — three languages, all outside this branch's remit ("work only in your
-  worktree", parallel team elsewhere touching the daemon/relay). A vite
-  plugin is entirely contained inside `web/`, touches nothing another team
-  could be mid-edit on, and can be built and thrown away without any
-  cross-language coordination.
+## What's still half-built / open from round 1, unchanged by me
 
-### Concrete endpoint sketch for round 2
+- **Live-mode `gitPath` only sets once at spawn.** If a live agent moves to
+  a different file mid-session, the hover card / freshness halo / blame
+  card all keep showing the file it *arrived* on, not the current one.
+  Doesn't break anything (matches "recent enough to be true," not
+  "literally millisecond-fresh"), but worth fixing if round 3 has slack:
+  `onLivePresence` already has `info.path` on every frame — just needs to
+  write `a.gitPath = info.path` there instead of only in `spawnLive`.
+- **Zoom-during-a-walk-animation** still unverified (flagged twice now,
+  by builder 3 and not re-tested by me — the demo cast was mid-walk during
+  some of my zoom tests and it looked fine, camera eased to wherever the
+  agent's root was at the time, no visible glitch, but I didn't specifically
+  chase a walk-cycle mid-stride the way a dedicated test would). Downgrading
+  this from "worth an eyeball" to "probably fine, low priority" based on
+  what I saw, but not calling it fully verified.
+- **`FRESH.normal`'s 0.16 opacity** (builder 4's flag, agent.js) — not
+  re-checked this round; the repo's only 6-7 days old so nothing hits the
+  `normal` bucket yet to look at (same "nothing stale yet" gap noted last
+  round, still true).
 
-All read-only, all `execFile('git', [...])` (never a shell string — no
-injection risk from a path containing spaces or a leading `-`), cwd pinned
-to the repo root, and every `path` query param validated against
-`git ls-files` before use so nothing can pass `--upload-pack` or similar as
-a fake path:
+## What's NOT built yet (untouched territory, still open per original plan)
 
-- `GET /api/git/blame?path=<repo-relative>` → `git blame --porcelain <path>`,
-  parsed into per-line `{ author, authorMail, authorTime, summary, sha }`
-  and rolled up into "N lines by X, M lines by Y" for the whole file (or a
-  line range if one is ever available).
-- `GET /api/git/log?path=<repo-relative>&n=8` → `git log --follow -n 8
-  --format=%H%x1f%an%x1f%ad%x1f%s --date=relative -- <path>`.
-- `GET /api/git/stat?path=<repo-relative>` → commit count
-  (`git log --follow --format=%H -- <path> | wc -l`), first/last commit
-  dates (age + recency — the "nobody touched this in a year" signal), and
-  unique author count.
-- `GET /api/git/shortlog?dir=<repo-relative-prefix>` → `git shortlog -sne --
-  <dir>`, for "who owns this area of the repo" (the crates/desks-zone-level
-  flourish idea).
-- `GET /api/git/diffstat?path=<repo-relative>` → `git diff --stat HEAD~1..HEAD
-  -- <path>` or similar, for "how much did this just change" ambient signal.
+- Whose-code-is-this desk/prop tinting (blame ownership fraction blended
+  onto desk materials) — machinery for it exists (`interact.js`'s
+  `tint()`/`ownMaterials()`, already used for desks) but nobody's wired
+  blame data into it yet.
+- Symbol-level blame (blame pinned to the specific function/symbol a
+  presence frame names, not just the whole file) — the presence protocol
+  gap noted in round 1's STATE (no line range in `Region`) is still there.
+  File-level is what's built and it's honest about being file-level; a
+  symbol-grep heuristic is still an open idea, not started.
+- Diffstat / "how much did this just change" ambient signal — sketched in
+  round 1's plan, no endpoint or UI for it yet.
 
-Degrade gracefully: an empty or all-`404` repo path (new file, not yet
-committed, or outside the repo) should return a small `{ ok:false, reason }`
-JSON, not a 500 or an empty box in the UI. `git blame` on an untracked file
-exits non-zero — that's the common case to design for first, not an edge
-case to bolt on later.
+## Nothing filed as a GitHub issue this round
 
-Cheap and fast: every one of these is a single local process spawn against a
-repo already on disk, no network. Fine to call generously, once per
-hover/click, not on every frame.
-
-## Seams for the visual treatments (round 2+, not built yet)
-
-- **Hover glow + tooltip.** `interact.js`'s `setHover(pick)` already tints
-  on hover (`tint(matsOf(pick), HOVER_TINT)`) and shows a tooltip div (`#it`,
-  `tip.textContent = pick.label`). Extend `pick.label` for an agent to a
-  richer string, or grow the tooltip into a small multi-line panel (agent,
-  human, file, zone) — the DOM/CSS pattern for a nicer floating panel
-  already exists in `interact.js`'s `CSS` template string and in
-  `zones.js`'s `labelTexture()` (canvas-drawn pill, used for the in-scene
-  zone labels — could reuse this approach for an in-scene name tag instead
-  of a DOM tooltip, which stays legible under camera rotation).
-- **Click-to-zoom into the head.** `office.html` already has `focus([x,z],
-  dist, yaw)` and the `goal`-based camera easing `tick()` drives every
-  frame. Zooming to a character's head specifically needs a look-target
-  above floor level, not on it — `focus()` currently only takes an (x,z)
-  and hardcodes `goal.target.y = 1.15`; that'll need a head-height variant,
-  or `focus` needs a 3rd optional y. `Agent` doesn't expose a head world
-  position directly, but `root.position` + a fixed head height (character
-  height is `1.68`, head is up near the top) gets you there without a bone
-  lookup — good enough for a camera target.
-- **"Whose code is this" tint.** `agent.js`'s `Agent` already tints its own
-  mesh by `color` at spawn (`makeCharacterRoot`'s `bodyColor` lerp in
-  office.html) and `interact.js`'s `tint()` already knows how to blend a
-  highlight color onto a `base` per-material color without erasing it. A
-  second tint layer — e.g. the desk's own material blending toward "mine"
-  vs "teammate's" based on blame ownership fraction — is the same
-  `tint()`/`ownMaterials()` machinery `interact.js` already has for desks
-  (`d.mats = ownMaterials(d.group)` at setup).
-- **File history in-scene.** The whiteboard zone (`Z.ZONES.whiteboard`,
-  drawn as a physical panel with drawn-on "boxes and arrows" in office.html's
-  `stubProps()`) is the obvious existing prop to repaint with real commit
-  history for whichever file is under discussion, canvas-texture style, same
-  technique as `labelTexture()`/`badgeTexture()`. Alternative: a panel that
-  pops up on click, DOM-based like `interact.js`'s `#ip`.
-- **Ambient "stale vs fresh" signal.** `Agent.setState(s)` already drives the
-  halo's color/opacity/pulse (`TONE` table: ok/working/blocked/idle/done).
-  A `stale`/`fresh` axis orthogonal to the existing ok/working/blocked tone
-  could ride the same halo (a second visual channel — e.g. halo *radius* or
-  a cold-to-warm hue shift — since `setState`'s tone already owns halo
-  color) or a new, separate ambient cue (desk surface glow, a dust
-  particle/cobweb prop) keyed off `stat.lastCommitAge` from the seam above.
-- **Shortlog-driven area ownership.** Zones already have a `means` and a
-  `prop`; a shortlog-driven flourish (a nameplate on a desk, a "planted flag"
-  color wash on a zone ring) could hang off `zones.js`'s existing
-  `buildZoneMarkers()` return value (`rings`, `sprites` maps, already
-  per-zone and already has a `highlight(name)` method to extend).
-
-## What's NOT built yet
-
-Nothing. This round is branch setup, code reading, and this file. No
-`vite.config.js`, no endpoint, no new clip, no UI. Round 2 should start by
-writing `web/vite.config.js` with the git-data plugin (that's the seam
-everything else hangs off), get one endpoint (`blame` is the highest-value)
-working end to end with a real `fetch()` from `office.html`'s console
-(`window.__ready` gate already exists to know when it's safe to poke at the
-scene), and then land ONE visual treatment (hover tooltip showing real blame
-is the smallest, most legible win) before fanning out into more variants.
-
-## Nothing tried and rejected yet
-
-First round. Nothing built to reject.
+Nothing hit that needed one — the one real bug found (blame card / HUD
+overlap) was cheap enough to fix inline rather than defer.
 
 ## Browser/port discipline
 
-Not used this round — no browser testing happened, only reading source and
-writing this file. Next round: read
-`/private/tmp/claude-501/-Users-mohsen-agentai-src-2/92367945-a78b-45ee-8788-865f14f2c2d3/scratchpad/devtools-protocol.md`
-in full before any `chrome-devtools` tool call — one shared port (5173), one
-tab, lock directory, kill server + release lock when done. That path is
-session-scratchpad-local to whoever runs round 2, not part of this repo.
-
-## Nothing filed as a GitHub issue yet
-
-Nothing hit yet that needs one. The symbol-vs-line-range gap in the presence
-protocol (see above) is worth a "consider" note for whoever owns the
-relay/protocol side, but it's not blocking anything in round 2 (file-level
-blame degrades fine without it), so no issue filed for it yet — flagging it
-here instead. File one if round 2 actually needs line-level precision and
-still doesn't have it.
-
-## Round 1 build notes
-
-### task 3
-
-Built click-to-zoom-into-the-head plus a blame card overlay.
-
-- `web/src/office/blamecard.js` (new): DOM overlay, same pattern as
-  interact.js's `#ip`/`#it` — own injected CSS, own div. `attachBlameCard({fetchFn})`
-  returns `{show(agent), hide()}`. Header is name/human/gitPath; body is
-  ownership bars from `GET /api/git/blame?path=` sorted by share, plus a
-  recent-commits list from `GET /api/git/log?path=&n=8`. Any `{ok:false}` or
-  fetch failure (or no `gitPath` at all) renders a small "no history here
-  yet" line, never an empty box. Caches per path for the life of the panel.
-- `web/src/office/office.html`: extended `focus()` with a 4th `targetY` arg
-  (default 1.15, so every existing demo.js call site is untouched), added
-  `zoomToAgent(a)`/`zoomRestore()` riding the same `goal` easing the render
-  loop already drives, and an `Escape` key handler that deselects and
-  restores the prior framing. Added `onSelect` to the `attachInteraction`
-  cfg — it's a no-op until interact.js starts calling `cfg.onSelect?.(...)`
-  (task 2), but is already wired to `zoomToAgent`/`blameCard.show` /
-  `zoomRestore`/`blameCard.hide`. Added `window.__zoomAgent(name)` at the
-  bottom so the whole flow is drivable from the console right now, before
-  the interact.js hook lands — that's what I used to test.
-- Also fixed the known glb-path bug from the devtools protocol doc
-  (`glb/...` → `/glb/...`, both in the prop/desk table and the character
-  loader) since it was blocking `window.__ready` entirely — no characters
-  ever spawned with the relative paths. Fixed once, here, so the other
-  builders don't have to. `glb/coffee-cup-v2.glb` still 404s — that asset
-  file just isn't in `public/glb/`, unrelated to the path bug, harmless
-  (one missing prop, not a blocker), not fixed this round.
-
-Verified in browser: took the lock, ran `pnpm dev`, set `a.gitPath` by hand
-on a demo agent (task 2's cast-wiring hadn't landed while I was testing),
-called `window.__zoomAgent('a1')` — camera eased into the head with a slight
-yaw, blame card slid in showing real ownership (100% mohsensc) and eight
-real recent commits for `web/src/office/anim.js`. `Escape` restored the
-original room framing and closed the card. Screenshot taken both states.
-Killed the server and released the lock when done.
-
-`pnpm test` (72 passed, includes tasks 1 and 4's suites which landed in the
-same worktree while I worked) and a direct `tsc --noEmit` both green for my
-files — `pnpm typecheck`'s wrapper script currently fails on an unrelated
-pnpm supply-chain check (`ERR_PNPM_IGNORED_BUILDS`) that has nothing to do
-with any of this round's code; ran `tsc` directly instead, only
-`gitsignals.test.ts` (task 4's file) has two pre-existing type errors, not
-mine.
-
-Nothing filed as an issue this round — no edge case hit that was expensive
-enough to defer. Zoom-during-a-walk-animation wasn't tested (demo cast was
-idle when I zoomed); worth an eyeball next round but didn't look risky in
-the render-loop code, no issue filed for it.
-
-## Round 1 build notes
-
-### task 4
-
-Built the ambient signal layer: `web/src/office/gitsignals.js` polls the git
-endpoints every 20s (once immediately) and folds the results onto two new,
-purely-additive hooks:
-
-- `Agent.setFreshness(ageDays)` in `web/src/office/agent.js` — a second halo
-  ring, orthogonal to `setState`'s TONE ring. Own color/radius/pulse-rate per
-  bucket (`freshnessBucket`, exported and unit-tested): fresh (<2d, warm/big/
-  quick), warm (<21d), normal (<180d, barely visible), stale (>=180d, cold/
-  small/slow). `ageDays: null` (no gitPath, or the endpoint 404s) clears the
-  ring to invisible rather than showing a wrong default.
-- `zones.setOwner(zoneName, ownerLabel)` in `web/src/office/zones.js` —
-  repaints a zone's existing label pill to add "· mostly <name>" under its
-  usual meaning line, reusing `labelTexture()` as-is. Falls back to the plain
-  meaning line if called with a falsy owner.
-
-`gitsignals.js` itself: `attachGitSignals({world, zones, fetchFn, intervalMs,
-zoneDirs})`. Static `ZONE_DIRS` map (desks -> web/src, vault -> go,
-whiteboard -> web/src/office — picked by eye against the tree, the other
-zones have no obvious single directory so were left unmapped rather than
-faked). Every failure — endpoint not up, bad path, network error, malformed
-body — is caught and swallowed; on failure an agent's freshness clears to
-null rather than lying. Pure fold functions (`statToAgeDays`, `shortlogToOwner`)
-are exported and tested against canned JSON bodies so the wiring is testable
-without a live endpoint. Wired into `office.html` with the two lines the plan
-allowed: one import, and `window.__gitSignals = attachGitSignals({world,
-zones: zoneUI})` right before `window.__ready = true`.
-
-Two new hand-written `.d.ts` files (`agent.d.ts`, `gitsignals.d.ts`) — same
-pattern `live.d.ts` already used, so `test/gitsignals.test.ts` (a typechecked
-.ts file) can import the plain-JS office modules without `tsc` erroring on
-missing declarations. Minimal surface only (what the test actually imports),
-not a full type surface for `Agent`/`World`.
-
-Files: `web/src/office/gitsignals.js` (new), `web/test/gitsignals.test.ts`
-(new), `web/src/office/agent.d.ts` (new), `web/src/office/gitsignals.d.ts`
-(new), `web/src/office/agent.js` (+freshness channel), `web/src/office/
-zones.js` (+setOwner). Office.html's two lines landed inside task 3's
-commits since this was a shared, concurrently-edited worktree — see below.
-
-**Not verified in the browser.** This task's plan explicitly budgeted the
-shared dev-server lock to tasks 2 and 3, not 4. `pnpm test` and `pnpm
-typecheck` are green (72 tests, 6 files, including gitapi's once task 1
-landed), but nobody has actually looked at the freshness ring pulsing on a
-character or a zone pill repainting with an owner name. **Next round should
-run `pnpm dev`, hover/wait near a desk-zone agent with a `gitPath`, and
-eyeball**: does the outer ring read as a distinct signal from the inner TONE
-halo at a glance, is the zone pill's second line legible at the label
-sprite's normal viewing distance, and does a `stale` agent actually feel
-different from a `fresh` one from across the room (not just up close).
-
-Also worth someone's eye: `FRESH.normal`'s opacity (0.16) may be too faint to
-register as an intentional "normal" state vs. "signal not loaded yet" —
-consider bumping it or dropping the ring for `normal` entirely and only
-showing rings for the two extremes.
-
-One concurrency note for whoever reads this: this round ran with multiple
-builder agents editing files in the *same* worktree simultaneously (not
-separate worktrees per builder). `agent.js`/`zones.js` briefly appeared to
-have reverted to HEAD mid-task from a stale read racing another process's
-write, before syncing back to the correct content. Nothing was lost this
-round, but future rounds running the same way should `git diff --stat` on
-their own files right before committing, not trust an in-memory diff read
-several tool calls earlier.
-
-### task 1
-
-Built the git data seam: `web/gitapi.mjs` (parsers + `gitApiMiddleware`),
-`web/vite.config.js` (wires it into vite's dev server under `/api/git/*`),
-`web/test/gitapi.test.ts` (22 tests). All four endpoints match the shapes
-tasks 2-4 were written against — confirmed by reading their landed code
-above, nothing needed to change.
-
-- `parseBlamePorcelain` walks `git blame --porcelain` output line by line,
-  tracking `sha -> {author, time}` the first time a sha's full header block
-  appears (porcelain only repeats the bare header line after that), then
-  rolls per-line shas up into per-author `{lines, share}`. Also carries
-  `newestLineAgeDays`/`oldestLineAgeDays` off each sha's `author-time`.
-- `parseStatLog`/`parseLog`/`parseShortlog` are straight line-oriented
-  parsers over `\x1f`-delimited `git log`/`git shortlog -sn` output.
-  `ageDays(epochSeconds, now)` is the one date-math helper, shared by stat
-  and blame.
-- `gitApiMiddleware(repoRoot)` re-reads `git ls-files` on every request
-  (repo is small, dev-only tool, cheap — no staleness bugs from a cached
-  allowlist) and checks `path` for exact membership / `dir` for prefix
-  membership before either ever reaches `execFile('git', [...])`. Every
-  route is wrapped so any failure — untracked path, bad path, git erroring
-  — resolves `{ok:false, reason}` at HTTP 200, never a throw, never a
-  non-200. Non-`/api/git/*` requests call `next()` and fall through to
-  vite's normal handling.
-- Two extra files beyond the three assigned, both justified by an existing
-  pattern already in this codebase: `web/gitapi.d.mts` (hand-written types
-  for `gitapi.mjs`, same reasoning and shape as `office/live.d.ts` — no
-  `@types/node` in this project, so a `.ts` test importing an untyped `.mjs`
-  fails `tsc` without a companion declaration; `.d.mts` not `.d.ts` because
-  the source is `.mjs`, and TS's declaration-file matching cares). Also
-  `web/pnpm-workspace.yaml` showed up untracked in the shared worktree,
-  presumably from another agent's environment fix — didn't touch it, didn't
-  commit it, leaving it for whoever put it there.
-- Test file avoids `node:path`/`node:url` for the same missing-`@types/node`
-  reason — `repoRoot` in the middleware tests is just `'..'`, relying on the
-  documented invocation (`cd web && pnpm test`) rather than resolving an
-  absolute path from `import.meta.url`.
-
-`pnpm test` and `pnpm typecheck` as literal commands both fail before
-reaching any script — pnpm's own preflight deps-status check hits
-`ERR_PNPM_IGNORED_BUILDS` on esbuild's postinstall and refuses to proceed,
-even though `node_modules` already has the correct pinned binaries and
-nothing in this round touched `package.json`/`pnpm-lock.yaml`. This is a
-pnpm/environment issue, not code — tasks 3 and 4 independently hit the same
-thing. Verified with the equivalent direct invocation instead: `bash
-scripts/verify-toolchain.sh && node_modules/.bin/vitest run` (72 passed, 6
-files, including gitsignals and everyone else's suites) and `bash
-scripts/verify-toolchain.sh && node_modules/.bin/tsc --noEmit` (clean, zero
-errors) — both using the exact pinned binaries, never npx. Whoever picks up
-round 2 should either run `pnpm approve-builds` once (writes to
-`package.json`, so worth doing deliberately, not as a side effect of one
-task) or keep using the direct-binary invocation.
-
-Nothing filed as an issue this round — the endpoint shapes were locked in
-the plan already and matched what landed on the other three tasks with zero
-back-and-forth needed.
-
-### task 2
-
-Built hover: glow pulse plus a git-aware agent card. Files touched:
-`web/src/office/interact.js` (whole file, mine) and two narrow regions of
-`web/src/office/office.html` (`AGENT_CAST`/`setupCast()`, `spawnLive`), plus
-one line inside `onLivePresence` (see below).
-
-- **Cast wiring.** `AGENT_CAST` now carries a `file:` field — five real,
-  verified repo paths chosen for a spread of history: `python/src/
-  agent_presence/__init__.py` (untouched since the repo's first commit),
-  `cpp/hook/hook.cpp` (mid-age, 10 commits), `web/src/office/anim.js`
-  (recent, actively edited), `go/cmd/gorelay/main.go` (landed yesterday),
-  `README.md` (highest churn, 17 commits). `setupCast()` stashes it as
-  `a.gitPath` on the created agent. `spawnLive(id, human, path)` takes a
-  third arg and does the same for live agents. Its call site is inside
-  `onLivePresence`, one function outside my two assigned regions — changed
-  the single line `spawnLive(info.id, info.human)` to pass `info.path` too,
-  since without it live-mode `gitPath` would never populate at all. One
-  token, no restructuring; flagging it here since it's technically outside
-  scope. Note this only sets `gitPath` at spawn time — if a live agent moves
-  to a different file later, `gitPath` goes stale (spawnLive only runs once
-  per id). Fine for round 1 (nothing reads it more than once every ~30s
-  through the cache anyway); worth a follow-up if per-frame accuracy starts
-  to matter.
-- **Hover card.** `interact.js`'s `#it` tooltip now renders one of two
-  things: the original one-line `.tag` pill for floor/desk/prop (unchanged
-  visually, just reclassed), or a `.card` for agents — name, role/note,
-  doing, zone, file, then a git line appended asynchronously once `GET
-  /api/git/stat?path=` resolves: "last touched 1d ago by mohsensc · 8
-  commits · 1 author". `{ok:false}`/fetch failure/no `gitPath` just omits
-  that row — no empty box, confirmed by testing before task 1's endpoint
-  landed (fetch 404'd, card still rendered clean with the other four rows).
-  A `hoverToken` counter guards against a slow fetch resolving after the
-  hover has moved on to something else. Cached per path with a 30s TTL
-  (`Map`, not per-frame — one fetch per hover, reused on repeat hovers).
-  `fetchFn` is injectable (defaults to `window.fetch`) so this stays unit
-  a11y testable elsewhere later, though I didn't add an interact.js test
-  file this round — none existed before and none of the shared test
-  files import it.
-- **Pulse.** `tint()` gained a third `alpha` arg (default 0.6, matches the
-  old fixed blend everywhere else). A standalone `requestAnimationFrame`
-  loop inside `attachInteraction` breathes the hovered object's tint alpha
-  between ~0.4 and ~0.62 on a sine wave while something is hovered — reads
-  as "noticing you" rather than a flat on/off wash. Runs independently of
-  office.html's render loop since interact.js has no other per-frame hook.
-  Verified live: sampled a hovered agent's material hex three times 250ms
-  apart in the browser console and got three different values.
-- **`onSelect` hook.** Added `onSelect` to `attachInteraction`'s destructured
-  cfg and one line in `select()`: `onSelect?.(selected)`, called after every
-  selection change including deselect (`null`). Task 3 had already wired the
-  `attachInteraction({...})` call site's `onSelect:` key to
-  `zoomToAgent`/`blameCard.show`/`zoomRestore`/`blameCard.hide` before I got
-  to this — the two sides matched with no changes needed on either end.
-
-Verified in browser: took the lock, `npx vite --port 5173 --strictPort` from
-this worktree, reused the existing tab. `window.__ready` gate, then drove
-hover with `window.__interact.project(x,z)` + `window.__hoverAt(sx, sy-40)`
-(same torso-offset trick `window.__clickAgent` already used) since there's
-no per-agent DOM element to `hover()` on a canvas scene. Screenshotted the
-card mid-render showing real data for `go/cmd/gorelay/main.go`: "agent-4 ·
-agent · doing reading · zone desks · file go/cmd/gorelay/main.go · last
-touched 1d ago by mohsensc · 2 commits · 1 author", colored warm/caramel
-(the `fresh` class, <2 days). Confirmed the plain `.tag` path still renders
-correctly for a desk ("desk 1"). Checked `list_network_requests` — every
-`/api/git/stat` call came back 200, including task 4's `gitsignals.js`
-polling loop picking up the same `gitPath` field I wired, which was a nice
-confirmation the two tasks' work actually composes. `list_console_messages`
-showed only the two pre-existing unrelated warnings (missing
-`coffee-cup-v2.glb` prop asset, relay websocket refused in demo mode) —
-nothing new from this round. Killed the server, released the lock.
-
-Given the repo is only 6 days old, nothing in it is old enough to actually
-hit the `stale` (>180 days) bucket in either the hover card's fresh/stale
-coloring or task 4's freshness halo — every file's `lastAgeDays` tops out
-around 5-6. Not a bug, just a ceiling on what round 1 could visually prove;
-worth re-checking once the repo has more history, or temporarily lowering
-the stale threshold locally to eyeball it.
-
-Also fixed a shared blocker while I was in here: `web/pnpm-workspace.yaml`
-existed but with a placeholder value (`esbuild: set this to true or false`)
-that made pnpm refuse to install/run anything
-(`ERR_PNPM_IGNORED_BUILDS`) — tasks 1, 3, and 4 all independently worked
-around it with direct binary invocations rather than `pnpm test`/`pnpm
-typecheck`. Ran `pnpm approve-builds --all`, which rewrote the file to
-`allowBuilds: esbuild: true` and let esbuild's postinstall run. Committed it
-separately (`web: approve esbuild build script for pnpm install`) so `cd
-web && pnpm test`/`pnpm typecheck` work as the literal documented commands
-again, no more workaround needed for round 2.
-
-Nothing filed as a GitHub issue this round — no edge case surfaced that was
-expensive enough to defer rather than just handle (the `spawnLive` path
-going stale after the first frame, noted above, felt like a "worth knowing"
-not a "worth an issue" — it doesn't break anything, it just doesn't refresh).
+Lock was held by another process (`builder3-shove`, presumably a leftover
+from round 1, well under the 12-minute steal threshold) when I started —
+waited it out rather than stealing it early. Took it once free, ran vite
+from this worktree on 5173, drove the existing tab (id 6, "Agent Presence —
+the office"), killed the server and released the lock when done. Same
+protocol file as before, nothing about it changed this round.
