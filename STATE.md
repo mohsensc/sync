@@ -394,3 +394,146 @@ visual guess on a brand new variant, not a regression.
   with `?vcard=ticket` or `?vcard=bout` yet, only split (round 7) and now
   neither of these two at all. Same "5 minutes with the lock" item as the
   slap-via-reel gap already on the list above.
+
+## Round 8, task 3 — reel severity sort, seed history, ticker two-line
+
+Scope: `reel.js`, `seed.js`, their `.d.ts`, their tests, and only the
+`/* ---- reel skins ---- */` CSS block in `office.html` (plus
+`reel-skins-test.html`, called out explicitly as mine too). No browser —
+everything below is verified via `pnpm test` / `pnpm typecheck` only.
+
+**1. Severity sort.** `ReelStore` gained `sortMode` — `'new'` (default,
+today's chronological order, unchanged), `'worst'` (rung descending,
+newest-first as the tiebreak within a rung), `'worst-grouped'` (same
+order, with a rung divider drawn between groups in the render layer).
+A second cycle button sits next to the skin button in the panel head,
+reusing the `.reel-skin-btn` class so it needed zero new CSS anywhere —
+that also meant the group-divider markup (`groupHeadHtml` in reel.js)
+had to be inline-styled rather than given its own class, since I don't
+own office.html's base CSS to give it a home; it reuses the existing
+`.reel-badge[data-rung]` rule (already themed per rung by every skin) for
+its only meaningful color, so the divider looks right under paper/glass/
+ticker without any skin-specific work. Filters and sort compose — sort
+runs after the rung/human filter, not instead of it. Changing sort mode
+does *not* reset the reveal cap (unlike changing a filter): re-ranking
+the same set of rows shouldn't punt you back to the top of a list you'd
+already paged into. Unit tests cover: default, fallback-to-'new' on a bad
+value, correct rung-desc ordering, the newest-first tiebreak within a
+rung, worst-grouped sorting identically to worst (grouping is a render
+concern, not a data one), sort respecting active filters, and reveal-cap
+behavior on a mode switch. All in `office-reel.test.ts`.
+
+**2. Seed history.** Reconciled seed.js's stale "not imported anywhere
+yet" header — office.html has imported it since round 6
+(`new ReelStore([...SAMPLE_EVENTS, ...seedEvents()])`); the header was
+just never updated to say so. Grew `seedEvents()` from 25 to 75 (86
+total with reel.js's own 12 `SAMPLE_EVENTS`), which clears
+`REVEAL_STEP` (40) with real room to spare — "show older" and the
+long-list tail are now actually reachable on a fresh checkout, not just
+in a long-running session. Made it uneven on purpose rather than tuning
+by hand and hoping:
+- rung distribution weighted 0.30/0.24/0.20/0.16/0.10 (rung 0 through 4)
+  instead of a flat `i % 5` — "co-location happens constantly, a
+  contested symbol is rare," per the collision ladder in the brief.
+- timestamps staged into three bands (last hour / next ~10h / out to ~4
+  days) instead of one flat random window — a uniform draw over multiple
+  days rarely lands inside the last hour by chance, so recency needed to
+  be forced, not hoped for.
+- sara is deterministically kept out of every rung-4 event (`
+  pairExcludingHuman`, bounded-retry with a deterministic fallback) —
+  the brief asked for at least one human×rung filter combo that's
+  provably empty, not just empty by luck. reel.js's own `SAMPLE_EVENTS`
+  already agreed by coincidence (neither of its two rung-4 rows involves
+  sara); this makes it a guarantee.
+Still fully deterministic (same mulberry32 PRNG, no `Math.random`
+anywhere) — `office-seed.test.ts` still checks that directly. New tests:
+count is 75, skewed toward low rungs, spans minutes to multiple days,
+sara+rung4 is always empty. New integration describe block in
+`office-reel.test.ts` builds a real `ReelStore` from
+`[...SAMPLE_EVENTS, ...seedEvents()]` and checks paging actually
+triggers (`page().remaining > 0` at the default cap), `showMore()`
+eventually reveals everything, the sara+rung4 combo filters to `[]`
+through the store's real filter methods (not just checked on the raw
+array), and — the brief's own named failure mode — that it is *not* the
+case that every human×rung combination is populated.
+
+**3. Ticker skin, two lines instead of one.** The one-line version
+(`display:contents` merging line1/line2 into a single 288px-wide flex
+row) was reviewed at the real panel width and read as "priy… vs dev… —
+split the …" on five of seven rows — a dozen-ish characters of budget
+per field once R-badge + who + vs + who + path + dot + res + time are
+all fighting for the same line. Went with "drop the one-line ambition,
+go two-line dense" per the brief's own framing, over "drop a column" —
+dropping path or res would have thrown away information the paper/glass
+skins keep, and the whole point of ticker is density, not a lesser
+feature set. Removed the `display:contents`/`flex-direction:row`
+overrides so the base column layout (line1 above line2) stands, then
+tuned padding/gap/font-size down to keep the terminal feel. Kept modest
+`nowrap`/`ellipsis`/`max-width` on `.reel-who` (118px) and `.reel-path`
+(150px) as insurance even though each field now has a full line to
+itself — cheap, and it's exactly the assumption that broke last time.
+**Unverified in browser** — this is a CSS-only, no-browser round; the
+next round holding the lock should load `?skin=ticker` (or
+`reel-skins-test.html`) and confirm it actually reads clean at 308px,
+not just "shouldn't overflow by the math."
+
+**4. `reel-skins-test.html` resync.** Owned this file already (called
+out explicitly in the brief) but it had drifted since round 6 — missing
+both of round 7's real fixes (`#reel` specificity on glass, `.reel-who`
+nowrap on ticker) because this harness mounts `<div class="reel">`
+panels, not `<div id="reel">`, so it never shared the bug that specific
+fix was for. Resynced properly this time: kept the class-only selectors
+(no `#reel.` prefix — genuinely doesn't need it here, documented why
+inline so the next person doesn't "fix" it into a mismatch with the
+real markup), carried the two-line ticker rework over, and fixed the
+same `.reel-row` `width:100%` + `padding` content-box overflow bug
+office.html had (28px overflow, clips the timestamp) independently in
+this file's own copy. Also pinned `.col`'s width alongside its
+flex-basis so the mount is defensibly 308px, not just "should be by the
+flex math" — the brief flagged this exact divergence as the root cause
+of two shipped bugs, so belt-and-suspenders felt right here specifically.
+
+**Process note — shared worktree collision, not a code bug.** Early in
+this round, `git add <my files>` followed by a separate `git commit -m`
+picked up other agents' uncommitted WIP (task 4's `replay-card.js` edits
+and a `vcard-test.html` in progress) because all four builders share this
+exact working directory and object database — the index can change
+between an `add` and a `commit` issued from a different agent's shell.
+Caught it before pushing (the commit's file list was obviously too wide),
+`git reset --soft HEAD~1`, `git restore --staged` on the files that
+weren't mine, and recommitted with an explicit trailing `-- <pathspec>`
+on `git commit` itself instead of a separate `git add` step, which is
+race-proof against this. Between that soft-reset and the recommit,
+another agent apparently picked up the *original* bad commit before I
+un-staged it (origin briefly had a commit bundling my reel/seed work with
+task 4's WIP replay-card.js under my message) — task 1 or task 4 cleaned
+it back out in a follow-up commit before I even pushed, so nothing landed
+broken, but if anyone digs through `git log` and sees a commit that looks
+wrong, that's why. No data was lost; every file's final content on origin
+matches what its owning task actually wrote. **Recommendation for future
+rounds sharing this exact setup: always pass files as a trailing
+pathspec on `git commit` directly, never a bare `git commit -m` after a
+separate `git add`.**
+
+**Tests / typecheck.** `pnpm test`: 257/257 green, including 20 new tests
+across `office-reel.test.ts` and `office-seed.test.ts` for this round's
+work. `pnpm typecheck` was red at push time, but not from anything in
+this task's scope — `office-clips-sustain.test.ts` and
+`office-clips-unloved-variants.test.ts` (task 2's territory: tiptoe/
+facepalm clips, still missing a `.d.ts` at the time) were the only
+failing files. Confirmed by reading the error output directly — no
+mention of reel.js, seed.js, reel.d.ts, seed.d.ts, office.html, or
+reel-skins-test.html anywhere in it.
+
+## What's next (task 3's leftovers)
+
+- **Ticker two-line rework needs eyes** — see above, CSS-only round,
+  nobody has looked at it rendered yet.
+- **`worst-grouped`'s inline-styled divider** is a reasonable v1 but a
+  real CSS home (even just a class in whatever base-CSS file ends up
+  covering it) would be cleaner than inline style attributes long-term —
+  not worth blocking on, flagging for whoever's next in office.html's
+  base block.
+- No new GitHub issues filed this round — everything found was in-scope
+  and cheap enough to fix directly (the seed reconciliation, the ticker
+  rework, the harness resync) rather than defer.
