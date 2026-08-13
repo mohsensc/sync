@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { churnToIntensity, attachGitSignals } from '../src/office/gitsignals.js'
+import { churnToIntensity, attachGitSignals, CHURN_MODES, staleToIntensity } from '../src/office/gitsignals.js'
 
 describe('churnToIntensity', () => {
   it('returns null on ok:false, missing body, or a body missing both recent and working', () => {
@@ -122,6 +122,105 @@ describe('attachGitSignals churn wiring', () => {
     const s = attachGitSignals({ world, zones, fetchFn, intervalMs: 999999 })
     await s.tick()
     expect(setChurn).not.toHaveBeenCalled()
+    s.stop()
+  })
+})
+
+// -- CHURN_MODES / staleToIntensity — the 'C'-key churn treatments --------
+
+describe('CHURN_MODES', () => {
+  it('cycles stack -> heat -> cold', () => {
+    expect(CHURN_MODES).toEqual(['stack', 'heat', 'cold'])
+  })
+})
+
+describe('staleToIntensity', () => {
+  it('is 0 below the fresh floor and for no signal', () => {
+    expect(staleToIntensity(0)).toBe(0)
+    expect(staleToIntensity(60)).toBe(0)
+    expect(staleToIntensity(null)).toBe(0)
+    expect(staleToIntensity(undefined)).toBe(0)
+    expect(staleToIntensity(NaN)).toBe(0)
+    expect(staleToIntensity(-5)).toBe(0)
+  })
+
+  it('is 1 at and beyond the ancient ceiling', () => {
+    expect(staleToIntensity(365)).toBe(1)
+    expect(staleToIntensity(4000)).toBe(1)
+  })
+
+  it('ramps linearly between the floor and the ceiling', () => {
+    expect(staleToIntensity(212.5)).toBeCloseTo(0.5, 5) // midpoint of 60..365
+  })
+})
+
+// -- churn-vis: the 'heat'/'cold' desk treatments, cycled by setChurnMode --
+// (the browser owns the 'C' keypress itself; this is the wiring it drives)
+
+function fakeRoot() {
+  const children: unknown[] = []
+  return { add: (...o: unknown[]) => { children.push(...o) }, remove: vi.fn(), children }
+}
+
+describe('attachGitSignals churn-vis mode', () => {
+  it('defaults to stack mode', () => {
+    const world = { agents: [] }
+    const zones = { setOwner: vi.fn() }
+    const s = attachGitSignals({ world, zones, fetchFn: vi.fn(async () => stubResponse(null, false)), intervalMs: 999999 })
+    expect(s.churnMode).toBe('stack')
+    s.stop()
+  })
+
+  it('ignores an unrecognised mode rather than clearing the current one', () => {
+    const world = { agents: [] }
+    const zones = { setOwner: vi.fn() }
+    const s = attachGitSignals({ world, zones, fetchFn: vi.fn(async () => stubResponse(null, false)), intervalMs: 999999 })
+    s.setChurnMode('bogus' as never)
+    expect(s.churnMode).toBe('stack')
+    s.stop()
+  })
+
+  it('stops routing to setChurn once switched to heat, and attaches desk-fx onto agent.root', async () => {
+    const setChurn = vi.fn()
+    const root = fakeRoot()
+    const world = { agents: [{ gitPath: 'web/src/office/anim.js', setFreshness: vi.fn(), setChurn, root, scale: 1 }] }
+    const zones = { setOwner: vi.fn() }
+    const fetchFn: FetchStub = vi.fn(async (input) => {
+      const url = String(input)
+      if (url.includes('/api/git/churn')) {
+        return stubResponse({
+          ok: true,
+          recent: { commits: 5, added: 40, deleted: 10, windowDays: 14 },
+          working: { added: 20, deleted: 5 },
+        })
+      }
+      return stubResponse(null, false)
+    })
+    const s = attachGitSignals({ world, zones, fetchFn, intervalMs: 999999 })
+    await s.tick()
+    expect(setChurn).toHaveBeenCalled() // stack mode, same as the existing wiring test above
+
+    setChurn.mockClear()
+    s.setChurnMode('heat')
+    expect(s.churnMode).toBe('heat')
+    await s.tick()
+    expect(setChurn).not.toHaveBeenCalled()
+    // deskHeat + deskDust both attach a group onto the agent's root the
+    // first time it's polled, regardless of which mode ends up visible.
+    expect(root.children.length).toBe(2)
+    s.stop()
+  })
+
+  it('never builds desk-fx, and never throws, for agents with no root (every pre-existing test fixture)', async () => {
+    const setChurn = vi.fn()
+    const world = { agents: [{ gitPath: 'x', setFreshness: vi.fn(), setChurn }] }
+    const zones = { setOwner: vi.fn() }
+    const fetchFn: FetchStub = vi.fn(async () => stubResponse({
+      ok: true, recent: { commits: 1, added: 1, deleted: 0, windowDays: 14 }, working: { added: 0, deleted: 0 },
+    }))
+    const s = attachGitSignals({ world, zones, fetchFn, intervalMs: 999999 })
+    s.setChurnMode('cold')
+    await expect(s.tick()).resolves.toBeUndefined()
     s.stop()
   })
 })

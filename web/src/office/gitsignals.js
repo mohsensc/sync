@@ -18,6 +18,13 @@
 // never breaks the room. The churn route in particular may not exist yet on
 // a given checkout (see gitapi.mjs's task-1 seam) — a 404 there degrades the
 // exact same way a network hiccup would, no special-casing needed.
+//
+// The churn number also drives a second, swappable layer: three distinct
+// treatments of "how busy/stale does this file look", cycled with the 'C'
+// key or ?churnMode=. See CHURN_MODES / staleToIntensity / applyChurnVis
+// below for the how; dressing.js's deskHeat/deskDust for the what.
+
+import { deskHeat, deskDust } from './dressing.js'
 
 const DEFAULT_INTERVAL_MS = 20_000
 const STAT_TTL_MS = 20_000
@@ -79,6 +86,54 @@ export function churnToIntensity(data) {
   return score <= 0 ? 0 : 1 - Math.exp(-score / 40)
 }
 
+// ---------------------------------------------------------------------
+// Churn treatments: three distinct looks at the same two numbers
+// (churn intensity, file age), cycled with the 'C' key or ?churnMode=.
+//   'stack' (default) — agent.js's built-in typing-speed bump and paper
+//     stack. Untouched here; this file just keeps calling setChurn() the
+//     way it always has.
+//   'heat'  — dressing.js's deskHeat(): a warm glow that breathes and
+//     steam that drifts, scaled by churnToIntensity. Alive, because
+//     churn is something happening right now.
+//   'cold'  — dressing.js's deskDust(): a settled haze and a small
+//     cobweb that fade in once a file's last commit is genuinely old
+//     (staleToIntensity below). Deliberately inert — see dressing.js's
+//     header for why "hasn't been touched in a year" shouldn't move.
+// Self-contained (own keydown listener, own rAF loop) for the same
+// reason zoneowner.js and histshelf.js are: office.html's wiring block
+// isn't this round's file to edit, so there's no tick()/keydown seam to
+// hook a fourth signal into — see those two files' own notes.
+// ---------------------------------------------------------------------
+
+export const CHURN_MODES = ['stack', 'heat', 'cold']
+
+function initialChurnMode() {
+  try {
+    const m = new URLSearchParams(location.search).get('churnMode')
+    return CHURN_MODES.includes(m) ? m : 'stack'
+  } catch {
+    return 'stack' // no `location` outside a browser
+  }
+}
+
+// Below the floor a file just looks recently touched — no dust. At/above
+// the ceiling it reads as fully abandoned. A repo's own commit rhythm
+// picked these, not a calendar rule: 60 days is "nobody's mentioned this
+// in two months", 365 is "a full year", which is squarely inside FRESH's
+// own 'stale' bucket (agent.js, >=180d) rather than a brand new tier.
+const STALE_FLOOR_DAYS = 60
+const STALE_CEIL_DAYS = 365
+
+/** ageDays -> 0..1 "how abandoned does this feel", for the 'cold'
+ *  treatment. Pure, same "no signal reads as 0, not NaN" contract as
+ *  churnToIntensity/freshnessBucket. */
+export function staleToIntensity(ageDays) {
+  if (ageDays == null || !Number.isFinite(ageDays) || ageDays < 0) return 0
+  if (ageDays <= STALE_FLOOR_DAYS) return 0
+  if (ageDays >= STALE_CEIL_DAYS) return 1
+  return (ageDays - STALE_FLOOR_DAYS) / (STALE_CEIL_DAYS - STALE_FLOOR_DAYS)
+}
+
 /**
  * @param {object} opts
  * @param {{agents: Array<{gitPath?: string, setFreshness?: Function, setChurn?: Function}>}} opts.world
@@ -95,6 +150,50 @@ export function attachGitSignals({ world, zones, ownership, fetchFn = fetch, int
   const churnCache = new Map() // path -> { t, intensity }
   const ownerCache = new Map() // dir -> { t, owner }
 
+  // -- churn-vis: desk-level 'heat'/'cold' treatments, see the comment
+  // above staleToIntensity for what they are and why they live here.
+  let churnMode = initialChurnMode()
+  const fxByAgent = new Map()   // agent -> { heat, cold } (dressing.js instances)
+  const gitByAgent = new Map()  // agent -> { ageDays, intensity } — last known, for reapplying on a mode switch
+
+  function stateFor(a) {
+    let s = gitByAgent.get(a)
+    if (!s) { s = { ageDays: null, intensity: 0 }; gitByAgent.set(a, s) }
+    return s
+  }
+
+  // Lazily built the first time an agent is ever polled, and only when it
+  // actually carries a real root to hang props off — every existing test
+  // fixture is a plain object with no .root, so this is a no-op there,
+  // same "no DOM, no problem" shape the rest of this file already has.
+  function fxFor(a) {
+    if (fxByAgent.has(a)) return fxByAgent.get(a)
+    if (!a || !a.root || typeof a.root.add !== 'function') return null
+    const scale = (typeof a.scale === 'number' && a.scale) || 1
+    const fx = {
+      heat: deskHeat(a.root, 0.5 * scale, 0, -0.24 * scale),
+      cold: deskDust(a.root, 0.5 * scale, 0, -0.24 * scale),
+    }
+    fxByAgent.set(a, fx)
+    return fx
+  }
+
+  /** Re-renders one agent's desk-fx from its last known numbers and the
+   *  current churnMode. Cheap and idempotent — safe to call on every poll
+   *  AND on every mode switch. */
+  function applyChurnVis(a) {
+    const st = stateFor(a)
+    const fx = fxFor(a)
+    if (!fx) return
+    if (churnMode === 'heat') {
+      fx.heat.set(st.intensity); fx.cold.set(0)
+    } else if (churnMode === 'cold') {
+      fx.heat.set(0); fx.cold.set(staleToIntensity(st.ageDays))
+    } else {
+      fx.heat.set(0); fx.cold.set(0) // 'stack' — agent.js's own paper stack carries this signal
+    }
+  }
+
   async function getJson(url) {
     const res = await fetchFn(url)
     if (!res || !res.ok) return null
@@ -102,10 +201,12 @@ export function attachGitSignals({ world, zones, ownership, fetchFn = fetch, int
   }
 
   async function pollAgent(a) {
-    if (!a.gitPath) { a.setFreshness?.(null); return }
+    if (!a.gitPath) { a.setFreshness?.(null); stateFor(a).ageDays = null; applyChurnVis(a); return }
     const cached = statCache.get(a.gitPath)
     if (cached && Date.now() - cached.t < STAT_TTL_MS) {
       a.setFreshness?.(cached.ageDays)
+      stateFor(a).ageDays = cached.ageDays
+      applyChurnVis(a)
       return
     }
     try {
@@ -113,8 +214,12 @@ export function attachGitSignals({ world, zones, ownership, fetchFn = fetch, int
       const ageDays = statToAgeDays(data)
       statCache.set(a.gitPath, { t: Date.now(), ageDays })
       a.setFreshness?.(ageDays)
+      stateFor(a).ageDays = ageDays
+      applyChurnVis(a)
     } catch {
       a.setFreshness?.(null)
+      stateFor(a).ageDays = null
+      applyChurnVis(a)
     }
   }
 
@@ -129,14 +234,25 @@ export function attachGitSignals({ world, zones, ownership, fetchFn = fetch, int
     if (!a.gitPath) return
     const cached = churnCache.get(a.gitPath)
     if (cached && Date.now() - cached.t < STAT_TTL_MS) {
-      if (cached.intensity != null) a.setChurn?.(cached.intensity)
+      if (cached.intensity != null) {
+        stateFor(a).intensity = cached.intensity
+        // Only 'stack' reads setChurn — 'heat'/'cold' get this same number
+        // through applyChurnVis below instead, and leave the built-in
+        // paper-stack prop at 0 (see applyChurnVis).
+        if (churnMode === 'stack') a.setChurn?.(cached.intensity)
+        applyChurnVis(a)
+      }
       return
     }
     try {
       const data = await getJson(`/api/git/churn?path=${encodeURIComponent(a.gitPath)}`)
       const intensity = churnToIntensity(data)
       churnCache.set(a.gitPath, { t: Date.now(), intensity })
-      if (intensity != null) a.setChurn?.(intensity)
+      if (intensity != null) {
+        stateFor(a).intensity = intensity
+        if (churnMode === 'stack') a.setChurn?.(intensity)
+        applyChurnVis(a)
+      }
     } catch {
       // route not up yet, network hiccup, whatever — leave it alone
     }
@@ -179,5 +295,48 @@ export function attachGitSignals({ world, zones, ownership, fetchFn = fetch, int
   tick()
   const timer = setInterval(() => { tick() }, intervalMs)
 
-  return { tick, stop: () => clearInterval(timer) }
+  // 'C' cycles stack -> heat -> cold -> stack. Re-renders every known
+  // agent immediately from its last-known numbers rather than waiting
+  // for the next poll, so the switch reads instantly.
+  function setChurnMode(mode) {
+    if (!CHURN_MODES.includes(mode)) return
+    churnMode = mode
+    const agents = (world && world.agents) || []
+    agents.forEach(applyChurnVis)
+  }
+  function onKeydown(e) {
+    if (e.key !== 'c' && e.key !== 'C') return
+    const tag = (document.activeElement && document.activeElement.tagName) || ''
+    if (tag === 'INPUT' || tag === 'TEXTAREA') return
+    setChurnMode(CHURN_MODES[(CHURN_MODES.indexOf(churnMode) + 1) % CHURN_MODES.length])
+  }
+  if (typeof addEventListener === 'function') addEventListener('keydown', onKeydown)
+
+  // The heat treatment's glow/steam need per-frame motion; the poll loop
+  // above only runs every intervalMs. Own rAF loop for the same reason
+  // zoneowner.js and histshelf.js each have their own — office.html's
+  // tick() isn't a seam this round's file split leaves open.
+  let churnRaf = 0
+  let churnLastT = null
+  function churnFrame() {
+    churnRaf = requestAnimationFrame(churnFrame)
+    const now = performance.now()
+    const dt = churnLastT == null ? 0 : Math.min(0.1, (now - churnLastT) / 1000)
+    churnLastT = now
+    for (const fx of fxByAgent.values()) fx.heat.update(dt)
+  }
+  if (typeof requestAnimationFrame === 'function') churnFrame()
+
+  return {
+    tick,
+    stop: () => {
+      clearInterval(timer)
+      if (churnRaf) cancelAnimationFrame(churnRaf)
+      if (typeof removeEventListener === 'function') removeEventListener('keydown', onKeydown)
+      for (const fx of fxByAgent.values()) { fx.heat.dispose(); fx.cold.dispose() }
+      fxByAgent.clear()
+    },
+    get churnMode() { return churnMode },
+    setChurnMode,
+  }
 }

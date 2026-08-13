@@ -30,6 +30,9 @@ export function pickOwnership(data: ShortlogBody | null | undefined): Ownership 
 export function plaqueScale(share: number | null | undefined): number
 export function rugSplit(ownership: Ownership | null | undefined): { topFrac: number; secondFrac: number }
 export function flourishFor(ownership: Ownership | null | undefined): 'trophy' | 'contested' | null
+/** The caption under a plaque's name / a single-owner rug's quiet woven
+ *  name: a percentage normally, "all theirs" once authorCount is 1. */
+export function ownerLine(ownership: Ownership | null | undefined): string
 
 export interface ZoneOwnerHandle {
   setZoneOwnership(zoneName: string, rawShortlogData: ShortlogBody | null | undefined): void

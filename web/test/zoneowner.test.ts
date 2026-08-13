@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   HAIR_COLORS, hairFor, POSSESSIVE_SHARE, CONTESTED_MARGIN,
-  pickOwnership, plaqueScale, rugSplit, flourishFor,
+  pickOwnership, plaqueScale, rugSplit, flourishFor, ownerLine,
 } from '../src/office/zoneowner.js'
 
 // -- colour parity with palette.ts's hairFor --------------------------------
@@ -145,6 +145,38 @@ describe('flourishFor', () => {
   })
   it('prefers trophy if both were somehow true (possessive wins)', () => {
     expect(flourishFor({ possessive: true, contested: true } as never)).toBe('trophy')
+  })
+
+  // -- single-owner calm ------------------------------------------------
+  // Post-dedup, a real single-committer repo is possessive:true on every
+  // zone — the trophy would fire everywhere and mean nothing. authorCount
+  // === 1 overrides possessive/contested either way.
+  it('is null for a genuine single-owner zone even though possessive is also true', () => {
+    const own = pickOwnership({ ok: true, owners: [{ author: 'mohsensc', commits: 40, share: 1 }] })
+    expect(own!.authorCount).toBe(1)
+    expect(own!.possessive).toBe(true)
+    expect(flourishFor(own)).toBe(null)
+  })
+  it('is null for authorCount:1 even if the fixture also claims contested', () => {
+    expect(flourishFor({ authorCount: 1, possessive: false, contested: true } as never)).toBe(null)
+  })
+})
+
+// -- ownerLine ----------------------------------------------------------
+
+describe('ownerLine', () => {
+  it('is empty with no ownership data', () => {
+    expect(ownerLine(null)).toBe('')
+  })
+  it('reads "all theirs" for a single-owner zone, no percentage', () => {
+    const own = pickOwnership({ ok: true, owners: [{ author: 'mohsensc', commits: 12, share: 1 }] })
+    expect(ownerLine(own)).toBe('all theirs')
+  })
+  it('reads a rounded percentage when there is a second author', () => {
+    const own = pickOwnership({ ok: true, owners: [
+      { author: 'a', commits: 3, share: 0.75 }, { author: 'b', commits: 1, share: 0.25 },
+    ] })
+    expect(ownerLine(own)).toBe('75% of this area')
   })
 })
 

@@ -312,6 +312,169 @@ export function wallArt(group, xs, wallZ) {
   return out
 }
 
+// ---------------------------------------------------------------------
+// Churn treatments — "desk heat" and "the cold end" (see gitsignals.js's
+// C-key/?churnMode= wiring). Alternative looks at the same two numbers
+// agent.js's built-in typing-speed + paper-stack treatment already reads
+// (churn intensity, file age); these live here instead of in agent.js
+// because that rig isn't this round's file to touch, and a desk prop is
+// exactly the kind of thing this file already does.
+//
+// Every mesh gets its own material rather than dressing.js's usual mat()
+// cache — the cache is for furniture whose colour never changes after
+// it's built, and these two need an independent, per-agent opacity that
+// tracks that one agent's own numbers. Sharing a material here would
+// make one agent's glow bleed its brightness onto every other agent
+// wearing the same colour.
+//
+// Heat is alive on purpose: a glow that breathes and steam that drifts,
+// because churn is something happening right now. Cold is deliberately
+// inert: the haze and the cobweb fade in and then just sit there,
+// because "nobody's touched this in a year" should read as still, not
+// busy-in-reverse. set()/update() split the same way agent.js's own
+// setChurn()/update(dt) does, for the same reason: a poll landing
+// mid-frame should ease toward its target, never snap to it.
+// ---------------------------------------------------------------------
+
+const HEAT_GLOW_COLOR = 0xE8946C   // salmon — warm, reads as "hot" against the cream floor
+const HEAT_STEAM_COLOR = 0xF0ECE6
+const COLD_DUST_COLOR = 0xC3B39B
+const COLD_WEB_COLOR = 0xDDD6C7
+const FX_EASE = 2.4   // 1/s — how fast both treatments chase their target intensity
+
+/**
+ * A warm underglow disc plus three drifting steam wisps, parented at
+ * (x,y,z) in `parent`'s local space (agent.js's root — see gitsignals.js).
+ * set(intensity 0..1) only moves the target; update(dt) does the actual
+ * animating, driven by gitsignals.js's own rAF loop since office.html's
+ * tick() isn't a seam this round can add to (see that file's own note).
+ */
+export function deskHeat(parent, x, y, z) {
+  const g = new THREE.Group()
+  g.name = 'desk-heat'
+  g.visible = false
+
+  const glowMat = new THREE.MeshBasicMaterial({
+    color: HEAT_GLOW_COLOR, transparent: true, opacity: 0, depthWrite: false,
+  })
+  const glowGeo = new THREE.CircleGeometry(0.20, 24)
+  const glow = new THREE.Mesh(glowGeo, glowMat)
+  glow.rotation.x = -Math.PI / 2
+  glow.position.y = 0.012
+  g.add(glow)
+
+  const wispGeo = new THREE.PlaneGeometry(0.045, 0.15)
+  const wisps = [0, 1, 2].map(i => {
+    const m = new THREE.MeshBasicMaterial({
+      color: HEAT_STEAM_COLOR, transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide,
+    })
+    const mesh = new THREE.Mesh(wispGeo, m)
+    mesh.userData.phase = i / 3
+    mesh.userData.xOff = (i - 1) * 0.055
+    g.add(mesh)
+    return mesh
+  })
+
+  g.position.set(x, y, z)
+  parent.add(g)
+
+  let target = 0, level = 0, t = 0
+
+  return {
+    group: g,
+    set(intensity) {
+      target = Math.max(0, Math.min(1, Number.isFinite(intensity) ? intensity : 0))
+    },
+    update(dt) {
+      level += (target - level) * Math.min(1, dt * FX_EASE)
+      t += dt
+      const on = level > 0.01
+      g.visible = on
+      if (!on) return
+      glowMat.opacity = level * (0.14 + 0.10 * Math.sin(t * 2.6))
+      glow.scale.setScalar(0.7 + 0.6 * level)
+      wisps.forEach(w => {
+        const p = (t * 0.32 + w.userData.phase) % 1
+        w.position.set(w.userData.xOff, 0.05 + p * 0.32, 0)
+        w.material.opacity = level * 0.30 * Math.sin(p * Math.PI)
+        w.scale.setScalar(0.55 + p * 0.75)
+      })
+    },
+    dispose() {
+      glowMat.dispose(); glowGeo.dispose()
+      wispGeo.dispose(); wisps.forEach(w => w.material.dispose())
+      parent.remove(g)
+    },
+  }
+}
+
+/**
+ * A settled dust haze plus a small cobweb, built from shared box/ring
+ * geometry rather than a canvas texture — cheap, and it means this can be
+ * constructed without a real DOM (see gitsignals.js's test-time guard on
+ * a.root before ever calling this). Nothing here animates on its own;
+ * set(intensity) fades it in or out and that's the whole show — see the
+ * file header for why cold is deliberately still.
+ */
+export function deskDust(parent, x, y, z) {
+  const g = new THREE.Group()
+  g.name = 'desk-dust'
+  g.visible = false
+
+  const hazeMat = new THREE.MeshBasicMaterial({
+    color: COLD_DUST_COLOR, transparent: true, opacity: 0, depthWrite: false,
+  })
+  const hazeGeo = new THREE.CircleGeometry(0.19, 20)
+  const haze = new THREE.Mesh(hazeGeo, hazeMat)
+  haze.rotation.x = -Math.PI / 2
+  haze.position.y = 0.014
+  g.add(haze)
+
+  // Cobweb corner: a fan of thin strands plus two partial rings, one
+  // shared material so a single opacity write fades the whole web.
+  const webMat = new THREE.MeshBasicMaterial({
+    color: COLD_WEB_COLOR, transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide,
+  })
+  const strandGeo = new THREE.BoxGeometry(1, 1, 1)
+  const geos = [strandGeo]
+  ;[-0.5, -0.2, 0.1, 0.4].forEach(a => {
+    const mesh = new THREE.Mesh(strandGeo, webMat)
+    mesh.scale.set(0.006, 0.006, 0.15)
+    mesh.position.set(0.08 * Math.sin(a), 0.10, 0.08 * Math.cos(a))
+    mesh.rotation.y = a
+    mesh.rotation.x = -0.5
+    g.add(mesh)
+  })
+  ;[0.055, 0.10].forEach(r => {
+    const ringGeo = new THREE.RingGeometry(r, r + 0.004, 12, 1, 0, 1.1)
+    geos.push(ringGeo)
+    const ring = new THREE.Mesh(ringGeo, webMat)
+    ring.rotation.x = -0.5
+    ring.position.y = 0.10
+    g.add(ring)
+  })
+
+  g.position.set(x, y, z)
+  parent.add(g)
+
+  return {
+    group: g,
+    set(intensity) {
+      const level = Math.max(0, Math.min(1, Number.isFinite(intensity) ? intensity : 0))
+      g.visible = level > 0.01
+      hazeMat.opacity = 0.22 * level
+      webMat.opacity = 0.5 * level
+      haze.scale.setScalar(0.6 + 0.5 * level)
+    },
+    update() {}, // static by design — see the treatment note above
+    dispose() {
+      hazeMat.dispose(); hazeGeo.dispose()
+      webMat.dispose(); geos.forEach(gm => gm.dispose())
+      parent.remove(g)
+    },
+  }
+}
+
 /**
  * Build everything. Called once the GLB loads have settled, because the desk
  * dressing needs the real seat positions.

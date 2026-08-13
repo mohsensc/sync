@@ -4,17 +4,28 @@
 // from gitsignals.js's pollZone).
 //
 // Two treatments behind one key toggle (press U, or load with
-// ?zoMode=rug — 'plaque' is the default):
-//   'plaque' — a wall-style sign floating over the zone, owner's name in
-//     their palette hair colour, sized by commit share.
+// ?zoMode=plaque — 'rug' is the default):
 //   'rug'    — a floor mat tinted by the owner's colour with a second
-//     woven stripe for the runner-up.
+//     woven stripe for the runner-up. Default because it reads as part of
+//     the room; a floating sign every time you glance at a desk bank got
+//     loud fast (round 4 review: "a tooltip cosplaying as a prop").
+//   'plaque' — a wall-style sign floating over the zone, owner's name in
+//     their palette hair colour, sized by commit share. Still here,
+//     still one keypress away, for whenever the room needs to spell it
+//     out (screenshots, a walkthrough) rather than just imply it.
 // Both modes also get an ambient flourish when the numbers are lopsided
 // enough to say something with a prop instead of a label: a trophy for a
 // zone one human clearly owns (>=80% share), two mugs side by side for one
 // that's genuinely split. Anything in between gets dressing but no
 // flourish — most zones most of the time, and that's fine, not everything
 // needs to shout.
+//
+// Single-owner calm: once a zone has exactly one author — which, after
+// gitapi.mjs's email dedup, is most of this repo's own history — a
+// trophy for "the only person who could possibly own this" states the
+// obvious, and a plaque doing long division to print "100%" is worse
+// than just saying so. See ownerLine()/flourishFor() below: no flourish,
+// no percentage, just a name and "all theirs".
 //
 // Degrade rule: no shortlog data (fresh dir, endpoint not up, network
 // hiccup) means no dressing for that zone. A plaque with no name on it or
@@ -100,6 +111,17 @@ export function pickOwnership(data) {
   }
 }
 
+/** The line under a plaque's name (and the quiet caption on a
+ *  single-owner rug) — a percentage most of the time, but a flat "all
+ *  theirs" once a zone has exactly one author. A bar chart with one
+ *  segment doesn't need the number spelled out, and "100%" reads like a
+ *  stat that could have come out otherwise. */
+export function ownerLine(ownership) {
+  if (!ownership) return ''
+  if (ownership.authorCount === 1) return 'all theirs'
+  return `${Math.round(ownership.top.share * 100)}% of this area`
+}
+
 /** Commit share -> a scale multiplier for the plaque, so a zone one
  *  person has thoroughly claimed reads as a slightly bigger sign than one
  *  they merely lead. Clamped so a 100% share doesn't run away. */
@@ -124,6 +146,10 @@ export function rugSplit(ownership) {
 /** Which ambient flourish, if any, a zone's ownership earns. */
 export function flourishFor(ownership) {
   if (!ownership) return null
+  // Single-owner calm: with no second author there is nothing to be
+  // possessive OVER — a trophy for the only person who ever committed
+  // here just restates authorCount. See the file header.
+  if (ownership.authorCount === 1) return null
   if (ownership.possessive) return 'trophy'
   if (ownership.contested) return 'contested'
   return null
@@ -237,7 +263,7 @@ function plaqueTexture(ownership) {
 
   g.font = '400 22px ui-sans-serif, -apple-system, Segoe UI, sans-serif'
   g.fillStyle = '#6b5f56'
-  g.fillText(`${Math.round(ownership.top.share * 100)}% of this area`, W / 2, 130)
+  g.fillText(ownerLine(ownership), W / 2, 130)
 
   if (ownership.second) {
     g.font = '600 16px ui-sans-serif, -apple-system, Segoe UI, sans-serif'
@@ -268,7 +294,10 @@ function buildPlaque(zoneDef, ownership) {
 
 /** A rug texture: owner colour fill, a runner-up stripe woven along one
  *  edge if there is a second author, a plain undyed border either way so
- *  it reads as a mat and not a paint swatch. */
+ *  it reads as a mat and not a paint swatch. Single-owner zones (no
+ *  second author — see the file header's "single-owner calm") get a
+ *  small, low-contrast name stitched near the edge instead of the
+ *  two-tone split, since there's no second colour to do the telling. */
 function rugTexture(ownership) {
   const W = 256, H = 256
   const c = document.createElement('canvas')
@@ -285,6 +314,16 @@ function rugTexture(ownership) {
   g.strokeStyle = 'rgba(240,236,230,0.85)'
   g.lineWidth = 14
   g.strokeRect(7, 7, W - 14, H - 14)
+
+  if (ownership.authorCount === 1) {
+    g.save()
+    g.textAlign = 'center'
+    g.font = '600 15px ui-monospace, SFMono-Regular, Menlo, monospace'
+    g.fillStyle = 'rgba(240,236,230,0.55)'
+    g.fillText(ownership.top.author, W / 2, H - 24)
+    g.restore()
+  }
+
   void topFrac
   const t = new THREE.CanvasTexture(c)
   t.anisotropy = 8
@@ -327,9 +366,9 @@ void RING // reserved: a ring-border rug variant was tried and dropped, see STAT
 
 function initialMode() {
   try {
-    return new URLSearchParams(location.search).get('zoMode') === 'rug' ? 'rug' : 'plaque'
+    return new URLSearchParams(location.search).get('zoMode') === 'plaque' ? 'plaque' : 'rug'
   } catch {
-    return 'plaque' // no `location` outside a browser
+    return 'rug' // no `location` outside a browser
   }
 }
 
