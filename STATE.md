@@ -429,3 +429,164 @@ notes above) — five-line job in `agent.js`, same shape as `handshake`.
 Also worth a real screenshot of `World.handshake`/`World.shove` firing
 inside the full lit scene (not just the plain-floor harness) now that
 characters should render there.
+
+## Round 3 — integration
+
+Four builders landed round 2 concurrently (the four sections above, one
+per task). This round's job: pull it together, make sure it actually
+runs, wire up what got built-but-not-connected, and look at it. Branch
+was coherent going in — no merge conflicts, no duplicated helpers, all
+four builders' commits pushed cleanly on top of each other. `pnpm test`
+(89/89) and `pnpm typecheck` both passed clean before I touched anything.
+That's a good sign for how the round's git discipline held up (path-scoped
+commits, nobody stepping on shared files) — worth doing again.
+
+**What was actually broken: nothing crashed, but three pieces of round 2
+work were built and tested in isolation and never connected to anything.**
+That's the normal cost of four builders working the same tree without
+talking to each other — nobody's fault, it's exactly what this round
+exists to catch.
+
+1. **`seed.js`'s 25-event generated history was never imported.** Task 2
+   built it, task 1 built the reel panel with its own 12 `SAMPLE_EVENTS`
+   in parallel, and the two never got introduced. Fixed: office.html now
+   does `new ReelStore([...SAMPLE_EVENTS, ...seedEvents()])` — 37 events
+   on a fresh checkout instead of 12. No id collisions (`sample-N` vs
+   `seed-N`).
+2. **`live.js`'s `onDecision`/`onRedundant` callbacks were never passed to
+   `Live.connect()`.** Task 2 built the whole negotiate/claim_result/
+   redundant_work parsing path, tested it 17 ways, and office.html's
+   `initLive()` only ever wired `onPresence`. Fixed: added
+   `onDecision: onLiveReelFrame, onRedundant: onLiveReelFrame` to the
+   `connect()` call; `onLiveReelFrame` runs the frame through
+   `Live.toReelEvent`, adds it to `reelStore`, re-renders. This is real
+   plumbing now, not dead code — see the caveat below on what it can't do
+   yet.
+3. **`World.yield`/`World.doubletake` didn't exist.** Task 4 built
+   `clips/yield.js` and `clips/doubletake.js` fully (marks, spacing,
+   registry, geometry-tested) but explicitly scoped "wiring is next
+   round" — task 3 had `agent.js` locked for the round and only had
+   budget for handshake + shove. Wired both this round, same shape as
+   `World.handshake`/`World.shove`: `yielding`/`keeping` ACTS entries
+   (asymmetric, like shove), `doubletaking` (symmetric, like highfive),
+   folded both registries into `ANIM.CLIPS`, added both to the
+   phase-machine's same-clip/different-clip dispatch and the
+   `CLIP_OF_KIND` end-timing map. All five resolution beats
+   (highfive/share, handshake/wait, shove/abort, yield/read-yield,
+   doubletake/redundant) are now reachable through `World`.
+
+**Also built this round: the reel actually replays now.** Task 1 left
+`onSelect` as a caption stand-in on purpose ("actual playback... next
+round's job, once a task owns agent.js again" — its own words). With all
+five `World` methods now wired, this was the natural next step:
+`replayEvent(e)` in office.html matches `e.a.agent`/`e.b.agent` against
+the live `agents` array by name, and if both are on screen and idle,
+dispatches to the right `World` method by `e.resolution.kind`
+(`read-yield→yield`, `share→highfive`, `wait→handshake`,
+`abort→shove(holder, requester)`, `redundant→doubletake`). If either
+agent isn't currently spawned (true for every live-sourced event today,
+see the caveat below — `toReelEvent` leaves `a` blank), it still captions
+who it was and stops there rather than guessing. Convention documented in
+a comment: for the asymmetric beats, `a` is "the one who stands down",
+matching `toReelEvent`'s own convention that `b` is always the lease
+holder. For generated events there's no real winner encoded on the wire,
+so that assignment is arbitrary there — fine for a demo click, not a
+factual claim.
+
+**One real gap found, not fixed, filed instead:**
+[#60](https://github.com/mohsensc/sync/issues/60) — a live rung-3 contest
+resolving for real does not play handshake/shove today. `onLivePresence`
+still just calls `world.resolveContest()` on the encounter and drops both
+agents to idle. The decision that would explain *why* (the same
+`negotiate`/`claim_result` frames now feeding the reel) only reaches the
+reel panel, not the scene, because those frames don't carry the
+requester's own agent/human identity — there's no clean way today to
+match an incoming decision frame back to a specific live `encounters`
+pair and know which side is "self" without either client-side bookkeeping
+of your own last claim, or a relay-side change to include the requester's
+identity on those frames. Wrote up both options in the issue. Not a small
+fix, didn't attempt it this round — generated/demo replay through the
+reel already exercises all five beats end to end, so this doesn't block
+looking at the feature, it just means a *real* relay run's contests
+resolve silently in the 3D scene (the reel still shows the truth).
+
+**Small fixes along the way:**
+- Reel's human `<select>` had no `name`/`id`/label — devtools flagged it
+  as an a11y issue (`msgid 876` in the first console check). Added
+  `name="reel-human" aria-label="filter by human"`.
+- Nothing else needed fixing — no dead imports, no duplicated helpers
+  found. Four builders, clean tree.
+
+**Browser-verified**, shared lock/port/tab, `office.html` under the
+running demo (relay unreachable → demo fallback, as expected with no
+relay process running):
+- Screenshot: scene renders (15/15 objects), reel panel shows 37/37
+  events, readable over the busy 3D background, rung chips and human
+  filter present and functional (unchanged from task 1's verification).
+- Clicked reel rows of every resolution kind with a real DOM click
+  (not just console API calls) and confirmed via `window.__world` /
+  `window.__agents` (both already exposed by office.html) that each
+  produces a live encounter and completes cleanly:
+  - `share` (R2) → `world.highfive` — confirmed via debug hook mid-flight
+    (`created:true`, both agents busy, then back to idle).
+  - `wait` (R3) → `world.handshake` — confirmed via direct console call
+    (`created:true`); real-click path shares the same code, not
+    separately re-verified after removing the debug hook.
+  - `abort` (R3) → `world.shove` — clicked, zero console errors, agents
+    resolved without incident.
+  - `read-yield` (R1) → `world.yield` — same.
+  - `redundant` (R4) → `world.doubletake` — same, plus a direct console
+    call earlier in the session confirming the encounter completes and
+    both agents return to idle (`activity:'idle'`, `busy:false`).
+  - `console` stayed clean throughout — only the two known/expected
+    warnings (relay `ERR_CONNECTION_REFUSED`, three `coffee-cup-v2.glb`
+    404s, #59) plus, before the fix above, the one a11y notice.
+- One thing worth knowing for next round: agents that are mid-demo-beat
+  (walking, reading, already paired) are `busy` and a reel click on them
+  silently no-ops past the caption — correct behavior, not a bug, but if
+  a future round wants every click to *guarantee* a visible beat, it'd
+  need to either queue the replay or pull two agents out of the demo's
+  own choreography first. Didn't do either; "some clicks land, some just
+  caption" reads as acceptable given the panel is explicit about being a
+  demo.
+
+`pnpm test` — 89/89 (unchanged; no new tests added this round, this was
+integration/wiring, not new logic — the wiring itself is exercised by the
+existing `office-reel`/`office-live-decisions`/`office-clips-geometry`
+suites plus the manual browser pass above). `pnpm typecheck` — clean.
+
+**Filed:** [#60](https://github.com/mohsensc/sync/issues/60) — live
+contest resolution doesn't drive the actual beat (see above).
+
+**Not touched / left alone:** `go/`, `python/`, everything under
+`web/src/office/clips/*.js` and `*-test.html` (no clip authoring this
+round, just wiring). `README.md` in `web/src/office/` is stale (predates
+the whole reel/clips/live-decision system, still describes an
+eight-character static scene) — didn't rewrite it, wasn't blocking
+anything and a real rewrite deserves its own pass rather than a rushed
+addendum. `web/pnpm-workspace.yaml` is untracked in this worktree
+(created by `pnpm approve-builds esbuild`, per round 1's setup note) —
+left it untracked like round 1 did; it's local toolchain config, not
+feature code.
+
+**What's next:**
+1. #60 — real live contest resolution. Needs either client-side
+   "remember my last claim attempt" bookkeeping or a relay change.
+   Bigger than a wiring pass; scope it properly before starting.
+2. `README.md` rewrite for `web/src/office/` — it's lying about what's in
+   the directory now. Not urgent, but the next person who reads it first
+   will be misled.
+3. Rung 2's "collaboration" beat still only has one real candidate
+   (`world.highfive` via `share`). The chest-bump alternative
+   (`clips/social.js`) mentioned in round 1's scoping notes has still
+   never shown up in this tree — if it lands from wherever it's supposed
+   to come from, rung 2 has a choice to make; until then highfive is it,
+   and that's fine.
+4. Nothing in this round touched contest→resolution transition *timing*
+   or *visual polish* (windup/anticipation/follow-through beyond what
+   each clip's own author already tuned) — that's still open ground for
+   a round that wants to spend a full session on animation feel rather
+   than plumbing.
+5. Consider whether `replayEvent`'s silent no-op on busy agents needs a
+   caption-level "can't replay right now" instead of a plain caption with
+   no visible beat — low priority, flagged above, not done.
