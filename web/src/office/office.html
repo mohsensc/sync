@@ -98,7 +98,7 @@
   .reel-list{overflow-y:auto;overflow-x:hidden}
   .reel-item{border-bottom:1px solid #F0ECE6}
   .reel-item:last-child{border-bottom:0}
-  .reel-row{display:flex;align-items:flex-start;gap:8px;width:100%;
+  .reel-row{box-sizing:border-box;display:flex;align-items:flex-start;gap:8px;width:100%;
     text-align:left;font:inherit;border:0;
     background:none;cursor:pointer;padding:9px 14px}
   .reel-row:hover{background:#F7F4EC}
@@ -825,13 +825,45 @@ function focusPair(a, b, enc) {
   if (!camReturn) camReturn = { target: target.clone(), dist, yaw }
   replayEnc = enc
   const mx = (a.pos.x + b.pos.x) / 2, mz = (a.pos.z + b.pos.z) / 2
-  focus([mx, mz], 0.55)
+  focus([mx, mz], 0.35)
 }
 
 function releaseCameraFocus() {
   if (camReturn) focus([camReturn.target.x, camReturn.target.z], camReturn.dist, camReturn.yaw)
   camReturn = null
   replayEnc = null
+}
+
+// Staged outro: round review's complaint was that contact ending and the
+// camera/card/caption all vanishing happened on the same frame — "clicked
+// slap five times and never saw it land." Now the resolved pose holds, the
+// card gets its own beat to read (and, once it animates out rather than
+// popping, its own beat to be *seen* leaving), and only then does the
+// camera ease back out and the stage return to normal.
+const REPLAY_HOLD_MS = 1350     // how long the resolved pose + card sit before anything moves
+const REPLAY_CARD_EXIT_MS = 320 // rough budget for replayCard.hide()'s own exit animation
+let outroPending = false
+
+function beginReplayOutro() {
+  setTimeout(() => {
+    replayCard.hide()
+    setTimeout(() => {
+      releaseCameraFocus()
+      zoneUI.setVisible(zonesOn)
+      if (typeof world.clearFocusDim === 'function') world.clearFocusDim()
+      // Write '' before releasing the hold — release() alone only frees the
+      // priority slot, it doesn't touch the DOM, so without this the last
+      // replay caption (or the empty string standing in for the versus
+      // card, see replayEvent) just sat there forever until the demo's next
+      // scripted line happened to overwrite it.
+      captionArbiter.set('', { priority: PRIORITY.replay })
+      captionArbiter.release(replayCaptionToken)
+      replayCaptionToken = null
+      reel.clearPlaying()
+      activeReplay = null
+      outroPending = false
+    }, REPLAY_CARD_EXIT_MS)
+  }, REPLAY_HOLD_MS)
 }
 
 let drag=false, px=0, py=0
@@ -1061,6 +1093,28 @@ function pickReplayVariant(kind, eventId) {
   return available[hashStr(`${eventId}:${n}`) % available.length]
 }
 
+// A no-op click (busy pair, pair not on screen, rung 0, no matching beat,
+// or a replay already in flight) still owes the user a word — but it must
+// not clobber whatever the *active* replay's caption is currently showing,
+// so these go through the arbiter at replay priority too, just released on
+// a short timer instead of held open. Previously these four branches called
+// the plain demo-priority caption() and got silently swallowed by an
+// in-progress replay's hold — a click that looked like it did nothing.
+function replayCaption(text, ms = 2400) {
+  const token = captionArbiter.hold(PRIORITY.replay)
+  captionArbiter.set(text, { priority: PRIORITY.replay })
+  setTimeout(() => captionArbiter.release(token), ms)
+}
+
+// Single in-flight guard: one object while a replay (clash + resolution +
+// the held outro below) is running, null once it's fully settled back to
+// idle. Checked before a.busy/b.busy in replayEvent because the staged
+// outro keeps the camera/card/caption alive for a beat *after* the agents'
+// own busy flags have already cleared — without this, a click during that
+// window could start a second replay on top of the first mid-outro, which
+// is the likely cause of the reported 1-in-8 "no card, no zoom" click.
+let activeReplay = null
+
 /** Click a reel row: caption who it was, then run the two-act replay — the
  *  clash, then the beat that actually resolved it — through
  *  World.replay() (or a direct variant call, see pickReplayVariant above),
@@ -1069,28 +1123,34 @@ function pickReplayVariant(kind, eventId) {
  *  releaseCameraFocus, and the render-loop check that calls the latter).
  *  A click never silently no-ops: a rung-0 event (resolution: null), a
  *  pair not currently on screen (live frames often only know one side —
- *  see toReelEvent's own comment, that's honest, not a bug), or a pair
- *  where either side is already mid-beat all caption instead, rather than
- *  doing nothing. */
+ *  see toReelEvent's own comment, that's honest, not a bug), a pair where
+ *  either side is already mid-beat, or a replay already running all caption
+ *  instead, rather than doing nothing. */
 function replayEvent(e) {
   const who = (s) => (s.human || s.agent) ? `${s.human || '?'}/${s.agent || '?'}` : 'an unnamed agent'
   const pair = `${who(e.a)} vs ${who(e.b)}`
+
+  if (activeReplay) {
+    replayCaption(`replay already running — let it finish`)
+    return
+  }
+
   const a = agents.find(x => x.name === e.a.agent)
   const b = agents.find(x => x.name === e.b.agent)
 
   if (!a || !b || a === b) {
-    caption(`replay: ${pair} — not both on screen right now`)
+    replayCaption(`replay: ${pair} — not both on screen right now`)
     return
   }
   if (!e.resolution) {
-    caption(`replay: ${pair} — co-location, nothing to resolve`)
+    replayCaption(`replay: ${pair} — co-location, nothing to resolve`)
     return
   }
   if (a.busy || b.busy) {
     // Preempting a mid-beat encounter cleanly would mean tearing another
     // pair's animation down without leaving either of THEM stuck — not
     // attempted here, see STATE.md. This still never silently no-ops.
-    caption(`can't replay right now — ${a.busy ? a.name : b.name} is busy`)
+    replayCaption(`can't replay right now — ${a.busy ? a.name : b.name} is busy`)
     return
   }
 
@@ -1098,19 +1158,33 @@ function replayEvent(e) {
   const variant = pickReplayVariant(kind, e.id)
   const isBaseVariant = variant === null ||
     (kind === 'share' && variant === 'highfive') || (kind === 'abort' && variant === 'shove')
-  // A direct (non-chained) variant call skips world.replay()'s own arg
-  // convention and goes straight to the standalone World method, which
-  // for the abort family expects (winner, loser) — the opposite order
-  // from the reel's own a=stands-down/b=prevails convention this function
-  // uses throughout. Share's family is symmetric, so no swap needed there.
-  const enc = isBaseVariant ? world.replay(a, b, kind)
-    : kind === 'abort' ? world[variant](b, a) : world[variant](a, b)
+  // Preferred path: world.replay(a, b, kind, variant) splices the variant's
+  // contact clip in as the resolution act after the existing clash stage,
+  // normalizing the abort family's winner-first arg order internally — see
+  // the comment below on why the fallback path has to do that swap itself.
+  // Only take that 4-arg path once it's actually landed (arity check, not a
+  // feature flag) so this file works whether or not agent.js's replay() has
+  // grown the param yet.
+  let enc
+  if (world.replay.length >= 4) {
+    enc = world.replay(a, b, kind, isBaseVariant ? undefined : variant)
+  } else if (isBaseVariant) {
+    enc = world.replay(a, b, kind)
+  } else {
+    // A direct (non-chained) variant call skips world.replay()'s own arg
+    // convention and goes straight to the standalone World method, which
+    // for the abort family expects (winner, loser) — the opposite order
+    // from the reel's own a=stands-down/b=prevails convention this function
+    // uses throughout. Share's family is symmetric, so no swap needed there.
+    enc = kind === 'abort' ? world[variant](b, a) : world[variant](a, b)
+  }
   if (!enc) {
-    caption(`replay: ${pair} — no matching beat for "${kind}"`)
+    replayCaption(`replay: ${pair} — no matching beat for "${kind}"`)
     return
   }
 
   const label = RESOLUTION_LABEL[kind] || kind
+  activeReplay = { id: e.id }
   const token = captionArbiter.hold(PRIORITY.replay)
   replayCaptionToken = token
   // With a versus card on (?vcard=split|strip) it IS the replay caption —
@@ -1124,6 +1198,12 @@ function replayEvent(e) {
   captionArbiter.set(replayCard.variant ? '' : `replay: ${pair} — ${label}`,
     { priority: PRIORITY.replay })
   replayCard.show({ a: e.a, b: e.b, rung: e.rung, label })
+  reel.setPlaying(e.id)
+  // Always hidden during a replay regardless of the zonesOn toggle (a zone
+  // sign hanging over the pair mid-beat was one of the round review's
+  // complaints); restored to whatever the toggle says once the outro ends.
+  zoneUI.setVisible(false)
+  if (typeof world.setFocusDim === 'function') world.setFocusDim(a, b)
   focusPair(a, b, enc)
 }
 
@@ -1285,11 +1365,11 @@ function tick(){
   // world.update() above already advanced it this frame, so `phase` is
   // current. #end() only removes it from world.encounters, it doesn't
   // stop being an object, so the reference here stays valid to check.
-  if (replayEnc && replayEnc.phase === 'done') {
-    releaseCameraFocus()
-    captionArbiter.release(replayCaptionToken)
-    replayCaptionToken = null
-    replayCard.hide()
+  // `phase` stays 'done' forever afterward, so outroPending guards this
+  // from firing again on every subsequent frame while the outro plays out.
+  if (replayEnc && replayEnc.phase === 'done' && !outroPending) {
+    outroPending = true
+    beginReplayOutro()
   }
 
   const r = RADIUS*dist, cp = Math.cos(pitch)
