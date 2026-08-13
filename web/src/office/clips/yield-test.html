@@ -158,7 +158,7 @@ function buildRun() {
 }
 
 const loader = new GLTFLoader()
-loader.load('../glb/character.glb', gltf => {
+loader.load('/glb/character.glb', gltf => {
   src = gltf.scene
   buildRun()
   window.__ready = true
