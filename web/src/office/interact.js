@@ -41,14 +41,39 @@ const CSS = `
 #ip dt{color:#8A94A3}
 #ip dd{margin:0;color:#35455C;overflow-wrap:anywhere}
 #ip .hint{margin:10px 0 0;font-size:11px;color:#8A94A3;border-top:1px solid #E9E0CE;padding-top:8px}
-#it{position:fixed;pointer-events:none;background:#35455Cee;color:#F0ECE6;font-size:11px;
-  padding:3px 7px;border-radius:5px;display:none;transform:translate(13px,15px);
-  white-space:nowrap;z-index:6}
+#it{position:fixed;pointer-events:none;display:none;transform:translate(13px,15px);z-index:6}
+#it.on{display:block}
+#it.tag{background:#35455Cee;color:#F0ECE6;font-size:11px;padding:3px 7px;
+  border-radius:5px;white-space:nowrap}
+#it.card{width:206px;background:#fffdfaee;border:1px solid #C3B39B;border-radius:10px;
+  padding:10px 12px;box-shadow:0 8px 26px #4a1f3d22;
+  animation:itin .16s cubic-bezier(.16,1,.3,1)}
+#it.card h3{margin:0 0 1px;font-size:13px;letter-spacing:-.01em;color:#35455C}
+#it.card .sub{margin:0 0 8px;font-size:11px;color:#A5738C}
+#it.card dl{margin:0;display:grid;grid-template-columns:38px 1fr;gap:1px 6px;font-size:10.5px}
+#it.card dt{color:#8A94A3}
+#it.card dd{margin:0;color:#35455C;overflow-wrap:anywhere}
+#it.card .git{margin-top:7px;padding-top:7px;border-top:1px solid #E9E0CE;
+  font-size:10.5px;color:#C0762A}
+#it.card .git.stale{color:#8A94A3}
+@keyframes itin{from{opacity:0;transform:translateY(-3px)}to{opacity:1;transform:translateY(0)}}
+@media (prefers-reduced-motion: reduce){#it.card{animation:none}}
 `
+
+const ESC_MAP = { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }
+const esc = s => String(s).replace(/[&<>"']/g, c => ESC_MAP[c])
+
+function fmtAge(days) {
+  if (days == null) return 'recently'
+  if (days < 1) return 'today'
+  if (days < 1.5) return '1d ago'
+  return `${Math.round(days)}d ago`
+}
 
 export function attachInteraction(cfg) {
   const { canvas, camera, scene, world, floor, rug,
-          props = {}, desks = [], log = () => {} } = cfg
+          props = {}, desks = [], log = () => {}, onSelect,
+          fetchFn = (typeof fetch !== 'undefined' ? fetch.bind(globalThis) : null) } = cfg
 
   // ---- DOM ---------------------------------------------------------------
   const style = document.createElement('style')
@@ -68,6 +93,26 @@ export function attachInteraction(cfg) {
   tip.id = 'it'
   document.body.appendChild(tip)
   const $ = id => document.getElementById(id)
+
+  // ---- git stat, cached ---------------------------------------------------
+  // One fetch per hovered path, reused for ~30s. Hovering the same agent
+  // twice inside that window costs nothing; a fresh git process is cheap but
+  // there is no reason to spawn one every time the mouse crosses a capsule.
+  const GIT_TTL = 30000
+  const gitCache = new Map()
+  async function statLine(path) {
+    const now = Date.now()
+    const hit = gitCache.get(path)
+    if (hit && now - hit.t < GIT_TTL) return hit.v
+    let v
+    try {
+      if (!fetchFn) throw new Error('no fetch')
+      const r = await fetchFn(`/api/git/stat?path=${encodeURIComponent(path)}`)
+      v = r.ok ? await r.json() : { ok:false }
+    } catch { v = { ok:false } }
+    gitCache.set(path, { t:now, v })
+    return v
+  }
 
   // ---- proxies -----------------------------------------------------------
   const pickable = []
@@ -184,27 +229,76 @@ export function attachInteraction(cfg) {
    * Blending rather than replacing matters: each character carries a per-agent
    * body tint as its base, and a hard overwrite would erase the one cue that
    * tells eight identical clay figures apart. Pass null to restore.
+   *
+   * `alpha` overrides the blend strength — the hover pulse below rides this
+   * to breathe the tint in and out instead of snapping to a flat wash.
    */
   const _c = new THREE.Color()
-  function tint(mats, hex) {
+  function tint(mats, hex, alpha = 0.6) {
     if (!mats) return
     for (const m of mats) {
       const base = m.userData.base != null ? m.userData.base : 0xffffff
       if (hex == null) { m.color.setHex(base); continue }
-      m.color.setHex(base).lerp(_c.setHex(hex), 0.6)
+      m.color.setHex(base).lerp(_c.setHex(hex), alpha)
     }
+  }
+
+  // A flat hover tint reads as a UI state change; a pulsing one reads as
+  // something alive noticing you. Runs its own rAF rather than piggybacking
+  // office.html's render loop, since interact.js has no other hook into it.
+  let pulseT = performance.now()
+  let hoverPhase = 0
+  function pulseHover(t) {
+    const dt = Math.min(0.05, (t - pulseT) / 1000)
+    pulseT = t
+    if (hovered && !(selected && hovered.kind === 'agent' && hovered.ref === selected)) {
+      hoverPhase += dt * 3.4
+      tint(matsOf(hovered), HOVER_TINT, 0.4 + 0.22 * (0.5 + 0.5 * Math.sin(hoverPhase)))
+    }
+    requestAnimationFrame(pulseHover)
+  }
+  requestAnimationFrame(pulseHover)
+
+  let hoverToken = 0
+  function renderTag(pick) {
+    tip.className = 'tag on'
+    tip.textContent = pick.label
+  }
+  function renderAgentCard(a, token) {
+    tip.className = 'card on'
+    const role = a.note || a.role || 'agent'
+    const zone = Z.zoneAt(a.pos.x, a.pos.z) || 'open floor'
+    tip.innerHTML = `<h3>${esc(a.name)}</h3><p class="sub">${esc(role)}</p>
+      <dl><dt>doing</dt><dd>${esc(a.doing)}</dd>
+          <dt>zone</dt><dd>${esc(zone)}</dd>
+          <dt>file</dt><dd>${a.gitPath ? esc(a.gitPath) : '—'}</dd></dl>`
+    if (!a.gitPath) return
+    statLine(a.gitPath).then(v => {
+      if (token !== hoverToken) return                 // hover moved on since
+      const host = tip.querySelector('dl')
+      if (!host || !v || v.ok === false) return         // omit the row, not an empty box
+      const fresh = v.lastAgeDays != null && v.lastAgeDays < 2
+      const stale = v.lastAgeDays != null && v.lastAgeDays > 180
+      const row = document.createElement('div')
+      row.className = 'git' + (fresh ? ' fresh' : stale ? ' stale' : '')
+      const authors = v.authorCount === 1 ? '1 author' : `${v.authorCount} authors`
+      row.textContent = `last touched ${fmtAge(v.lastAgeDays)} by ${v.lastAuthor} · ${v.commits} commits · ${authors}`
+      host.after(row)
+    })
   }
   function setHover(pick) {
     if (pick === hovered) return
     if (hovered && !(selected && hovered.kind === 'agent' && hovered.ref === selected))
       tint(matsOf(hovered), null)
     hovered = pick
-    if (pick && !(selected && pick.kind === 'agent' && pick.ref === selected))
-      tint(matsOf(pick), HOVER_TINT)
-    const show = pick && pick.kind !== 'floor'
-    tip.style.display = show ? 'block' : 'none'
-    if (show) tip.textContent = pick.label
+    hoverPhase = 0
+    hoverToken++
     canvas.style.cursor = pick ? 'pointer' : ''
+    const show = pick && pick.kind !== 'floor'
+    tip.classList.toggle('on', !!show)
+    if (!show) return
+    if (pick.kind === 'agent') renderAgentCard(pick.ref, hoverToken)
+    else renderTag(pick)
   }
   function select(agent) {
     if (selected) tint(selected.mats, null)
@@ -213,6 +307,7 @@ export function attachInteraction(cfg) {
     ring.visible = !!selected
     panel.classList.toggle('on', !!selected)
     paint()
+    onSelect?.(selected)
     return selected
   }
   function paint() {
