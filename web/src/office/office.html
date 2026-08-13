@@ -646,6 +646,16 @@ function despawnLive(id) {
   a.badge.material.dispose()
   a.halo.geometry.dispose()
   a.halo.material.dispose()
+  // freshHalo and the churn props (tray + paper block) all get their own
+  // per-instance geometry in the Agent constructor, same as halo above —
+  // the material-only traverse a few lines up doesn't touch geometry, so
+  // these leaked on every live despawn until now.
+  a.freshHalo.geometry.dispose()
+  a.freshHalo.material.dispose()
+  a.churnTray.geometry.dispose()
+  a.churnTray.material.dispose()
+  a.churnPapers.geometry.dispose()
+  a.churnPapers.material.dispose()
 }
 
 function endContestFor(a, partnerId) {
@@ -664,6 +674,7 @@ function onLivePresence(msg) {
   const info = director.onPresence(msg, now)
   const a = liveAgents.get(info.id) || spawnLive(info.id, info.human, info.path)
   if (!a) return   // rig still loading; the next frame for this agent will spawn it
+  a.gitPath = info.path   // keep the git-aware UI pointed at whatever file this frame is actually about
 
   if (info.contestWith) {
     const b = liveAgents.get(info.contestWith)
