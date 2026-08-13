@@ -105,6 +105,29 @@ const TONE = {
   idle: '#8A94A3', done: '#4A1F3D',
 }
 
+// Freshness is a second, orthogonal halo channel — not TONE. TONE says what
+// the agent is doing right now (ok/working/blocked); freshness says how old
+// the ground they're standing on is (git stat's lastAgeDays). Both ride the
+// feet at once: TONE owns the inner ring's color, freshness owns an outer
+// ring's color/radius/pulse rate. An agent editing code from this morning
+// should not read the same as one editing a file nobody's touched all year.
+const FRESH = {
+  fresh:  { color: '#E8946C', radius: 1.34, pulse: 2.6, opacity: 0.46 }, // <2d: warm, big, quick
+  warm:   { color: '#D6B45C', radius: 1.14, pulse: 1.5, opacity: 0.34 }, // <21d
+  normal: { color: '#8A94A3', radius: 1.00, pulse: 0.9, opacity: 0.16 }, // <180d, barely there
+  stale:  { color: '#3E4A5E', radius: 0.86, pulse: 0.35, opacity: 0.24 }, // >=180d: cold, small, slow
+}
+
+/** ageDays -> a FRESH bucket name, or null for "no signal, show nothing".
+ *  Pure so it's unit-testable without a THREE scene. */
+export function freshnessBucket(ageDays) {
+  if (ageDays == null || !Number.isFinite(ageDays) || ageDays < 0) return null
+  if (ageDays < 2) return 'fresh'
+  if (ageDays < 21) return 'warm'
+  if (ageDays < 180) return 'normal'
+  return 'stale'
+}
+
 function badgeTexture(text, tone) {
   const c = document.createElement('canvas')
   c.width = 512; c.height = 128
@@ -194,9 +217,23 @@ export class Agent {
     this.halo.userData.decor = true
     this.badge.userData.decor = true
 
+    // Outer ring for the freshness channel. Starts invisible (opacity 0,
+    // bucket null) until setFreshness() has something to say.
+    this.freshHalo = new THREE.Mesh(
+      new THREE.RingGeometry(0.46, 0.58, 32),
+      new THREE.MeshBasicMaterial({ color: 0x8A94A3, transparent: true, opacity: 0,
+        depthWrite: false, side: THREE.DoubleSide }))
+    this.freshHalo.rotation.x = -Math.PI / 2
+    this.freshHalo.position.y = 0.05
+    this.freshHalo.renderOrder = 2
+    this.freshHalo.userData.decor = true
+    this._freshness = null
+    this._freshPulse = 0
+
     if (root) {
       root.add(this.badge)
       root.add(this.halo)
+      root.add(this.freshHalo)
       root.position.set(this.pos.x, 0, this.pos.z)
       root.rotation.y = this.yaw + YAW_OFFSET
       ANIM.crossfade(root, 'idle', 0)
@@ -274,6 +311,20 @@ export class Agent {
     this.state = s
     this.halo.material.color.setStyle(TONE[s] || TONE.ok)
     this.halo.material.opacity = s === 'blocked' ? 0.95 : 0.55
+    return this
+  }
+
+  /** ageDays of the last commit touching whatever this agent is holding, or
+   *  null to clear the ring (unknown / no gitPath / lookup failed). Orthogonal
+   *  to setState — see the FRESH table above. */
+  setFreshness(ageDays) {
+    this._freshness = freshnessBucket(ageDays)
+    if (!this._freshness) {
+      this.freshHalo.material.opacity = 0
+      return this
+    }
+    const cfg = FRESH[this._freshness]
+    this.freshHalo.material.color.setStyle(cfg.color)
     return this
   }
 
@@ -360,6 +411,14 @@ export class Agent {
       this.halo.scale.setScalar(1 + 0.14 * k)
     } else {
       this.halo.scale.setScalar(1)
+    }
+
+    if (this._freshness) {
+      const cfg = FRESH[this._freshness]
+      this._freshPulse += dt * cfg.pulse
+      const k = 0.5 + 0.5 * Math.sin(this._freshPulse)
+      this.freshHalo.material.opacity = cfg.opacity * (0.7 + 0.3 * k)
+      this.freshHalo.scale.setScalar(cfg.radius * (0.96 + 0.06 * k))
     }
 
     this.root.position.set(this.pos.x, 0, this.pos.z)

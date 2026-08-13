@@ -361,6 +361,8 @@ export function buildZoneMarkers({ labels = true, y = 0.045 } = {}) {
     }
   }
 
+  const owners = {} // zone name -> last-set owner label, so re-renders don't need it re-passed
+
   group.userData.rings = rings
   group.userData.sprites = sprites
   return {
@@ -373,6 +375,21 @@ export function buildZoneMarkers({ labels = true, y = 0.045 } = {}) {
         rings[n].material.opacity = on ? (name ? 0.75 : 0.42) : 0.12
         if (sprites[n]) sprites[n].material.opacity = on ? 1 : 0.2
       }
+    },
+    /** Shortlog-driven area ownership: repaint a zone's pill with "mostly
+     *  <name>" under its usual meaning line. Pass null/undefined to clear
+     *  back to plain `means`. No-op on an unknown zone or a labels:false
+     *  build (no sprites to repaint). */
+    setOwner(name, ownerLabel) {
+      const zn = ZONES[name]
+      const sp = sprites[name]
+      if (!zn || !sp) return
+      owners[name] = ownerLabel || null
+      const sub = owners[name] ? `${zn.means} · mostly ${owners[name]}` : zn.means
+      const old = sp.material.map
+      sp.material.map = labelTexture(zn.label, sub, zn.color)
+      sp.material.needsUpdate = true
+      if (old) old.dispose()
     },
   }
 }
