@@ -471,6 +471,85 @@ export class Agent {
 export function createAgent(opts) { return new Agent(opts) }
 
 // ---------------------------------------------------------------------------
+// World.replay()'s stage tables — see the method's own doc for why this
+// exists as a second, additive path rather than a rewrite of contest() /
+// shove() / etc. Those methods and their standalone kind dispatch in #step
+// are untouched; a chained encounter is flagged (e.isChain) and takes the
+// branches added above instead.
+// ---------------------------------------------------------------------------
+
+/** Marks (standing spots) for each stage kind a replay chain can pass
+ *  through. Purely spatial — see highfiveMarks: the marks straddle the
+ *  midpoint of the pair's CURRENT positions, so which side ends up on
+ *  marks.a vs marks.b has no winner/loser meaning by itself. That meaning
+ *  comes entirely from each stage's own start() below. */
+const STAGE_MARKS = {
+  // The argue-like standoff every rung-3 replay opens on, before it
+  // resolves. Reuses argue's own spacing — a beat, not the final contact.
+  clash:      (pa, pb, h) => argueMarks(pa, pb, argueSpacingFor(h)),
+  // The rung-1/4 pre-beat pause — same idea, same spacing, just no clip of
+  // its own (see REPLAY_CHAINS).
+  notice:     (pa, pb, h) => argueMarks(pa, pb, argueSpacingFor(h)),
+  handshake:  (pa, pb, h) => handshakeMarks(pa, pb, handshakeSpacingFor(h)),
+  shove:      (pa, pb, h) => shoveMarks(pa, pb, shoveSpacingFor(h)),
+  highfive:   (pa, pb, h) => highfiveMarks(pa, pb, spacingFor(h)),
+  yield:      (pa, pb, h) => yieldMarks(pa, pb, yieldSpacingFor(h)),
+  doubletake: (pa, pb, h) => doubletakeMarks(pa, pb, doubletakeSpacingFor(h)),
+}
+
+/**
+ * kind -> (a, b) -> stage list. Each stage is
+ *   { kind, clipName: string|null, holdSec: number|null, start(): void }
+ * `clipName` set means the stage ends on that clip's own length (like a
+ * plain encounter); `clipName` null means it ends after `holdSec` instead
+ * (the clash standoff and the notice pause have no natural end of their
+ * own — a real rung-3 collision loops until resolveContest() says so, but
+ * a replay isn't live, so a timed window standing in for "however long the
+ * standoff read" is deliberate here, ~1.5-2s per the brief).
+ */
+const REPLAY_CHAINS = {
+  // Rung 3, decision "wait": the standoff, then the requester agrees to
+  // hold off — no animosity, so it resolves into a handshake.
+  wait: (a, b) => [
+    { kind: 'clash', clipName: null, holdSec: 1.75,
+      start: () => { a.act('arguing'); b.act('reacting') } },
+    { kind: 'handshake', clipName: 'handshake', holdSec: null,
+      start: () => { a.act('handshaking'); b.act('handshaking') } },
+  ],
+  // Rung 3, decision "abort": the same standoff, but `b` (who prevails)
+  // shoves `a` (who stood down) out of the way. The act assignment is the
+  // deliberate mirror of shove()'s own a=winner convention — see replay()'s
+  // doc comment.
+  abort: (a, b) => [
+    { kind: 'clash', clipName: null, holdSec: 1.75,
+      start: () => { a.act('arguing'); b.act('reacting') } },
+    { kind: 'shove', clipName: 'shove', holdSec: null,
+      start: () => { b.act('shoving'); a.act('shoveReacting') } },
+  ],
+  // Rung 2: no real clash to stage first — highfive() already IS "a brief
+  // mutual approach, then contact" via its own approach/settle phases. One
+  // stage is the whole beat.
+  share: (a, b) => [
+    { kind: 'highfive', clipName: 'highfive', holdSec: null,
+      start: () => { a.act('highfiving'); b.act('highfiving') } },
+  ],
+  // Rung 1: a short held beat of both just having arrived and noticing each
+  // other, before the reader (a) steps back.
+  'read-yield': (a, b) => [
+    { kind: 'notice', clipName: null, holdSec: 0.5, start: () => {} },
+    { kind: 'yield', clipName: 'yieldStep', holdSec: null,
+      start: () => { a.act('yielding'); b.act('keeping') } },
+  ],
+  // Rung 4: same shape as read-yield — a beat of "...wait, is that the same
+  // change?" before the doubletake.
+  redundant: (a, b) => [
+    { kind: 'notice', clipName: null, holdSec: 0.5, start: () => {} },
+    { kind: 'doubletake', clipName: 'doubletake', holdSec: null,
+      start: () => { a.act('doubletaking'); b.act('doubletaking') } },
+  ],
+}
+
+// ---------------------------------------------------------------------------
 // World: owns the agents, runs paired actions.
 // ---------------------------------------------------------------------------
 
@@ -687,6 +766,75 @@ export class World {
     if (e && e.kind === 'contest' && e.phase !== 'done') this.#end(e)
   }
 
+  /**
+   * The reel's "two-act" playback: the clash, THEN the beat that actually
+   * resolved it — per the feature brief, replay is not supposed to jump
+   * straight to the resolution. Chains multiple stages through the SAME
+   * approach -> settle -> active phase machine every other paired action
+   * already runs on (see #step) rather than inventing a second one: each
+   * stage just re-settles the pair onto its own marks and plays its own
+   * act(s), then either advances to the next stage or ends exactly like a
+   * plain encounter does.
+   *
+   * `a`/`b` follow the reel's own convention throughout (see reel.d.ts /
+   * live.js's toReelEvent) — `a` is the one who stands down, `b` is the one
+   * who prevails — NOT shove()'s standalone convention where the first
+   * argument always wins. `kind` is a resolution kind straight off a reel
+   * event (`wait` | `abort` | `share` | `read-yield` | `redundant`).
+   *
+   * Returns the encounter (so the caller can, e.g., frame a camera on it
+   * and watch for `phase === 'done'`), or null if either side is busy, the
+   * pair is degenerate, or `kind` has no chain.
+   */
+  replay(a, b, kind) {
+    if (!a || !b || a === b || a.busy || b.busy) return null
+    const build = REPLAY_CHAINS[kind]
+    if (!build) return null
+    return this.#startChain(a, b, build(a, b))
+  }
+
+  #startChain(a, b, stages) {
+    const [stage, ...rest] = stages
+    const height = (a.height + b.height) / 2
+    const marks = STAGE_MARKS[stage.kind](
+      new THREE.Vector3(a.pos.x, 0, a.pos.z),
+      new THREE.Vector3(b.pos.x, 0, b.pos.z), height)
+    const ax = marks.a.pos.x, az = marks.a.pos.z
+    const bx = marks.b.pos.x, bz = marks.b.pos.z
+
+    a.busy = b.busy = true
+    a.lastGreet = b.lastGreet = this.time
+    a.goTo(ax, az, { yaw: yawToward(ax, az, bx, bz), label: 'replaying with ' + b.name })
+    b.goTo(bx, bz, { yaw: yawToward(bx, bz, ax, az), label: 'replaying with ' + a.name })
+
+    const e = {
+      a, b, kind: stage.kind, phase: 'approach', t: 0,
+      marks: { a: [ax, az], b: [bx, bz] },
+      isChain: true, stage, chain: rest,
+    }
+    this.encounters.push(e)
+    return e
+  }
+
+  /** Advance a chained encounter to its next stage in place — no new
+   *  approach, just a quick re-settle onto the next stage's own marks
+   *  (reusing the 'settle' tween below), because the pair is already
+   *  standing close together from the stage that just finished. */
+  #advanceChain(e) {
+    const [stage, ...rest] = e.chain
+    e.stage = stage
+    e.kind = stage.kind
+    e.chain = rest
+    const height = (e.a.height + e.b.height) / 2
+    const marks = STAGE_MARKS[stage.kind](
+      new THREE.Vector3(e.a.pos.x, 0, e.a.pos.z),
+      new THREE.Vector3(e.b.pos.x, 0, e.b.pos.z), height)
+    e.marks = { a: [marks.a.pos.x, marks.a.pos.z], b: [marks.b.pos.x, marks.b.pos.z] }
+    e.from = { a: [e.a.pos.x, e.a.pos.z], b: [e.b.pos.x, e.b.pos.z] }
+    e.phase = 'settle'
+    e.t = 0
+  }
+
   #step(e, dt) {
     const { a, b } = e
     e.t += dt
@@ -710,7 +858,13 @@ export class World {
       }
       if (k >= 1) {
         e.phase = 'active'; e.t = 0
-        if (e.kind === 'contest') {
+        if (e.isChain) {
+          // A replay() stage owns its own act() calls (see REPLAY_CHAINS) —
+          // the role a given side plays (winner/loser, reader/editor) can
+          // differ from what the same kind means standalone, so this does
+          // not fall through to the kind-based dispatch below.
+          e.stage.start()
+        } else if (e.kind === 'contest') {
           // Different bodies doing different things — one points, the other
           // throws its hands up — but started the same frame, the same sync
           // story highfive's SAME clip trick tells; see clips/argue.js.
@@ -737,6 +891,23 @@ export class World {
         }
       }
     } else if (e.phase === 'active') {
+      if (e.isChain) {
+        // A stage with a clipName ends on its own clip's length, same as
+        // the plain encounters below; a stage without one (the argue-like
+        // clash, or the rung-1/4 "notice" beat) has no natural end and
+        // holds for its own timed window instead. Either way, once the
+        // current stage is done there's either another stage to re-settle
+        // onto (#advanceChain) or the whole replay ends like any encounter.
+        const stage = e.stage
+        const done = stage.clipName
+          ? e.t >= ANIM.getClip(stage.clipName).duration + 0.2
+          : e.t >= stage.holdSec
+        if (done) {
+          if (e.chain.length) this.#advanceChain(e)
+          else return this.#end(e)
+        }
+        return
+      }
       // A contest has no clip-length end: it lasts until resolveContest()
       // says the region is free. Everything else (highfive, handshake,
       // shove, yield, doubletake) plays out once and ends on its own

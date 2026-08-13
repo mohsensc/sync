@@ -587,6 +587,33 @@ function focus([x, z], d = 1, y = null) {
   goal.active = true
 }
 
+// ---- reel replay camera -------------------------------------------------
+// A reel click frames the pair for the whole two-act beat and eases back
+// out once it's over — reusing focus()'s own easing, not a second camera
+// system. `replayEnc` is the encounter the render loop watches each frame
+// (see the `phase === 'done'` check by the camera lines below) so the
+// release fires the instant World.replay()'s whole chain finishes, not on
+// a fixed timer that could clip a longer or shorter beat.
+let camReturn = null   // { target, dist, yaw } to ease back to, or null
+let replayEnc = null   // encounter camera framing is currently following
+
+/** Ease in on the midpoint between two agents, tight enough that a two-
+ *  person beat reads clearly. Yaw is left alone: camera.lookAt(target)
+ *  already centres the pair regardless of orbit angle, and the arc is
+ *  clamped to angles that stay inside the room anyway (see YAW_MIN/MAX). */
+function focusPair(a, b, enc) {
+  if (!camReturn) camReturn = { target: target.clone(), dist, yaw }
+  replayEnc = enc
+  const mx = (a.pos.x + b.pos.x) / 2, mz = (a.pos.z + b.pos.z) / 2
+  focus([mx, mz], 0.55)
+}
+
+function releaseCameraFocus() {
+  if (camReturn) focus([camReturn.target.x, camReturn.target.z], camReturn.dist, camReturn.yaw)
+  camReturn = null
+  replayEnc = null
+}
+
 let drag=false, px=0, py=0
 canvas.addEventListener('pointerdown', e => { drag=true; px=e.clientX; py=e.clientY
   spin=false; setB(bSpin,false); goal.active=false })
@@ -738,35 +765,72 @@ function onLivePresence(msg) {
   }
 }
 
-// Resolution kind -> the World paired-action that plays it. `a`/`b` follow
-// the reel event's own sides; for the asymmetric beats that convention is
-// "a is the one who stands down, b is the one who keeps going" — matching
-// live.js's toReelEvent, where b is always the current lease holder. For
-// generated events (seed.js, SAMPLE_EVENTS) there's no real winner encoded
-// on the wire, so which side is a vs b there is arbitrary — fine for a
-// demo replay, but not a claim about who actually deferred to whom.
-const RESOLUTION_TO_WORLD = {
-  'read-yield': (a, b) => world.yield(a, b),
-  'share':      (a, b) => world.highfive(a, b),
-  'wait':       (a, b) => world.handshake(a, b),
-  'abort':      (a, b) => world.shove(b, a),
-  'redundant':  (a, b) => world.doubletake(a, b),
+// The reel calls this "the two characters conflicting, THEN a highlight
+// animation of how it resolved" — World.replay() is the sequencer that
+// actually does both acts, chained through the same encounter phase
+// machine every other paired action uses (see agent.js). `kind` here is
+// the resolution kind straight off the event, which is also exactly the
+// vocabulary World.replay() expects — no translation table needed. `a`/`b`
+// follow the reel event's own sides throughout: "a is the one who stands
+// down, b is the one who keeps going" — matching live.js's toReelEvent,
+// where b is always the current lease holder. For generated events
+// (seed.js, SAMPLE_EVENTS) there's no real winner encoded on the wire, so
+// which side is a vs b there is arbitrary — fine for a demo replay, but
+// not a claim about who actually deferred to whom.
+//
+// Kept local to replayEvent rather than imported from reel.js, same
+// "small copy across the toolchain boundary" pattern live.js's HAIR/
+// zones.js's PALETTE already use — this file doesn't import reel.js's
+// internals and shouldn't start for one caption string.
+const RESOLUTION_LABEL = {
+  wait: 'granted the lease, other waits',
+  abort: 'out-authoritied — aborted',
+  share: 'split the work, no overlap',
+  redundant: 'redundant work caught',
+  'read-yield': 'reader yielded',
 }
 
-/** Click a reel row: caption who it was, and if both sides are agents on
- *  screen right now (by name — live frames often only know one side, and
- *  that's honest, not a bug: see toReelEvent's own comment), play the
- *  resolution beat that matches. A rung 0 event (resolution: null) or an
- *  event whose agents aren't currently spawned just captions — there's
- *  nothing truthful to replay. */
+/** Click a reel row: caption who it was, then run the two-act replay — the
+ *  clash, then the beat that actually resolved it — through
+ *  World.replay(), with the camera easing in to frame the pair and back
+ *  out once the whole chain finishes (see the camera block above,
+ *  focusPair/releaseCameraFocus, and the render-loop check that calls the
+ *  latter). A click never silently no-ops: a rung-0 event (resolution:
+ *  null), a pair not currently on screen (live frames often only know one
+ *  side — see toReelEvent's own comment, that's honest, not a bug), or a
+ *  pair where either side is already mid-beat all caption instead, rather
+ *  than doing nothing. */
 function replayEvent(e) {
   const who = (s) => (s.human || s.agent) ? `${s.human || '?'}/${s.agent || '?'}` : 'an unnamed agent'
-  caption(`replay: ${who(e.a)} vs ${who(e.b)}`)
+  const pair = `${who(e.a)} vs ${who(e.b)}`
   const a = agents.find(x => x.name === e.a.agent)
   const b = agents.find(x => x.name === e.b.agent)
-  if (!a || !b || a === b) return
-  const play = e.resolution && RESOLUTION_TO_WORLD[e.resolution.kind]
-  if (play) play(a, b)
+
+  if (!a || !b || a === b) {
+    caption(`replay: ${pair} — not both on screen right now`)
+    return
+  }
+  if (!e.resolution) {
+    caption(`replay: ${pair} — co-location, nothing to resolve`)
+    return
+  }
+  if (a.busy || b.busy) {
+    // Preempting a mid-beat encounter cleanly would mean tearing another
+    // pair's animation down without leaving either of THEM stuck — not
+    // attempted here, see STATE.md. This still never silently no-ops.
+    caption(`can't replay right now — ${a.busy ? a.name : b.name} is busy`)
+    return
+  }
+
+  const enc = world.replay(a, b, e.resolution.kind)
+  if (!enc) {
+    caption(`replay: ${pair} — no matching beat for "${e.resolution.kind}"`)
+    return
+  }
+
+  const label = RESOLUTION_LABEL[e.resolution.kind] || e.resolution.kind
+  caption(`replay: ${pair} — ${label}`)
+  focusPair(a, b, enc)
 }
 
 /** A negotiate/claim_result/redundant_work frame, normalized by
@@ -918,6 +982,13 @@ function tick(){
   expireLive(Date.now())
   if (demo) demo.update(dt)
   if (interaction) interaction.paint()
+
+  // A replay's whole chain (clash, then resolution) can be one stage or
+  // two, so this watches the encounter itself rather than a fixed timer —
+  // world.update() above already advanced it this frame, so `phase` is
+  // current. #end() only removes it from world.encounters, it doesn't
+  // stop being an object, so the reference here stays valid to check.
+  if (replayEnc && replayEnc.phase === 'done') releaseCameraFocus()
 
   const r = RADIUS*dist, cp = Math.cos(pitch)
   camera.position.set(target.x + Math.sin(yaw)*r*cp,
