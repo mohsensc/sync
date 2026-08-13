@@ -996,3 +996,172 @@ could retry using `--timeout`-extended `wait_for` calls tuned to the
 Not touched: `initLive`/`onLiveReelFrame`, `.reel`/`.reel-*` CSS,
 `reel.js`, `live.js`, `clips/*` — other tasks' regions this round, left
 alone.
+
+## Round 4, task 1 — motion pass on yield and doubletake
+
+Both clips were flagged in their own round-2 writeup as "a first draft
+off the pose math alone, not off how it actually reads." Loaded both
+`-test.html` harnesses, scrubbed them, and the brief's own diagnosis was
+right on both counts — one sequencing problem in `yield.js`, one sampling
+problem in `doubletake.js`. Fixed both, added an alternate timing variant
+to each per the brief ("volume of iterations is the point"), and got a
+real screenshot of `handshake`/`shove` firing in the full lit scene for
+the first time (flagged as never-confirmed by round 2 task 3 and again by
+round 3).
+
+**`clips/yield.js`** — refactored the three `bump()` calls (glance, offer,
+nod) behind a `DEFAULT_TIMING` config object instead of hardcoded
+constants, then actually moved the numbers:
+- glance (`lookPeak`) 0.30→0.20, offer (`armPeak`) 0.42→0.50: in the old
+  timing the two windows overlapped almost entirely (at t=0.36, the old
+  peak of both, `lookUp` was already 0.84 and the arm's `k` was 0.91 —
+  reconstructed and screenshotted this old-timing pose directly against
+  the rig for a real before/after, not a guess) so the glance and the
+  offer read as one simultaneous gesture. New timing: glance is fully
+  resolving (arm `k` still exactly 0, confirmed both by the bump math and
+  by screenshot at t=0.10/0.20) before the arm starts moving at all, arm
+  reaches full extension at its own peak (t=0.50, screenshotted — clean
+  open-palm offer, chest height, camera-legible).
+- weight shift (`stepAmp`/`hipsLiftAmp`) bumped 2.5→3.6 / 4→5.5 for
+  readability, per the brief's separate ask.
+- nod (`nodPeak`) 0.46→0.64, more than the token few-percent gap the old
+  timing had past the (also-moved) arm peak — screenshotted at t=0.64,
+  reads as an acknowledgment after the offer's landed, not a reflex tied
+  to it.
+- Added `variants.emphatic` — same structure, longer (1.7s→2.1s), earlier
+  glance, bigger step, later nod. Compare live in `yield-test.html`'s new
+  `default`/`emphatic` picker (screenshotted both at their own arm-peak
+  frame — emphatic's step-back reads visibly bigger).
+- `getClip(name, reg)` now takes an optional registry so the harness can
+  build/scrub either take without a second code path.
+
+**`clips/doubletake.js`** — the pause held up fine on inspection
+(screenshotted t=0.32 and t=0.44, identical — the away-look genuinely
+sits still for the window, not blending continuously into the snap).
+The snap didn't: the brief named the exact failure mode ("under ~4 frames
+of easing it'll mush") and that's what the numbers showed — the original
+flat `40 keys / 2.6s` put only ~3.1 samples across the 0.208s snap
+window. Screenshotting t=0.50 (mid-snap) already showed the head most of
+the way back, so the SHAPE read as intended even under-sampled at this
+particular duration, but the brief's own arithmetic said it was on the
+wrong side of the line, and a longer variant would make it worse without
+a fix (snap stays a fixed 0.208s while the total grows, so the fraction
+of samples landing in it shrinks). Fixed properly rather than just
+bumping a constant: `DOUBLETAKE_KEYS` is gone, replaced by
+`keysFor(dur) = round(dur * 40) + 1` — density in samples/second, not a
+flat count, so `longPause`'s longer clip doesn't re-introduce the same
+problem. Default take now samples the snap at ~8.3 frames.
+- Also refactored the beat-timing table (`DT_SEGS`) into
+  `buildDoubletakeTiming(pauseS, shrugAmp)`, built from named SECONDS
+  durations (not fractions of a shared total) specifically so a "longer
+  pause" variant only grows the pause, not the snap or anything else —
+  fractions-of-a-total would have silently stretched or compressed
+  everything when the total changed.
+- `variants.longPause` (pause +0.5s, dur 2.6s→3.1s, screenshotted at
+  t=0.40 both takes — default has already snapped back by then, longPause
+  is still holding away, exactly the intended contrast) and
+  `variants.bigShrug` (shrug amplitude ×1.4 — the shrug segment's target
+  K is just the mix() interpolation's endpoint, so K>1 extrapolates past
+  the authored pose for free; screenshotted, visibly bigger, arguably
+  almost too big — a good problem for the owner to have two takes to
+  choose from). `getClip(reg)`/`playDoubletake(root, fade, reg)` both
+  take an optional registry, same pattern as yield.js.
+- Confirmed the mirrored shrug lands together — screenshotted t=0.90,
+  both arms raised identically, same frame (mirrored via
+  `ANIM.mirrorPose`, which was already the mechanism, just never seen at
+  the shared peak before).
+
+**`web/test/office-clips-geometry.test.ts`** — 11 new tests (15→26):
+anticipation ordering pinned directly against the timing configs
+(`lookPeak < armPeak`, `nodPeak > armPeak + 0.08`, both also checked for
+the emphatic variant, not just default), snap sample-density checked for
+all three doubletake variants (`0.208 / (dur/(keys-1)) >= 4`), a
+longPause-holds-longer check sampled in absolute seconds (fair across the
+two different total durations), a bigShrug-is-bigger check at the shared
+shrug-peak fraction, and a default/registry identity check
+(`variants.default === registry`, so nobody swaps that binding by
+accident later). `pnpm test` 137/137 (was 126 going into this round —
+task 4's reel-v2 tests landed in between), `pnpm typecheck` clean.
+
+**`.d.ts` updates** — `yield.d.ts`/`doubletake.d.ts` gained
+`DEFAULT_TIMING`/`EMPHATIC_TIMING` (yield) and
+`DEFAULT_TIMING`/`LONGPAUSE_TIMING`/`BIGSHRUG_TIMING` (doubletake) types,
+plus `variants` and the widened `getClip`/`playDoubletake` signatures.
+
+**Also fixed**: `yield-test.html` and `doubletake-test.html` both loaded
+`../glb/character.glb`, the exact bug the shared browser-protocol doc
+already documents and says "fix once, cheaply" — office.html got it in
+round 2 task 1, but nobody had touched the individual clip harnesses.
+Both now load `/glb/character.glb`. `handshake-test.html`/
+`argue-test.html` still have the same bug; out of scope this round (not
+this task's files), left alone, not worth a separate issue since the fix
+is a one-line copy of what's already documented.
+
+**Secondary check from the brief — handshake/shove in the full lit
+scene, never confirmed before**: with `office.html` loaded read-only,
+triggered `window.__world.handshake(a1, a2)` and `.shove(a1, a2)` from
+the console on idle named agents, polled `world.encounters[0].phase`
+until `'active'` inside a single `evaluate_script` call (a separate
+poll-then-screenshot round trip kept missing the window — these beats
+finish in under the ~1-2s a tool round trip costs), then rendered and
+captured `renderer.domElement.toDataURL()` in that SAME call before
+returning, avoiding the render-loop-stomps-manual-steps problem task 2's
+writeup above ran into for the same reason (nothing here needed a manual
+step — this rides the real rAF loop, just samples it at the right
+instant from inside one script instead of across two tool calls). Got
+real screenshots of both: handshake shows the pair standing close, arms
+approaching the grip; shove shows the winner's arm already reaching the
+loser's chest. Both fire cleanly in the lit scene, characters visible,
+poses read as intended — this closes the "never visually confirmed
+inside the full scene" gap flagged by round 2 task 3 and repeated in
+round 3's writeup.
+
+**Infra problem hit, filed, not this task's to fix**:
+[#62](https://github.com/mohsensc/sync/issues/62) — while holding the
+shared browser lock, port 5173 got stolen twice by a vite process running
+out of `sync-featA/web` (a different feature entirely), each time within
+a minute or two of my own server dying on its own. Cost real time: one
+whole round of console checks silently ran against feature A's `agent.js`
+(no `handshake`/`shove`/`yield`/`doubletake` on its `World`) before
+`Object.getOwnPropertyNames(Object.getPrototypeOf(window.__world))`
+coming back short caught it. Killed the intruder's process each time and
+restarted the local server from the correct worktree
+(`cd .../sync-featB/web && npx vite --port 5173 --strictPort`, backgrounded
+via the harness's own `run_in_background` rather than a detached shell
+subshell — the latter kept dying silently, which may be part of why the
+port kept coming free for feature A to grab). Wrote up what's known and
+what's still unclear in the issue; not something fixable from inside this
+task.
+
+**Worktree hazard, same one every other task this round hit
+independently**: `yield.js` specifically got reset back to its pre-edit
+(round-2) content mid-session, after two Edit calls both reported
+success — `doubletake.js`, both `.d.ts` files, and both `-test.html`
+files edited in the same span all kept their changes, only `yield.js`
+reverted, which rules out a blanket `git checkout .`/`reset --hard` and
+points at something narrower (possibly a stash/pop race, given task 2 and
+task 3 both separately confirmed a stash-related mechanism this round —
+see their writeups above). Caught it with the same technique they used:
+`grep -c "export const variants" clips/yield.js` came back 0 when it
+should have been 1. Rebuilt the file from the same edit already worked
+out (had the full content from the earlier successful `Edit` calls, just
+had to `Write` it back), verified with the grep again, then `git stash
+push -u` on all seven of this task's files, `git pull --rebase`, `stash
+pop`, verified content once more, and committed immediately rather than
+leaving it staged-but-uncommitted — same lesson every other task's
+writeup landed on independently.
+
+Not touched: `agent.js`, `office.html`'s `replayEvent`/camera/`initLive`
+regions, `.reel`/`.reel-*` CSS, `reel.js`, `live.js` — other tasks' files
+this round, left alone (the two harness `<title>`/glb-path lines above
+are the only office/ files outside `clips/` this task touched, and
+neither is in another task's owned region).
+
+**What's next for these two clips specifically**: both are now visually
+iterated and geometry-tested, but nobody has yet seen them inside a full
+`World.replay()` chain in the lit scene (task 2 built that machinery this
+same round, in parallel) — worth a pass once both land together. The
+`emphatic`/`longPause`/`bigShrug` variants are picked-but-not-shipped by
+design; if the owner likes one better than the current default on
+review, swapping `registry` to point at the preferred variant's specs is
+a small, mechanical change (the shape is already identical).
