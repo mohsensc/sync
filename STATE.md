@@ -1,196 +1,177 @@
 # STATE — feat/git-aware-characters
 
-Round 4 starts here. This is an integrator pass over round 3's four parallel
-builders (file-history bookshelf, zone-ownership dressing, zoom/hover motion
-+ verification backlog, region blame end-to-end). Read this before touching
-anything — round 4 has no memory except this file. Trimmed round 3's
-builder-by-builder play-by-play out of here; PR history and `git log` still
-have it if you need the detail (commits `3232a1c`..`5a77431` cover round 3).
+Round 5 starts here. Round 4 ran four parallel tasks: zoom/focus/framing
+(this task), churn variants + zoneowner demotion, gitapi dedup + per-line
+blame + source route, blamecard variety (timeline stacking, single-owner,
+gutter). Read this before touching anything — round 5 has no memory except
+this file and `git log`.
 
 ## Where things stand
 
-Branch is coherent, everything from round 3 is merged in and pushed.
-`pnpm test` — 182/182, 12 files. `pnpm typecheck` — clean. Both verified
-fresh at the end of this round, after this round's own fixes.
+Branch coherent, everything from round 4 merged and pushed.
+`pnpm test` — 237/237, 12 files. `pnpm typecheck` — clean. Both verified
+fresh at the end of this round.
 
-Checked for four-way-concurrent damage and found none new:
-- No conflict markers, all `office/*.js` + the extracted `office.html`
-  module script parse clean.
-- No duplicate helpers: `histshelf.js` correctly imports `colorForAuthor`/
-  `hueForAuthor` from `history-viz.js` rather than reimplementing the hash;
-  `zoneowner.js`'s `hairFor`/`HAIR_COLORS` is a deliberate, documented
-  re-host of `palette.ts` (office/*.js can't import the .ts side), not an
-  accidental duplicate. `ZONE_DIRS` has one definition (`gitsignals.js`),
-  imported everywhere else that needs it.
-- No unused imports (checked every `office/*.js` import list against its own
-  body).
-- Key bindings: B (histshelf) / H (hover treatment) / R (blame region) / T
-  (desk tint) / U (zone ownership) / V (blame variant) / Z (zoom mode) /
-  Escape — eight single-owner keys, no collisions. Round 3's own
-  histshelf-vs-hover H collision was already caught and fixed mid-round
-  (moved to B) before it landed.
+Commits this round, oldest to newest: `7aaaeb0` (gitapi dedup), `fda2dbd`
+(gitapi tests), `bdea055` (zoom declutter + head framing — this task),
+`3d998d6`/`41442b6`/`323d288` (blamecard timeline stacking, single-owner
+collapse, gutter variant), `6daa4af`/`5df098c` (churn heat/cold treatments,
+zoneowner rug default + calm single-owner), `00d42a1` (fixes found verifying
+this task's work live — see below).
 
-## Two things fixed this round, found by actually reading the code + browser
+## This task's build: focus mode, head framing, hover-clear
 
-1. **office.html's one-line gap, closed.** Round 3 task 4 built the full
-   live→region pipe (`live.js`'s `regionFromMsg`, `LiveDirector.onPresence`
-   returning `start`/`end`) but couldn't wire the last hop
-   (`onLivePresence` → `a.gitStart`/`a.gitEnd`) because `office.html` was
-   off-limits to that task. Fixed: `a.gitStart = info.start; a.gitEnd =
-   info.end` right after the existing `a.gitPath = info.path` line. Live-mode
-   region blame is now fully wired, not just demo-mode. (`c387597`)
+**Focus mode** (`office.html`, default on, `F` to toggle, `?focus=off`).
+While a head-zoom flight has the camera (`priorFraming` set), the zoomed
+state used to pile up: blame card, stale hover card, the corner selection
+panel, a zone label pill, a zoneowner plaque/rug, and the demo caption all
+stating some version of the same fact. Focus mode now drops everything but
+the character and the blame card for the duration of the zoom:
+- `zones.js`'s `buildZoneMarkers()` label pills get a real `updateCamera()`
+  distance fade (same shape as `zoneowner.js`'s `09b6ca3` fix — hidden below
+  3m, full above 5.5m) PLUS a hard `setFocusHidden()` override for focus
+  mode, since distance fade alone wasn't enough to fully clear them.
+- `interact.js`'s corner panel (`#ip`) and hover tooltip (`#it`) get a
+  `setFocusMode()` toggle on the interaction API; both also got a proper
+  opacity/transform transition instead of a hard `display` snap, since this
+  round's brief called out that mechanical motion reads as cheap.
+- The zoneowner plaque/rug root (`scene.getObjectByName('zoneowner-root')`)
+  gets hidden outright via `.visible` — read-only reference to a name
+  `zoneowner.js` already exposed, no edit to that file needed.
+- The demo caption gets a `.declutter{opacity:0}` CSS override.
+All of it restores on Escape/deselect via the same `updateDeclutter()` call
+that turns it on.
 
-2. **Real browser bug: zone-ownership plaques ballooned to fill the screen
-   during the new zoom flight.** Round 3 shipped two features that never got
-   tested together: `zoneowner.js`'s plaque/rug (task 2, on by default) is a
-   fixed-world-size `THREE.Sprite`/mesh, and the new head-zoom camera flight
-   (task 3, `Z` toggle) parks the camera a couple of metres from an agent's
-   desk when you select them. Up close, a sprite sized for the normal wide
-   room shot fills most of the frame and visually bleeds through the
-   semi-transparent blame card / hover panel sitting on top of it in the DOM.
-   Reproduced live: selecting `a2` and letting the zoom flight settle put the
-   "desks" plaque's giant `mohsensc` text across half the screen, overlapping
-   the region-blame card. Fixed by adding `updateCamera(camera)` to
-   `attachZoneOwner`'s return value — each frame it fades the zone prop's
-   opacity out as camera distance drops below 3m (fully hidden) up to 5.5m
-   (fully shown), instead of capping world scale. Wired into `office.html`'s
-   `tick()`. Verified live: zoomed close on `a2`, plaque fades cleanly, blame
-   card fully readable; zoomed back out, plaque returns. (`09b6ca3`)
+**Head framing** (`office.html`, `headFraming()`). The old flight kept
+whatever yaw/pitch the room camera happened to be at before the click —
+literally luck, confirmed live (a top-down orbit before selecting someone
+landed the head-zoom on a scalp). Now derives from the character's own
+`a.yaw`: `'threequarter'` (default) faces them roughly head-on with a
+slight offset so it doesn't read as a mugshot; `'shoulder'` sits behind
+and to the side, wider, framing past them toward their desk. Switchable via
+`window.__zoomMode.setFrame('shoulder'|'threequarter')` / `?frame=`.
 
-Both fixes typechecked clean and kept `pnpm test` at 182/182 (no new test —
-neither is unit-testable without a live camera/THREE scene; both were
-caught and confirmed by eyes-on-screen, which is exactly why this round's
-integrator browser pass mattered).
+Found and fixed a real bug building this: the yaw clamp (`Math.max(MIN,
+Math.min(MAX, y))`) is periodicity-blind. `a.yaw + PI` routinely lands past
+a full turn, and a plain min/max picks whichever raw number is smaller —
+not necessarily the nearest point on the circle. Replaced with `clampYaw()`,
+which wraps to the representative nearest the arc's centre before clamping.
+Pitch also now animates as part of the flight (it never did before — this
+is what let a top-down orbit's pitch carry straight into a close-up).
 
-## Also resolved: task 1's importmap suspicion was a false alarm
+**Known real limitation, filed as #64, not fixed this round**: the room's
+valid camera arc is only ~68° wide (cutaway room, open on +x/+z only). For
+characters facing away from that hemisphere — front-row desk sitters
+(`Z.ZONES.desks.slots[0..2]`, yaw 0, facing their own desk toward the back
+wall) are the common case — even the nearest reachable point on the arc is
+90°+ off from a true face-on shot, so `threequarter` still lands on a
+back/side view for them. Confirmed live: `a1`/`a2` (front row) land on the
+back of the head; `a3` (facing the vault, closer to the arc) lands cleanly
+on the face. `shoulder` mode is the more reliable default for desk-seated
+characters in practice — it targets `a.yaw` directly, which empirically
+lands inside the arc far more often for this room's actual layout. Issue
+#64 has the detail and possible directions (widen the arc specifically for
+head-zoom's close range, or revisit desk seat yaws).
 
-Round 3 task 1 flagged, from reading paths only, that `office.html`'s
-`<script type="importmap">` (`"three":"./vendor/three.module.js"`) looks
-like it should 404 the same way the GLB assets used to — `./vendor/...`
-resolves relative to the document URL (`/src/office/office.html`) to
-`/src/office/vendor/three.module.js`, which doesn't exist on disk (only
-`web/public/vendor/three.module.js` does, served at `/vendor/...`).
+**Stale hover card** (`interact.js`). Used to only clear on the next
+pointermove, so it could sit mid-screen describing the wrong agent after a
+click, a keyboard select, or `zoomToAgent()`. Now `select()` clears it
+unconditionally (reuses `setHover(null)`'s existing rest-state logic, so a
+desk's ownership tint still restores correctly), and `zoomToAgent()` also
+calls the new `interaction.clearHover()` directly as a second guard for any
+future call path that reaches it without going through `select()` first.
 
-Checked live this round via `list_network_requests`: the browser never
-actually fetches that importmap URL at all. Vite's dev server rewrites bare
-`three`/`three/addons/...` specifiers inside every `<script type="module">`
-it transforms to point at its own optimized-deps cache
-(`/node_modules/.vite/deps/three.js`, from the `three` entry in
-`package.json`'s `dependencies`), which happens *before* the browser's
-native import-map resolution would ever run. The importmap is dead code in
-`pnpm dev` — not exercised, not a bug in the mode this scene actually runs
-in (README already says `office.html` needs `pnpm dev` and a browser; there
-is no separate production build path for it). Leaving the importmap as-is;
-not worth touching a working (if redundant) declaration. Not filed as an
-issue — confirmed non-issue, not a deferred one.
+**Also found and fixed live, not in the original plan**: `interact.js`'s
+CSS had `#it.card{display:flex;flex-direction:column}` with no `.on` gate
+(added in round 3 for the 'rich' treatment's `order`-based reordering
+trick). Same specificity as `#it.on{display:block}`, later in the sheet, so
+it always won — meaning once a card-treatment tooltip had ever rendered,
+nothing could hide it again, `.on` or not. This is exactly why the
+stale-hover-card fix above looked broken in the browser until this turned
+up as the actual cause. Fixed: `#it.card.on{...}`.
 
-## Browser verification: done, and it's why the round-3 bug above got caught
+## Verified live this round
 
-Took the lock (`~12 min wait`, `featB-round5-integrator` held it), started
-this worktree's server, confirmed via `curl` + `list_network_requests` it
-was serving my worktree's files before touching the tab.
+Browser session had real friction worth flagging for round 5: my server
+died between Bash calls twice (background `(cmd &)` doesn't survive a Bash
+tool call boundary without `nohup ... < /dev/null &` + `disown` — a plain
+subshell background job gets SIGHUP'd when that call's shell exits), and
+both times a stray `sync-featB` vite process silently took the now-free
+port 5173 before I noticed, so I was actually testing featB's build for a
+while without any error to signal it (`window.__ready` was true, but
+featB's `office.html` predates several of the globals I was checking for,
+which is what actually tipped me off). Issue #62 already covers the port-
+theft half of this; the "background job dies on its own" half is new and
+worth the next round's server-start step reading: use
+`nohup cmd > log 2>&1 < /dev/null & disown`, then verify with `lsof -ti
+:5173` from a SEPARATE Bash call (not the one that started it) before
+trusting the tab.
 
-**Mid-session, lost the lock and the server anyway** — a concurrent
-process's own release step (`pkill -f 'vite.*5173'; rm -rf $LOCK`, the exact
-protocol release command) fired while I still held it, killing my server and
-freeing the lock out from under me. Re-acquired within ~30s (nobody else
-grabbed it in that window this time) and continued. This is the same shape
-of problem issue #61 already documents (featB's server repeatedly stealing
-5173 mid-session) — not filing a duplicate, but noting I hit it personally
-this round, from the other side (my session got killed, not stolen-from).
-The lock has no compare-and-swap on release; any agent's routine cleanup can
-tear down another agent's active session. Worth a protocol fix if this
-keeps costing rounds real time — out of scope for this round to fix (it's
-the scratchpad protocol doc, not this branch), flagging for whoever owns
-that file.
+Once actually pointed at this worktree's server:
+- Focus mode on: zoomed `a2` and `a3` — screenshot shows character + blame
+  card only, no zone pill, no zoneowner plaque, no caption, no corner panel.
+  Confirmed via DOM query too (`zoneOwnerVisible:false`, pill
+  `opacity:0`, `panelOn:false`, `tipOn:false`, caption has `declutter`
+  class).
+- Focus mode off (`window.__focusMode.set(false)`) on the same zoom: the
+  zone pill balloons across the character's face and the corner panel
+  reappears — exactly the pile-up the fix addresses. Good before/after pair.
+- Both framing variants: `threequarter` on `a3` lands cleanly on the face;
+  `shoulder` on `a1` gives the wider over-the-shoulder desk view. See the
+  limitation above re: `threequarter` on front-row desk sitters.
+- Stale hover card: hovered `a1` (card visible, `display:flex`), clicked
+  `a3` via real dispatched pointer events (not the `__clickAgent` shortcut —
+  exercises the actual listener chain), tip fully `display:none` afterward,
+  `a3` selected. This is also how the CSS bug above got caught — the first
+  attempt showed the tip still stuck, before the fix.
+- `H` treatments: `nameplate` and `rich` both screenshotted as pixels
+  (open items from round 3 and the round-4 integrator pass). Nameplate
+  floats a small navy pill over the head; rich promotes the "whose code"
+  line above doing/zone/file via the `order` CSS.
+- `Z` snap mode: sampled camera distance every ~30-60ms through a snap
+  flight — dist dips to 2.89 (past the 4.32 resting point) before easing
+  back and settling, the expected overshoot-and-settle shape. Also
+  screenshotted mid-flight.
 
-**Confirmed working, live, this round:**
-- Base scene: 15/15 objects loaded, characters/desks/props all render,
-  console clean apart from the two known pre-existing lines (`glb` 404 issue
-  #59, demo-mode `ECONNREFUSED`).
-- Region blame (`R` toggle, task 4): selected `a2`
-  (`cpp/hook/hook.cpp`, lines 120-150) — card opens straight into the region
-  view, real gutter/summary (`these 31 lines: mohsensc, newest 5 days old`),
-  `R` flips to whole-file and back cleanly.
-- Live-mode region forwarding (this round's fix #1): `window.__cast` shows
-  `a2`/`a3`/`a4` all carry real `gitStart`/`gitEnd` in demo mode already;
-  the office.html hop is the piece that made this reach live mode too,
-  unverified against a real relay in this environment (none running here —
-  same limitation task 4 had).
-- Histshelf (`B` toggle, task 1): confirmed both treatments render with
-  real data — DOM strip (`#hshelf`, 10 real commit spines with
-  author/message/age tooltips, gold-tinted) and 3D spines
-  (`histshelf-root` group in-scene, visible as a small staircase of colored
-  bars near the agent).
-- Zone ownership (`U` toggle, task 2): both plaque and rug render with real
-  shortlog data (`mohsensc 100%`/`86%` etc.), trophy/rug-stripe flourishes
-  visible. This is also where the zoom-overlap bug above was found and
-  fixed.
-- Hover treatments (`H`, task 3): confirmed `hoverTreatment`/
-  `setHoverTreatment('nameplate')` work via `evaluate_script` — not
-  screenshotted as pixels for `nameplate`/`rich` specifically (ran out of
-  lock time after the plaque-fade fix and re-verification). `card` (default)
-  already gets exercised implicitly by every other screenshot in this round.
-- Camera flight (`Z`, task 3): `ease` mode (default) confirmed smooth and
-  settling correctly (`window.__zoomMode.flying` false after landing,
-  matches task 3's own finding). `snap` mode still not re-verified visually
-  this round either — same gap task 3 left, still open.
+Not reached: churn visuals were task 2's first-priority item this round,
+not this task's — see their commits (`6daa4af`, `5df098c`) for what they
+verified themselves before I took the lock.
 
-**Not reached this round:** churn typing-speed/paper-stack visuals — still
-unverified going back two rounds now (flagged by round 3 task 3, and round 2
-before that). No test in this repo instantiates a real `Agent`, so this
-needs a live look specifically, on a busy agent (`agent2`/`cpp/hook/hook.cpp`
-is still the flagged strongest signal). Worth a dedicated slot.
+## Key registry (current, no collisions)
 
-Killed the server, released the lock, confirmed port free before finishing.
+B (histshelf) / C (churn treatment) / F (focus mode) / H (hover treatment) /
+R (blame region) / T (desk tint) / U (zone ownership) / V (blame variant) /
+Z (zoom feel) / Escape (deselect). `?focus=off`, `?frame=`, `?churnMode=`,
+`?zoMode=`, `?bcVariant=` are the matching query params.
 
 ## What's NOT built yet / still genuinely open
 
-- **Churn visuals unverified in browser**, three rounds running now (see
-  above). Next round with a spare browser slot: select `agent2`, watch
-  typing speed and the paper-stack prop for a beat or two, screenshot it.
-- **`Z` snap mode and `H`'s `nameplate`/`rich` treatments**: code is real,
-  typechecked, exercised via `evaluate_script`, never screenshotted as
-  pixels. Quick check: `window.__interact.setHoverTreatment('nameplate')`
-  then hover a character; `window.__zoomMode.set('snap')` then
-  `window.__zoomAgent('a3')` and watch for the overshoot-and-settle.
-- **Symbol-level blame beyond a line range**: `gitapi.mjs`'s `blame` route
-  has taken `start`/`end` since round 2; a `Region` on the presence protocol
-  has carried them since round 3 task 4. Endpoint-ready, protocol-ready,
-  rendered in the demo cast and (as of this round) forwarded in live mode
-  too. What's left is genuinely upstream of this branch — nothing more to
-  do here until the C++ hook/Go relay side actually populates
-  `region.start`/`region.end` on real presence frames.
-- **True per-line region rendering** (real source text + a real editor-style
-  gutter, not a proportional colour bar) needs `parseBlamePorcelain` in
-  `gitapi.mjs` to keep per-line author data instead of collapsing to
-  aggregate `{total, owners}`. Deliberately out of scope for the
-  office-side rounds so far — a `gitapi.mjs` change.
-- **Three independent client-side git-data fetchers**, no shared cache
-  (`interact.js`'s hover card, `gitsignals.js`'s ambient poll,
-  `blamecard.js`'s own blame fetch, and now `histshelf.js`/`zoneowner.js`
-  each running a fourth and fifth). All cheap, all local, all degrade fine
-  independently — documented every round since round 2, still not worth a
-  standalone task. Collapse it opportunistically if a future round is
-  already touching two or more of these files.
+- **#64** (filed this round): threequarter head framing can't reach a
+  face-on shot for characters facing away from the room's valid camera arc
+  — front-row desk sitters, concretely. `shoulder` mode is the practical
+  workaround today.
+- **#62**: shared port 5173 gets stolen by other worktrees mid-lock. Hit it
+  twice this round from a new angle (my own backgrounded server dying
+  between Bash calls, not just another team's cleanup racing mine). See the
+  "Verified live" section above for the `nohup`/`disown` fix.
+- **#59**: `coffee-cup-v2.glb` 404, still open, still cosmetic-only.
+- **Symbol-level blame beyond a line range**: unchanged from round 4 — the
+  gap is upstream of this branch (C++ hook / Go relay don't populate
+  `region.start`/`end` on real presence frames yet).
+- **Three-plus independent client-side git-data fetchers, no shared cache**:
+  still true, still cheap, still not worth a standalone task. Now includes
+  `zoneowner.js`'s shortlog poll (its own note explains why), plus whatever
+  task 4's gutter variant added on top of `blamecard.js`'s existing fetch
+  for the `source`/`lines` routes.
+- **Churn typing-speed/paper-stack + new heat/cold treatments**: task 2's
+  own commits are the source of truth on what they verified; not re-checked
+  by this task.
 
-## Nothing filed as a GitHub issue this round
+## Filed this round
 
-Both real bugs found (the live.js one-liner, the plaque zoom-overlap) were
-small enough to fix inline in the time it took to characterize them — no
-issue needed. The importmap concern from round 3 turned out to be a false
-alarm, not a deferred bug. Issues #59 (`coffee-cup-v2.glb` 404) and #61
-(shared-port contention) remain open from prior rounds; #61 nearly got a
-duplicate filed against it this round for the lock-loss described above
-before double-checking it's the same root cause already on file.
+- **#64** (this task): head-zoom threequarter framing geometry limit, see
+  above. `enhancement`, `priority:nice-to-have`, `area:web`.
 
-## Browser/port discipline
-
-Followed the protocol: reused the existing tab (never opened a second),
-served from this worktree only, verified via network trace before trusting
-what was on screen (worth doing given #61 — a stale tab can silently be
-showing a different worktree's server). Killed the server and released the
-lock at the end, confirmed the port was actually free before finishing
-rather than trusting `pkill` on faith (`npx vite` spawns a child process
-that a plain `pkill -f 'vite.*5173'` didn't always catch this round — killed
-by port with `lsof -ti :5173 | xargs kill -9` instead when that happened).
+Nothing else needed filing — the CSS display bug and the yaw-clamp
+periodicity bug were both small enough to characterize and fix inline in
+the time it took to find them.
