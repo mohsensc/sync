@@ -267,7 +267,11 @@ export function attachInteraction(cfg) {
   function matsOf(pick) {
     if (!pick) return null
     if (pick.kind === 'agent') return pick.ref.mats
-    return pick.mats || null
+    // Real raycast picks carry `.mats` directly (see boxProxy/capsuleProxy).
+    // The ownership scan below builds lightweight `{kind:'desk', ref}` picks
+    // of its own to reuse applyRest() outside of a hover/click, so fall back
+    // to the desk's own mats when the pick didn't carry them.
+    return pick.mats || (pick.ref && pick.ref.mats) || null
   }
   /**
    * Highlight by blending the DIFFUSE colour toward the highlight hue.
