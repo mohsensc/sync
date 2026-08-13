@@ -236,3 +236,123 @@ relay/protocol side, but it's not blocking anything in round 2 (file-level
 blame degrades fine without it), so no issue filed for it yet — flagging it
 here instead. File one if round 2 actually needs line-level precision and
 still doesn't have it.
+
+## Round 1 build notes
+
+### task 3
+
+Built click-to-zoom-into-the-head plus a blame card overlay.
+
+- `web/src/office/blamecard.js` (new): DOM overlay, same pattern as
+  interact.js's `#ip`/`#it` — own injected CSS, own div. `attachBlameCard({fetchFn})`
+  returns `{show(agent), hide()}`. Header is name/human/gitPath; body is
+  ownership bars from `GET /api/git/blame?path=` sorted by share, plus a
+  recent-commits list from `GET /api/git/log?path=&n=8`. Any `{ok:false}` or
+  fetch failure (or no `gitPath` at all) renders a small "no history here
+  yet" line, never an empty box. Caches per path for the life of the panel.
+- `web/src/office/office.html`: extended `focus()` with a 4th `targetY` arg
+  (default 1.15, so every existing demo.js call site is untouched), added
+  `zoomToAgent(a)`/`zoomRestore()` riding the same `goal` easing the render
+  loop already drives, and an `Escape` key handler that deselects and
+  restores the prior framing. Added `onSelect` to the `attachInteraction`
+  cfg — it's a no-op until interact.js starts calling `cfg.onSelect?.(...)`
+  (task 2), but is already wired to `zoomToAgent`/`blameCard.show` /
+  `zoomRestore`/`blameCard.hide`. Added `window.__zoomAgent(name)` at the
+  bottom so the whole flow is drivable from the console right now, before
+  the interact.js hook lands — that's what I used to test.
+- Also fixed the known glb-path bug from the devtools protocol doc
+  (`glb/...` → `/glb/...`, both in the prop/desk table and the character
+  loader) since it was blocking `window.__ready` entirely — no characters
+  ever spawned with the relative paths. Fixed once, here, so the other
+  builders don't have to. `glb/coffee-cup-v2.glb` still 404s — that asset
+  file just isn't in `public/glb/`, unrelated to the path bug, harmless
+  (one missing prop, not a blocker), not fixed this round.
+
+Verified in browser: took the lock, ran `pnpm dev`, set `a.gitPath` by hand
+on a demo agent (task 2's cast-wiring hadn't landed while I was testing),
+called `window.__zoomAgent('a1')` — camera eased into the head with a slight
+yaw, blame card slid in showing real ownership (100% mohsensc) and eight
+real recent commits for `web/src/office/anim.js`. `Escape` restored the
+original room framing and closed the card. Screenshot taken both states.
+Killed the server and released the lock when done.
+
+`pnpm test` (72 passed, includes tasks 1 and 4's suites which landed in the
+same worktree while I worked) and a direct `tsc --noEmit` both green for my
+files — `pnpm typecheck`'s wrapper script currently fails on an unrelated
+pnpm supply-chain check (`ERR_PNPM_IGNORED_BUILDS`) that has nothing to do
+with any of this round's code; ran `tsc` directly instead, only
+`gitsignals.test.ts` (task 4's file) has two pre-existing type errors, not
+mine.
+
+Nothing filed as an issue this round — no edge case hit that was expensive
+enough to defer. Zoom-during-a-walk-animation wasn't tested (demo cast was
+idle when I zoomed); worth an eyeball next round but didn't look risky in
+the render-loop code, no issue filed for it.
+
+## Round 1 build notes
+
+### task 4
+
+Built the ambient signal layer: `web/src/office/gitsignals.js` polls the git
+endpoints every 20s (once immediately) and folds the results onto two new,
+purely-additive hooks:
+
+- `Agent.setFreshness(ageDays)` in `web/src/office/agent.js` — a second halo
+  ring, orthogonal to `setState`'s TONE ring. Own color/radius/pulse-rate per
+  bucket (`freshnessBucket`, exported and unit-tested): fresh (<2d, warm/big/
+  quick), warm (<21d), normal (<180d, barely visible), stale (>=180d, cold/
+  small/slow). `ageDays: null` (no gitPath, or the endpoint 404s) clears the
+  ring to invisible rather than showing a wrong default.
+- `zones.setOwner(zoneName, ownerLabel)` in `web/src/office/zones.js` —
+  repaints a zone's existing label pill to add "· mostly <name>" under its
+  usual meaning line, reusing `labelTexture()` as-is. Falls back to the plain
+  meaning line if called with a falsy owner.
+
+`gitsignals.js` itself: `attachGitSignals({world, zones, fetchFn, intervalMs,
+zoneDirs})`. Static `ZONE_DIRS` map (desks -> web/src, vault -> go,
+whiteboard -> web/src/office — picked by eye against the tree, the other
+zones have no obvious single directory so were left unmapped rather than
+faked). Every failure — endpoint not up, bad path, network error, malformed
+body — is caught and swallowed; on failure an agent's freshness clears to
+null rather than lying. Pure fold functions (`statToAgeDays`, `shortlogToOwner`)
+are exported and tested against canned JSON bodies so the wiring is testable
+without a live endpoint. Wired into `office.html` with the two lines the plan
+allowed: one import, and `window.__gitSignals = attachGitSignals({world,
+zones: zoneUI})` right before `window.__ready = true`.
+
+Two new hand-written `.d.ts` files (`agent.d.ts`, `gitsignals.d.ts`) — same
+pattern `live.d.ts` already used, so `test/gitsignals.test.ts` (a typechecked
+.ts file) can import the plain-JS office modules without `tsc` erroring on
+missing declarations. Minimal surface only (what the test actually imports),
+not a full type surface for `Agent`/`World`.
+
+Files: `web/src/office/gitsignals.js` (new), `web/test/gitsignals.test.ts`
+(new), `web/src/office/agent.d.ts` (new), `web/src/office/gitsignals.d.ts`
+(new), `web/src/office/agent.js` (+freshness channel), `web/src/office/
+zones.js` (+setOwner). Office.html's two lines landed inside task 3's
+commits since this was a shared, concurrently-edited worktree — see below.
+
+**Not verified in the browser.** This task's plan explicitly budgeted the
+shared dev-server lock to tasks 2 and 3, not 4. `pnpm test` and `pnpm
+typecheck` are green (72 tests, 6 files, including gitapi's once task 1
+landed), but nobody has actually looked at the freshness ring pulsing on a
+character or a zone pill repainting with an owner name. **Next round should
+run `pnpm dev`, hover/wait near a desk-zone agent with a `gitPath`, and
+eyeball**: does the outer ring read as a distinct signal from the inner TONE
+halo at a glance, is the zone pill's second line legible at the label
+sprite's normal viewing distance, and does a `stale` agent actually feel
+different from a `fresh` one from across the room (not just up close).
+
+Also worth someone's eye: `FRESH.normal`'s opacity (0.16) may be too faint to
+register as an intentional "normal" state vs. "signal not loaded yet" —
+consider bumping it or dropping the ring for `normal` entirely and only
+showing rings for the two extremes.
+
+One concurrency note for whoever reads this: this round ran with multiple
+builder agents editing files in the *same* worktree simultaneously (not
+separate worktrees per builder). `agent.js`/`zones.js` briefly appeared to
+have reverted to HEAD mid-task from a stale read racing another process's
+write, before syncing back to the correct content. Nothing was lost this
+round, but future rounds running the same way should `git diff --stat` on
+their own files right before committing, not trust an in-memory diff read
+several tool calls earlier.
