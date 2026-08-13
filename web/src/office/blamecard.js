@@ -10,13 +10,16 @@
 // Never an empty box.
 
 const CSS = `
-#bc{position:fixed;left:18px;top:50%;transform:translate(-16px,-50%);
-  width:280px;max-height:72vh;overflow-y:auto;background:#fffdfaf2;
+/* top:328px clears the #hud panel (office.html), which runs from 16px down
+   to roughly 300px with its three button rows — the two used to sit on top
+   of each other any time a character was selected while the HUD was up. */
+#bc{position:fixed;left:18px;top:328px;bottom:16px;transform:translateX(-16px);
+  width:280px;overflow-y:auto;background:#fffdfaf2;
   border:1px solid #C3B39B;border-radius:12px;padding:16px 18px;
   box-shadow:0 14px 40px #4a1f3d26;opacity:0;pointer-events:none;
   transition:opacity .38s ease, transform .38s cubic-bezier(.2,.8,.3,1.1);
   z-index:8;font:13px/1.5 ui-sans-serif,-apple-system,Segoe UI,sans-serif;color:#35455C}
-#bc.on{opacity:1;pointer-events:auto;transform:translate(0,-50%)}
+#bc.on{opacity:1;pointer-events:auto;transform:translateX(0)}
 #bc h2{font-size:16px;margin:0 0 1px;letter-spacing:-.01em}
 #bc .human{font-size:12px;color:#A5738C;margin:0 0 2px}
 #bc .path{font:11px ui-monospace,monospace;color:#8A94A3;margin:0 0 12px;
