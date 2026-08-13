@@ -28,6 +28,11 @@ export interface ReelEvent {
   source: 'live' | 'generated'
 }
 
+export interface ReelPage {
+  shown: ReelEvent[]
+  remaining: number
+}
+
 export declare class ReelStore {
   constructor(events?: ReelEvent[])
   add(event: ReelEvent): ReelEvent
@@ -39,9 +44,22 @@ export declare class ReelStore {
   humans(): string[]
   all(): ReelEvent[]
   visible(): ReelEvent[]
+  toggleOpen(id: string): void
+  readonly openId: string | null
+  closeOpen(): void
+  setPlaying(id: string | null): void
+  clearPlaying(): void
+  readonly playingId: string | null
+  readonly revealCount: number
+  resetReveal(): void
+  showMore(step?: number): void
+  page(): ReelPage
+  takeNewLiveIds(): string[]
 }
 
 export const SAMPLE_EVENTS: ReelEvent[]
+
+export function relTime(ts: number, now: number): string
 
 export interface MountReelOptions {
   onSelect?: (event: ReelEvent) => void
@@ -50,6 +68,9 @@ export interface MountReelOptions {
 export interface MountedReel {
   render(): void
   setFoot(html: string): void
+  setPlaying(id: string | null): void
+  clearPlaying(): void
+  dispose(): void
 }
 
 export function mountReel(container: HTMLElement, store: ReelStore, opts?: MountReelOptions): MountedReel
