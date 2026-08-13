@@ -28,7 +28,7 @@
   <p>Marker cube stands in for the selected agent's desk spot. Real THREE
      scene (histshelf.js needs one for the 3D treatment) but canned
      <code>/api/git/log</code> JSON — no dev server required. Press
-     <b>H</b> (or the button) to flip the 3D-spines / DOM-filmstrip
+     <b>B</b> (or the button) to flip the 3D-spines / DOM-filmstrip
      treatment, matching the toggle office.html wires up.</p>
   <div class="row">
     <button data-f="dozen">12 commits, old + new</button>
@@ -179,7 +179,7 @@ document.getElementById('bMode').addEventListener('click', () => {
 })
 document.getElementById('bHide').addEventListener('click', () => shelf.hide())
 addEventListener('keydown', e => {
-  if (e.key === 'h' || e.key === 'H') setTimeout(updateModeButton, 0)
+  if (e.key === 'b' || e.key === 'B') setTimeout(updateModeButton, 0)
 })
 
 show('dozen')

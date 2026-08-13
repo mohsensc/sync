@@ -2,7 +2,7 @@
 // file into a physical row of book spines floating near their desk. One
 // spine per commit, newest nearest the agent, height/lean tracking age.
 //
-// Two treatments behind one key toggle (press H, or load with
+// Two treatments behind one key toggle (press B, or load with
 // ?hsMode=strip): "3d" builds thin boxes in the scene itself; "strip" is a
 // flat DOM film-strip pinned in screen space over the agent's head. Same
 // layout math (layoutShelf below) drives both, so switching treatments
@@ -347,7 +347,7 @@ export function attachHistShelf(cfg = {}) {
   }
 
   function onKeydown(e) {
-    if (e.key !== 'h' && e.key !== 'H') return
+    if (e.key !== 'b' && e.key !== 'B') return
     const tag = (document.activeElement && document.activeElement.tagName) || ''
     if (tag === 'INPUT' || tag === 'TEXTAREA') return
     setMode(mode === '3d' ? 'strip' : '3d')

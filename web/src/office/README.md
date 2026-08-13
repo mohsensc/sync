@@ -31,7 +31,7 @@ The GLB ships no usable motion, so every clip is authored from keyframe tracks.
 - `gitsignals.js` — ambient per-zone polling off `/api/git/stat` +
   `/api/git/churn` (typing speed, desk paper stacks).
 - `histshelf.js` — the selected agent's file history as a floating shelf of
-  book spines (H toggles 3D spines / DOM film-strip); degrades to a single
+  book spines (B toggles 3D spines / DOM film-strip); degrades to a single
   dusty tome at 0-1 commits, nothing at all with no history.
 
 ## Two traps
