@@ -21,16 +21,33 @@
   #note code{background:#0006;padding:1px 5px;border-radius:4px}
   #grid{display:flex;gap:20px;align-items:flex-start;flex-wrap:wrap;
     padding:14px 20px 40px;max-width:1040px;margin:0 auto}
-  .col{flex:0 0 308px;display:flex;flex-direction:column;gap:8px}
+  /* flex-basis and width both pinned to 308 — office.html's real #reel is
+     `position:fixed;width:308px`, and round 7's two shipped bugs (glass's
+     #reel specificity loss, ticker's mid-word wrap) both went unnoticed
+     here specifically because an earlier version of this harness mounted
+     wider than that and never showed the real panel's cramping. Setting
+     both properties instead of just flex-basis is belt-and-suspenders —
+     flex-basis alone should already pin it, but a stray flex-shrink
+     upstream has bitten this exact assumption before. */
+  .col{flex:0 0 308px;width:308px;display:flex;flex-direction:column;gap:8px}
   .col h2{margin:0;font-size:11px;letter-spacing:.06em;text-transform:uppercase;
     color:#C7D0DC;font-family:ui-monospace,monospace}
   .col p.about{margin:0;font-size:11px;color:#8FA0B5;line-height:1.4}
 
-  /* ---- copied verbatim from office.html's reel CSS block --------------
-     Keep this block byte-for-byte in sync with office.html's — this
-     harness exists specifically so the next round can see all three skins
-     without booting the 3D scene, so drift here is drift in what gets
-     reviewed. See STATE.md for the "known duplication" note. */
+  /* ---- copied from office.html's reel CSS block ------------------------
+     Kept in sync with office.html's, with two deliberate adaptations:
+     these panels mount as `<div class="reel">`, not `#reel`, so every
+     `#reel.reel-skin-X` rule over there is `.reel-skin-X` here (no ID to
+     hang the specificity trick on, and none needed — a bare class
+     selector already beats this file's own bare-class `.reel` base rule
+     on source order alone, so the bug that fix was for can't occur here
+     in the first place); and `.reel-row` below carries `box-sizing:
+     border-box` that office.html's copy may or may not have yet
+     (round-8 bugfix, same content-box overflow either way — see that
+     rule's own comment). Everything else is meant to be byte-for-byte —
+     this harness exists specifically so the next round can see all three
+     skins without booting the 3D scene, so drift here is drift in what
+     gets reviewed. See STATE.md for more. */
   .reel{width:308px;max-height:70vh;
     background:#fffdfaee;border:1px solid #C3B39B;border-radius:10px;
     box-shadow:0 6px 24px #4a1f3d18;display:flex;flex-direction:column;
@@ -58,8 +75,13 @@
   .reel-list{overflow-y:auto;overflow-x:hidden;max-height:52vh}
   .reel-item{border-bottom:1px solid #F0ECE6}
   .reel-item:last-child{border-bottom:0}
+  /* box-sizing:border-box — without it, width:100% + padding:9px 14px
+     under the default content-box renders 28px wider than the panel
+     (336px inside 308px), clipping the timestamp on every row. Same bug
+     as office.html's base .reel-row; fixed here independently since this
+     file keeps its own full copy rather than importing office.html's. */
   .reel-row{display:flex;align-items:flex-start;gap:8px;width:100%;
-    text-align:left;font:inherit;border:0;
+    box-sizing:border-box;text-align:left;font:inherit;border:0;
     background:none;cursor:pointer;padding:9px 14px}
   .reel-row:hover{background:#F7F4EC}
   .reel-row-open{background:#F7F2E7}
@@ -192,17 +214,19 @@
   .reel-skin-ticker .reel-human{background:#111820;border-color:#26313F;
     color:#DCE6F0;border-radius:3px}
   .reel-skin-ticker .reel-item{border-color:#131A22}
-  .reel-skin-ticker .reel-row{padding:3px 10px;gap:7px;font-size:11px;align-items:baseline}
+  /* two-line, not one — see office.html's copy of this comment for why */
+  .reel-skin-ticker .reel-row{padding:5px 10px;gap:7px}
   .reel-skin-ticker .reel-row:hover{background:#101720}
   .reel-skin-ticker .reel-row-open,.reel-skin-ticker .reel-row-open:hover{background:#121B26}
-  .reel-skin-ticker .reel-badge{font-size:9px;padding:1px 4px;border-radius:3px;margin-top:0}
-  .reel-skin-ticker .reel-body{flex-direction:row;align-items:baseline;gap:6px;
-    min-width:0;overflow:hidden}
-  .reel-skin-ticker .reel-line1,.reel-skin-ticker .reel-line2{display:contents}
-  .reel-skin-ticker .reel-who{color:#DCE6F0;font-size:11px}
-  .reel-skin-ticker .reel-vs{color:#425063}
+  .reel-skin-ticker .reel-badge{font-size:9px;padding:1px 4px;border-radius:3px}
+  .reel-skin-ticker .reel-body{gap:1px}
+  .reel-skin-ticker .reel-line1{font-size:11px;gap:5px}
+  .reel-skin-ticker .reel-line2{font-size:10px;gap:5px}
+  .reel-skin-ticker .reel-who{color:#DCE6F0;white-space:nowrap;
+    overflow:hidden;text-overflow:ellipsis;max-width:118px}
+  .reel-skin-ticker .reel-vs{color:#425063;white-space:nowrap;flex:0 0 auto}
   .reel-skin-ticker .reel-src{display:none}
-  .reel-skin-ticker .reel-path{color:#7FE0A8;max-width:120px}
+  .reel-skin-ticker .reel-path{color:#7FE0A8;max-width:150px}
   .reel-skin-ticker .reel-dot{color:#2F3B48}
   .reel-skin-ticker .reel-res{color:#8291A3}
   .reel-skin-ticker .reel-time{color:#425063;font-size:10px}

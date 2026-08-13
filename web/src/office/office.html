@@ -246,11 +246,20 @@
   .reel-skin-glass .reel-badge[data-rung="4"]{color:#F1685E;background:rgba(241,104,94,.16)}
 
   /* ticker — dense monospace incident log. No card chrome (flat panel,
-     hairline border, no shadow), tight single-line rows: line1/line2
-     collapse into one flex row via display:contents on the wrapper spans,
-     so the markup stays identical to the other two skins and only the
-     layout changes. Source tags are dropped here — R-badge + who + path +
-     resolution + time is already dense enough without them. */
+     hairline border, no shadow). Two lines per row, same as paper/glass —
+     NOT the one-line version this used to be. That version packed
+     R-badge + who + vs + who + path + dot + res + time into one 288px-
+     wide flex row (line1/line2 collapsed via display:contents so nothing
+     in the shared markup had to change); at the real panel width that's
+     roughly a dozen characters of budget per field, so five of seven rows
+     read as "priy… vs dev… — split the …" — ellipsis soup, zero
+     information, caught in the browser at 308px (reel-skins-test.html's
+     old wider mount never showed it, see that file's own note). One line
+     was never going to fit this many fields at this width — going
+     two-line-but-tight keeps the terminal feel (monospace, flat, no card
+     chrome) without the cramming. Source tags still stay dropped; even
+     with a second line, "live" vs "generated" isn't worth the width here
+     when the paper/glass skins already show it. */
   /* same #reel-specificity fix as glass, above. */
   #reel.reel-skin-ticker{background:#0A0E13;border:1px solid #1B2430;border-radius:4px;
     box-shadow:none;font-family:ui-monospace,monospace}
@@ -269,28 +278,25 @@
   .reel-skin-ticker .reel-human{background:#111820;border-color:#26313F;
     color:#DCE6F0;border-radius:3px}
   .reel-skin-ticker .reel-item{border-color:#131A22}
-  .reel-skin-ticker .reel-row{padding:3px 10px;gap:7px;font-size:11px;align-items:baseline}
+  /* Deliberately no display/flex-direction override on .reel-body,
+     .reel-line1 or .reel-line2 here — that's the whole fix. Letting the
+     base column layout stand (line1 above line2) is what makes this
+     two-line; the tightness comes from smaller padding/gap/font below,
+     not from cramming everything into one row. */
+  .reel-skin-ticker .reel-row{padding:5px 10px;gap:7px}
   .reel-skin-ticker .reel-row:hover{background:#101720}
   .reel-skin-ticker .reel-row-open,.reel-skin-ticker .reel-row-open:hover{background:#121B26}
-  .reel-skin-ticker .reel-badge{font-size:9px;padding:1px 4px;border-radius:3px;margin-top:0}
-  .reel-skin-ticker .reel-body{flex-direction:row;align-items:baseline;gap:6px;
-    min-width:0;overflow:hidden}
-  .reel-skin-ticker .reel-line1,.reel-skin-ticker .reel-line2{display:contents}
-  /* who/vs/res need their own overflow+nowrap here (not just inherited)
-     because reel-line1/line2's display:contents makes them direct flex
-     items of the row-direction reel-body — without overflow:hidden the
-     browser falls back to each item's min-content size, which for "who"
-     breaks at the "/" in "priya/agent-2" and wraps to two lines instead
-     of shrinking. Caught in the browser at the real 308px panel width;
-     reel-skins-test.html's wider layout never showed it. */
-  .reel-skin-ticker .reel-who{color:#DCE6F0;font-size:11px;white-space:nowrap;
-    overflow:hidden;text-overflow:ellipsis;max-width:78px}
+  .reel-skin-ticker .reel-badge{font-size:9px;padding:1px 4px;border-radius:3px}
+  .reel-skin-ticker .reel-body{gap:1px}
+  .reel-skin-ticker .reel-line1{font-size:11px;gap:5px}
+  .reel-skin-ticker .reel-line2{font-size:10px;gap:5px}
+  .reel-skin-ticker .reel-who{color:#DCE6F0;white-space:nowrap;
+    overflow:hidden;text-overflow:ellipsis;max-width:118px}
   .reel-skin-ticker .reel-vs{color:#425063;white-space:nowrap;flex:0 0 auto}
   .reel-skin-ticker .reel-src{display:none}
-  .reel-skin-ticker .reel-path{color:#7FE0A8;max-width:120px}
+  .reel-skin-ticker .reel-path{color:#7FE0A8;max-width:150px}
   .reel-skin-ticker .reel-dot{color:#2F3B48}
-  .reel-skin-ticker .reel-res{color:#8291A3;white-space:nowrap;overflow:hidden;
-    text-overflow:ellipsis;max-width:96px}
+  .reel-skin-ticker .reel-res{color:#8291A3}
   .reel-skin-ticker .reel-time{color:#425063;font-size:10px}
   .reel-skin-ticker .reel-empty{color:#425063}
   .reel-skin-ticker .reel-foot{border-color:#1B2430;color:#5A6B7D}
