@@ -92,6 +92,18 @@ const CSS = `
 #bc .close{position:absolute;top:10px;right:12px;border:none;background:none;
   color:#8A94A3;font-size:15px;cursor:pointer;padding:2px 6px;border-radius:5px}
 #bc .close:hover{background:#E9E0CE;color:#35455C}
+
+/* --- region strip: the lines this agent actually holds right now, not the
+   whole file. Press R to flip against the ownership-bar view above. --- */
+#bc .region-summary{margin:0 0 8px;font-size:12px;color:#35455C}
+#bc .region-summary b{color:#C0762A}
+#bc .region-gutter{display:flex;height:38px;border-radius:6px;overflow:hidden;
+  background:#E9E0CE;box-shadow:inset 0 0 0 1px #C3B39B55}
+#bc .region-seg{height:100%;width:0;transition:width .5s cubic-bezier(.2,.8,.2,1);
+  position:relative}
+#bc .region-seg.self{box-shadow:inset 0 0 0 2px #fffdfa99}
+#bc .region-legend{display:flex;flex-wrap:wrap;gap:4px 10px;margin:8px 0 0}
+#bc .region-note{margin:8px 0 0;font-size:10px;color:#8A94A3;font-style:italic}
 `
 
 /** repo-relative path -> {blame, log} promise, so re-selecting the same agent
@@ -114,8 +126,83 @@ function loadFor(path, fetchFn) {
   return p
 }
 
+/** path + line range -> ranged blame promise. Separate cache from loadFor's
+ *  whole-file one — same path can be open in both modes at once (the R
+ *  toggle swaps between them without refetching either). */
+const regionCache = new Map()
+
+function loadRegion(path, start, end, fetchFn) {
+  if (!path) return Promise.resolve({ ok: false })
+  const key = `${path}#${start}-${end}`
+  if (regionCache.has(key)) return regionCache.get(key)
+  const p = fetchJSON(fetchFn, `/api/git/blame?path=${encodeURIComponent(path)}&start=${start}&end=${end}`)
+  regionCache.set(key, p)
+  return p
+}
+
 function isSelf(agent, author) {
   return agent.role === author || agent.name === author
+}
+
+// ---------------------------------------------------------------------
+// region blame — pure functions, covered directly by
+// web/test/region-blame.test.ts without touching the DOM.
+// ---------------------------------------------------------------------
+
+/** Does this agent carry a real, well-formed line range? Absent/partial
+ *  fields (today's whole-file agents, live frames with no region) both
+ *  read as "no". Mirrors live.js's own regionFromMsg guard on the other
+ *  end of the pipe: end must be strictly past start. */
+export function hasUsableRegion(agent) {
+  return !!agent && typeof agent.gitPath === 'string' && agent.gitPath.length > 0 &&
+    Number.isFinite(agent.gitStart) && Number.isFinite(agent.gitEnd) &&
+    agent.gitEnd > agent.gitStart
+}
+
+/** A ranged blame response is only "usable" if the endpoint actually found
+ *  lines there. gitapi.mjs tolerates a bogus range (past EOF, etc.) by
+ *  returning {ok:false} the same way it does for "no blame available" at
+ *  all — this is the single point that decides whether the card falls back
+ *  to the whole-file view or shows the region strip. */
+export function regionBlameUsable(regionBlame) {
+  return !!(regionBlame && regionBlame.ok && regionBlame.total > 0)
+}
+
+/** Ranged blame's `owners` array (same aggregate shape parseBlamePorcelain
+ *  always returns — total lines + per-author share, not per-line text) into
+ *  gutter segments: one per author, sorted biggest first, tagged `self` so
+ *  the render step can outline the viewer's own share. */
+export function regionGutterSegments(blame, agent) {
+  if (!regionBlameUsable(blame)) return []
+  return blame.owners.map(o => ({
+    author: o.author,
+    pct: Math.max(Math.round(o.share * 100), blame.owners.length > 1 ? 1.5 : Math.round(o.share * 100)),
+    self: agent ? isSelf(agent, o.author) : false,
+  }))
+}
+
+function formatAge(days) {
+  if (days == null) return null
+  if (days <= 0) return 'today'
+  if (days === 1) return '1 day'
+  if (days < 30) return `${days} days`
+  if (days < 365) return `${Math.round(days / 30)} months`
+  return `${Math.round(days / 365)} years`
+}
+
+/** "these 14 lines: mostly mohsen (78%), newest 2 days ago" — the one-line
+ *  summary that goes on top of the gutter. null when there's nothing
+ *  usable to summarise (empty/absent region blame). */
+export function regionSummary(blame) {
+  if (!regionBlameUsable(blame)) return null
+  const top = blame.owners[0]
+  return {
+    total: blame.total,
+    topAuthor: top ? top.author : null,
+    topPct: top ? Math.round(top.share * 100) : null,
+    multiAuthor: blame.owners.length > 1,
+    ageLabel: formatAge(blame.newestLineAgeDays),
+  }
 }
 
 // ---------------------------------------------------------------------
@@ -215,6 +302,67 @@ function renderHistoryGraphic(host, log) {
 }
 
 // ---------------------------------------------------------------------
+// region strip: the lines the agent actually holds, not the whole file.
+// Built on the same `owners` aggregate parseBlamePorcelain always returns
+// (no per-line text or per-line author sequence comes back from the
+// endpoint today — see gitapi.mjs's blame route), so the gutter is
+// proportional colour, not a literal line-by-line render. Good enough to
+// answer "whose lines are these, and how fresh" at a glance; true
+// line-by-line rendering would need the porcelain parser to keep per-line
+// author instead of collapsing straight to totals, which is a gitapi.mjs
+// change and out of scope for the file-ownership boundary this round drew.
+// ---------------------------------------------------------------------
+
+function renderRegionStrip(host, regionBlame, agent, range) {
+  const summary = regionSummary(regionBlame)
+  if (!summary) {
+    host.innerHTML = '<p class="empty">no blame for this range</p>'
+    return
+  }
+  const segs = regionGutterSegments(regionBlame, agent)
+
+  const p = document.createElement('p')
+  p.className = 'region-summary'
+  const who = summary.multiAuthor ? `mostly <b>${summary.topAuthor}</b> (${summary.topPct}%)` : `<b>${summary.topAuthor}</b>`
+  const age = summary.ageLabel ? `, newest ${summary.ageLabel} old` : ''
+  p.innerHTML = `these ${summary.total} lines: ${who}${age}`
+
+  const track = document.createElement('div')
+  track.className = 'region-gutter'
+  const legend = document.createElement('div')
+  legend.className = 'region-legend'
+  segs.forEach(s => {
+    const color = colorForAuthor(s.author)
+    const seg = document.createElement('span')
+    seg.className = 'region-seg' + (s.self ? ' self' : '')
+    seg.style.background = color
+    seg.dataset.target = String(s.pct)
+    track.appendChild(seg)
+
+    const who2 = document.createElement('span')
+    who2.className = 'who' + (s.self ? ' self' : '')
+    who2.innerHTML = `<span class="swatch" style="background:${color}"></span>${s.author}<span class="pct">${Math.round(s.pct)}%</span>`
+    legend.appendChild(who2)
+  })
+
+  const note = document.createElement('p')
+  note.className = 'region-note'
+  note.textContent = range ? `lines ${range.start}–${range.end}, held right now` : 'held right now'
+
+  host.innerHTML = ''
+  host.appendChild(p)
+  host.appendChild(track)
+  host.appendChild(legend)
+  host.appendChild(note)
+
+  requestAnimationFrame(() => {
+    track.querySelectorAll('.region-seg').forEach((seg, i) => {
+      setTimeout(() => { seg.style.width = seg.dataset.target + '%' }, i * 70)
+    })
+  })
+}
+
+// ---------------------------------------------------------------------
 // classic variant (the earlier per-row/list treatment, kept for comparison)
 // ---------------------------------------------------------------------
 
@@ -309,14 +457,28 @@ export function attachBlameCard(cfg = {}) {
     const body = el.querySelector('#bcBody')
     body.innerHTML = ''
 
+    const showRegion = current.hasRegion && current.regionMode
+    el.querySelector('#bcPath').textContent = showRegion
+      ? `${agent.gitPath} : lines ${current.range.start}–${current.range.end}`
+      : (agent.gitPath || 'no file tracked yet')
+
     const ownH3 = document.createElement('h3')
+    const toggleBtn = current.hasRegion
+      ? `<button class="variant-btn" id="bcRegionBtn" title="press R to switch between region and whole file">${showRegion ? 'this region' : 'whole file'}</button>`
+      : ''
     ownH3.innerHTML = `<span>whose lines these are</span>` +
-      `<button class="variant-btn" title="press V to switch view">${VARIANTS[variant].label}</button>`
-    ownH3.querySelector('.variant-btn').addEventListener('click', () => cycleVariant())
+      toggleBtn +
+      `<button class="variant-btn" id="bcVariantBtn" title="press V to switch view">${VARIANTS[variant].label}</button>`
+    if (current.hasRegion) ownH3.querySelector('#bcRegionBtn').addEventListener('click', () => toggleRegion())
+    ownH3.querySelector('#bcVariantBtn').addEventListener('click', () => cycleVariant())
     body.appendChild(ownH3)
     const ownBody = document.createElement('div')
     body.appendChild(ownBody)
-    VARIANTS[variant].ownership(ownBody, data.blame, agent)
+    if (showRegion) {
+      renderRegionStrip(ownBody, current.regionData, agent, current.range)
+    } else {
+      VARIANTS[variant].ownership(ownBody, data.blame, agent)
+    }
 
     const histH3 = document.createElement('h3')
     histH3.textContent = 'recent commits'
@@ -332,12 +494,18 @@ export function attachBlameCard(cfg = {}) {
     renderBody()
   }
 
+  function toggleRegion() {
+    if (!current || !current.hasRegion) return
+    current.regionMode = !current.regionMode
+    renderBody()
+  }
+
   function onKeydown(e) {
-    if (e.key !== 'v' && e.key !== 'V') return
     if (!el.classList.contains('on')) return
     const tag = (document.activeElement && document.activeElement.tagName) || ''
     if (tag === 'INPUT' || tag === 'TEXTAREA') return
-    cycleVariant()
+    if (e.key === 'v' || e.key === 'V') return cycleVariant()
+    if (e.key === 'r' || e.key === 'R') return toggleRegion()
   }
   addEventListener('keydown', onKeydown)
 
@@ -349,14 +517,23 @@ export function attachBlameCard(cfg = {}) {
     el.classList.add('on')
 
     const path = agent.gitPath
+    const wantsRegion = hasUsableRegion(agent)
     const myReq = ++reqId
     current = null
     el.querySelector('#bcBody').innerHTML =
       path ? '<p class="empty">loading…</p>' : '<p class="empty">no history here yet</p>'
     if (!path) return
-    loadFor(path, fetchFn).then(data => {
+    Promise.all([
+      loadFor(path, fetchFn),
+      wantsRegion ? loadRegion(path, agent.gitStart, agent.gitEnd, fetchFn) : Promise.resolve(null),
+    ]).then(([data, regionBlame]) => {
       if (myReq !== reqId) return   // a later select() beat this fetch home
-      current = { agent, data }
+      const hasRegion = wantsRegion && regionBlameUsable(regionBlame)
+      current = {
+        agent, data, regionData: regionBlame, hasRegion,
+        regionMode: hasRegion,   // default to the region view when there is one — it's the more specific answer
+        range: hasRegion ? { start: agent.gitStart, end: agent.gitEnd } : null,
+      }
       renderBody()
     })
   }
