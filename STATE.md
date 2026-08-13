@@ -199,3 +199,123 @@ after you write it, check reflog before assuming you imagined it.
 Not filed as an issue: nothing here hit the "expensive edge case" bar. The
 churn windowDays is hardcoded to 14 per the task contract; making it
 configurable is a small follow-up if a future round wants it, not done here.
+
+## round 2 task 2 — ambient churn on characters + live gitPath fix
+
+No browser needed for this one (the two lock slots went to tasks 3/4).
+Built the third ambient signal end to end: gitsignals.js polls a file's
+churn, agent.js turns it into a typing-speed bump and a growing paper
+stack.
+
+- **`gitsignals.js`** — new `churnToIntensity(data)`, pure and exported:
+  `{ok:true, recent:{commits,added,deleted}, working:{added,deleted}}` ->
+  a 0..1 number. Working-tree lines weighted 3x, recent-log lines 0.5x,
+  recent commit count 2x, squashed through `1 - exp(-score/40)` so a first
+  small edit already registers instead of needing to clear a threshold.
+  Malformed `ok:true` body with both `recent` and `working` absent reads as
+  `null` ("unknown"), same convention as `statToAgeDays`; a well-formed body
+  with genuinely zero churn reads as `0` ("known and quiet") — those are
+  different things and the function treats them differently. New
+  `pollChurn()` added to the existing `tick()`, same 20s cache/interval as
+  the freshness poll. Its failure mode is a true no-op (doesn't call
+  `setChurn` at all on a miss) rather than resetting to 0, specifically so
+  building against this before task 1's route existed wouldn't fight the
+  eased ramp with a false "not busy" every 20s — confirmed this actually
+  happened: task 1 hadn't landed `/api/git/churn` when I started, landed it
+  mid-session, and the no-op path is exactly what let me build without
+  waiting.
+- **`anim.js`** — new `setTimeScale(obj, name, timeScale)`. Reaches into the
+  mixer's cached-action map directly rather than going through `crossfade`,
+  so nudging the typing speed doesn't restart the clip or reset its phase.
+- **`agent.js`** — `setChurn(intensity)` next to `setFreshness`, same shape
+  (clamps, stores a target, does nothing else synchronously). `update(dt)`
+  eases `_churn` toward that target at a fixed rate (`CHURN_EASE`, ~2.2/s)
+  so a poll landing mid-keystroke can't snap anything. Two visible effects,
+  both driven off the same eased value:
+  - typing timeScale, 1.0x..1.6x (`CHURN_TYPE_SPEED`), only while
+    `activity === 'typing'` so an idle/walking agent never carries a
+    phantom speed-up.
+  - a paper-stack prop (`churnGroup`: a tray + a block whose `scale.y` IS
+    the eased churn value times `CHURN_MAX_H`), riding the agent root at a
+    fixed desk-height guess (`CHURN_BASE_Y = 0.74`, office.html's real
+    `DESK_TOP` is 0.76 — close enough, agent.js has no reference to which
+    desk mesh an agent is actually at, so this is a decoration next to
+    them rather than literally resting on their desk). Grows from the
+    tray's surface, not the block's center, so it reads as stacking up.
+    Both meshes go fully transparent and `visible = false` below
+    `_churn > 0.004` — genuinely zero papers at zero churn, not just
+    invisible-but-present.
+- **Real data confirmed via curl against a throwaway `pnpm dev --port 5199`
+  instance** (never touched the shared 5173 lock — this wasn't a browser
+  task) then killed immediately:
+  `web/src/office/agent.js` -> `{"recent":{"commits":4,"added":716,
+  "deleted":39,"windowDays":14},"working":{"added":69,"deleted":0}}`
+  (intensity ~1.0, it's been hammered this round). Checked the whole demo
+  cast's actual files too: `python/src/agent_presence/__init__.py` comes
+  back intensity ~0.05 (one commit, no lines), `go/cmd/gorelay/main.go`
+  ~0.78, `cpp/hook/hook.cpp` and `README.md` both ~1.0. That's real spread
+  across the 5-agent cast without touching anything — see below on why I
+  didn't also do 2d.
+- **2d (vary demo-cast paths), not done, and not really actionable as
+  written**: the task described this as a `demo.js` change, but the actual
+  file->agent mapping (the `CAST` array with each agent's `file:`) lives in
+  `office.html`, which this task was explicitly told not to touch (task 3
+  owns it this round). `demo.js` itself has no path data at all — grepped
+  for `gitPath`/`file` there, nothing. Since the curl check above shows the
+  five existing demo-cast paths already produce five different real
+  intensities (0.05 to ~1.0), I'm treating this as already satisfied by
+  the existing data rather than a gap.
+- **2c (live gitPath staleness fix), also not done, also not actionable as
+  written, for the same reason**: the task said "in `live.js`,
+  `onLivePresence`..." but `onLivePresence` and `spawnLive` both actually
+  live in `office.html` (grepped for both names — `live.js` only has
+  `connect()` and the pure `LiveDirector`/`hairFor`; the presence-frame-to-
+  character binding is scene-file code, not client code). Round 2's
+  integrator pass already documented this exact fix and its exact location
+  in the "What's still half-built" section above. Repeating the concrete
+  patch here since I couldn't apply it: in `office.html`'s
+  `onLivePresence`, right after `if (!a) return`, add `a.gitPath =
+  info.path`. One line, safe, not done because it requires touching a file
+  outside this task's ownership this round.
+- **Paper-stack / typing-speed visuals: UNVERIFIED in-browser.** This task
+  had no lock slot and the logic can't be meaningfully checked without
+  jsdom/canvas (no test in this repo instantiates a real `Agent` — even
+  `badgeTexture`'s `document.createElement('canvas')` would throw in
+  vitest's node environment, which is presumably why no prior round tried
+  it either). What IS verified: `churnToIntensity`'s math (9 new tests in
+  `web/test/churn.test.ts`, real edge cases including the `ok:true` vs
+  malformed distinction, working-vs-recent weighting, monotonicity, and a
+  non-numeric-input guard) and the poll's wiring into `attachGitSignals`
+  (calls `setChurn` on success, silently no-ops on 404/reject/no-gitPath).
+  What's NOT verified: whether the paper stack actually looks like papers
+  from the office camera angle, whether 1.6x typing read as "busy" instead
+  of "broken," whether `CHURN_BASE_Y`/the `0.34, 0.22` offset actually
+  clears the character's body without clipping. Round 3 (or whoever next
+  has the lock): `window.__zoomAgent` or a stat-panel check on `agent2`
+  (mapped to `cpp/hook/hook.cpp`, intensity ~1.0 per the curl check above)
+  should show a near-max paper stack and visibly faster typing — that's
+  the agent to eyeball first since it has the strongest real signal.
+- Also touched `agent.js`'s constructor/`update()` for the churn meshes and
+  `despawnLive` in `office.html` was NOT touched, which means `churnGroup`
+  leaks on live-agent despawn exactly the same way `freshHalo` already does
+  (round 1 gap, not new — noted here so it doesn't look like a regression
+  I introduced).
+
+Files touched: `web/src/office/gitsignals.js`, `web/src/office/gitsignals.d.ts`,
+`web/src/office/agent.js`, `web/src/office/anim.js`, `web/test/churn.test.ts`.
+`agent.d.ts`, `live.js`, `live.d.ts`, `demo.js` — untouched (no pure function
+needed exporting from any of them for this task; live.js/demo.js turned out
+to not be where the actual work was, per above).
+
+Verified: `pnpm test` (111/111, including the 9 new churn tests) and
+`pnpm typecheck` both clean at commit time, re-checked again after a scare
+where a concurrent builder's process (this worktree is shared live across
+all four, see task 1's note above — I hit the same thing) silently reverted
+an in-progress edit to `anim.js` between my Edit call and the next read.
+Caught it by grepping for `setTimeScale` before committing rather than
+trusting the edit had stuck; redid it, reran the full suite, then committed
+and pushed immediately rather than batching further changes. Nothing
+filed as a GitHub issue — no edge case here cleared the "expensive to fix"
+bar; the two "not done, not actionable" items above are ownership
+boundaries for this round, not bugs, and are already tracked precisely
+enough in this file for round 3 to pick up as one-line fixes.
