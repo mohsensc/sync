@@ -27,12 +27,19 @@
 
 const RUNGS = [0, 1, 2, 3, 4]
 
-const RUNG_INFO = {
-  0: { label: 'co-location', color: '#8A94A3', bg: '#EEF0F3' },
-  1: { label: 'read vs edit', color: '#5C8C74', bg: '#EAF2ED' },
-  2: { label: 'same file', color: '#B98F2A', bg: '#FBF2DE' },
-  3: { label: 'contested', color: '#C0762A', bg: '#FBEBDA' },
-  4: { label: 'redundant', color: '#B0403A', bg: '#F9E5E3' },
+// Visual treatments for the panel. Colors live entirely in CSS now (see
+// office.html's reel CSS block and reel-skins-test.html's copy of it) keyed
+// off `.reel-badge[data-rung]` — rowHtml below only ever writes the rung
+// number as a data attribute, never a color, so a skin can restyle every
+// badge without touching this file. 'paper' is the original warm-card look
+// and stays the default; a fresh checkout with no ?skin= param looks
+// exactly like it always has.
+export const SKINS = ['paper', 'glass', 'ticker']
+
+/** Pure param -> skin resolution, no DOM. Anything unrecognized (missing
+ *  param, typo, null) falls back to 'paper' rather than rendering broken. */
+export function resolveSkin(value) {
+  return SKINS.includes(value) ? value : 'paper'
 }
 
 const RESOLUTION_LABEL = {
@@ -246,7 +253,6 @@ function sourceTagHtml(e) {
 }
 
 function rowHtml(e, now, state) {
-  const info = RUNG_INFO[e.rung]
   const res = e.resolution ? (RESOLUTION_LABEL[e.resolution.kind] || e.resolution.kind) : 'still live'
   const open = state.openId === e.id
   const playing = state.playingId === e.id
@@ -277,7 +283,7 @@ function rowHtml(e, now, state) {
   return `<div class="reel-item">
     <div class="${rowClass}" data-id="${escapeAttr(e.id)}" data-ts="${e.ts}"
          role="button" tabindex="0" aria-expanded="${open}">
-      <span class="reel-badge" style="color:${info.color};background:${info.bg}">R${e.rung}</span>
+      <span class="reel-badge" data-rung="${e.rung}">R${e.rung}</span>
       <span class="reel-body">
         <span class="reel-line1">
           <span class="reel-who">${escapeHtml(e.a.human)}/${escapeHtml(e.a.agent)}</span>
@@ -313,18 +319,31 @@ function escapeAttr(s) { return escapeHtml(s) }
  * has a single entry point to drive instead of guessing which click meant
  * "tell me more" vs "play it").
  *
+ * Skin is a class on `container`, not a prop threaded through every draw
+ * call — `reel-skin-<name>`, one of `SKINS`. `opts.skin` sets the initial
+ * one (already resolved through `resolveSkin`, this function doesn't
+ * re-validate); a button in the head cycles through the rest so the owner
+ * can flip looks without editing a URL. All three skins render the exact
+ * same markup — only office.html's CSS (and reel-skins-test.html's copy of
+ * it) differs — so filtering, paging, replay, all of it works identically
+ * regardless of which one is showing.
+ *
  * @param {HTMLElement} container
  * @param {ReelStore} store
- * @param {{ onSelect?: (event:object)=>void }} [opts]
- * @returns {{ render():void, setFoot(html:string):void, setPlaying(id:string|null):void, clearPlaying():void, dispose():void }}
+ * @param {{ onSelect?: (event:object)=>void, skin?: string }} [opts]
+ * @returns {{ render():void, setFoot(html:string):void, setPlaying(id:string|null):void, clearPlaying():void, getSkin():string, setSkin(skin:string):void, dispose():void }}
  */
 export function mountReel(container, store, opts = {}) {
   const onSelect = opts.onSelect || (() => {})
+  let skin = SKINS.includes(opts.skin) ? opts.skin : 'paper'
 
   container.innerHTML = `
     <div class="reel-head">
       <span class="reel-title">highlight reel</span>
-      <span class="reel-count"></span>
+      <span class="reel-head-right">
+        <span class="reel-count"></span>
+        <button class="reel-skin-btn" data-role="skin-btn" type="button"></button>
+      </span>
     </div>
     <div class="reel-filters">
       <div class="reel-chips" data-role="rung"></div>
@@ -339,6 +358,20 @@ export function mountReel(container, store, opts = {}) {
   const humanEl = container.querySelector('[data-role="human"]')
   const listEl = container.querySelector('[data-role="list"]')
   const footEl = container.querySelector('[data-role="foot"]')
+  const skinBtn = container.querySelector('[data-role="skin-btn"]')
+
+  function applySkinClass() {
+    for (const s of SKINS) container.classList.remove(`reel-skin-${s}`)
+    container.classList.add(`reel-skin-${skin}`)
+    skinBtn.textContent = skin
+    skinBtn.title = `look: ${skin} — click for ${SKINS[(SKINS.indexOf(skin) + 1) % SKINS.length]}`
+    skinBtn.setAttribute('aria-label', skinBtn.title)
+  }
+  skinBtn.onclick = () => {
+    skin = SKINS[(SKINS.indexOf(skin) + 1) % SKINS.length]
+    applySkinClass()
+  }
+  applySkinClass()
 
   function renderChips() {
     const items = ['all', ...RUNGS]
@@ -419,8 +452,14 @@ export function mountReel(container, store, opts = {}) {
   function setFoot(html) { footEl.innerHTML = html }
   function setPlaying(id) { store.setPlaying(id); render() }
   function clearPlaying() { store.clearPlaying(); render() }
+  function getSkin() { return skin }
+  function setSkin(next) {
+    if (!SKINS.includes(next)) return
+    skin = next
+    applySkinClass()
+  }
   function dispose() { clearInterval(retimeTimer) }
 
   render()
-  return { render, setFoot, setPlaying, clearPlaying, dispose }
+  return { render, setFoot, setPlaying, clearPlaying, getSkin, setSkin, dispose }
 }

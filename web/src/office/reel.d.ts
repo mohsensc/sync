@@ -61,8 +61,15 @@ export const SAMPLE_EVENTS: ReelEvent[]
 
 export function relTime(ts: number, now: number): string
 
+export type ReelSkin = 'paper' | 'glass' | 'ticker'
+
+export const SKINS: ReelSkin[]
+
+export function resolveSkin(value: string | null | undefined): ReelSkin
+
 export interface MountReelOptions {
   onSelect?: (event: ReelEvent) => void
+  skin?: ReelSkin
 }
 
 export interface MountedReel {
@@ -70,6 +77,8 @@ export interface MountedReel {
   setFoot(html: string): void
   setPlaying(id: string | null): void
   clearPlaying(): void
+  getSkin(): ReelSkin
+  setSkin(skin: ReelSkin): void
   dispose(): void
 }
 

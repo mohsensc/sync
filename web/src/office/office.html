@@ -28,6 +28,38 @@
     padding:11px 20px;font-size:15px;line-height:1.45;letter-spacing:-.005em;
     box-shadow:0 8px 30px #4a1f3d33;opacity:0;transition:opacity .35s;pointer-events:none}
   #caption.on{opacity:1}
+
+  /* ---- replay versus card -------------------------------------------
+     Off by default (see replay-card.js — createReplayCard returns a
+     no-op unless ?vcard=split|strip is set), so nothing here changes the
+     look of a plain checkout. Two variants, one shared box: 'split' is a
+     wide lower-third that slides its two halves in from the edges,
+     'strip' is one dense line, both replacing the plain #caption text
+     for the duration of a reel replay (see office.html's replayEvent). */
+  .rcard{position:fixed;left:50%;bottom:34px;transform:translateX(-50%) translateY(14px);
+    max-width:min(720px,90vw);opacity:0;pointer-events:none;
+    transition:opacity .3s,transform .3s;font:14px ui-sans-serif,sans-serif;color:#F0ECE6}
+  .rcard.on{opacity:1;transform:translateX(-50%) translateY(0)}
+  .rcard-badge{font:700 10px ui-monospace,monospace;text-transform:uppercase;
+    letter-spacing:.04em;border-radius:999px;padding:2px 8px}
+  .rcard.split{display:flex;align-items:stretch;gap:0;
+    background:#35455Cf2;border-radius:12px;box-shadow:0 8px 30px #4a1f3d33;overflow:hidden}
+  .rcard.split .rcard-side{flex:1 1 0;padding:12px 18px;display:flex;flex-direction:column;
+    gap:2px;min-width:0;transition:transform .4s cubic-bezier(.2,.8,.2,1)}
+  .rcard.split .rcard-side b{font-size:14px;letter-spacing:-.01em}
+  .rcard.split .rcard-side span{font:11px ui-monospace,monospace;color:#C7CDD8;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .rcard.split .rcard-a{text-align:right;align-items:flex-end;
+    border-right:1px solid #ffffff22}
+  .rcard.split .rcard-b{text-align:left;align-items:flex-start}
+  .rcard.split:not(.on) .rcard-a{transform:translateX(-24px)}
+  .rcard.split:not(.on) .rcard-b{transform:translateX(24px)}
+  .rcard.split .rcard-mid{flex:0 0 auto;padding:10px 16px;display:flex;
+    flex-direction:column;align-items:center;gap:5px;justify-content:center}
+  .rcard.split .rcard-verdict{font-size:12px;color:#F0ECE6;text-align:center;max-width:180px}
+  .rcard.strip{background:#35455Cf2;border-radius:999px;padding:8px 16px;
+    box-shadow:0 6px 20px #4a1f3d33;display:flex;align-items:center;gap:8px;
+    font:12px ui-monospace,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   #mode{position:fixed;left:50%;top:16px;transform:translateX(-50%);
     background:#35455Cf2;color:#F0ECE6;border-radius:999px;padding:6px 16px;
     font:600 11px ui-monospace,monospace;letter-spacing:.04em;text-transform:uppercase;
@@ -46,7 +78,12 @@
   .reel-head{display:flex;align-items:baseline;justify-content:space-between;
     padding:11px 14px 0}
   .reel-title{font-size:14px;font-weight:600;letter-spacing:-.01em;color:#35455C}
+  .reel-head-right{display:flex;align-items:center;gap:6px}
   .reel-count{font:11px ui-monospace,monospace;color:#8a94a3}
+  .reel-skin-btn{font:600 10px ui-monospace,monospace;padding:3px 7px;border-radius:6px;
+    border:1px solid #C3B39B;background:#fff;color:#6b5f56;cursor:pointer;
+    text-transform:uppercase;letter-spacing:.02em}
+  .reel-skin-btn:hover{background:#E9E0CE}
   .reel-filters{display:flex;align-items:center;gap:6px;padding:8px 14px 10px;
     border-bottom:1px solid #E9E0CE;flex-wrap:wrap}
   .reel-chips{display:flex;gap:4px;flex-wrap:wrap}
@@ -126,6 +163,138 @@
     padding:9px 14px;border:0;border-top:1px solid #E9E0CE;background:#FAF7F0;
     color:#6b5f56;cursor:pointer;text-align:center}
   .reel-more:hover{background:#F0ECE6;color:#35455C}
+
+  /* Rung badge colors, base (paper) case. Unscoped so they're also the
+     fallback if a skin class is somehow missing — reel.js only ever writes
+     data-rung on the badge, never a color, see mountReel's doc comment. */
+  .reel-badge[data-rung="0"]{color:#8A94A3;background:#EEF0F3}
+  .reel-badge[data-rung="1"]{color:#5C8C74;background:#EAF2ED}
+  .reel-badge[data-rung="2"]{color:#B98F2A;background:#FBF2DE}
+  .reel-badge[data-rung="3"]{color:#C0762A;background:#FBEBDA}
+  .reel-badge[data-rung="4"]{color:#B0403A;background:#F9E5E3}
+
+  /* ---- reel skins -----------------------------------------------------
+     Three switchable looks, picked with ?skin=glass|ticker or the cycle
+     button reel.js draws in the head. 'paper' (above) is every rule
+     already written — it needs no .reel-skin-paper block of its own.
+     reel-skins-test.html keeps its own copy of this whole section so it
+     can render all three without loading office.html's 3D scene. */
+
+  /* glass — dark translucent card over the 3D scene. Every text token below
+     was picked against the .reel-skin-glass background itself (rgba(20,26,
+     36,.78) plus blur, so effectively a near-opaque dark ground regardless
+     of what's moving underneath) — rung badges are the only saturated
+     color, everything else is white at varying opacity. */
+  .reel-skin-glass{background:rgba(20,26,36,.78);border-color:rgba(255,255,255,.14);
+    backdrop-filter:blur(16px) saturate(150%);-webkit-backdrop-filter:blur(16px) saturate(150%);
+    box-shadow:0 16px 44px rgba(0,0,0,.5)}
+  .reel-skin-glass .reel-title{color:#F3F5F8}
+  .reel-skin-glass .reel-count{color:rgba(243,245,248,.5)}
+  .reel-skin-glass .reel-skin-btn{background:rgba(255,255,255,.08);
+    border-color:rgba(255,255,255,.18);color:rgba(243,245,248,.75)}
+  .reel-skin-glass .reel-skin-btn:hover{background:rgba(255,255,255,.16)}
+  .reel-skin-glass .reel-filters{border-color:rgba(255,255,255,.12)}
+  .reel-skin-glass .reel-chip{background:rgba(255,255,255,.06);
+    border-color:rgba(255,255,255,.18);color:rgba(243,245,248,.72)}
+  .reel-skin-glass .reel-chip:hover{background:rgba(255,255,255,.13)}
+  .reel-skin-glass .reel-chip.on{background:rgba(243,245,248,.92);color:#141A24;
+    border-color:rgba(243,245,248,.92)}
+  .reel-skin-glass .reel-human{background:rgba(255,255,255,.06);
+    border-color:rgba(255,255,255,.18);color:#F3F5F8}
+  .reel-skin-glass .reel-item{border-color:rgba(255,255,255,.08)}
+  .reel-skin-glass .reel-row:hover{background:rgba(255,255,255,.05)}
+  .reel-skin-glass .reel-row-open,.reel-skin-glass .reel-row-open:hover{
+    background:rgba(255,255,255,.09)}
+  .reel-skin-glass .reel-who{color:#F3F5F8}
+  .reel-skin-glass .reel-vs{color:rgba(243,245,248,.4)}
+  .reel-skin-glass .reel-src-live{background:rgba(127,224,168,.16);color:#8FE3B2}
+  .reel-skin-glass .reel-src-gen{background:rgba(255,255,255,.08);color:rgba(243,245,248,.55)}
+  .reel-skin-glass .reel-path{color:rgba(243,245,248,.72)}
+  .reel-skin-glass .reel-dot{color:rgba(243,245,248,.3)}
+  .reel-skin-glass .reel-res{color:rgba(243,245,248,.6)}
+  .reel-skin-glass .reel-time{color:rgba(243,245,248,.4)}
+  .reel-skin-glass .reel-empty{color:rgba(243,245,248,.45)}
+  .reel-skin-glass .reel-foot{border-color:rgba(255,255,255,.1);color:rgba(243,245,248,.5)}
+  .reel-skin-glass .reel-foot b{color:#F3F5F8}
+  .reel-skin-glass .reel-row-playing{background:rgba(214,180,92,.14)}
+  .reel-skin-glass .reel-row-playing::before{background:#E4BD5C}
+  .reel-skin-glass .reel-row-new{animation:reel-arrive-glass 1.6s ease-out}
+  @keyframes reel-arrive-glass{0%{background:rgba(127,224,168,.22)}100%{background:transparent}}
+  .reel-skin-glass .reel-detail-explain{background:rgba(255,255,255,.05);
+    border-color:rgba(255,255,255,.12);color:rgba(243,245,248,.72)}
+  .reel-skin-glass .reel-detail-label{color:rgba(243,245,248,.4)}
+  .reel-skin-glass .reel-detail-value{color:#F3F5F8}
+  .reel-skin-glass .reel-replay-btn{background:#F3F5F8;color:#141A24;border-color:#F3F5F8}
+  .reel-skin-glass .reel-replay-btn:hover{background:#DCE6F0}
+  .reel-skin-glass .reel-replay-btn:disabled{background:rgba(255,255,255,.18);
+    color:rgba(20,26,36,.6);border-color:rgba(255,255,255,.18)}
+  .reel-skin-glass .reel-more{background:rgba(255,255,255,.03);
+    border-color:rgba(255,255,255,.1);color:rgba(243,245,248,.5)}
+  .reel-skin-glass .reel-more:hover{background:rgba(255,255,255,.08);color:#F3F5F8}
+  .reel-skin-glass .reel-badge[data-rung="0"]{color:#B7C2D1;background:rgba(255,255,255,.08)}
+  .reel-skin-glass .reel-badge[data-rung="1"]{color:#7FE0A8;background:rgba(127,224,168,.14)}
+  .reel-skin-glass .reel-badge[data-rung="2"]{color:#F0C55C;background:rgba(240,197,92,.16)}
+  .reel-skin-glass .reel-badge[data-rung="3"]{color:#F3934D;background:rgba(243,147,77,.16)}
+  .reel-skin-glass .reel-badge[data-rung="4"]{color:#F1685E;background:rgba(241,104,94,.16)}
+
+  /* ticker — dense monospace incident log. No card chrome (flat panel,
+     hairline border, no shadow), tight single-line rows: line1/line2
+     collapse into one flex row via display:contents on the wrapper spans,
+     so the markup stays identical to the other two skins and only the
+     layout changes. Source tags are dropped here — R-badge + who + path +
+     resolution + time is already dense enough without them. */
+  .reel-skin-ticker{background:#0A0E13;border:1px solid #1B2430;border-radius:4px;
+    box-shadow:none;font-family:ui-monospace,monospace}
+  .reel-skin-ticker .reel-head{border-bottom:1px solid #1B2430;padding:7px 10px 6px}
+  .reel-skin-ticker .reel-title{font-size:11px;letter-spacing:.08em;
+    text-transform:uppercase;color:#7FE0A8}
+  .reel-skin-ticker .reel-count{color:#4B5A6B}
+  .reel-skin-ticker .reel-skin-btn{background:#111820;border-color:#26313F;
+    color:#8291A3;border-radius:3px}
+  .reel-skin-ticker .reel-skin-btn:hover{background:#1B2430}
+  .reel-skin-ticker .reel-filters{padding:5px 10px;border-color:#1B2430}
+  .reel-skin-ticker .reel-chip{font-size:9px;padding:2px 5px;border-radius:3px;
+    border-color:#26313F;background:#111820;color:#8291A3}
+  .reel-skin-ticker .reel-chip:hover{background:#1B2430}
+  .reel-skin-ticker .reel-chip.on{background:#1B2430;color:#DCE6F0;border-color:#3A4B5E}
+  .reel-skin-ticker .reel-human{background:#111820;border-color:#26313F;
+    color:#DCE6F0;border-radius:3px}
+  .reel-skin-ticker .reel-item{border-color:#131A22}
+  .reel-skin-ticker .reel-row{padding:3px 10px;gap:7px;font-size:11px;align-items:baseline}
+  .reel-skin-ticker .reel-row:hover{background:#101720}
+  .reel-skin-ticker .reel-row-open,.reel-skin-ticker .reel-row-open:hover{background:#121B26}
+  .reel-skin-ticker .reel-badge{font-size:9px;padding:1px 4px;border-radius:3px;margin-top:0}
+  .reel-skin-ticker .reel-body{flex-direction:row;align-items:baseline;gap:6px;
+    min-width:0;overflow:hidden}
+  .reel-skin-ticker .reel-line1,.reel-skin-ticker .reel-line2{display:contents}
+  .reel-skin-ticker .reel-who{color:#DCE6F0;font-size:11px}
+  .reel-skin-ticker .reel-vs{color:#425063}
+  .reel-skin-ticker .reel-src{display:none}
+  .reel-skin-ticker .reel-path{color:#7FE0A8;max-width:120px}
+  .reel-skin-ticker .reel-dot{color:#2F3B48}
+  .reel-skin-ticker .reel-res{color:#8291A3}
+  .reel-skin-ticker .reel-time{color:#425063;font-size:10px}
+  .reel-skin-ticker .reel-empty{color:#425063}
+  .reel-skin-ticker .reel-foot{border-color:#1B2430;color:#5A6B7D}
+  .reel-skin-ticker .reel-row-playing{background:#1B2A1E}
+  .reel-skin-ticker .reel-row-playing::before{background:#7FE0A8}
+  .reel-skin-ticker .reel-row-new{animation:reel-arrive-ticker 1.6s ease-out}
+  @keyframes reel-arrive-ticker{0%{background:#12301F}100%{background:transparent}}
+  .reel-skin-ticker .reel-detail{padding:2px 10px 8px 32px}
+  .reel-skin-ticker .reel-detail-explain{background:#0F161D;border-color:#1B2430;
+    color:#8291A3;border-radius:4px}
+  .reel-skin-ticker .reel-detail-label{color:#425063}
+  .reel-skin-ticker .reel-detail-value{color:#DCE6F0}
+  .reel-skin-ticker .reel-replay-btn{background:#173B2A;border-color:#2B6B4A;
+    color:#7FE0A8;border-radius:3px}
+  .reel-skin-ticker .reel-replay-btn:hover{background:#1F4E38}
+  .reel-skin-ticker .reel-more{background:#0D1319;border-color:#1B2430;color:#5A6B7D}
+  .reel-skin-ticker .reel-more:hover{background:#101720;color:#8291A3}
+  .reel-skin-ticker .reel-badge[data-rung="0"]{color:#93A2B4;background:#151C24}
+  .reel-skin-ticker .reel-badge[data-rung="1"]{color:#66C990;background:#12251C}
+  .reel-skin-ticker .reel-badge[data-rung="2"]{color:#E4BD5C;background:#241D10}
+  .reel-skin-ticker .reel-badge[data-rung="3"]{color:#E08A4C;background:#26180E}
+  .reel-skin-ticker .reel-badge[data-rung="4"]{color:#E06860;background:#26120F}
 </style>
 </head>
 <body>
@@ -151,6 +320,7 @@
 <div id="reel"></div>
 <div id="mode" class="connecting">connecting…</div>
 <div id="caption"></div>
+<div id="replayCard"></div>
 <div id="log">loading…</div>
 
 <script type="importmap">
@@ -167,8 +337,10 @@ import { attachInteraction } from './interact.js'
 import { runDemo } from './demo.js'
 import { buildDressing } from './dressing.js'
 import * as Live from './live.js'
-import { ReelStore, SAMPLE_EVENTS, mountReel } from './reel.js'
+import { ReelStore, SAMPLE_EVENTS, mountReel, resolveSkin } from './reel.js'
 import { seedEvents } from './seed.js'
+import { createCaptionArbiter, PRIORITY } from './caption.js'
+import { createReplayCard } from './replay-card.js'
 
 const P = { cream:0xF0ECE6, sand:0xE9E0CE, taupe:0xC3B39B, sage:0xE5E1D2, butter:0xF7DFAF,
             mustard:0xD6B45C, caramel:0xC0762A, coffee:0xB0674F, terracotta:0xD9714F,
@@ -179,6 +351,25 @@ const logEl = document.getElementById('log')
 const capEl = document.getElementById('caption')
 const modeEl = document.getElementById('mode')
 
+// ---- caption arbiter (#63) -----------------------------------------------
+// Both the demo and a reel replay want to drive #caption; see caption.js
+// for why a plain last-write-wins was a bug (a live demo beat could clobber
+// a replay's own text mid-read) and why this is the fix rather than a
+// timer or a "pause the demo" hack — the demo keeps running underneath a
+// replay (agents elsewhere in the room still walk around), it just loses
+// the caption line for as long as the replay holds it.
+const captionArbiter = createCaptionArbiter(text => {
+  capEl.textContent = text
+  capEl.classList.toggle('on', !!text)
+})
+let replayCaptionToken = null
+
+// ---- versus card (replay-card.js) ----------------------------------------
+// Off unless ?vcard=split|strip is set — see replay-card.js's own doc for
+// why default-off matters here (nothing regresses on a plain checkout).
+const vcardParam = new URLSearchParams(location.search).get('vcard')
+const replayCard = createReplayCard(document.getElementById('replayCard'), vcardParam)
+
 // ---- highlight reel -----------------------------------------------------
 // Panel lives top-right, over the scene (see #reel's CSS). Seeded with
 // reel.js's own sample events plus seed.js's larger generated history, so
@@ -187,8 +378,12 @@ const modeEl = document.getElementById('mode')
 // decision feed (onDecision/onRedundant below) adds real rows on top as
 // they arrive — see live.js's toReelEvent for the normalization.
 const reelStore = new ReelStore([...SAMPLE_EVENTS, ...seedEvents()])
+// ?skin=glass|ticker picks a look on load; anything else (including no
+// param) falls back to 'paper', the original warm-card treatment. The
+// head's cycle button (drawn by mountReel itself) switches at runtime too.
 const reel = mountReel(document.getElementById('reel'), reelStore, {
   onSelect: (e) => replayEvent(e),
+  skin: resolveSkin(new URLSearchParams(location.search).get('skin')),
 })
 reel.setFoot('idle')
 // preserveDrawingBuffer: canvas.toDataURL() is how the browser-lock
@@ -797,16 +992,68 @@ const RESOLUTION_LABEL = {
   'read-yield': 'reader yielded',
 }
 
+// ---- replay variant dispatch ---------------------------------------------
+// A 'share' resolution can play as highfive (the only one that shipped in
+// earlier rounds) or, once the clip pair land, chestbump/fistbump; an
+// 'abort' resolution can play as shove, waveoff, or slap. Every non-base
+// name is a `typeof world.X === 'function'` check away from a silent
+// fallback to the base beat, so this dispatch degrades cleanly whether or
+// not those clips have landed yet in this tree — see office/STATE.md.
+//
+// world.replay(a, b, kind) is still the whole story for the base name of
+// each family: it plays the two-act "clash, then resolution" chain
+// (REPLAY_CHAINS in agent.js). A non-base variant instead calls the
+// standalone World method directly (world.chestbump(a, b), etc.) — those
+// are already complete, self-contained beats with their own approach and
+// contact (same shape as world.highfive/world.shove), so this trades the
+// leading clash stage for the alternate contact animation rather than
+// trying to splice a new stage into REPLAY_CHAINS from outside agent.js.
+const SHARE_VARIANTS = ['highfive', 'chestbump', 'fistbump']
+const ABORT_VARIANTS = ['shove', 'waveoff', 'slap']
+const replayPlayCounts = new Map()   // event id -> times replayed, for the cycle-on-repeat rule
+
+/** Small deterministic string hash (FNV-1a-ish) — good enough to spread
+ *  event ids across a handful of variants without pulling in a dependency
+ *  for it. Not cryptographic, doesn't need to be. */
+function hashStr(s) {
+  let h = 2166136261
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) }
+  return h >>> 0
+}
+
+/** Which World method should play this resolution's beat: honors
+ *  ?beat=<name> if it names a function that actually exists on `world`;
+ *  otherwise cycles deterministically through whichever variants in the
+ *  family exist, keyed by event id + how many times this exact event has
+ *  been replayed this session (so clicking replay twice in a row on the
+ *  same row shows a different take, but reloading the page and clicking
+ *  once always shows the same first take for a given id). Returns null
+ *  for a kind with no variant family (wait, redundant, read-yield all
+ *  still just go through world.replay unconditionally). */
+function pickReplayVariant(kind, eventId) {
+  const family = kind === 'share' ? SHARE_VARIANTS : kind === 'abort' ? ABORT_VARIANTS : null
+  if (!family) return null
+
+  const forced = new URLSearchParams(location.search).get('beat')
+  if (forced && family.includes(forced) && typeof world[forced] === 'function') return forced
+
+  const available = family.filter(name => name === family[0] || typeof world[name] === 'function')
+  const n = replayPlayCounts.get(eventId) || 0
+  replayPlayCounts.set(eventId, n + 1)
+  return available[hashStr(`${eventId}:${n}`) % available.length]
+}
+
 /** Click a reel row: caption who it was, then run the two-act replay — the
  *  clash, then the beat that actually resolved it — through
- *  World.replay(), with the camera easing in to frame the pair and back
- *  out once the whole chain finishes (see the camera block above,
- *  focusPair/releaseCameraFocus, and the render-loop check that calls the
- *  latter). A click never silently no-ops: a rung-0 event (resolution:
- *  null), a pair not currently on screen (live frames often only know one
- *  side — see toReelEvent's own comment, that's honest, not a bug), or a
- *  pair where either side is already mid-beat all caption instead, rather
- *  than doing nothing. */
+ *  World.replay() (or a direct variant call, see pickReplayVariant above),
+ *  with the camera easing in to frame the pair and back out once the whole
+ *  chain finishes (see the camera block above, focusPair/
+ *  releaseCameraFocus, and the render-loop check that calls the latter).
+ *  A click never silently no-ops: a rung-0 event (resolution: null), a
+ *  pair not currently on screen (live frames often only know one side —
+ *  see toReelEvent's own comment, that's honest, not a bug), or a pair
+ *  where either side is already mid-beat all caption instead, rather than
+ *  doing nothing. */
 function replayEvent(e) {
   const who = (s) => (s.human || s.agent) ? `${s.human || '?'}/${s.agent || '?'}` : 'an unnamed agent'
   const pair = `${who(e.a)} vs ${who(e.b)}`
@@ -829,14 +1076,27 @@ function replayEvent(e) {
     return
   }
 
-  const enc = world.replay(a, b, e.resolution.kind)
+  const kind = e.resolution.kind
+  const variant = pickReplayVariant(kind, e.id)
+  const isBaseVariant = variant === null ||
+    (kind === 'share' && variant === 'highfive') || (kind === 'abort' && variant === 'shove')
+  // A direct (non-chained) variant call skips world.replay()'s own arg
+  // convention and goes straight to the standalone World method, which
+  // for the abort family expects (winner, loser) — the opposite order
+  // from the reel's own a=stands-down/b=prevails convention this function
+  // uses throughout. Share's family is symmetric, so no swap needed there.
+  const enc = isBaseVariant ? world.replay(a, b, kind)
+    : kind === 'abort' ? world[variant](b, a) : world[variant](a, b)
   if (!enc) {
-    caption(`replay: ${pair} — no matching beat for "${e.resolution.kind}"`)
+    caption(`replay: ${pair} — no matching beat for "${kind}"`)
     return
   }
 
-  const label = RESOLUTION_LABEL[e.resolution.kind] || e.resolution.kind
-  caption(`replay: ${pair} — ${label}`)
+  const label = RESOLUTION_LABEL[kind] || kind
+  const token = captionArbiter.hold(PRIORITY.replay)
+  replayCaptionToken = token
+  captionArbiter.set(`replay: ${pair} — ${label}`, { priority: PRIORITY.replay })
+  replayCard.show({ a: e.a, b: e.b, rung: e.rung, label })
   focusPair(a, b, enc)
 }
 
@@ -909,9 +1169,12 @@ function initLive() {
 
 // ---- demo -------------------------------------------------------------
 let demo = null
+// Routed through captionArbiter at demo priority — see #63 above. A
+// replay hold (higher priority) simply drops these while it's active;
+// this function's own signature and every existing call site are
+// unchanged, so this is a transparent swap.
 function caption(text) {
-  capEl.textContent = text
-  capEl.classList.toggle('on', !!text)
+  captionArbiter.set(text, { priority: PRIORITY.demo })
 }
 function startDemo() {
   if (demo) demo.cancel()
@@ -995,7 +1258,12 @@ function tick(){
   // world.update() above already advanced it this frame, so `phase` is
   // current. #end() only removes it from world.encounters, it doesn't
   // stop being an object, so the reference here stays valid to check.
-  if (replayEnc && replayEnc.phase === 'done') releaseCameraFocus()
+  if (replayEnc && replayEnc.phase === 'done') {
+    releaseCameraFocus()
+    captionArbiter.release(replayCaptionToken)
+    replayCaptionToken = null
+    replayCard.hide()
+  }
 
   const r = RADIUS*dist, cp = Math.cos(pitch)
   camera.position.set(target.x + Math.sin(yaw)*r*cp,
