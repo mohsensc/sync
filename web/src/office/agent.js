@@ -36,11 +36,15 @@ import * as THREE from 'three'
 import * as ANIM from './anim.js'
 import { highfiveMarks, spacingFor } from './highfive.js'
 import { argueMarks, spacingFor as argueSpacingFor, registry as ARGUE_CLIPS } from './clips/argue.js'
+import { handshakeMarks, spacingFor as handshakeSpacingFor, registry as HANDSHAKE_CLIPS } from './clips/handshake.js'
+import { shoveMarks, spacingFor as shoveSpacingFor, registry as SHOVE_CLIPS } from './clips/shove.js'
 
-// Fold the contested-write pair's clips into anim.js's own table, once, at
-// import time — before any agent has crossfaded into anything and cached the
-// clip list. See anim.js's CLIPS export and clips/argue.js's own header.
+// Fold the paired-action clips into anim.js's own table, once, at import
+// time — before any agent has crossfaded into anything and cached the clip
+// list. See anim.js's CLIPS export and each clip module's own header.
 Object.assign(ANIM.CLIPS, ARGUE_CLIPS)
+Object.assign(ANIM.CLIPS, HANDSHAKE_CLIPS)
+Object.assign(ANIM.CLIPS, SHOVE_CLIPS)
 
 export const YAW_OFFSET = Math.PI
 
@@ -81,6 +85,13 @@ const ACTS = {
   // 'argueReact' once World.contest() folds them into ANIM.CLIPS.
   arguing:    { clip: 'argue',      fade: 0.25 },
   reacting:   { clip: 'argueReact', fade: 0.25 },
+  // Resolution beats — the reel plays these once a rung-3 collision clears.
+  // Rung 3, decision "wait": the requester agreed to hold off. clips/handshake.js.
+  handshaking: { clip: 'handshake', fade: 0.20, oneShot: true, next: 'idle' },
+  // Rung 3, decision "abort": wait-die or a straight priority-tier win.
+  // clips/shove.js — `shoving` is the winner, `shoveReacting` the loser.
+  shoving:        { clip: 'shove',      fade: 0.18, oneShot: true, next: 'idle' },
+  shoveReacting:  { clip: 'shoveReact', fade: 0.18, oneShot: true, next: 'idle' },
 }
 export const ACTIVITIES = Object.keys(ACTS)
 
@@ -91,6 +102,7 @@ const ACT_OF_CLIP = {
   idle: 'idle', walk: 'walking', sit: 'sitting', type: 'typing',
   read: 'reading', sleep: 'sleeping', drink: 'drinking', wave: 'waving',
   highfive: 'highfiving', argue: 'arguing', argueReact: 'reacting',
+  handshake: 'handshaking', shove: 'shoving', shoveReact: 'shoveReacting',
 }
 
 const DOING = {
@@ -98,6 +110,7 @@ const DOING = {
   standing: 'getting up', typing: 'typing', sleeping: 'asleep at the desk',
   reading: 'reading', drinking: 'on a break', waving: 'waving',
   highfiving: 'high fiving', arguing: 'arguing over it', reacting: 'not having it',
+  handshaking: 'shaking on it', shoving: 'pulling rank', shoveReacting: 'shoved aside',
 }
 
 const TONE = {
@@ -524,6 +537,34 @@ export class World {
   }
 
   /**
+   * The rung-3 "wait" resolution beat: the requester agreed to hold off, no
+   * animosity, so it's a handshake — a plain office "you go ahead". Same
+   * shape as highfive() exactly (same-frame same-clip pair, marks from
+   * clips/handshake.js's own spacing), just a different clip and a different
+   * ACTS entry. See clips/handshake.js for why this reuses highfive's
+   * "both play the SAME clip, facing each other is already the mirror" trick.
+   */
+  handshake(a, b) {
+    if (!a || !b || a === b || a.busy || b.busy) return null
+    const height = (a.height + b.height) / 2
+    const marks = handshakeMarks(
+      new THREE.Vector3(a.pos.x, 0, a.pos.z),
+      new THREE.Vector3(b.pos.x, 0, b.pos.z),
+      handshakeSpacingFor(height))
+    const ax = marks.a.pos.x, az = marks.a.pos.z
+    const bx = marks.b.pos.x, bz = marks.b.pos.z
+
+    a.busy = b.busy = true
+    a.lastGreet = b.lastGreet = this.time
+    a.goTo(ax, az, { yaw: yawToward(ax, az, bx, bz), label: 'settling with ' + b.name })
+    b.goTo(bx, bz, { yaw: yawToward(bx, bz, ax, az), label: 'settling with ' + a.name })
+
+    const e = { a, b, kind: 'handshake', phase: 'approach', t: 0, marks: { a:[ax, az], b:[bx, bz] } }
+    this.encounters.push(e)
+    return e
+  }
+
+  /**
    * Walk two agents onto the argue marks (clips/argue.js's spacing, same
    * geometry idea as highfive's) and start the contested-write pair: `a`
    * points, `b` throws its hands up. Unlike highfive() this has no natural
@@ -546,6 +587,32 @@ export class World {
     b.goTo(bx, bz, { yaw: yawToward(bx, bz, ax, az), label: 'contesting with ' + a.name })
 
     const e = { a, b, kind: 'contest', phase: 'approach', t: 0, marks: { a:[ax, az], b:[bx, bz] } }
+    this.encounters.push(e)
+    return e
+  }
+
+  /**
+   * The rung-3 "abort" resolution beat: `a` out-authoritied `b` — wait-die
+   * aborted the younger transaction, or a straight priority-tier win — and
+   * `a` makes sure `b` knows it. Asymmetric like contest(), but this one has
+   * a natural end: it plays out once and is done, same as highfive(). `a` is
+   * always the winner.
+   */
+  shove(a, b) {
+    if (!a || !b || a === b || a.busy || b.busy) return null
+    const height = (a.height + b.height) / 2
+    const marks = shoveMarks(
+      new THREE.Vector3(a.pos.x, 0, a.pos.z),
+      new THREE.Vector3(b.pos.x, 0, b.pos.z),
+      shoveSpacingFor(height))
+    const ax = marks.a.pos.x, az = marks.a.pos.z
+    const bx = marks.b.pos.x, bz = marks.b.pos.z
+
+    a.busy = b.busy = true
+    a.goTo(ax, az, { yaw: yawToward(ax, az, bx, bz), label: 'pulling rank on ' + b.name })
+    b.goTo(bx, bz, { yaw: yawToward(bx, bz, ax, az), label: 'shoved by ' + a.name })
+
+    const e = { a, b, kind: 'shove', phase: 'approach', t: 0, marks: { a:[ax, az], b:[bx, bz] } }
     this.encounters.push(e)
     return e
   }
@@ -586,18 +653,26 @@ export class World {
           // story highfive's SAME clip trick tells; see clips/argue.js.
           a.act('arguing')
           b.act('reacting')
+        } else if (e.kind === 'shove') {
+          // Asymmetric like contest — the winner shoves, the loser eats it —
+          // but this one has a fixed length; see clips/shove.js.
+          a.act('shoving')
+          b.act('shoveReacting')
         } else {
-          // Same frame, same fade, both from time zero, both the SAME clip —
-          // facing each other is already the mirror. That is the whole sync
-          // story; see highfive.js.
-          a.act('highfiving')
-          b.act('highfiving')
+          // highfive and handshake: same frame, same fade, both from time
+          // zero, both the SAME clip — facing each other is already the
+          // mirror. That is the whole sync story; see highfive.js.
+          a.act(e.kind === 'handshake' ? 'handshaking' : 'highfiving')
+          b.act(e.kind === 'handshake' ? 'handshaking' : 'highfiving')
         }
       }
     } else if (e.phase === 'active') {
       // A contest has no clip-length end: it lasts until resolveContest()
-      // says the region is free.
-      if (e.kind === 'highfive' && e.t >= ANIM.getClip('highfive').duration + 0.2) {
+      // says the region is free. Everything else (highfive, handshake,
+      // shove) plays out once and ends on its own clip's length.
+      const CLIP_OF_KIND = { highfive: 'highfive', handshake: 'handshake', shove: 'shove' }
+      const clipName = CLIP_OF_KIND[e.kind]
+      if (clipName && e.t >= ANIM.getClip(clipName).duration + 0.2) {
         return this.#end(e)
       }
     }
