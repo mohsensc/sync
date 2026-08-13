@@ -513,6 +513,44 @@ const HEAD_YAW_OFFSET = 0.16
 
 let priorFraming = null   // { target, dist, yaw } to restore to on deselect/Escape
 
+// ---- zoom flight ---------------------------------------------------------
+// The head zoom used to ride the same asymptotic goal.active lerp as every
+// other camera move (see tick() below) — smooth, but it decays toward the
+// target with no shape to it: a dolly, not a look. A flight has a start, an
+// end and a duration, which is what lets it carry an arc and a distinct feel
+// per mode, neither of which a per-frame "close 0.15% of the gap" loop can
+// express. `focus()`/goal is untouched and still drives every other camera
+// move in the file (demo.js's scripted shots, the top/spin buttons) — this
+// is additive, only zoomToAgent/zoomRestore start a flight.
+//
+// Z toggles between two feels, so both are sitting in the room to compare
+// rather than argued about from memory:
+//   'ease' (default) — ease-in-out over ~0.9s, with a lateral arc that bows
+//     the flight path off the straight line between old and new target. A
+//     dead-straight dolly into a face reads as a camera rig; a few degrees
+//     of curve reads as someone leaning in to look.
+//   'snap' — fast, ~0.4s, ease-out-back so the camera overshoots the framing
+//     slightly and settles back — a flinch-and-focus instead of a glide.
+let zoomMode = 'ease'
+let flight = null   // { mode, t, dur, fromTarget, toTarget, fromDist, toDist, fromYaw, toYaw }
+
+function easeInOutCubic(p) { return p < 0.5 ? 4*p*p*p : 1 - Math.pow(-2*p + 2, 3) / 2 }
+function easeOutBack(p) {
+  const c1 = 1.70158, c3 = c1 + 1
+  return 1 + c3 * Math.pow(p - 1, 3) + c1 * Math.pow(p - 1, 2)
+}
+
+function startFlight(toXZ, toDist, toYaw, toTargetY) {
+  flight = {
+    mode: zoomMode, t: 0, dur: zoomMode === 'snap' ? 0.42 : 0.92,
+    fromTarget: target.clone(),
+    toTarget: new THREE.Vector3(toXZ[0], toTargetY, toXZ[1]),
+    fromDist: dist, toDist,
+    fromYaw: yaw, toYaw: Math.max(YAW_MIN, Math.min(YAW_MAX, toYaw)),
+  }
+  goal.active = false
+}
+
 function zoomToAgent(a) {
   if (!priorFraming) {
     // Only the FIRST zoom in a selection streak snapshots the room shot —
@@ -521,15 +559,14 @@ function zoomToAgent(a) {
     // on whichever head came before it.
     priorFraming = { target: target.clone(), dist, yaw }
   }
-  const headYaw = Math.max(YAW_MIN, Math.min(YAW_MAX, yaw + HEAD_YAW_OFFSET))
-  focus([a.pos.x, a.pos.z], HEAD_DIST, headYaw, HEAD_Y)
+  startFlight([a.pos.x, a.pos.z], HEAD_DIST, yaw + HEAD_YAW_OFFSET, HEAD_Y)
 }
 
 function zoomRestore() {
   if (!priorFraming) return
   const p = priorFraming
   priorFraming = null
-  focus([p.target.x, p.target.z], p.dist, p.yaw, p.target.y)
+  startFlight([p.target.x, p.target.z], p.dist, p.yaw, p.target.y)
 }
 
 addEventListener('keydown', e => {
@@ -538,9 +575,19 @@ addEventListener('keydown', e => {
   }
 })
 
+// Z swaps the head-zoom feel between the eased arc and the fast snap-back
+// overshoot. Only affects the NEXT flight — deliberately doesn't retarget
+// one already in progress, so switching mid-zoom doesn't jump.
+addEventListener('keydown', e => {
+  if (e.key !== 'z' && e.key !== 'Z') return
+  if (e.target && /input|textarea/i.test(e.target.tagName)) return
+  zoomMode = zoomMode === 'ease' ? 'snap' : 'ease'
+  logEl.textContent = `zoom feel: ${zoomMode}`
+})
+
 let drag=false, px=0, py=0
 canvas.addEventListener('pointerdown', e => { drag=true; px=e.clientX; py=e.clientY
-  spin=false; setB(bSpin,false); goal.active=false })
+  spin=false; setB(bSpin,false); goal.active=false; flight=null })
 addEventListener('pointerup', () => drag=false)
 addEventListener('pointermove', e => {
   if(!drag) return
@@ -548,7 +595,7 @@ addEventListener('pointermove', e => {
   pitch = Math.max(0.08, Math.min(1.45, pitch + (e.clientY-py)*0.005))
   px=e.clientX; py=e.clientY
 })
-canvas.addEventListener('wheel', e => { e.preventDefault(); goal.active=false
+canvas.addEventListener('wheel', e => { e.preventDefault(); goal.active=false; flight=null
   dist = Math.max(0.35, Math.min(2.2, dist + e.deltaY*0.0012)) }, {passive:false})
 
 const bSpin=document.getElementById('bSpin'), bTop=document.getElementById('bTop')
@@ -799,7 +846,28 @@ function tick(){
     if(yaw>YAW_MAX){ yaw=YAW_MAX; spinDir=-1 }
     if(yaw<YAW_MIN){ yaw=YAW_MIN; spinDir=1 } }
 
-  if (goal.active) {
+  if (flight) {
+    flight.t += dt
+    const p = Math.min(1, flight.t / flight.dur)
+    const e = flight.mode === 'snap' ? easeOutBack(p) : easeInOutCubic(p)
+    const dx = flight.toTarget.x - flight.fromTarget.x
+    const dz = flight.toTarget.z - flight.fromTarget.z
+    const len = Math.hypot(dx, dz)
+    // Perpendicular to the travel line, in the floor plane, so the arc
+    // bows sideways rather than up through the floor or ceiling.
+    const px = len > 1e-4 ? -dz / len : 0, pz = len > 1e-4 ? dx / len : 0
+    const amp = flight.mode === 'snap' ? 0 : Math.min(0.4, len * 0.22)
+    const bow = Math.sin(Math.PI * p)   // zero at both ends, peak mid-flight
+    target.x = flight.fromTarget.x + dx * e + px * amp * bow
+    target.z = flight.fromTarget.z + dz * e + pz * amp * bow
+    target.y = flight.fromTarget.y + (flight.toTarget.y - flight.fromTarget.y) * e
+    dist = flight.fromDist + (flight.toDist - flight.fromDist) * e
+    yaw = flight.fromYaw + (flight.toYaw - flight.fromYaw) * e
+    if (p >= 1) {
+      flight = null
+      goal.target.copy(target); goal.dist = dist; goal.yaw = yaw
+    }
+  } else if (goal.active) {
     const k = 1 - Math.pow(0.0015, dt)
     target.lerp(goal.target, k)
     dist += (goal.dist - dist) * k
@@ -851,7 +919,9 @@ window.__startDemo = startDemo
 window.__caption = () => capEl.textContent
 window.__live = { director, liveAgents, mode: () => (liveMode ? 'live' : 'demo'), onPresence: onLivePresence }
 window.__focus = focus
-window.__setCam = (y,p,d) => { goal.active=false; yaw=y; pitch=p; dist=d }
+window.__setCam = (y,p,d) => { goal.active=false; flight=null; yaw=y; pitch=p; dist=d }
+window.__zoomMode = { get: () => zoomMode, set: m => { zoomMode = m === 'snap' ? 'snap' : 'ease' },
+  get flying() { return !!flight } }
 window.__agentState = () => world.agents.map(a => ({
   ...a.describe(),
   note: a.note || null,

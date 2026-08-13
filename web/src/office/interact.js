@@ -59,6 +59,34 @@ const CSS = `
 #it.card .git.own{border-top:none;margin-top:2px;padding-top:2px;color:#A5738C}
 @keyframes itin{from{opacity:0;transform:translateY(-3px)}to{opacity:1;transform:translateY(0)}}
 @media (prefers-reduced-motion: reduce){#it.card{animation:none}}
+
+/* Second treatment (press H to cycle): a nameplate that floats in 3D space
+   over the character's head instead of trailing the cursor in a corner
+   card. Small on purpose — a whisper, same spirit as the hover tint. */
+#it.nameplate{transform:translate(-50%,-100%);text-align:center}
+#it.nameplate .np{display:inline-flex;flex-direction:column;align-items:center;
+  gap:1px;background:#35455Cd9;color:#F0ECE6;padding:4px 10px 5px;
+  border-radius:8px;box-shadow:0 4px 14px #4a1f3d2e;
+  animation:npin .15s cubic-bezier(.16,1,.3,1)}
+#it.nameplate .np-name{font-size:12px;font-weight:600;letter-spacing:-.01em;white-space:nowrap}
+#it.nameplate .np-role{font-size:9.5px;color:#C3B39B;white-space:nowrap}
+#it.nameplate::after{content:'';position:absolute;left:50%;bottom:-4px;
+  transform:translateX(-50%);border:5px solid transparent;border-top-color:#35455Cd9}
+@keyframes npin{from{opacity:0;transform:translateY(4px) scale(.9)}to{opacity:1;transform:none}}
+
+/* Third treatment: the same rich card, but the ownership line moves up to
+   sit right under the role, ahead of doing/zone/file — for when "whose
+   code is this" is the thing you actually want to lead with. Cards are a
+   flex column so DOM order (fixed by renderAgentCard/host.after) can be
+   overridden purely with CSS \`order\` — no restructuring needed when the
+   git rows land asynchronously after the fetch resolves. */
+#it.card{display:flex;flex-direction:column}
+#it.card h3{order:0}
+#it.card .sub{order:1}
+#it.card dl{order:3}
+#it.card .git{order:4}
+#it.card.rich .git.own{order:2;border-top:none;border-bottom:1px solid #E9E0CE;
+  margin:0 0 8px;padding:0 0 8px;font-size:12px;font-weight:600;color:#4A1F3D}
 `
 
 const ESC_MAP = { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }
@@ -386,6 +414,13 @@ export function attachInteraction(cfg) {
       hoverPhase += dt * 3.4
       tint(matsOf(hovered), HOVER_TINT, 0.4 + 0.22 * (0.5 + 0.5 * Math.sin(hoverPhase)))
     }
+    // The nameplate lives in world space, not cursor space — it has to
+    // track the camera every frame (zoom flight, orbit drag) rather than
+    // only on pointermove like the corner card does.
+    if (hovered && hovered.kind === 'agent' && hoverTreatment === 'nameplate') {
+      const [x, y] = projectHead(hovered.ref)
+      tip.style.left = x + 'px'; tip.style.top = y + 'px'
+    }
     requestAnimationFrame(pulseHover)
   }
   requestAnimationFrame(pulseHover)
@@ -395,8 +430,39 @@ export function attachInteraction(cfg) {
     tip.className = 'tag on'
     tip.textContent = pick.label
   }
+
+  // Three hover treatments for one agent, cycled with H. `card` is the
+  // original: doing/zone/file plus two git rows appended below once their
+  // fetches resolve. `nameplate` is the opposite instinct — nothing but a
+  // name and role, floating over the head in world space instead of
+  // trailing the cursor, for when the corner card is more chrome than the
+  // room needs. `rich` is `card` again but the ownership line (whose code
+  // this is) gets promoted above doing/zone/file via CSS `order` — see the
+  // #it.card.rich rule above — because on a contested file that line is
+  // usually the one thing worth reading first.
+  const HOVER_TREATMENTS = ['card', 'nameplate', 'rich']
+  let hoverTreatment = 'card'
+
+  /** Screen position of a point roughly at head height for `a`, for the
+   *  nameplate treatment. Same projection math as the api's project(),
+   *  just fixed to head height rather than floor level. */
+  function projectHead(a) {
+    const v = new THREE.Vector3(a.pos.x, 1.55, a.pos.z).project(camera)
+    const r = canvas.getBoundingClientRect()
+    return [r.left + (v.x * 0.5 + 0.5) * r.width, r.top + (-v.y * 0.5 + 0.5) * r.height]
+  }
+
+  function renderNameplate(a) {
+    tip.className = 'nameplate on'
+    const role = a.note || a.role || 'agent'
+    tip.innerHTML = `<span class="np"><span class="np-name">${esc(a.name)}</span>` +
+      `<span class="np-role">${esc(role)}</span></span>`
+    const [x, y] = projectHead(a)
+    tip.style.left = x + 'px'; tip.style.top = y + 'px'
+  }
+
   function renderAgentCard(a, token) {
-    tip.className = 'card on'
+    tip.className = hoverTreatment === 'rich' ? 'card rich on' : 'card on'
     const role = a.note || a.role || 'agent'
     const zone = Z.zoneAt(a.pos.x, a.pos.z) || 'open floor'
     tip.innerHTML = `<h3>${esc(a.name)}</h3><p class="sub">${esc(role)}</p>
@@ -429,6 +495,10 @@ export function attachInteraction(cfg) {
       host.after(row)
     })
   }
+  function renderHoveredAgent(a, token) {
+    if (hoverTreatment === 'nameplate') renderNameplate(a)
+    else renderAgentCard(a, token)
+  }
   function setHover(pick) {
     if (pick === hovered) return
     if (hovered && !(selected && hovered.kind === 'agent' && hovered.ref === selected))
@@ -440,9 +510,20 @@ export function attachInteraction(cfg) {
     const show = pick && pick.kind !== 'floor'
     tip.classList.toggle('on', !!show)
     if (!show) return
-    if (pick.kind === 'agent') renderAgentCard(pick.ref, hoverToken)
+    if (pick.kind === 'agent') renderHoveredAgent(pick.ref, hoverToken)
     else renderTag(pick)
   }
+  // H cycles the three hover treatments above. Kept separate from T (desk
+  // tint) since they're independent questions — "how does ownership read on
+  // a desk" vs. "how does a hovered agent's card read" — and the owner asked
+  // for both to be pickable on their own.
+  addEventListener('keydown', e => {
+    if (e.key !== 'h' && e.key !== 'H') return
+    if (e.target && /input|textarea/i.test(e.target.tagName)) return
+    hoverTreatment = HOVER_TREATMENTS[(HOVER_TREATMENTS.indexOf(hoverTreatment) + 1) % HOVER_TREATMENTS.length]
+    log(`hover card: ${hoverTreatment}`)
+    if (hovered && hovered.kind === 'agent') renderHoveredAgent(hovered.ref, hoverToken)
+  })
   function select(agent) {
     if (selected) tint(selected.mats, null)
     selected = agent || null
@@ -544,7 +625,9 @@ export function attachInteraction(cfg) {
   })
   addEventListener('pointermove', e => {
     if (down) { moved = Math.max(moved, Math.hypot(e.clientX-dx0, e.clientY-dy0)); return }
-    tip.style.left = e.clientX + 'px'; tip.style.top = e.clientY + 'px'
+    // Nameplate positions itself off the head every frame (see pulseHover);
+    // mouse-following here would fight that and jitter.
+    if (hoverTreatment !== 'nameplate') { tip.style.left = e.clientX + 'px'; tip.style.top = e.clientY + 'px' }
     const now = performance.now()
     if (now - hoverAt < 45) return          // the camera moves; 22 Hz is plenty
     hoverAt = now
@@ -562,6 +645,12 @@ export function attachInteraction(cfg) {
     setDeskTintMode(mode) {
       deskTintMode = mode === 'breathe' ? 'breathe' : 'steady'
       if (deskTintMode === 'steady') for (const d of desks) applyRest({ kind:'desk', ref:d })
+    },
+    get hoverTreatment() { return hoverTreatment },
+    setHoverTreatment(mode) {
+      if (!HOVER_TREATMENTS.includes(mode)) return
+      hoverTreatment = mode
+      if (hovered && hovered.kind === 'agent') renderHoveredAgent(hovered.ref, hoverToken)
     },
     hoverAt(x, y) { const h = pickAt(x, y); setHover(h ? h.pick : null); return h ? h.pick.label : null },
     /** Register a click target for an agent added after attachInteraction()
