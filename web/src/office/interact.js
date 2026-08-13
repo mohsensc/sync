@@ -33,8 +33,10 @@ const PROP_JOB = {
 const CSS = `
 #ip{position:fixed;right:18px;top:74px;width:238px;background:#fffdfaee;
   border:1px solid #C3B39B;border-radius:10px;padding:12px 14px;
-  box-shadow:0 6px 24px #4a1f3d18;display:none;z-index:5}
-#ip.on{display:block}
+  box-shadow:0 6px 24px #4a1f3d18;z-index:5;
+  opacity:0;transform:translateX(8px);pointer-events:none;
+  transition:opacity .22s ease,transform .22s ease}
+#ip.on{opacity:1;transform:none;pointer-events:auto}
 #ip h2{font-size:15px;margin:0 0 2px;letter-spacing:-.01em;color:#35455C}
 #ip .role{font-size:12px;color:#A5738C;margin:0 0 9px}
 #ip dl{margin:0;display:grid;grid-template-columns:58px 1fr;gap:2px 8px;font-size:12px}
@@ -291,6 +293,12 @@ export function attachInteraction(cfg) {
   // and the whole room flickers as the cursor crosses it.
   const HOVER_TINT = 0xFCEFD2
   let selected = null, hovered = null
+  // Focus mode: office.html sets this while a head-zoom flight is holding the
+  // camera, so the zoomed state reads as "character + blame card" instead of
+  // that plus a hover card and the corner selection panel repeating the same
+  // facts. Suppresses new tooltip renders and hides the panel; doesn't touch
+  // the 3D hover tint, which is subtle enough to keep.
+  let focusMode = false
 
   function matsOf(pick) {
     if (!pick) return null
@@ -507,7 +515,7 @@ export function attachInteraction(cfg) {
     hoverPhase = 0
     hoverToken++
     canvas.style.cursor = pick ? 'pointer' : ''
-    const show = pick && pick.kind !== 'floor'
+    const show = pick && pick.kind !== 'floor' && !focusMode
     tip.classList.toggle('on', !!show)
     if (!show) return
     if (pick.kind === 'agent') renderHoveredAgent(pick.ref, hoverToken)
@@ -529,7 +537,14 @@ export function attachInteraction(cfg) {
     selected = agent || null
     if (selected) tint(selected.mats, P.mustard)
     ring.visible = !!selected
-    panel.classList.toggle('on', !!selected)
+    panel.classList.toggle('on', !!selected && !focusMode)
+    // Whatever hover card is on screen was set by the last pointermove, and
+    // a selection can happen without one — a click that landed dead still,
+    // a keyboard/console select, zoomToAgent()'s onSelect hook. Left alone
+    // it sits there describing the wrong agent until the mouse next moves.
+    // Clearing it here, on every select() including deselect, means it's
+    // never stale for longer than the frame it takes onSelect to fire.
+    setHover(null)
     paint()
     onSelect?.(selected)
     return selected
@@ -653,6 +668,19 @@ export function attachInteraction(cfg) {
       if (hovered && hovered.kind === 'agent') renderHoveredAgent(hovered.ref, hoverToken)
     },
     hoverAt(x, y) { const h = pickAt(x, y); setHover(h ? h.pick : null); return h ? h.pick.label : null },
+    /** office.html's focus mode: while true, no new hover card shows and the
+     *  corner selection panel stays hidden even with something selected. */
+    get focusMode() { return focusMode },
+    setFocusMode(v) {
+      focusMode = !!v
+      if (focusMode) tip.classList.remove('on')
+      panel.classList.toggle('on', !!selected && !focusMode)
+    },
+    /** Force whatever hover card is showing to clear right now — used at
+     *  the start of a head-zoom flight, belt-and-braces alongside select()'s
+     *  own clear (see there) for any future call path that reaches
+     *  zoomToAgent without going through select() first. */
+    clearHover() { setHover(null) },
     /** Register a click target for an agent added after attachInteraction()
      *  ran — every live-spawned character, since the roster at setup time is
      *  only ever the demo cast. */

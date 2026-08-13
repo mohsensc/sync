@@ -28,6 +28,7 @@
     padding:11px 20px;font-size:15px;line-height:1.45;letter-spacing:-.005em;
     box-shadow:0 8px 30px #4a1f3d33;opacity:0;transition:opacity .35s;pointer-events:none}
   #caption.on{opacity:1}
+  #caption.declutter{opacity:0}
   #beat{position:fixed;right:18px;top:16px;background:#fffdfaee;border:1px solid #C3B39B;
     border-radius:10px;padding:9px 12px;font:11px ui-monospace,monospace;color:#6b5f56}
   #beat b{color:#35455C}
@@ -510,8 +511,20 @@ function focus([x, z], d = 1, y = null, targetY = 1.15) {
 const HEAD_Y = 1.5
 const HEAD_DIST = 0.24
 const HEAD_YAW_OFFSET = 0.16
+// The old flight never touched pitch at all — it just carried over whatever
+// the room happened to be at, top-down button included. That's the "scalp"
+// the reviewer landed on: select someone right after pressing top-down and
+// the head zoom stayed looking almost straight down. A close portrait wants
+// something closer to eye level.
+const HEAD_PITCH = 0.26
+// "Over the shoulder": lower and a little further back than the front
+// portrait, so the desk/monitor the character is facing has room in frame.
+const SHOULDER_DIST = 0.34
+const SHOULDER_Y = 1.42
+const SHOULDER_YAW_OFFSET = 0.22
+const SHOULDER_PITCH = 0.16
 
-let priorFraming = null   // { target, dist, yaw } to restore to on deselect/Escape
+let priorFraming = null   // { target, dist, yaw, pitch } to restore to on deselect/Escape
 
 // ---- zoom flight ---------------------------------------------------------
 // The head zoom used to ride the same asymptotic goal.active lerp as every
@@ -540,15 +553,47 @@ function easeOutBack(p) {
   return 1 + c3 * Math.pow(p - 1, 3) + c1 * Math.pow(p - 1, 2)
 }
 
-function startFlight(toXZ, toDist, toYaw, toTargetY) {
+function startFlight(toXZ, toDist, toYaw, toTargetY, toPitch) {
   flight = {
     mode: zoomMode, t: 0, dur: zoomMode === 'snap' ? 0.42 : 0.92,
     fromTarget: target.clone(),
     toTarget: new THREE.Vector3(toXZ[0], toTargetY, toXZ[1]),
     fromDist: dist, toDist,
     fromYaw: yaw, toYaw: Math.max(YAW_MIN, Math.min(YAW_MAX, toYaw)),
+    fromPitch: pitch, toPitch: toPitch != null ? toPitch : pitch,
   }
   goal.active = false
+}
+
+// Two ?frame= choices for where the head-zoom camera lands, switchable live
+// via window.__zoomMode.setFrame() so both sit in the room to compare rather
+// than argued about from memory (same spirit as the ease/snap toggle below).
+let frameMode = new URLSearchParams(location.search).get('frame') === 'shoulder' ? 'shoulder' : 'threequarter'
+
+/**
+ * Where the head-zoom camera should land, derived from the character's own
+ * facing (a.yaw — external convention, forward is -(sin y, 0, cos y), see
+ * zones.js's header note) instead of whatever the room camera happened to be
+ * pointed at before the click. That was the bug: landing on a face was luck,
+ * because the old flight kept the room's yaw *and* pitch untouched.
+ *
+ *   'threequarter' (default) — camera sits roughly opposite the character's
+ *     forward direction (a.yaw + PI), so it looks back at their face. A few
+ *     degrees off dead-on so a head-on close-up doesn't read as a mugshot.
+ *   'shoulder' — camera sits roughly behind the character, on their own
+ *     forward side (a.yaw), a little further back and lower, framing past
+ *     their shoulder toward whatever they're facing.
+ *
+ * Either result still gets clamped to [YAW_MIN, YAW_MAX] by startFlight. The
+ * room is a cutaway open only on +x/+z — a character planted facing the back
+ * or left wall genuinely cannot be framed face-on from the camera's side of
+ * the room. That clamp is the honest degrade, not a bug still to chase.
+ */
+function headFraming(a, mode) {
+  if (mode === 'shoulder') {
+    return { yaw: a.yaw + SHOULDER_YAW_OFFSET, pitch: SHOULDER_PITCH, dist: SHOULDER_DIST, y: SHOULDER_Y }
+  }
+  return { yaw: a.yaw + Math.PI + HEAD_YAW_OFFSET, pitch: HEAD_PITCH, dist: HEAD_DIST, y: HEAD_Y }
 }
 
 function zoomToAgent(a) {
@@ -557,17 +602,49 @@ function zoomToAgent(a) {
     // selecting a second agent while already zoomed in should ease from head
     // to head, and Escape/deselect should still land back on the room, not
     // on whichever head came before it.
-    priorFraming = { target: target.clone(), dist, yaw }
+    priorFraming = { target: target.clone(), dist, yaw, pitch }
   }
-  startFlight([a.pos.x, a.pos.z], HEAD_DIST, yaw + HEAD_YAW_OFFSET, HEAD_Y)
+  interaction?.clearHover()
+  const f = headFraming(a, frameMode)
+  startFlight([a.pos.x, a.pos.z], f.dist, f.yaw, f.y, f.pitch)
+  updateDeclutter()
 }
 
 function zoomRestore() {
   if (!priorFraming) return
   const p = priorFraming
   priorFraming = null
-  startFlight([p.target.x, p.target.z], p.dist, p.yaw, p.target.y)
+  startFlight([p.target.x, p.target.z], p.dist, p.yaw, p.target.y, p.pitch)
+  updateDeclutter()
 }
+
+// ---- focus mode: declutter the zoomed state ----------------------------
+// The reviewer's verdict on the zoomed state: blame card + stale hover card
+// + selection panel + zone pill + zoneowner plaque/rug + demo caption all
+// pile up, stating the same fact four different ways. Focus mode drops
+// everything but the character and the blame card for as long as a head
+// zoom holds the camera (priorFraming is set) — on by default, off via the
+// F key or ?focus=off for the owner to compare against.
+let focusEnabled = new URLSearchParams(location.search).get('focus') !== 'off'
+let declutterOn = false
+function setDeclutter(on) {
+  if (on === declutterOn) return
+  declutterOn = on
+  interaction?.setFocusMode(on)
+  zoneUI.setFocusHidden(on)
+  capEl.classList.toggle('declutter', on)
+  const zo = scene.getObjectByName('zoneowner-root')
+  if (zo) zo.visible = !on
+}
+function updateDeclutter() { setDeclutter(focusEnabled && !!priorFraming) }
+
+addEventListener('keydown', e => {
+  if (e.key !== 'f' && e.key !== 'F') return
+  if (e.target && /input|textarea/i.test(e.target.tagName)) return
+  focusEnabled = !focusEnabled
+  logEl.textContent = `focus mode: ${focusEnabled ? 'on' : 'off'}`
+  updateDeclutter()
+})
 
 addEventListener('keydown', e => {
   if (e.key === 'Escape' && priorFraming) {
@@ -864,6 +941,7 @@ function tick(){
     target.y = flight.fromTarget.y + (flight.toTarget.y - flight.fromTarget.y) * e
     dist = flight.fromDist + (flight.toDist - flight.fromDist) * e
     yaw = flight.fromYaw + (flight.toYaw - flight.fromYaw) * e
+    pitch = flight.fromPitch + (flight.toPitch - flight.fromPitch) * e
     if (p >= 1) {
       flight = null
       goal.target.copy(target); goal.dist = dist; goal.yaw = yaw
@@ -880,6 +958,7 @@ function tick(){
   expireLive(Date.now())
   if (demo) demo.update(dt)
   if (interaction) interaction.paint()
+  zoneUI.updateCamera(camera)
   if (window.__zoneOwner) window.__zoneOwner.updateCamera(camera)
 
   const r = RADIUS*dist, cp = Math.cos(pitch)
@@ -923,7 +1002,11 @@ window.__live = { director, liveAgents, mode: () => (liveMode ? 'live' : 'demo')
 window.__focus = focus
 window.__setCam = (y,p,d) => { goal.active=false; flight=null; yaw=y; pitch=p; dist=d }
 window.__zoomMode = { get: () => zoomMode, set: m => { zoomMode = m === 'snap' ? 'snap' : 'ease' },
-  get flying() { return !!flight } }
+  get flying() { return !!flight },
+  get frame() { return frameMode },
+  setFrame(m) { frameMode = m === 'shoulder' ? 'shoulder' : 'threequarter' } }
+window.__focusMode = { get: () => focusEnabled, set: v => { focusEnabled = !!v; updateDeclutter() },
+  get active() { return declutterOn } }
 window.__agentState = () => world.agents.map(a => ({
   ...a.describe(),
   note: a.note || null,
