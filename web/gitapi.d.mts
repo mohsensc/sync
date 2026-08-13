@@ -13,14 +13,25 @@ export interface BlameOwner {
   share: number
 }
 
+export interface BlameLine {
+  n: number
+  author: string
+  ageDays: number | null
+}
+
 export interface BlameResult {
   total: number
   owners: BlameOwner[]
   newestLineAgeDays: number | null
   oldestLineAgeDays: number | null
+  lines?: BlameLine[]
 }
 
-export function parseBlamePorcelain(text: string, now?: number): BlameResult
+export interface ParseBlamePorcelainOpts {
+  includeLines?: boolean
+}
+
+export function parseBlamePorcelain(text: string, now?: number, opts?: ParseBlamePorcelainOpts): BlameResult
 
 export interface LogEntry {
   sha: string
@@ -31,12 +42,25 @@ export interface LogEntry {
 
 export function parseLog(text: string): LogEntry[]
 
+export interface ShortlogRow {
+  author: string
+  email: string
+  commits: number
+}
+
+export function parseShortlog(text: string): ShortlogRow[]
+
+export function parseCanonicalNames(text: string): Map<string, string>
+
 export interface ShortlogOwner {
   author: string
   commits: number
 }
 
-export function parseShortlog(text: string): ShortlogOwner[]
+export function mergeAuthorsByEmail(
+  rows: ShortlogRow[],
+  canonicalNames?: Map<string, string>
+): ShortlogOwner[]
 
 export interface StatResult {
   commits: number
@@ -64,7 +88,19 @@ export interface NumstatResult {
 
 export function parseNumstat(text: string): NumstatResult
 
+export function clampLine(raw: string | number | null | undefined): number | null
+
 export function blameRangeArgs(startRaw: string | null | undefined, endRaw: string | null | undefined): string[]
+
+export type SourceSliceResult =
+  | { ok: true; lines: string[] }
+  | { ok: false; reason: string }
+
+export function sliceSourceLines(
+  text: string,
+  startRaw: string | null | undefined,
+  endRaw: string | null | undefined
+): SourceSliceResult
 
 export type GitApiHandler = (req: { url?: string }, res: unknown, next: () => void) => void | Promise<void>
 

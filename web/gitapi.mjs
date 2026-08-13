@@ -29,60 +29,97 @@ export function ageDays(epochSeconds, now = Date.now()) {
 
 // `git blame --porcelain` emits one header line per source line
 // (`<sha> <origline> <finalline> [<groupsize>]`), followed by a full
-// metadata block (author, author-time, ...) the first time a sha is seen
-// and nothing but the header + tab-content line on repeats. Track sha ->
-// {author, time} as we go and count one line per header line seen.
-export function parseBlamePorcelain(text, now = Date.now()) {
+// metadata block (author, author-mail, author-time, ...) the first time a
+// sha is seen and nothing but the header + tab-content line on repeats.
+// Track sha -> {author, mail, time} as we go and count one line per
+// header line seen.
+//
+// Ownership is grouped by author-mail, not display name. This repo's own
+// history has two spellings of one person (`mohsensc` and `Mohsen
+// Sarrafan Chaharsoughi`, same inbox — a git config change mid-project),
+// and a vault plaque or blame bar that lists them as two separate owners
+// is just wrong. Pass `{ includeLines: true }` to also get a per-line
+// breakdown (used by the region-blame gutter view) — capped by the
+// caller, since a whole-file per-line dump isn't something the UI wants.
+export function parseBlamePorcelain(text, now = Date.now(), opts = {}) {
+  const includeLines = !!opts.includeLines
   const lines = text.split('\n')
-  const meta = new Map() // sha -> { author, time }
-  const perLineSha = []
+  const meta = new Map() // sha -> { author, mail, time }
+  const perLine = [] // { sha, finalLine }
   let i = 0
   while (i < lines.length) {
-    const header = /^([0-9a-f]{40}) \d+ \d+(?: \d+)?$/.exec(lines[i])
+    const header = /^([0-9a-f]{40}) \d+ (\d+)(?: \d+)?$/.exec(lines[i])
     if (!header) { i++; continue }
     const sha = header[1]
+    const finalLine = parseInt(header[2], 10)
     i++
     while (i < lines.length && !lines[i].startsWith('\t')) {
       const l = lines[i]
       if (l.startsWith('author ')) {
         meta.set(sha, { ...(meta.get(sha) || {}), author: l.slice('author '.length) })
+      } else if (l.startsWith('author-mail ')) {
+        const mail = l.slice('author-mail '.length).replace(/^<|>$/g, '')
+        meta.set(sha, { ...(meta.get(sha) || {}), mail })
       } else if (l.startsWith('author-time ')) {
         meta.set(sha, { ...(meta.get(sha) || {}), time: parseInt(l.slice('author-time '.length), 10) })
       }
       i++
     }
-    perLineSha.push(sha)
+    perLine.push({ sha, finalLine })
     i++ // consume the tab-prefixed content line (or EOF)
   }
 
-  const total = perLineSha.length
+  const total = perLine.length
   if (total === 0) {
-    return { total: 0, owners: [], newestLineAgeDays: null, oldestLineAgeDays: null }
+    return {
+      total: 0, owners: [], newestLineAgeDays: null, oldestLineAgeDays: null,
+      ...(includeLines ? { lines: [] } : {}),
+    }
   }
 
-  const byAuthor = new Map()
+  // mail -> { lines, name, latestTime }. Display name for a mail is the
+  // name on the most-recent-by-author-time line seen for it, so a split
+  // identity resolves to whichever spelling that person is using now.
+  const byMail = new Map()
   let newestTime = -Infinity
   let oldestTime = Infinity
-  for (const sha of perLineSha) {
+  for (const { sha } of perLine) {
     const m = meta.get(sha) || {}
-    const author = m.author || 'unknown'
-    byAuthor.set(author, (byAuthor.get(author) || 0) + 1)
+    const mail = m.mail || m.author || 'unknown'
+    const entry = byMail.get(mail) || { lines: 0, name: m.author || 'unknown', latestTime: -Infinity }
+    entry.lines++
+    if (typeof m.time === 'number' && m.time >= entry.latestTime) {
+      entry.latestTime = m.time
+      entry.name = m.author || entry.name
+    }
+    byMail.set(mail, entry)
     if (typeof m.time === 'number') {
       if (m.time > newestTime) newestTime = m.time
       if (m.time < oldestTime) oldestTime = m.time
     }
   }
 
-  const owners = [...byAuthor.entries()]
-    .map(([author, lines]) => ({ author, lines, share: lines / total }))
+  const owners = [...byMail.entries()]
+    .map(([, v]) => ({ author: v.name, lines: v.lines, share: v.lines / total }))
     .sort((a, b) => b.lines - a.lines)
 
-  return {
+  const result = {
     total,
     owners,
     newestLineAgeDays: Number.isFinite(newestTime) ? ageDays(newestTime, now) : null,
     oldestLineAgeDays: Number.isFinite(oldestTime) ? ageDays(oldestTime, now) : null,
   }
+
+  if (includeLines) {
+    const nameByMail = new Map([...byMail.entries()].map(([mail, v]) => [mail, v.name]))
+    result.lines = perLine.map(({ sha, finalLine }) => {
+      const m = meta.get(sha) || {}
+      const mail = m.mail || m.author || 'unknown'
+      return { n: finalLine, author: nameByMail.get(mail) || m.author || 'unknown', ageDays: ageDays(m.time, now) }
+    })
+  }
+
+  return result
 }
 
 // `git log --follow -n <n> --date=relative --format=%h<US>%an<US>%ad<US>%s`
@@ -94,17 +131,52 @@ export function parseLog(text) {
   })
 }
 
-// `git shortlog -sn` — "  <count>\t<name>" per line. Share is left to the
-// caller, since that needs the total across the whole result set.
+// `git shortlog -sne` — "  <count>\t<name> <email>" per line (the `e`
+// flag is what makes dedup possible at all: two rows can share a name by
+// coincidence, but not an inbox). Share and cross-row merging are left to
+// the caller.
 export function parseShortlog(text) {
   if (!text.trim()) return []
   const owners = []
   for (const line of text.split('\n')) {
-    const m = /^\s*(\d+)\t(.+)$/.exec(line)
+    const m = /^\s*(\d+)\t(.+)\s<([^>]*)>$/.exec(line)
     if (!m) continue
-    owners.push({ author: m[2], commits: parseInt(m[1], 10) })
+    owners.push({ author: m[2], email: m[3], commits: parseInt(m[1], 10) })
   }
   return owners
+}
+
+// `git log --format=%ae<US>%an` — one line per commit, newest first
+// (git's default order). First line seen for an email wins, which makes
+// this map "the display name on that email's most recent commit" —
+// exactly the canonical spelling to show for a split identity.
+export function parseCanonicalNames(text) {
+  const byEmail = new Map()
+  for (const line of text.split('\n')) {
+    if (!line) continue
+    const [email, name] = line.split(US)
+    if (email && name && !byEmail.has(email)) byEmail.set(email, name)
+  }
+  return byEmail
+}
+
+// Collapses shortlog rows that share an email (two name spellings of one
+// person) into one row, summing commit counts and using the canonical
+// name for that email when one's available.
+export function mergeAuthorsByEmail(rows, canonicalNames) {
+  const byEmail = new Map()
+  for (const row of rows) {
+    const key = row.email || row.author
+    const name = (canonicalNames && canonicalNames.get(row.email)) || row.author
+    const prev = byEmail.get(key)
+    if (prev) {
+      prev.commits += row.commits
+      if (name) prev.author = name
+    } else {
+      byEmail.set(key, { author: name, commits: row.commits })
+    }
+  }
+  return [...byEmail.values()].sort((a, b) => b.commits - a.commits)
 }
 
 // `git log --follow --format=%an<US>%at<US>%s` (newest first, no -n cap).
@@ -165,7 +237,7 @@ export function parseNumstat(text) {
 // range (git rejects 0 and negative starts), ignore anything that isn't a
 // plain non-negative integer rather than half-parsing it — malformed input
 // falls back to whole-file blame, same as no range at all.
-function clampLine(raw) {
+export function clampLine(raw) {
   if (raw == null) return null
   const s = String(raw).trim()
   if (!/^\d+$/.test(s)) return null
@@ -177,6 +249,33 @@ export function blameRangeArgs(startRaw, endRaw) {
   const end = clampLine(endRaw)
   if (start == null || end == null) return []
   return ['-L', `${start},${end}`]
+}
+
+// The source route's line cap — 200 real lines is plenty for a gutter
+// view and keeps the response small even on a huge file.
+const SOURCE_LINE_CAP = 200
+
+// `git show HEAD:<path>` output in, `{ ok, lines }` or `{ ok:false,
+// reason }` out. Pure and synchronous so it's cheap to unit-test without
+// shelling out — the route just hands it real stdout.
+export function sliceSourceLines(text, startRaw, endRaw) {
+  if (text.includes('\x00')) return { ok: false, reason: 'binary file' }
+  const allLines = text.length === 0 ? [] : text.split('\n')
+  // git show ends text files with a trailing newline, which turns into a
+  // trailing empty element after split — drop it so line counts match
+  // what an editor would show.
+  if (allLines.length > 0 && allLines[allLines.length - 1] === '') allLines.pop()
+  if (allLines.length === 0) return { ok: false, reason: 'empty file' }
+
+  let start = clampLine(startRaw)
+  let end = clampLine(endRaw)
+  if (start == null) start = 1
+  if (end == null) end = allLines.length
+  if (start > allLines.length) return { ok: false, reason: 'start beyond end of file' }
+  if (end < start) end = start
+  end = Math.min(end, start + SOURCE_LINE_CAP - 1, allLines.length)
+
+  return { ok: true, lines: allLines.slice(start - 1, end) }
 }
 
 // ---------------------------------------------------------------------
@@ -235,17 +334,40 @@ export function gitApiMiddleware(repoRoot) {
       if (route === 'blame') {
         const p = url.searchParams.get('path')
         if (!isTrackedPath(p, files)) return sendJson(res, { ok: false, reason: 'not a tracked path' })
-        const rangeArgs = blameRangeArgs(url.searchParams.get('start'), url.searchParams.get('end'))
+        const start = clampLine(url.searchParams.get('start'))
+        const end = clampLine(url.searchParams.get('end'))
+        const rangeArgs = start != null && end != null ? ['-L', `${start},${end}`] : []
+        // Opt-in per-line breakdown for the region-blame gutter view. Only
+        // worth the payload when there's an actual range and it's small —
+        // whole-file per-line dumps aren't something any consumer wants,
+        // so silently omit rather than 500 or truncate awkwardly.
+        const wantLines = url.searchParams.get('lines') === '1'
+          && rangeArgs.length > 0 && (end - start + 1) <= 150
         try {
           const { stdout } = await execFileP(
             'git', ['blame', '--porcelain', ...rangeArgs, '--', p], { cwd: repoRoot }
           )
-          return sendJson(res, { ok: true, ...parseBlamePorcelain(stdout) })
+          return sendJson(res, { ok: true, ...parseBlamePorcelain(stdout, Date.now(), { includeLines: wantLines }) })
         } catch {
           // untracked, binary, or empty file — git blame exits non-zero for
           // all of these. Design for it, don't special-case it. A bogus
           // range (start past EOF) also lands here; same fallback.
           return sendJson(res, { ok: false, reason: 'no blame available' })
+        }
+      }
+
+      if (route === 'source') {
+        const p = url.searchParams.get('path')
+        if (!isTrackedPath(p, files)) return sendJson(res, { ok: false, reason: 'not a tracked path' })
+        try {
+          const { stdout } = await execFileP(
+            'git', ['show', `HEAD:${p}`], { cwd: repoRoot, maxBuffer: 8 * 1024 * 1024 }
+          )
+          return sendJson(res, sliceSourceLines(stdout, url.searchParams.get('start'), url.searchParams.get('end')))
+        } catch {
+          // not tracked at HEAD yet (new/staged-only file), or git show
+          // otherwise balked — same "degrade, don't 500" shape as blame.
+          return sendJson(res, { ok: false, reason: 'not available at HEAD' })
         }
       }
 
@@ -284,9 +406,17 @@ export function gitApiMiddleware(repoRoot) {
       if (route === 'shortlog') {
         const d = url.searchParams.get('dir') || ''
         if (!isTrackedDir(d, files)) return sendJson(res, { ok: false, reason: 'not a tracked dir' })
-        const args = d === '' || d === '.' ? ['shortlog', '-sn', 'HEAD'] : ['shortlog', '-sn', 'HEAD', '--', d]
-        const { stdout } = await execFileP('git', args, { cwd: repoRoot })
-        const owners = parseShortlog(stdout)
+        const pathArgs = d === '' || d === '.' ? [] : ['--', d]
+        // Two calls: -sne for the counts, a plain log for canonical
+        // display names, so a split identity (same inbox, two name
+        // spellings) merges into one owner instead of two.
+        const [shortlogOut, namesOut] = await Promise.all([
+          execFileP('git', ['shortlog', '-sne', 'HEAD', ...pathArgs], { cwd: repoRoot }),
+          execFileP('git', ['log', `--format=%ae${US}%an`, 'HEAD', ...pathArgs], { cwd: repoRoot }),
+        ])
+        const rows = parseShortlog(shortlogOut.stdout)
+        const canonicalNames = parseCanonicalNames(namesOut.stdout)
+        const owners = mergeAuthorsByEmail(rows, canonicalNames)
         const total = owners.reduce((sum, o) => sum + o.commits, 0)
         return sendJson(res, {
           ok: true,
