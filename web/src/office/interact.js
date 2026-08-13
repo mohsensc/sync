@@ -82,7 +82,15 @@ const CSS = `
    flex column so DOM order (fixed by renderAgentCard/host.after) can be
    overridden purely with CSS \`order\` — no restructuring needed when the
    git rows land asynchronously after the fetch resolves. */
-#it.card{display:flex;flex-direction:column}
+/* .on required here too. This rule and #it.on{display:block} above tie on
+   specificity (1 id + 1 class each), so source order decides, and this one
+   sits later in the sheet — it was forcing display:flex on the card
+   treatment any time the 'card' class was present AT ALL, 'on' or not.
+   That's exactly why a select() clearing 'on' never actually hid a
+   card-treatment tooltip: the box stayed visible, permanently, showing
+   whatever it last rendered. Found live, chasing the stale-hover-card fix
+   down to a CSS rule that was quietly undoing it. */
+#it.card.on{display:flex;flex-direction:column}
 #it.card h3{order:0}
 #it.card .sub{order:1}
 #it.card dl{order:3}

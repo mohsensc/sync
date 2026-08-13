@@ -486,6 +486,20 @@ let yaw = 0.78, pitch = 0.46, dist = 1.14, spin = false, top = false, wire = fal
 // The room is a cutaway, open on +x and +z only. Orbiting past these puts the
 // camera behind a wall and the view goes blank, so the arc is clamped.
 const YAW_MIN = 0.18, YAW_MAX = 1.39
+const YAW_MID = (YAW_MIN + YAW_MAX) / 2
+/** Clamp a yaw into the room's valid orbit arc, correctly on the circle. A
+ *  plain Math.max/min is periodicity-blind: an angle just past a full turn
+ *  clamps to the FAR boundary instead of wrapping back to the near one. The
+ *  room's own orbit never noticed because dragging only ever fed this small,
+ *  already-nearby deltas — but head framing routinely computes something
+ *  like `a.yaw + PI`, which lands anywhere across a full turn, and the arc
+ *  here (1.21 rad) is well under PI wide, so "wrap to the representative
+ *  nearest the arc's centre, then clamp" always finds the true closest
+ *  reachable point instead of whichever raw number happens to be smaller. */
+function clampYaw(y) {
+  const d = ((y - YAW_MID) % (Math.PI * 2) + Math.PI * 3) % (Math.PI * 2) - Math.PI
+  return Math.max(YAW_MIN, Math.min(YAW_MAX, YAW_MID + d))
+}
 let spinDir = 1
 const target = new THREE.Vector3(0.2, 1.0, 0.7)
 const goal = { target: target.clone(), dist: 1.14, yaw: 0.78, active: false }
@@ -519,7 +533,7 @@ const HEAD_YAW_OFFSET = 0.16
 const HEAD_PITCH = 0.26
 // "Over the shoulder": lower and a little further back than the front
 // portrait, so the desk/monitor the character is facing has room in frame.
-const SHOULDER_DIST = 0.34
+const SHOULDER_DIST = 0.27
 const SHOULDER_Y = 1.42
 const SHOULDER_YAW_OFFSET = 0.22
 const SHOULDER_PITCH = 0.16
@@ -559,7 +573,7 @@ function startFlight(toXZ, toDist, toYaw, toTargetY, toPitch) {
     fromTarget: target.clone(),
     toTarget: new THREE.Vector3(toXZ[0], toTargetY, toXZ[1]),
     fromDist: dist, toDist,
-    fromYaw: yaw, toYaw: Math.max(YAW_MIN, Math.min(YAW_MAX, toYaw)),
+    fromYaw: yaw, toYaw: clampYaw(toYaw),
     fromPitch: pitch, toPitch: toPitch != null ? toPitch : pitch,
   }
   goal.active = false
