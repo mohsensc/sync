@@ -940,6 +940,26 @@ window.__zoomAgent = name => {
   blameCard.show(a)
   return a.id
 }
+
+// --- histshelf wiring ---
+import { attachHistShelf } from './histshelf.js'
+
+// interact.js's onSelect hook (see setupCast() above) already drives
+// zoomToAgent/blameCard, and reassigning it here would just clobber that —
+// so this polls interaction.selected instead, same low-cost pattern
+// gitsignals.js uses for its own ambient poll. Catches every selection
+// path uniformly: real clicks, Escape/deselect, and __zoomAgent() in
+// the console, since they all funnel through interaction.select().
+const histShelf = attachHistShelf({ scene, camera, canvas })
+let histShelfFor = null
+setInterval(() => {
+  if (!interaction) return
+  const sel = interaction.selected
+  if (sel === histShelfFor) return
+  histShelfFor = sel
+  if (sel) histShelf.show(sel); else histShelf.hide()
+}, 150)
+window.__histShelf = histShelf
 </script>
 </body>
 </html>
