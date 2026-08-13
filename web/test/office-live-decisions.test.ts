@@ -5,7 +5,11 @@
 // covers it; this file only adds the two new frame kinds).
 
 import { describe, it, expect, afterEach } from 'vitest'
-import { connect, toReelEvent } from '../src/office/live.js'
+import { connect, toReelEvent, LiveDirector } from '../src/office/live.js'
+
+function presence(agent: string, human: string, verb = 'edit', path = 'src/a.ts', rung = 3) {
+  return { type: 'presence', agent, human, verb, region: { path }, rung }
+}
 
 class FakeSocket {
   static last: FakeSocket | undefined
@@ -187,5 +191,170 @@ describe('toReelEvent', () => {
     const a = toReelEvent({ type: 'negotiate', rung: 3, decision: 'wait', holder_agent: 'x', holder_human: 'y' }, 1)
     const b = toReelEvent({ type: 'negotiate', rung: 3, decision: 'wait', holder_agent: 'x', holder_human: 'y' }, 1)
     expect(a!.id).not.toBe(b!.id)
+  })
+
+  it('fills in a known requester on the a side instead of leaving it blank', () => {
+    const e = toReelEvent(
+      { type: 'negotiate', rung: 3, decision: 'wait', holder_agent: 'agent-2', holder_human: 'priya' },
+      1,
+      { agent: 'agent-1', human: 'sara' },
+    )
+    expect(e!.a).toEqual({ agent: 'agent-1', human: 'sara' })
+    expect(e!.b).toEqual({ agent: 'agent-2', human: 'priya' })
+  })
+
+  it('a requester with no known human still fills the agent id, human stays blank', () => {
+    const e = toReelEvent(
+      { type: 'negotiate', rung: 3, decision: 'abort', holder_agent: 'agent-2', holder_human: 'priya' },
+      1,
+      { agent: 'agent-1', human: '' },
+    )
+    expect(e!.a).toEqual({ agent: 'agent-1', human: '' })
+  })
+
+  it('an empty-agent requester is treated the same as none — stays blank', () => {
+    const e = toReelEvent(
+      { type: 'negotiate', rung: 3, decision: 'wait', holder_agent: 'agent-2', holder_human: 'priya' },
+      1,
+      { agent: '', human: 'sara' },
+    )
+    expect(e!.a).toEqual({ agent: '', human: '' })
+  })
+
+  it('a requester has no effect on redundant_work, which already names both sides', () => {
+    const e = toReelEvent(
+      {
+        type: 'redundant_work', agent: 'agent-5', human: 'dev',
+        intent: 'x', region: { path: 'a.ts' }, score: 0.5,
+      },
+      1,
+      { agent: 'someone-else', human: 'nope' },
+    )
+    expect(e!.a).toEqual({ agent: 'agent-5', human: 'dev' })
+  })
+})
+
+// #60: client-side bookkeeping that matches a decision frame back to a
+// tracked live contest pair, since the wire never says who "self" is on
+// negotiate/claim_result. See LiveDirector.resolutionFor's own comment.
+describe('LiveDirector.resolutionFor', () => {
+  it('tracks an active pair on markContest, keyed by both ids', () => {
+    const d = new LiveDirector()
+    d.onPresence(presence('a1', 'sara', 'edit', 'src/x.ts'), 0)
+    d.onPresence(presence('a2', 'priya', 'edit', 'src/x.ts'), 0)
+    d.markContest('a1', 'a2')
+    expect(d.contestPairs.get('a1')).toMatchObject({ path: 'src/x.ts', aId: 'a1', bId: 'a2' })
+    expect(d.contestPairs.get('a2')).toBe(d.contestPairs.get('a1'))
+  })
+
+  it('matches a wait decision by holder_agent identity', () => {
+    const d = new LiveDirector()
+    d.onPresence(presence('a1', 'sara', 'edit', 'src/x.ts'), 0)
+    d.onPresence(presence('a2', 'priya', 'edit', 'src/x.ts'), 0)
+    d.markContest('a1', 'a2')
+    const res = d.resolutionFor({
+      type: 'negotiate', decision: 'wait', holder_agent: 'a2', holder_human: 'priya',
+      region: { path: 'src/x.ts' },
+    })
+    expect(res).toEqual({ winnerId: 'a2', loserId: 'a1', kind: 'wait' })
+  })
+
+  it('matches an abort decision by holder_agent, winner/loser swap the other way', () => {
+    const d = new LiveDirector()
+    d.onPresence(presence('a1', 'sara', 'edit', 'src/x.ts'), 0)
+    d.onPresence(presence('a2', 'priya', 'edit', 'src/x.ts'), 0)
+    d.markContest('a1', 'a2')
+    const res = d.resolutionFor({
+      type: 'negotiate', decision: 'abort', holder_agent: 'a1', holder_human: 'sara',
+    })
+    expect(res).toEqual({ winnerId: 'a1', loserId: 'a2', kind: 'abort' })
+  })
+
+  it('matches a claim_result by held_by when holder_agent is absent', () => {
+    const d = new LiveDirector()
+    d.onPresence(presence('a1', 'sara', 'edit', 'src/x.ts'), 0)
+    d.onPresence(presence('a2', 'priya', 'edit', 'src/x.ts'), 0)
+    d.markContest('a1', 'a2')
+    const res = d.resolutionFor({
+      type: 'claim_result', decision: 'abort', held_by: 'a2', human: 'priya',
+      region: { path: 'src/x.ts' },
+    })
+    expect(res).toEqual({ winnerId: 'a2', loserId: 'a1', kind: 'abort' })
+  })
+
+  it('matches by handover_to when holder_agent does not name a tracked id', () => {
+    const d = new LiveDirector()
+    d.onPresence(presence('a1', 'sara', 'edit', 'src/x.ts'), 0)
+    d.onPresence(presence('a2', 'priya', 'edit', 'src/x.ts'), 0)
+    d.markContest('a1', 'a2')
+    const res = d.resolutionFor({
+      type: 'negotiate', decision: 'wait', holder_agent: 'someone-not-tracked', handover_to: 'a1',
+    })
+    expect(res).toEqual({ winnerId: 'a1', loserId: 'a2', kind: 'wait' })
+  })
+
+  it('returns null when neither holder_agent nor handover_to names a tracked id', () => {
+    const d = new LiveDirector()
+    d.onPresence(presence('a1', 'sara', 'edit', 'src/x.ts'), 0)
+    d.onPresence(presence('a2', 'priya', 'edit', 'src/x.ts'), 0)
+    d.markContest('a1', 'a2')
+    const res = d.resolutionFor({ type: 'negotiate', decision: 'wait', holder_agent: 'agent-9' })
+    expect(res).toBeNull()
+  })
+
+  it('returns null when there is no active contest tracked at all', () => {
+    const d = new LiveDirector()
+    const res = d.resolutionFor({ type: 'negotiate', decision: 'wait', holder_agent: 'a2' })
+    expect(res).toBeNull()
+  })
+
+  it('returns null for a frame with no decision field (a granted claim_result)', () => {
+    const d = new LiveDirector()
+    d.onPresence(presence('a1', 'sara', 'edit', 'src/x.ts'), 0)
+    d.onPresence(presence('a2', 'priya', 'edit', 'src/x.ts'), 0)
+    d.markContest('a1', 'a2')
+    const res = d.resolutionFor({ type: 'claim_result', granted: true, held_by: 'a2' })
+    expect(res).toBeNull()
+  })
+
+  it('returns null when an identity match is contradicted by a mismatched path', () => {
+    const d = new LiveDirector()
+    d.onPresence(presence('a1', 'sara', 'edit', 'src/x.ts'), 0)
+    d.onPresence(presence('a2', 'priya', 'edit', 'src/x.ts'), 0)
+    d.markContest('a1', 'a2')
+    const res = d.resolutionFor({
+      type: 'negotiate', decision: 'wait', holder_agent: 'a2',
+      region: { path: 'src/completely-different.ts' },
+    })
+    expect(res).toBeNull()
+  })
+
+  it('a stale pair is cleaned up once the contest clears, and no longer matches', () => {
+    const d = new LiveDirector()
+    d.onPresence(presence('a1', 'sara', 'edit', 'src/x.ts'), 0)
+    d.onPresence(presence('a2', 'priya', 'edit', 'src/x.ts'), 0)
+    d.markContest('a1', 'a2')
+    d.clearContest('a1')
+    expect(d.contestPairs.size).toBe(0)
+    const res = d.resolutionFor({ type: 'negotiate', decision: 'wait', holder_agent: 'a2' })
+    expect(res).toBeNull()
+  })
+
+  it('humanOf returns the tracked human for a live agent id, and "" when unseen', () => {
+    const d = new LiveDirector()
+    d.onPresence(presence('a1', 'sara', 'edit', 'src/x.ts'), 0)
+    expect(d.humanOf('a1')).toBe('sara')
+    expect(d.humanOf('ghost')).toBe('')
+  })
+
+  it('only one contest is tracked at a time per agent — a second markContest replaces the pair', () => {
+    const d = new LiveDirector()
+    d.onPresence(presence('a1', 'sara', 'edit', 'src/x.ts'), 0)
+    d.onPresence(presence('a2', 'priya', 'edit', 'src/x.ts'), 0)
+    d.onPresence(presence('a3', 'dev', 'edit', 'src/y.ts'), 0)
+    d.markContest('a1', 'a2')
+    d.markContest('a1', 'a3')
+    const res = d.resolutionFor({ type: 'negotiate', decision: 'wait', holder_agent: 'a3' })
+    expect(res).toEqual({ winnerId: 'a3', loserId: 'a1', kind: 'wait' })
   })
 })

@@ -42,7 +42,11 @@ export interface ReelEvent {
   source: 'live' | 'generated'
 }
 
-export function toReelEvent(frame: unknown, now?: number): ReelEvent | null
+export function toReelEvent(
+  frame: unknown,
+  now?: number,
+  requester?: { agent: string; human: string } | null,
+): ReelEvent | null
 
 export interface PresenceInfo {
   id: string
@@ -61,12 +65,30 @@ export interface LiveDirectorOptions {
   zoneFor?: (verb: string, path: string) => string
 }
 
+export interface ContestResolution {
+  winnerId: string
+  loserId: string
+  kind: 'wait' | 'abort'
+}
+
+export interface ContestPair {
+  path: string
+  aId: string
+  bId: string
+}
+
 export class LiveDirector {
   constructor(opts?: LiveDirectorOptions)
+  // Exposed mainly for tests to assert on directly (see
+  // office-live-decisions.test.ts) — callers driving the scene should go
+  // through resolutionFor()/humanOf() rather than reading this map.
+  contestPairs: Map<string, ContestPair>
   onPresence(msg: Record<string, unknown>, now?: number): PresenceInfo
   expire(now?: number): string[]
   has(id: string): boolean
+  humanOf(id: string): string
   markContest(a: string, b: string): void
   clearContest(id: string): string | null
   contestPartner(id: string): string | null
+  resolutionFor(frame: unknown): ContestResolution | null
 }

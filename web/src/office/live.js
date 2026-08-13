@@ -144,10 +144,16 @@ let reelSeq = 0
  *
  * @param {object} frame
  * @param {number} [now]
+ * @param {{agent:string, human:string}|null} [requester] the requester's own
+ *   identity, when known — see LiveDirector.resolutionFor below, which is
+ *   how a caller with an active tracked contest pair can fill this in. Left
+ *   out (or null), `a` stays blank exactly as before: this parameter only
+ *   ever *adds* an identity the caller has separately confirmed, it never
+ *   changes how the frame itself is read.
  * @returns {object|null} a reel event, or null if the frame isn't one of
  *   the three kinds this function knows how to normalize
  */
-export function toReelEvent(frame, now = Date.now()) {
+export function toReelEvent(frame, now = Date.now(), requester = null) {
   if (!frame || typeof frame !== 'object') return null
   const id = `live-${now}-${reelSeq++}`
 
@@ -165,9 +171,12 @@ export function toReelEvent(frame, now = Date.now()) {
       ? frame.region.path : ''
     const detail = typeof frame.holder_priority === 'string'
       ? `holder priority ${frame.holder_priority}` : undefined
+    const a = requester && typeof requester.agent === 'string' && requester.agent
+      ? { agent: requester.agent, human: typeof requester.human === 'string' ? requester.human : '' }
+      : { agent: '', human: '' }
     return {
       id, ts: now, rung,
-      a: { agent: '', human: '' },
+      a,
       b: { agent: holderAgent, human: holderHuman },
       path,
       resolution: { kind: frame.decision === 'wait' ? 'wait' : 'abort', detail },
@@ -217,8 +226,15 @@ export class LiveDirector {
   constructor({ ttlMs = PRESENCE_TTL_MS, zoneFor = Z.zoneFor } = {}) {
     this.ttlMs = ttlMs
     this.zoneFor = zoneFor
-    this.records = new Map()    // agent id -> { human, verb, path, zone, rung, lastSeen }
-    this.contests = new Map()   // agent id -> partner agent id, both directions
+    this.records = new Map()      // agent id -> { human, verb, path, zone, rung, lastSeen }
+    this.contests = new Map()     // agent id -> partner agent id, both directions
+    // agent id -> the shared { path, aId, bId } record for the contest it's
+    // currently in, both directions (same object under both keys, so a
+    // lookup from either side sees the same pair) — this is #60's client
+    // side bookkeeping: the wire never tells us who "self" is on a decision
+    // frame, so we remember our own active pairs and match decisions back
+    // to them instead. See resolutionFor().
+    this.contestPairs = new Map()
   }
 
   /**
@@ -263,6 +279,14 @@ export class LiveDirector {
     return { id, human, verb, path, zone, rung, spawned, contestWith, shareWith }
   }
 
+  /** The human for a live agent id, or '' if we've never seen a presence
+   *  frame for it. Used to fill in a decision-matched requester's name
+   *  alongside their agent id — see resolutionFor()'s caller in office.html. */
+  humanOf(id) {
+    const rec = this.records.get(id)
+    return rec ? rec.human : ''
+  }
+
   #stale(rec, now) { return now - rec.lastSeen > this.ttlMs }
 
   /** Agent ids that have gone quiet past the TTL. Deletes them from the
@@ -278,21 +302,92 @@ export class LiveDirector {
 
   has(id) { return this.records.has(id) }
 
-  markContest(a, b) { this.contests.set(a, b); this.contests.set(b, a) }
+  markContest(a, b) {
+    this.contests.set(a, b); this.contests.set(b, a)
+    // Path comes off whichever side we already have a presence record for
+    // (should be both, since a contest is only ever marked between two live
+    // agents onPresence just saw) — never guessed, left '' if somehow both
+    // are missing.
+    const path = this.records.get(a)?.path || this.records.get(b)?.path || ''
+    const pair = { path, aId: a, bId: b }
+    this.contestPairs.set(a, pair)
+    this.contestPairs.set(b, pair)
+  }
 
   /** Clear a contest this agent was part of, if any, and return the partner
    *  id so the caller can resolve the paired encounter. Both directions are
-   *  cleared, so resolving from either side is safe and idempotent. */
+   *  cleared, so resolving from either side is safe and idempotent. The
+   *  tracked pair (see markContest/resolutionFor) is cleared right alongside
+   *  it — a stale pair must never outlive the contest it described, or a
+   *  later unrelated decision frame could get matched to it by mistake. */
   clearContest(id) {
     const other = this.contests.get(id)
     if (other === undefined) return null
     this.contests.delete(id)
     this.contests.delete(other)
+    this.contestPairs.delete(id)
+    this.contestPairs.delete(other)
     return other
   }
 
   contestPartner(id) {
     const other = this.contests.get(id)
     return other === undefined ? null : other
+  }
+
+  /**
+   * #60: match an incoming negotiate/claim_result decision frame back to one
+   * of our own tracked contest pairs, without the relay ever telling us
+   * which side is "self" — see this file's header note on why the wire
+   * can't do that today, and the issue for the two options weighed there.
+   * This is the client-side-bookkeeping option: we already know, from our
+   * own markContest() calls, which two agent ids are contesting which path;
+   * a decision frame that names one of those ids as the holder (or as who
+   * the lease is handing over to) is presumed to be about that pair.
+   *
+   * Deliberately conservative: a frame that names nobody we're tracking, or
+   * whose path contradicts the pair it would otherwise match, returns null
+   * rather than a guess — never present a resolution as real when it isn't
+   * traceable back to an identity we actually watched.
+   *
+   * @param {object} frame a negotiate or claim_result frame off the wire
+   * @returns {{winnerId:string, loserId:string, kind:'wait'|'abort'}|null}
+   */
+  resolutionFor(frame) {
+    if (!frame || typeof frame !== 'object') return null
+    if (frame.type !== 'negotiate' && frame.type !== 'claim_result') return null
+    if (frame.decision !== 'wait' && frame.decision !== 'abort') return null
+
+    const holderAgent = typeof frame.holder_agent === 'string' ? frame.holder_agent
+      : typeof frame.held_by === 'string' ? frame.held_by : ''
+    const handoverTo = typeof frame.handover_to === 'string' ? frame.handover_to : ''
+    const path = !!frame.region && typeof frame.region === 'object' && typeof frame.region.path === 'string'
+      ? frame.region.path : ''
+
+    const checked = new Set()
+    for (const pair of this.contestPairs.values()) {
+      if (checked.has(pair)) continue
+      checked.add(pair)
+
+      // holder_agent is who currently holds the lease — the natural
+      // "winner" on both a wait (they keep it) and an abort (they keep it
+      // and the requester's attempt dies). handover_to is the fallback for
+      // a frame shaped around a handoff instead: whoever it's handing over
+      // to is the one coming out ahead.
+      let winnerId = ''
+      if (holderAgent && (holderAgent === pair.aId || holderAgent === pair.bId)) winnerId = holderAgent
+      else if (handoverTo && (handoverTo === pair.aId || handoverTo === pair.bId)) winnerId = handoverTo
+      else continue
+
+      // Identity matched one of our tracked ids — but if the frame also
+      // names a path and it disagrees with the pair's, this is a different
+      // contest wearing a familiar agent id (e.g. that agent already moved
+      // on to a new file). Don't cross-wire it.
+      if (path && pair.path && path !== pair.path) continue
+
+      const loserId = winnerId === pair.aId ? pair.bId : pair.aId
+      return { winnerId, loserId, kind: frame.decision }
+    }
+    return null
   }
 }

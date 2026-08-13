@@ -590,3 +590,118 @@ feature code.
 5. Consider whether `replayEvent`'s silent no-op on busy agents needs a
    caption-level "can't replay right now" instead of a plain caption with
    no visible beat — low priority, flagged above, not done.
+
+## Round 4, task 4 — reel panel v2 (detail, now-playing, arrivals, long lists)
+
+No browser this task (scoped that way — see below for what still needs
+eyes). Owned `web/src/office/reel.js`, `reel.d.ts`,
+`web/test/office-reel.test.ts`, and only the `#reel`/`.reel-*` CSS rules in
+`office.html`'s `<style>` block. Did not touch `agent.js`, `live.js`,
+`clips/*`, or any JS in `office.html` — those were locked to tasks 1-3 this
+round, working concurrently in this same worktree (their in-progress,
+uncommitted edits to `live.js`/`agent.js`/`office.html`'s JS were sitting in
+the working tree while this was being built; staged and committed only the
+CSS hunk of `office.html` via a hand-picked patch, left the rest of the
+file exactly as the other tasks had it — checked with `git diff --cached`
+before committing, not just assumed).
+
+**Behavior change, flagged loudly because it changes what round 3 verified:**
+clicking a reel row **no longer replays immediately.** It opens/closes an
+inline detail card instead. The detail card has an explicit "▶ replay"
+button that's the only thing calling `onSelect` — that's what the brief for
+this round asked for ("an explicit replay affordance that fires the same
+onSelect, so task 2's work stays the single playback entry point"). The
+`onSelect` contract itself (`(event) => void`, called with the full reel
+event) is unchanged, so whatever task 2 built against it this round should
+still work — just triggered by the new button, not a bare row click.
+Round 3's "clicked reel rows of every kind" verification predates this and
+is now describing dead UX; the next browser pass should re-click through
+all five resolution kinds against the new detail-card flow, not just trust
+that old verification still applies.
+
+**What's in `reel.js` now**, all in `ReelStore` (pure, no DOM) plus a
+render layer that consumes it:
+
+- **Detail toggle** — `toggleOpen(id)`/`openId`/`closeOpen()`. One row open
+  at a time (opening a second closes the first). The detail card shows the
+  full untruncated path, a plain-English one-line rung explanation
+  (`RUNG_EXPLAIN`, e.g. "both wanted the same piece of relay.go —
+  contested" — written off the file path since the event shape has no
+  symbol field, not a literal echo of the brief's `parseConfig` example),
+  the full resolution phrase including `detail` if present, the source tag
+  again (never buried), and the replay button.
+- **Now-playing state** — `setPlaying(id)`/`clearPlaying()`/`playingId` on
+  the store, and `setPlaying`/`clearPlaying` exposed on the object
+  `mountReel()` returns, since replay is async and the caller (task 2's
+  replay dispatch) needs to set this when a beat starts and clear it when
+  it ends. Visual: a pulsing mustard left-edge bar on the row
+  (`prefers-reduced-motion` respected — pulse only runs under
+  `no-preference`), and the row's replay button reads "playing…" and
+  disables itself while its own event is the one playing.
+- **Long-list handling** — `page()` returns `{shown, remaining}` capped at
+  40 (`REVEAL_STEP`), with `showMore(step)` to raise the cap. Changing
+  either filter resets the cap back to 40 — a freshly filtered list starts
+  capped, doesn't inherit how far a different list had been expanded. The
+  panel renders a "show N older" button under the list when there's a
+  remainder.
+- **Relative timestamps that don't go stale** — `relTime` is now exported
+  (was file-private) so it's directly tested, and the mounted panel runs a
+  20s `setInterval` that patches just the `.reel-time` text nodes
+  (`retimeOnly()`), not a full re-render — a full render would blow away
+  an open detail card or replay an arrival flash every 20 seconds, which
+  would be worse than the staleness it's fixing. `mountReel()` now returns
+  a `dispose()` that clears the interval, for whoever eventually needs to
+  unmount this cleanly.
+- **Arrival flash** — `add()` queues live-sourced (not generated/seed) ids
+  into an internal list; `takeNewLiveIds()` drains it. The render layer
+  calls this once per `render()` and applies a one-shot CSS flash
+  (`.reel-row-new`, a soft green wash fading over 1.6s — the same green as
+  the `live` source tag, so the flash reads as "this just arrived for
+  real," not just "something changed"). Consumed once: a live row that
+  flashed on arrival won't flash again on a later filter-triggered
+  re-render.
+- **Keyboard focus** — rows are `role="button" tabindex="0"` with
+  Enter/Space wired to the same toggle as a click (rows are no longer
+  `<button>` elements themselves, because the detail card's replay button
+  can't legally nest inside one — restructured to a wrapping `.reel-item`
+  div with a focusable `.reel-row` inside it, mirroring how a disclosure
+  widget is normally built). `:focus-visible` outlines added for rows,
+  chips, the human select, the replay button, and the "show older" button
+  — none of the interactive reel elements had a visible focus state
+  before this.
+
+**Tests**: 22 new cases in `office-reel.test.ts` (open/close/switch-row
+toggle, now-playing set/clear, reveal cap/showMore/reset-on-filter-change,
+arrival marking including "consumes the queue" and "accumulates between
+takes," and `relTime`'s bucket boundaries at 5s/1m/1h/1d plus a
+future-timestamp guard). `pnpm test` — 111/111 in this file's own run
+(127 when run alongside tasks 1-3's concurrent in-progress work in the
+same tree, all green). `pnpm typecheck` — clean.
+
+**What still needs eyes in a browser, explicitly, since this task was
+scoped no-browser:**
+- The detail card's actual layout/spacing at 308px panel width — sized it
+  off the existing `.reel-body`/`.reel-line2` measurements but never
+  rendered it.
+- The arrival flash color/duration and the now-playing pulse, live, not
+  just read as CSS.
+- Whether the new row structure (div-based `.reel-row` inside `.reel-item`
+  instead of a bare `<button>`) still hovers/clicks the same as before —
+  should be identical since the CSS selectors didn't change shape, but
+  "should be identical" isn't "confirmed."
+- The `retimeOnly()` 20s interval doing the right thing over a longer
+  session (i.e. not drifting, not double-firing) — only reasoned through,
+  never run.
+- Keyboard-only navigation through the whole panel (Tab through chips,
+  human select, rows, replay button, show-older button) — the CSS is
+  there but never tabbed through by hand.
+
+Whoever does that pass: this doesn't need a dedicated round, task 2's
+existing replay screenshots plus five minutes of clicking through detail
+cards and the reveal button should cover it.
+
+Not touched: `agent.js`, `live.js`, `live.d.ts`, `clips/*`,
+`office-live*.test.ts`, `office-clips-geometry.test.ts` — other tasks'
+files and tests this round, left alone. No issue filed this task — nothing
+hit was expensive enough to defer; the row-click behavior change is a
+deliberate spec change, not an edge case being punted.
