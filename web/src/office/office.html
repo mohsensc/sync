@@ -880,6 +880,7 @@ function tick(){
   expireLive(Date.now())
   if (demo) demo.update(dt)
   if (interaction) interaction.paint()
+  if (window.__zoneOwner) window.__zoneOwner.updateCamera(camera)
 
   const r = RADIUS*dist, cp = Math.cos(pitch)
   camera.position.set(target.x + Math.sin(yaw)*r*cp,

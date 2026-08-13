@@ -365,6 +365,8 @@ export function attachZoneOwner(cfg = {}) {
   let mode = initialMode()
   const state = new Map() // zoneName -> ownership | null
   const groups = new Map() // zoneName -> THREE.Group currently in root
+  const _campos = new THREE.Vector3()
+  const _worldpos = new THREE.Vector3()
 
   function render(zoneName) {
     const old = groups.get(zoneName)
@@ -379,6 +381,30 @@ export function attachZoneOwner(cfg = {}) {
   }
 
   function renderAll() { for (const z of state.keys()) render(z) }
+
+  // Plaques/rugs are sized for the normal wide room shot. Round 3's head-zoom
+  // camera flight (office.html, Z) can park the camera a couple of metres
+  // from a desk zone's plaque, and a fixed-world-size sprite that close
+  // fills most of the frame and bleeds through the DOM cards on top of it —
+  // found live, integrating this round. Fade the zone's main prop out as the
+  // camera closes in rather than capping its world scale, so it reads as
+  // "stepped past the signage" instead of a jump-cut in size.
+  const FADE_NEAR = 3.0   // camera distance (m) below which it's fully hidden
+  const FADE_FAR = 5.5    // camera distance (m) at/above which it's fully shown
+  function updateCamera(camera) {
+    if (!camera) return
+    _campos.copy(camera.position)
+    for (const g of groups.values()) {
+      const main = g.children[0]
+      if (!main || !main.material) continue
+      main.getWorldPosition(_worldpos)
+      const d = _campos.distanceTo(_worldpos)
+      const t = Math.min(1, Math.max(0, (d - FADE_NEAR) / (FADE_FAR - FADE_NEAR)))
+      const base = mode === 'rug' ? 0.92 : 0.97
+      main.material.opacity = base * t
+      main.visible = t > 0.02
+    }
+  }
 
   /** Feed one zone's raw /api/git/shortlog body straight in — pure
    *  pickOwnership() does the interpreting, this just re-renders. Safe to
@@ -436,6 +462,7 @@ export function attachZoneOwner(cfg = {}) {
     setMode,
     get mode() { return mode },
     tick,
+    updateCamera,
     dispose() {
       if (timer) clearInterval(timer)
       if (typeof removeEventListener === 'function') removeEventListener('keydown', onKeydown)
