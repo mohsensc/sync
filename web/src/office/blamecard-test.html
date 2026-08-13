@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Blame card — fixture harness</title>
+<style>
+  html,body{margin:0;height:100%;background:#F0ECE6;
+    font:14px/1.5 ui-sans-serif,-apple-system,Segoe UI,sans-serif;color:#35455C}
+  #hud{position:fixed;left:18px;top:16px;background:#fffdfaee;border:1px solid #C3B39B;
+    border-radius:10px;padding:12px 14px;max-width:320px;box-shadow:0 6px 24px #4a1f3d18;
+    top:16px;height:296px;box-sizing:border-box}
+  #hud h1{font-size:15px;margin:0 0 3px;letter-spacing:-.01em}
+  #hud p{margin:0 0 10px;font-size:12px;color:#6b5f56}
+  .row{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}
+  button{font:inherit;font-size:12px;padding:5px 10px;border-radius:6px;
+    border:1px solid #C3B39B;background:#fff;color:#35455C;cursor:pointer}
+  button:hover{background:#E9E0CE}
+  button[aria-pressed="true"]{background:#35455C;color:#F0ECE6;border-color:#35455C}
+</style>
+</head>
+<body>
+<div id="hud">
+  <h1>Blame card fixtures</h1>
+  <p>No THREE scene needed — blamecard.js is a plain DOM controller.
+     fetchFn below is stubbed with canned blame/log JSON matching gitapi.mjs's
+     real response shape. Press V (or the button in the card) to flip the
+     graphic/classic variant.</p>
+  <div class="row">
+    <button data-f="skewed">skewed ownership</button>
+    <button data-f="even">even split, 3 authors</button>
+    <button data-f="solo">one author only</button>
+    <button data-f="empty">no history at path</button>
+    <button data-f="long">12 commits, old + new</button>
+  </div>
+  <div class="row">
+    <button id="bClose">close card</button>
+  </div>
+</div>
+
+<script type="module">
+import { attachBlameCard } from './blamecard.js?v=' + Date.now()
+
+// Canned data shaped exactly like gitapi.mjs's real response bodies —
+// {ok:true, total, owners:[{author,lines,share}], newestLineAgeDays,
+// oldestLineAgeDays} for blame, {ok:true, entries:[{sha,author,when,subject}]}
+// for log, `when` as a real `--date=relative` string since history-viz's
+// parseRelativeAge is what turns that into an axis position.
+const FIXTURES = {
+  skewed: {
+    blame: { ok: true, total: 210, owners: [
+      { author: 'mohsensc', lines: 178, share: 178 / 210 },
+      { author: 'agentai', lines: 32, share: 32 / 210 },
+    ], newestLineAgeDays: 0, oldestLineAgeDays: 340 },
+    log: { ok: true, entries: [
+      { sha: 'a1b2c3d', author: 'mohsensc', when: '3 hours ago', subject: 'fix zoom easing on head-lock' },
+      { sha: 'b2c3d4e', author: 'mohsensc', when: '2 days ago', subject: 'add churn poll to gitsignals' },
+      { sha: 'c3d4e5f', author: 'agentai', when: '3 weeks ago', subject: 'seed office cast positions' },
+      { sha: 'd4e5f6a', author: 'mohsensc', when: '11 months ago', subject: 'initial office scene' },
+    ] },
+  },
+  even: {
+    blame: { ok: true, total: 90, owners: [
+      { author: 'mohsensc', lines: 31, share: 31 / 90 },
+      { author: 'agentai', lines: 30, share: 30 / 90 },
+      { author: 'rae', lines: 29, share: 29 / 90 },
+    ], newestLineAgeDays: 1, oldestLineAgeDays: 60 },
+    log: { ok: true, entries: [
+      { sha: 'e5f6a7b', author: 'rae', when: 'yesterday', subject: 'tune desk tint alpha' },
+      { sha: 'f6a7b8c', author: 'agentai', when: '1 week ago', subject: 'wire ownership fetch' },
+      { sha: 'a7b8c9d', author: 'mohsensc', when: '2 months ago', subject: 'stub desk mats' },
+    ] },
+  },
+  solo: {
+    blame: { ok: true, total: 40, owners: [{ author: 'mohsensc', lines: 40, share: 1 }],
+      newestLineAgeDays: 5, oldestLineAgeDays: 5 },
+    log: { ok: true, entries: [
+      { sha: 'b8c9d0e', author: 'mohsensc', when: '5 days ago', subject: 'add new prop mesh' },
+    ] },
+  },
+  empty: {
+    blame: { ok: false, reason: 'no blame available' },
+    log: { ok: false, reason: 'no history' },
+  },
+  long: {
+    blame: { ok: true, total: 500, owners: [
+      { author: 'mohsensc', lines: 260, share: 0.52 },
+      { author: 'agentai', lines: 140, share: 0.28 },
+      { author: 'rae', lines: 60, share: 0.12 },
+      { author: 'kade', lines: 40, share: 0.08 },
+    ], newestLineAgeDays: 0, oldestLineAgeDays: 900 },
+    log: { ok: true, entries: Array.from({ length: 12 }, (_, i) => ({
+      sha: `${(i + 10).toString(16)}deadbeef`,
+      author: ['mohsensc', 'agentai', 'rae', 'kade'][i % 4],
+      when: [
+        '20 minutes ago', '4 hours ago', 'yesterday', '3 days ago', '1 week ago',
+        '2 weeks ago', '1 month ago', '3 months ago', '6 months ago',
+        '1 year ago', '2 years, 1 month ago', '2 years, 6 months ago',
+      ][i],
+      subject: `commit #${i + 1} in the fixture history`,
+    })) },
+  },
+}
+
+let current = 'skewed'
+function stubFetch(url) {
+  const u = new URL(url, location.href)
+  const data = FIXTURES[current]
+  const body = u.pathname.endsWith('/blame') ? data.blame : data.log
+  return Promise.resolve({ json: async () => body })
+}
+
+const card = attachBlameCard({ fetchFn: stubFetch, onClose: () => card.hide() })
+
+function show(name) {
+  current = name
+  card.show({ id: 'a1', name: 'a1', role: 'mohsensc', gitPath: `fixtures/${name}.js` })
+}
+
+document.querySelectorAll('[data-f]').forEach(b => {
+  b.addEventListener('click', () => show(b.dataset.f))
+})
+document.getElementById('bClose').addEventListener('click', () => card.hide())
+
+show('skewed')
+window.__card = card
+</script>
+</body>
+</html>
