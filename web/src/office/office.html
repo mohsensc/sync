@@ -771,13 +771,39 @@ function replayEvent(e) {
 
 /** A negotiate/claim_result/redundant_work frame, normalized by
  *  live.js's toReelEvent and dropped straight into the reel as a
- *  source:'live' row. Presence frames still drive the scene; this only
- *  ever touches the panel. */
+ *  source:'live' row. Presence frames used to be the only thing that drove
+ *  the scene — this is the other half of #60: if the frame resolves a
+ *  contest we're actively tracking (LiveDirector.resolutionFor matches it
+ *  back to an active pair by holder/handover identity, since the wire never
+ *  says who "self" is), drive the real beat too, not just the panel row —
+ *  handshake for a "wait" verdict, shove for an "abort". A frame that
+ *  resolutionFor can't match to a tracked pair still reaches the reel (the
+ *  panel is honest either way); it just changes nothing in the 3D scene,
+ *  same as before this fix. */
 function onLiveReelFrame(msg) {
-  const ev = Live.toReelEvent(msg)
-  if (!ev) return
-  reelStore.add(ev)
-  reel.render()
+  const res = director.resolutionFor(msg)
+  const requester = res ? { agent: res.loserId, human: director.humanOf(res.loserId) } : null
+  const ev = Live.toReelEvent(msg, Date.now(), requester)
+  if (ev) { reelStore.add(ev); reel.render() }
+
+  if (!res) return
+  const partner = director.clearContest(res.winnerId)
+  const winner = liveAgents.get(res.winnerId)
+  const loser = liveAgents.get(res.loserId)
+  if (winner && loser) {
+    const enc = world.encounters.find(e => e.kind === 'contest' &&
+      (e.a === winner || e.b === winner || e.a === loser || e.b === loser))
+    if (enc) world.resolveContest(enc)
+    if (res.kind === 'wait') world.handshake(winner, loser)
+    else world.shove(winner, loser)
+  } else if (partner) {
+    // One side isn't a live character right now (despawned mid-contest, or
+    // this viewer's own presence view never spawned it) — nothing to play
+    // a resolution beat between, but still drop the standoff pose rather
+    // than leave it looping on whichever side is here.
+    const solo = winner || loser
+    if (solo) endContestFor(solo, partner)
+  }
 }
 
 function expireLive(now) {
