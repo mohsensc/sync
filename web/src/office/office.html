@@ -75,9 +75,11 @@ import * as ANIM from './anim.js'
 import * as Z from './zones.js'
 import { createAgent, World } from './agent.js'
 import { attachInteraction } from './interact.js'
+import { attachBlameCard } from './blamecard.js'
 import { runDemo } from './demo.js'
 import { buildDressing } from './dressing.js'
 import * as Live from './live.js'
+import { attachGitSignals } from './gitsignals.js'
 
 const P = { cream:0xF0ECE6, sand:0xE9E0CE, taupe:0xC3B39B, sage:0xE5E1D2, butter:0xF7DFAF,
             mustard:0xD6B45C, caramel:0xC0762A, coffee:0xB0674F, terracotta:0xD9714F,
@@ -225,28 +227,28 @@ const PLAN = [
   // Faces +X in mesh space (bbox x=0.566 y=1.000 z=0.998), so it needs -PI/2
   // to look into the room. Centre sits half its depth off the wall plane
   // (-6.625) so the back touches rather than intersects: 0.566*2.6/2 = 0.736.
-  { id:'vault',   url:'glb/vault-door.glb',   h:2.6,  pos:[-6.0,0,-5.889], rot:-Math.PI/2, facing:'+z' },
+  { id:'vault',   url:'/glb/vault-door.glb',   h:2.6,  pos:[-6.0,0,-5.889], rot:-Math.PI/2, facing:'+z' },
   // bbox x=0.247 y=1.000 z=0.645. Same -PI/2; depth 0.247*2.0/2 = 0.247.
-  { id:'phones',  url:'glb/phone-wall.glb',   h:2.0,  pos:[ 5.4,1.1,-6.378], rot:-Math.PI/2, facing:'+z', air:true },
-  { id:'cables',  url:'glb/cable-ball.glb',   h:1.1,  pos:[-7.3,0, 4.7], rot:0.6          },
-  { id:'tortoise',url:'glb/tortoise-v2.glb',  h:0.55, pos:[ 2.0,0, 4.3], rot:-0.9         },
+  { id:'phones',  url:'/glb/phone-wall.glb',   h:2.0,  pos:[ 5.4,1.1,-6.378], rot:-Math.PI/2, facing:'+z', air:true },
+  { id:'cables',  url:'/glb/cable-ball.glb',   h:1.1,  pos:[-7.3,0, 4.7], rot:0.6          },
+  { id:'tortoise',url:'/glb/tortoise-v2.glb',  h:0.55, pos:[ 2.0,0, 4.3], rot:-0.9         },
   // Desks are click targets. The seat is the zone slot in front of the desk,
   // pulled SEAT_PULL closer so the knees end up under it: the sit clip walks
   // the pelvis 22cm back on the way down (anim.js SEAT_SETBACK).
-  { url:'glb/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[-2.6,0,-2.4], rot:0, desk:'desk 1', slot:Z.ZONES.desks.slots[0] },
-  { url:'glb/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[ 0.4,0,-2.4], rot:0, desk:'desk 2', slot:Z.ZONES.desks.slots[1] },
-  { url:'glb/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[ 3.4,0,-2.4], rot:0, desk:'desk 3', slot:Z.ZONES.desks.slots[2] },
-  { url:'glb/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[-2.6,0, 1.4], rot:Math.PI, desk:'desk 4', slot:Z.ZONES.desks.slots[3] },
-  { url:'glb/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[ 0.4,0, 1.4], rot:Math.PI, desk:'desk 5', slot:Z.ZONES.desks.slots[4] },
-  { url:'glb/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[ 3.4,0, 1.4], rot:Math.PI, desk:'desk 6', slot:Z.ZONES.desks.slots[5] },
-  { url:'glb/desk-tripo-12k.glb', h:0.95, pos:[-6.9,0, 1.0], rot:Math.PI/2, sx:1.45,
+  { url:'/glb/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[-2.6,0,-2.4], rot:0, desk:'desk 1', slot:Z.ZONES.desks.slots[0] },
+  { url:'/glb/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[ 0.4,0,-2.4], rot:0, desk:'desk 2', slot:Z.ZONES.desks.slots[1] },
+  { url:'/glb/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[ 3.4,0,-2.4], rot:0, desk:'desk 3', slot:Z.ZONES.desks.slots[2] },
+  { url:'/glb/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[-2.6,0, 1.4], rot:Math.PI, desk:'desk 4', slot:Z.ZONES.desks.slots[3] },
+  { url:'/glb/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[ 0.4,0, 1.4], rot:Math.PI, desk:'desk 5', slot:Z.ZONES.desks.slots[4] },
+  { url:'/glb/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[ 3.4,0, 1.4], rot:Math.PI, desk:'desk 6', slot:Z.ZONES.desks.slots[5] },
+  { url:'/glb/desk-tripo-12k.glb', h:0.95, pos:[-6.9,0, 1.0], rot:Math.PI/2, sx:1.45,
     desk:'reception', slot:Z.ZONES.reception.slots[0] },
   // Cups were 0.14 m and read as specks. Up to 0.20 and cut from four to three,
   // placed at the desks that actually have someone at them plus reception, near
   // the front edge where they catch the key light.
-  { url:'glb/coffee-cup-v2.glb', h:0.20, pos:[ 0.95,DESK_TOP,-2.05], rot:1.1 },
-  { url:'glb/coffee-cup-v2.glb', h:0.20, pos:[ 0.95,DESK_TOP, 1.05], rot:2.2 },
-  { url:'glb/coffee-cup-v2.glb', h:0.20, pos:[-6.55,0.95, 1.55], rot:0.2 },
+  { url:'/glb/coffee-cup-v2.glb', h:0.20, pos:[ 0.95,DESK_TOP,-2.05], rot:1.1 },
+  { url:'/glb/coffee-cup-v2.glb', h:0.20, pos:[ 0.95,DESK_TOP, 1.05], rot:2.2 },
+  { url:'/glb/coffee-cup-v2.glb', h:0.20, pos:[-6.55,0.95, 1.55], rot:0.2 },
 ]
 
 const loader = new GLTFLoader()
@@ -406,6 +408,7 @@ function makeCharacterRoot(gltfScene, height = 1.68, bodyColor = null) {
 // The seated background characters need their desks placed first, and the
 // interaction layer needs every prop, so setup waits for the whole load.
 let charGLTF = null, interaction = null
+const blameCard = attachBlameCard({ onClose: () => interaction && interaction.select(null) })
 function setupCast() {
   if (!charGLTF || interaction || done < pending) return
   const gltf = charGLTF
@@ -450,14 +453,20 @@ function setupCast() {
   interaction = attachInteraction({
     canvas, camera, scene, world, floor, rug, props, desks,
     log: s => { logEl.textContent = s },
+    // interact.js's select() calls this after selection changes (null on
+    // deselect); it's the hook zoomToAgent/blameCard ride on. Guarded below
+    // in case this lands before interact.js starts calling it.
+    onSelect: a => { if (a) { zoomToAgent(a); blameCard.show(a) }
+                      else { zoomRestore(); blameCard.hide() } },
   })
   window.__interact = interaction
+  window.__gitSignals = attachGitSignals({ world, zones: zoneUI })
   window.__ready = true
   initLive()
 }
 
 pending++
-loader.load('glb/character.glb', gltf => {
+loader.load('/glb/character.glb', gltf => {
   charGLTF = gltf
   done++; tally()
 }, undefined, (e) => { console.warn('character failed', e); done++; tally() })
@@ -476,13 +485,51 @@ const goal = { target: target.clone(), dist: 1.14, yaw: 0.78, active: false }
 // middle of the frame with a wide band of empty background around it.
 const RADIUS = 18
 
-/** Demo camera: ease toward a floor point at a given zoom and yaw. */
-function focus([x, z], d = 1, y = null) {
-  goal.target.set(x, 1.15, z)
+/** Demo camera: ease toward a floor point at a given zoom, yaw and look-height.
+ *  targetY defaults to 1.15 (roughly torso height on the floor plate) so every
+ *  existing demo.js call site — none of which pass a 4th arg — is unaffected. */
+function focus([x, z], d = 1, y = null, targetY = 1.15) {
+  goal.target.set(x, targetY, z)
   goal.dist = d
   if (y != null) goal.yaw = Math.max(YAW_MIN, Math.min(YAW_MAX, y))
   goal.active = true
 }
+
+// ---- click-to-zoom on a character's head -------------------------------
+// A character is 1.68 tall; the head sits near the top of that, not at the
+// torso height focus() aims at by default. Zooming there needs its own
+// close, slightly-off-axis framing — a dead-on close-up on a low-poly face
+// reads as a mugshot, a few degrees of yaw off center reads as a look.
+const HEAD_Y = 1.5
+const HEAD_DIST = 0.24
+const HEAD_YAW_OFFSET = 0.16
+
+let priorFraming = null   // { target, dist, yaw } to restore to on deselect/Escape
+
+function zoomToAgent(a) {
+  if (!priorFraming) {
+    // Only the FIRST zoom in a selection streak snapshots the room shot —
+    // selecting a second agent while already zoomed in should ease from head
+    // to head, and Escape/deselect should still land back on the room, not
+    // on whichever head came before it.
+    priorFraming = { target: target.clone(), dist, yaw }
+  }
+  const headYaw = Math.max(YAW_MIN, Math.min(YAW_MAX, yaw + HEAD_YAW_OFFSET))
+  focus([a.pos.x, a.pos.z], HEAD_DIST, headYaw, HEAD_Y)
+}
+
+function zoomRestore() {
+  if (!priorFraming) return
+  const p = priorFraming
+  priorFraming = null
+  focus([p.target.x, p.target.z], p.dist, p.yaw, p.target.y)
+}
+
+addEventListener('keydown', e => {
+  if (e.key === 'Escape' && priorFraming) {
+    interaction.select(null); zoomRestore(); blameCard.hide()
+  }
+})
 
 let drag=false, px=0, py=0
 canvas.addEventListener('pointerdown', e => { drag=true; px=e.clientX; py=e.clientY
@@ -791,6 +838,19 @@ window.__agentState = () => world.agents.map(a => ({
   note: a.note || null,
   zone: Z.zoneAt(a.pos.x, a.pos.z),
 }))
+// Drives the zoom-to-head + blame card flow without going through a real
+// click — useful for testing before interact.js's onSelect hook lands, and
+// for a console-driven demo beat later. Matches on id first, then name, so
+// either `__zoomAgent('a1')` or `__zoomAgent('reception')` works.
+window.__zoomAgent = name => {
+  if (!name) { interaction && interaction.select(null); zoomRestore(); blameCard.hide(); return null }
+  const a = world.agents.find(x => x.id === name || x.name === name)
+  if (!a) return null
+  if (interaction) interaction.select(a)
+  zoomToAgent(a)
+  blameCard.show(a)
+  return a.id
+}
 </script>
 </body>
 </html>
