@@ -344,3 +344,88 @@ as the real generated history (swap for `SAMPLE_EVENTS`), wire `live.js`'s
 exposes enough of `World` to actually replay a clip from a click, and swap
 `onSelect`'s caption stand-in for real playback once `World.handshake`/
 `World.shove`/etc. exist to drive it.
+
+## Round 2, task 3 — wired handshake, built shove
+
+Owned `agent.js` this round (only task allowed to touch it) plus the new
+`clips/shove.js` and `clips/shove-test.html`.
+
+- **`World.handshake(a, b)`** now exists, same shape as `World.highfive`
+  exactly: `handshakeMarks`/`spacingFor` from `clips/handshake.js`,
+  same-frame same-clip start (`handshaking` ACTS entry, `clip:'handshake'`),
+  ends on `ANIM.getClip('handshake').duration + 0.2` like highfive does.
+  This is the rung-3 `decision:"wait"` beat — handshake.js was fully built
+  and harness-tested in an earlier round but nothing called it; now
+  something does.
+- **`clips/shove.js`** — new, the rung-3 `decision:"abort"` beat (one agent
+  out-authoritied the other). Asymmetric pair like argue: `shove` (winner,
+  two-hand push) and `shoveReact` (loser, jolt/stagger/droop), same
+  `{fn,dur,keys,loop}` registry shape, same scratch-rig scaffold copied from
+  handshake.js's header (anim.js doesn't export clip-building internals).
+  `World.shove(winner, loser)` wired in following `contest()`'s asymmetric
+  shape but, like highfive, ends on its own clip length rather than looping.
+  Poses are authored as full milestone dicts blended with a generic
+  `lerpPose` (array-lerp on every bone key at once) rather than
+  handshake.js's narrow 11-field array scheme — simpler to author when a
+  pose touches both arms, torso, and hips together, which this one does.
+- **Contact geometry, solved not eyeballed**: grid-searched the arm joint
+  angles (shoulder/arm/elbow) for the combination that lands the right palm
+  on the character's own midline at chest height — same "own midline"
+  contract highfive.js's `HF_CONTACT` documents. `CONTACT_Y_CM`/
+  `CONTACT_Z_CM` are read off that solved pose (`measureContact()`), not
+  chosen independently of it.
+- **Spacing bug, caught and fixed in-browser**: first pass doubled the
+  reach the way highfive/handshake/argue all do (`2 * CONTACT_Z_CM`) — right
+  for a MUTUAL contact (both sides reach toward the shared midpoint), wrong
+  for a shove, which is one-sided (only the winner's hand travels; the
+  loser's body just stands at their own root). Doubled, the palm landed
+  58cm short of the loser's chest in `shove-test.html` — looked like two
+  people waving near each other, not a shove. Fixed to a single reach plus
+  a small chosen `BODY_DEPTH_CM` buffer (20cm, not measured — the rig has no
+  torso depth to measure), which lands the palm within ~20cm of the chest
+  and, just as important, keeps the two heads from ending up nose-to-nose
+  (a side effect of the winner's forward lean at the tight un-buffered
+  spacing). See the constant's comment in `shove.js` for the full story —
+  if the shove ever reads as not-quite-touching or as too intimate, that
+  buffer is the knob.
+- **Deliberate rule break, called out in the file header**: every other
+  paired clip keeps `hips:[0,0,0]` throughout (dragging the pelvis drags the
+  feet). The loser's "staggers back a step" is exactly that drag, done on
+  purpose (`STEP_BACK_CM = 34`) — there's no walk-cycle/IK to blend a real
+  recovery step out of, and at this clip's length a hip slide reads as a
+  stumble, not a skate. Flagged in case it reads wrong once seen at full
+  scene scale/lighting rather than the harness's plain floor.
+- Captions/ACTS: `handshaking` ("shaking on it"), `shoving` ("pulling
+  rank"), `shoveReacting` ("shoved aside") — dry, not neutral, per the
+  brief's "funny and a little mean" for the abort beat.
+
+Browser-verified with the shared lock (port 5173, tab 6):
+`shove-test.html` (three pairs, random start distances) — iterated twice on
+spacing (see above) until `Hold contact` reads a clean two-hand push
+against the chest at a sane standing distance, not a whiff and not a
+face-plant. Screenshots at t=0.10 (windup, arm cocked back), t=0.55 (jolt —
+loser's head snapped back, reads well), and t=1.0 (droop — loser visibly
+stepped back, head down; winner relaxed, arm dropped) all read as intended.
+Then loaded `office.html` and ran `World.handshake`/`World.shove` end to
+end from the console on idle agent pairs (`window.__world`,
+`window.__agents` are exposed) — both encounters completed cleanly, both
+agents returned to `idle`, `world.encounters.length` back to 0, no new
+console errors. Did not get a visual read of either beat inside the full
+scene itself (task 1 fixed the glb path bug this same round; hadn't
+confirmed characters render before I smoke-tested from the console — worth
+a follow-up screenshot next round, low risk since the harness confirms the
+motion and the console smoke test confirms the wiring).
+
+Not touched: `office.html`, `live.js`, `live.d.ts`, `reel.js`, `seed.js`,
+`clips/yield.js`, `clips/doubletake.js` — other tasks' files.
+
+No GitHub issue filed this round — no edge case hit that was expensive
+enough to defer; the one real problem (spacing) was cheap to fix once
+found and is documented above and in `shove.js` itself.
+
+What's next: `World.yield`/`World.doubletake` wiring once `yield.js`/
+`doubletake.js` land and get a visual pass (per round 2 task 4's own
+notes above) — five-line job in `agent.js`, same shape as `handshake`.
+Also worth a real screenshot of `World.handshake`/`World.shove` firing
+inside the full lit scene (not just the plain-floor harness) now that
+characters should render there.
