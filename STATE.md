@@ -219,6 +219,114 @@ was the one-line `preserveDrawingBuffer` fix in `office.html`.
 toolchain artifact from `pnpm approve-builds esbuild`, per round 1) — left
 untracked again, consistent with every prior round.
 
+## Round 6 task 3 — reel panel skins (browser: no, per the task spec)
+
+Built the two alternative looks the brief asked for, plus the switching
+mechanism, plus a standalone harness. `reel.js` was this task's only
+touched-everywhere file; `office.html` was scoped to its CSS block and the
+`mountReel` call site, as the plan required.
+
+**What changed and why:**
+
+- `RUNG_INFO` (the old color/bg lookup baked into `reel.js` and written as
+  an inline `style=` attribute on each badge) is gone. Badges now carry
+  `data-rung="N"` and every color lives in CSS, keyed off
+  `.reel-badge[data-rung="N"]` — plain (paper) as the unscoped base case,
+  `.reel-skin-glass .reel-badge[...]` / `.reel-skin-ticker .reel-badge[...]`
+  as overrides. This was the only way to let a skin repaint the one
+  "saturated color" element the glass brief calls for without `!important`
+  fighting an inline style. Task 4's `replay-card.js` independently copied
+  the same five hex pairs into its own `RUNG_COLORS` (their file's own
+  comment says so) rather than import from here — unaffected by this
+  removal, confirmed by reading their file before touching mine.
+- `mountReel(container, store, opts)` gained `opts.skin` (validated through
+  the new pure `resolveSkin(value)` export, unrecognized/missing always
+  falls back to `'paper'`) and draws a small cycle button in the head
+  (`paper -> glass -> ticker -> paper`). Skin state is a class on
+  `container` (`reel-skin-<name>`), applied by `mountReel` itself — no
+  markup changes needed in `office.html`, since the div it mounts into
+  already exists and I'm not allowed to touch that line this round anyway.
+  Added `getSkin()`/`setSkin()` to the returned handle too, for anything
+  that wants to force a look without clicking (the harness doesn't end up
+  needing them — set at mount time instead — but it seemed like the
+  obvious API to also expose alongside a button that already does it).
+- `office.html`: `?skin=glass|ticker` read once at mount time via
+  `resolveSkin(new URLSearchParams(location.search).get('skin'))`, passed
+  straight into `mountReel`'s `opts.skin`. No default query means `'paper'`
+  — a fresh link with no `?skin` looks exactly like it always has.
+- `office.html`'s reel CSS block grew a `.reel-skin-glass` and a
+  `.reel-skin-ticker` section, both scoped entirely by class selectors so
+  they'd work identically if reused on a container with a different id
+  (which is exactly what the harness does).
+- `reel.d.ts` updated to match: `ReelSkin`, `SKINS`, `resolveSkin`, the new
+  `MountReelOptions.skin` and `MountedReel.getSkin`/`setSkin`.
+- New `web/test/office-reel-skin.test.ts` — the one bit of pure logic this
+  task extracted (`resolveSkin`) gets a small describe/it block, per the
+  task's own "add a small test only if you extract pure logic" clause.
+  `ReelStore` itself: untouched, still skin-ignorant, `office-reel.test.ts`
+  passes with no edits.
+
+**The three looks:**
+
+- `paper` (default) — unchanged, the original warm cream card. Needed no
+  new CSS of its own; everything above the "reel skins" section already is
+  the paper look.
+- `glass` — `rgba(20,26,36,.78)` + `backdrop-filter: blur(16px)
+  saturate(150%)`, light text at varying opacity (full white for the
+  primary "who" line, down to ~30% for dividers), rung badges the only
+  saturated color on the panel (brightened versions of the same five hues
+  so they read against a dark ground instead of the light `EEF0F3`-family
+  backgrounds paper uses).
+- `ticker` — flat `#0A0E13`, hairline border, no shadow, no rounded card
+  feel beyond a 4px radius. Rows collapse to one line via `display:contents`
+  on the existing `.reel-line1`/`.reel-line2` wrapper spans — same markup
+  as the other two skins, CSS just unwraps them into the row's flex
+  container so R-badge/who/path/resolution/time sit on one baseline.
+  Source tags (`live`/`generated`) are hidden here on purpose — the detail
+  card still shows source, and a five-piece single line was already
+  crowded without a sixth chip.
+
+**Harness:** `web/src/office/reel-skins-test.html` — three independent
+`mountReel` instances, three independent `ReelStore`s (each needs its own
+open/filter state, so one shared store across three DOM mounts would have
+had them all show the same open row), fed the same
+`[...SAMPLE_EVENTS, ...seedEvents()]` array. Left panel is `paper` with a
+detail card pre-opened (`store.toggleOpen(events[0].id)` before mount).
+Middle is `glass`, plain list, over a radial-gradient background standing
+in for the 3D scene (blur needs something to blur). Right is `ticker`,
+pre-filtered to a human that matches nobody (`setHumanFilter('nobody-
+here')`) to show the empty state. All three panels' own cycle buttons still
+work, so this is also how the next round can check any skin against any of
+the three states without visiting all nine combinations by hand.
+
+**Not verified in a browser** — this task was scoped browser:no. The CSS
+is written and reasoned about (contrast ratios estimated, not measured
+with a tool) but nobody has loaded `reel-skins-test.html` in an actual
+tab. This is flagged as this round's plan required: **the harness is
+unverified and should be the next integrator's first stop** — specifically
+check (1) the glass blur actually reads as glass and not just a dark box
+in whatever browser renders it, (2) the ticker's `display:contents` trick
+doesn't do something unexpected with focus-visible outlines or the
+`reel-more` "show N older" button's layout, (3) real contrast on the glass
+skin's dimmest text tokens (`.reel-vs`, `.reel-dot` at 30-40% white) —
+picked by eye against the exact background color, not checked with a
+contrast tool, worth a second look before shipping as the default anyone
+lands on via a shared `?skin=glass` link.
+
+**Concurrency notes for whoever reads this next:** this worktree had all
+four round-6 builders committing to the same physical directory at once
+(not separate git worktrees — files from tasks 1/2/4 appeared on disk
+mid-edit more than once). Every touch to `office.html` and `reel.js`
+stayed inside this task's owned regions; `git pull --rebase` before each
+of the two pushes both landed cleanly, no conflicts. `RUNG_INFO`'s removal
+was checked against task 4's `replay-card.js` before pushing, specifically
+because that file's own header comment says it copies reel.js's rung
+colors — confirmed it's a hardcoded copy, not an import, so removing the
+object didn't break it.
+
+**Commits:** `add glass and ticker reel skins, cycle button`,
+`add reel-skins-test harness for all three looks`.
+
 ## Round 6 task 4 — replay presentation: caption arbiter, variant dispatch, versus card
 
 Three connected pieces in the replay-presentation region of `office.html`,
