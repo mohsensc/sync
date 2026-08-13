@@ -38,6 +38,8 @@ import { highfiveMarks, spacingFor } from './highfive.js'
 import { argueMarks, spacingFor as argueSpacingFor, registry as ARGUE_CLIPS } from './clips/argue.js'
 import { handshakeMarks, spacingFor as handshakeSpacingFor, registry as HANDSHAKE_CLIPS } from './clips/handshake.js'
 import { shoveMarks, spacingFor as shoveSpacingFor, registry as SHOVE_CLIPS } from './clips/shove.js'
+import { yieldMarks, spacingFor as yieldSpacingFor, registry as YIELD_CLIPS } from './clips/yield.js'
+import { doubletakeMarks, spacingFor as doubletakeSpacingFor, registry as DOUBLETAKE_CLIPS } from './clips/doubletake.js'
 
 // Fold the paired-action clips into anim.js's own table, once, at import
 // time — before any agent has crossfaded into anything and cached the clip
@@ -45,6 +47,8 @@ import { shoveMarks, spacingFor as shoveSpacingFor, registry as SHOVE_CLIPS } fr
 Object.assign(ANIM.CLIPS, ARGUE_CLIPS)
 Object.assign(ANIM.CLIPS, HANDSHAKE_CLIPS)
 Object.assign(ANIM.CLIPS, SHOVE_CLIPS)
+Object.assign(ANIM.CLIPS, YIELD_CLIPS)
+Object.assign(ANIM.CLIPS, DOUBLETAKE_CLIPS)
 
 export const YAW_OFFSET = Math.PI
 
@@ -92,6 +96,13 @@ const ACTS = {
   // clips/shove.js — `shoving` is the winner, `shoveReacting` the loser.
   shoving:        { clip: 'shove',      fade: 0.18, oneShot: true, next: 'idle' },
   shoveReacting:  { clip: 'shoveReact', fade: 0.18, oneShot: true, next: 'idle' },
+  // Rung 1: the reader notices the editor is already in there and steps
+  // back. clips/yield.js — `yielding` is the reader, `keeping` the editor.
+  yielding: { clip: 'yieldStep', fade: 0.18, oneShot: true, next: 'idle' },
+  keeping:  { clip: 'yieldKeep', fade: 0.18, oneShot: true, next: 'idle' },
+  // Rung 4: redundant work caught by similarity — same beat both sides,
+  // mirrored. clips/doubletake.js.
+  doubletaking: { clip: 'doubletake', fade: 0.16, oneShot: true, next: 'idle' },
 }
 export const ACTIVITIES = Object.keys(ACTS)
 
@@ -103,6 +114,7 @@ const ACT_OF_CLIP = {
   read: 'reading', sleep: 'sleeping', drink: 'drinking', wave: 'waving',
   highfive: 'highfiving', argue: 'arguing', argueReact: 'reacting',
   handshake: 'handshaking', shove: 'shoving', shoveReact: 'shoveReacting',
+  yieldStep: 'yielding', yieldKeep: 'keeping', doubletake: 'doubletaking',
 }
 
 const DOING = {
@@ -111,6 +123,7 @@ const DOING = {
   reading: 'reading', drinking: 'on a break', waving: 'waving',
   highfiving: 'high fiving', arguing: 'arguing over it', reacting: 'not having it',
   handshaking: 'shaking on it', shoving: 'pulling rank', shoveReacting: 'shoved aside',
+  yielding: 'stepping back', keeping: 'keeping at it', doubletaking: 'wait, you too?',
 }
 
 const TONE = {
@@ -617,6 +630,56 @@ export class World {
     return e
   }
 
+  /**
+   * The rung-1 beat: `a` is the reader, noticing `b` (the editor) is
+   * already in there, and gets out of the way. Asymmetric like shove() —
+   * two different clips, phase-matched — but there's no winner/loser
+   * framing here, just a reader standing down. See clips/yield.js.
+   */
+  yield(a, b) {
+    if (!a || !b || a === b || a.busy || b.busy) return null
+    const height = (a.height + b.height) / 2
+    const marks = yieldMarks(
+      new THREE.Vector3(a.pos.x, 0, a.pos.z),
+      new THREE.Vector3(b.pos.x, 0, b.pos.z),
+      yieldSpacingFor(height))
+    const ax = marks.a.pos.x, az = marks.a.pos.z
+    const bx = marks.b.pos.x, bz = marks.b.pos.z
+
+    a.busy = b.busy = true
+    a.goTo(ax, az, { yaw: yawToward(ax, az, bx, bz), label: 'yielding to ' + b.name })
+    b.goTo(bx, bz, { yaw: yawToward(bx, bz, ax, az), label: 'keeping the file' })
+
+    const e = { a, b, kind: 'yield', phase: 'approach', t: 0, marks: { a:[ax, az], b:[bx, bz] } }
+    this.encounters.push(e)
+    return e
+  }
+
+  /**
+   * The rung-4 beat: `a` and `b` discover they duplicated each other's
+   * work. Symmetric, same shape as highfive()/handshake() — same clip,
+   * mirrored by facing. See clips/doubletake.js.
+   */
+  doubletake(a, b) {
+    if (!a || !b || a === b || a.busy || b.busy) return null
+    const height = (a.height + b.height) / 2
+    const marks = doubletakeMarks(
+      new THREE.Vector3(a.pos.x, 0, a.pos.z),
+      new THREE.Vector3(b.pos.x, 0, b.pos.z),
+      doubletakeSpacingFor(height))
+    const ax = marks.a.pos.x, az = marks.a.pos.z
+    const bx = marks.b.pos.x, bz = marks.b.pos.z
+
+    a.busy = b.busy = true
+    a.lastGreet = b.lastGreet = this.time
+    a.goTo(ax, az, { yaw: yawToward(ax, az, bx, bz), label: 'noticing ' + b.name })
+    b.goTo(bx, bz, { yaw: yawToward(bx, bz, ax, az), label: 'noticing ' + a.name })
+
+    const e = { a, b, kind: 'doubletake', phase: 'approach', t: 0, marks: { a:[ax, az], b:[bx, bz] } }
+    this.encounters.push(e)
+    return e
+  }
+
   /** End a contest before it would end on its own — the region freed up, or
    *  one side went quiet. No-op on anything else (already done, or a plain
    *  highfive, which resolves itself). */
@@ -658,19 +721,30 @@ export class World {
           // but this one has a fixed length; see clips/shove.js.
           a.act('shoving')
           b.act('shoveReacting')
+        } else if (e.kind === 'yield') {
+          // Asymmetric like shove — reader and editor play different
+          // clips — but neither one "wins"; see clips/yield.js.
+          a.act('yielding')
+          b.act('keeping')
         } else {
-          // highfive and handshake: same frame, same fade, both from time
-          // zero, both the SAME clip — facing each other is already the
-          // mirror. That is the whole sync story; see highfive.js.
-          a.act(e.kind === 'handshake' ? 'handshaking' : 'highfiving')
-          b.act(e.kind === 'handshake' ? 'handshaking' : 'highfiving')
+          // highfive, handshake, doubletake: same frame, same fade, both
+          // from time zero, both the SAME clip — facing each other is
+          // already the mirror. That is the whole sync story; see
+          // highfive.js.
+          const sameClipAct = { handshake: 'handshaking', doubletake: 'doubletaking' }[e.kind] || 'highfiving'
+          a.act(sameClipAct)
+          b.act(sameClipAct)
         }
       }
     } else if (e.phase === 'active') {
       // A contest has no clip-length end: it lasts until resolveContest()
       // says the region is free. Everything else (highfive, handshake,
-      // shove) plays out once and ends on its own clip's length.
-      const CLIP_OF_KIND = { highfive: 'highfive', handshake: 'handshake', shove: 'shove' }
+      // shove, yield, doubletake) plays out once and ends on its own
+      // clip's length.
+      const CLIP_OF_KIND = {
+        highfive: 'highfive', handshake: 'handshake', shove: 'shove',
+        yield: 'yieldStep', doubletake: 'doubletake',
+      }
       const clipName = CLIP_OF_KIND[e.kind]
       if (clipName && e.t >= ANIM.getClip(clipName).duration + 0.2) {
         return this.#end(e)

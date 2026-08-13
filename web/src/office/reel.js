@@ -216,7 +216,7 @@ export function mountReel(container, store, opts = {}) {
     </div>
     <div class="reel-filters">
       <div class="reel-chips" data-role="rung"></div>
-      <select class="reel-human" data-role="human"></select>
+      <select class="reel-human" data-role="human" name="reel-human" aria-label="filter by human"></select>
     </div>
     <div class="reel-list" data-role="list"></div>
     <div class="reel-foot" data-role="foot"></div>

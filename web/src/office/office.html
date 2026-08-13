@@ -129,6 +129,7 @@ import { runDemo } from './demo.js'
 import { buildDressing } from './dressing.js'
 import * as Live from './live.js'
 import { ReelStore, SAMPLE_EVENTS, mountReel } from './reel.js'
+import { seedEvents } from './seed.js'
 
 const P = { cream:0xF0ECE6, sand:0xE9E0CE, taupe:0xC3B39B, sage:0xE5E1D2, butter:0xF7DFAF,
             mustard:0xD6B45C, caramel:0xC0762A, coffee:0xB0674F, terracotta:0xD9714F,
@@ -141,12 +142,14 @@ const modeEl = document.getElementById('mode')
 
 // ---- highlight reel -----------------------------------------------------
 // Panel lives top-right, over the scene (see #reel's CSS). Seeded with
-// reel.js's own sample events so it's never empty on a fresh checkout —
-// seed.js's larger generated history and the live decision feed both wire
-// in later rounds; for now selecting a row just captions who it was.
-const reelStore = new ReelStore(SAMPLE_EVENTS)
+// reel.js's own sample events plus seed.js's larger generated history, so
+// a fresh checkout reads as a plausible day of activity, not 12 rows. Both
+// are source:'generated' and tagged as such by the panel itself. The live
+// decision feed (onDecision/onRedundant below) adds real rows on top as
+// they arrive — see live.js's toReelEvent for the normalization.
+const reelStore = new ReelStore([...SAMPLE_EVENTS, ...seedEvents()])
 const reel = mountReel(document.getElementById('reel'), reelStore, {
-  onSelect: (e) => caption(`replay: ${e.a.human}/${e.a.agent} vs ${e.b.human}/${e.b.agent}`),
+  onSelect: (e) => replayEvent(e),
 })
 reel.setFoot('idle')
 const renderer = new THREE.WebGLRenderer({ canvas, antialias:true })
@@ -696,6 +699,48 @@ function onLivePresence(msg) {
   }
 }
 
+// Resolution kind -> the World paired-action that plays it. `a`/`b` follow
+// the reel event's own sides; for the asymmetric beats that convention is
+// "a is the one who stands down, b is the one who keeps going" — matching
+// live.js's toReelEvent, where b is always the current lease holder. For
+// generated events (seed.js, SAMPLE_EVENTS) there's no real winner encoded
+// on the wire, so which side is a vs b there is arbitrary — fine for a
+// demo replay, but not a claim about who actually deferred to whom.
+const RESOLUTION_TO_WORLD = {
+  'read-yield': (a, b) => world.yield(a, b),
+  'share':      (a, b) => world.highfive(a, b),
+  'wait':       (a, b) => world.handshake(a, b),
+  'abort':      (a, b) => world.shove(b, a),
+  'redundant':  (a, b) => world.doubletake(a, b),
+}
+
+/** Click a reel row: caption who it was, and if both sides are agents on
+ *  screen right now (by name — live frames often only know one side, and
+ *  that's honest, not a bug: see toReelEvent's own comment), play the
+ *  resolution beat that matches. A rung 0 event (resolution: null) or an
+ *  event whose agents aren't currently spawned just captions — there's
+ *  nothing truthful to replay. */
+function replayEvent(e) {
+  const who = (s) => (s.human || s.agent) ? `${s.human || '?'}/${s.agent || '?'}` : 'an unnamed agent'
+  caption(`replay: ${who(e.a)} vs ${who(e.b)}`)
+  const a = agents.find(x => x.name === e.a.agent)
+  const b = agents.find(x => x.name === e.b.agent)
+  if (!a || !b || a === b) return
+  const play = e.resolution && RESOLUTION_TO_WORLD[e.resolution.kind]
+  if (play) play(a, b)
+}
+
+/** A negotiate/claim_result/redundant_work frame, normalized by
+ *  live.js's toReelEvent and dropped straight into the reel as a
+ *  source:'live' row. Presence frames still drive the scene; this only
+ *  ever touches the panel. */
+function onLiveReelFrame(msg) {
+  const ev = Live.toReelEvent(msg)
+  if (!ev) return
+  reelStore.add(ev)
+  reel.render()
+}
+
 function expireLive(now) {
   for (const id of director.expire(now)) despawnLive(id)
 }
@@ -720,6 +765,8 @@ function initLive() {
     onOpen: () => { clearTimeout(fallbackTimer); goLive() },
     onClose: () => { clearTimeout(fallbackTimer); goDemoFallback('relay unreachable') },
     onPresence: onLivePresence,
+    onDecision: onLiveReelFrame,
+    onRedundant: onLiveReelFrame,
   })
   window.__liveConn = liveConn
 }
