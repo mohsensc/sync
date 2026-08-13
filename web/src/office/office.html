@@ -722,6 +722,7 @@ function onLivePresence(msg) {
   const a = liveAgents.get(info.id) || spawnLive(info.id, info.human, info.path)
   if (!a) return   // rig still loading; the next frame for this agent will spawn it
   a.gitPath = info.path   // keep the git-aware UI pointed at whatever file this frame is actually about
+  a.gitStart = info.start; a.gitEnd = info.end   // region blame, when the frame carries a range (null = whole file, unchanged)
 
   if (info.contestWith) {
     const b = liveAgents.get(info.contestWith)

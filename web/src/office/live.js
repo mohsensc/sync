@@ -176,10 +176,8 @@ export class LiveDirector {
       id, human, verb, path, zone, rung, spawned, contestWith, shareWith,
       // Absent (null) means whole-file, today's behaviour, unchanged — a
       // consumer that never reads these two fields sees no difference at
-      // all. office.html's onLivePresence still only reads `.path` off
-      // this object; wiring `a.gitStart`/`a.gitEnd` off `.start`/`.end`
-      // the same way is a one-line follow-up left for whoever next owns
-      // that file (see STATE.md — office.html was off-limits this round).
+      // all. office.html's onLivePresence forwards these onto
+      // `a.gitStart`/`a.gitEnd` right after `.path`.
       start: region ? region.start : null,
       end: region ? region.end : null,
     }
