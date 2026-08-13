@@ -340,12 +340,17 @@ PLAN.forEach(load)
 // left-wall shelving, and 8.2 clipped the crate stack; both put a figure half
 // buried in furniture on first paint. Kept identical to demo.js's park row so
 // a demo restart doesn't teleport anyone.
+// `file` is a real repo-relative path, picked for a spread of git history:
+// a1 hasn't moved since the repo's first commit, a4 landed yesterday. Stashed
+// onto the spawned agent as `.gitPath` in setupCast() below — everything that
+// reads git data off a demo agent (hover card, blame card, ambient signals)
+// reads that field, not this list.
 const AGENT_CAST = [
-  { id:'a1', name:'agent-1', color:P.navy,       start:[-7.7,-3.4] },
-  { id:'a2', name:'agent-2', color:P.caramel,    start:[-7.7,-2.2] },
-  { id:'a3', name:'agent-3', color:P.mauve,      start:[-7.7,-1.0] },
-  { id:'a4', name:'agent-4', color:P.terracotta, start:[ 7.5,-0.4] },
-  { id:'a5', name:'agent-5', color:P.slate,      start:[ 7.5, 1.4] },
+  { id:'a1', name:'agent-1', color:P.navy,       start:[-7.7,-3.4], file:'python/src/agent_presence/__init__.py' },
+  { id:'a2', name:'agent-2', color:P.caramel,    start:[-7.7,-2.2], file:'cpp/hook/hook.cpp' },
+  { id:'a3', name:'agent-3', color:P.mauve,      start:[-7.7,-1.0], file:'web/src/office/anim.js' },
+  { id:'a4', name:'agent-4', color:P.terracotta, start:[ 7.5,-0.4], file:'go/cmd/gorelay/main.go' },
+  { id:'a5', name:'agent-5', color:P.slate,      start:[ 7.5, 1.4], file:'README.md' },
 ]
 // Three more so the office is not empty between beats. They are full agents —
 // selectable, sendable — they just start with somewhere to be. The demo never
@@ -415,11 +420,13 @@ function setupCast() {
   for (const spec of AGENT_CAST) {
     const root = makeCharacterRoot(skinnedClone(gltf.scene), 1.68, spec.color)
     scene.add(root)
-    agents.push(world.add(createAgent({
+    const a = world.add(createAgent({
       root, id: spec.id, name: spec.name, color: spec.color,
       pos: spec.start, yaw: Math.PI / 2, height: 1.68,
       scale: root.userData.scale,
-    })))
+    }))
+    a.gitPath = spec.file
+    agents.push(a)
   }
   for (const b of BACKGROUND) {
     const root = makeCharacterRoot(skinnedClone(gltf.scene), 1.68, b.color)
@@ -594,7 +601,7 @@ function setMode(kind, text) { modeEl.className = kind; modeEl.textContent = tex
  *  the exact same rig setup the demo cast gets — same clone, same tint math,
  *  same shadow flags — so a live figure and a demo figure are indistinguishable
  *  except for what they are actually doing. */
-function spawnLive(id, human) {
+function spawnLive(id, human, path) {
   if (!charGLTF) return null      // frame arrived before the rig finished loading
   const color = Live.hairFor(human)
   const before = meshes.length
@@ -608,6 +615,7 @@ function spawnLive(id, human) {
     pos: [Z.ZONES.reception.at[0], Z.ZONES.reception.at[1]], yaw: Math.PI / 2,
     scale: root.userData.scale,
   }))
+  a.gitPath = path   // same field the demo cast carries; git-aware UI reads only this
   liveAgents.set(id, a)
   if (interaction) interaction.addAgent(a)
   return a
@@ -654,7 +662,7 @@ function endContestFor(a, partnerId) {
 function onLivePresence(msg) {
   const now = Date.now()
   const info = director.onPresence(msg, now)
-  const a = liveAgents.get(info.id) || spawnLive(info.id, info.human)
+  const a = liveAgents.get(info.id) || spawnLive(info.id, info.human, info.path)
   if (!a) return   // rig still loading; the next frame for this agent will spawn it
 
   if (info.contestWith) {
