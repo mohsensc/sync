@@ -5,7 +5,7 @@ import { holdSpec, endPose, holdPair, holdSame } from '../src/office/clips/susta
 // resolution act's replay chain stage uses (see agent.js's
 // REPLAY_CHAINS / REPLAY_VARIANT_STAGE). No DOM, no renderer, no rig.
 
-const SOME_POSE = {
+const SOME_POSE: Record<string, number[]> = {
   hips: [0, 0, 20],
   Hips: [0, 0, 0],
   Spine02: [8, 12, 0],
