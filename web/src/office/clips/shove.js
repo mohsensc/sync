@@ -315,11 +315,33 @@ export function getClip(name) {
 // ---------------------------------------------------------------------------
 // Spacing — measured off the pusher's own contact frame, same discipline as
 // handshake.js's CONTACT_Y_CM/CONTACT_Z_CM (fitted, not eyeballed).
-// ---------------------------------------------------------------------------
+//
+// NOT doubled, unlike highfive/handshake/argue. Those are all MUTUAL — both
+// characters reach toward a shared point on the line between their roots, so
+// the spacing is the sum of two matched reaches. A shove is one-sided: the
+// winner's hand does all the travelling, the loser's body just stands there
+// (this rig has no torso depth to speak of — the "chest" a shove lands on
+// sits right on the loser's own root, confirmed empirically: at
+// SHOVE_CONTACT_T the loser's Spine bone measures within a couple of
+// centimetres of their root position). So the spacing the marks use is the
+// winner's reach alone; doubling it, as an earlier pass did, put the loser's
+// root a full extra reach beyond the winner's fingertips and the "shove"
+// never touched anyone. See shove-test.html's palm→chest column.
 export const CONTACT_Y_CM = 115.1
 export const CONTACT_Z_CM = 59.7
 
-export const SHOVE_SPACING_RATIO = (2 * CONTACT_Z_CM) / MODEL_HEIGHT_CM
+// The reach alone (CONTACT_Z_CM, above) puts the winner's palm exactly on
+// the loser's ROOT — correct for "touches the chest", but this rig has no
+// torso depth to speak of, so at that spacing the forward lean the THRUST
+// pose carries puts the two heads within a few centimetres of each other.
+// BODY_DEPTH_CM is a chosen (not measured — there's nothing on the rig to
+// measure) stand-in for "how far a chest actually sits in front of a spine
+// centreline", enough to keep the heads apart while the hand still lands
+// convincingly on the chest rather than stopping short of it. See
+// shove-test.html's palm->chest column: this is tuned to land under 20cm.
+const BODY_DEPTH_CM = 20
+
+export const SHOVE_SPACING_RATIO = (CONTACT_Z_CM + BODY_DEPTH_CM) / MODEL_HEIGHT_CM
 export const SHOVE_SPACING = SHOVE_SPACING_RATIO * CHARACTER_HEIGHT
 
 export function spacingFor(height = CHARACTER_HEIGHT) {
