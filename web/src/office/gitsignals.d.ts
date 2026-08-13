@@ -40,6 +40,9 @@ export interface AttachGitSignalsOptions {
     setChurn?: (intensity: number) => void
   }> }
   zones: { setOwner?: (zoneName: string, owner: string) => void }
+  /** Optional sink for the full shortlog body per zone (shares, runner-up),
+   *  not just the top name `zones.setOwner` gets. See zoneowner.js. */
+  ownership?: { set?: (zoneName: string, data: GitShortlogBody | null | undefined) => void }
   fetchFn?: typeof fetch
   intervalMs?: number
   zoneDirs?: Record<string, string>

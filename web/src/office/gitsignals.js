@@ -83,11 +83,14 @@ export function churnToIntensity(data) {
  * @param {object} opts
  * @param {{agents: Array<{gitPath?: string, setFreshness?: Function, setChurn?: Function}>}} opts.world
  * @param {{setOwner?: Function}} opts.zones
+ * @param {{set?: Function}} [opts.ownership] optional sink for the full
+ *   shortlog body per zone (author shares, runner-up), not just the top
+ *   name `zones.setOwner` gets — see zoneowner.js's pickOwnership().
  * @param {typeof fetch} [opts.fetchFn]
  * @param {number} [opts.intervalMs]
  * @param {Record<string,string>} [opts.zoneDirs]
  */
-export function attachGitSignals({ world, zones, fetchFn = fetch, intervalMs = DEFAULT_INTERVAL_MS, zoneDirs = ZONE_DIRS } = {}) {
+export function attachGitSignals({ world, zones, ownership, fetchFn = fetch, intervalMs = DEFAULT_INTERVAL_MS, zoneDirs = ZONE_DIRS } = {}) {
   const statCache = new Map() // path -> { t, ageDays }
   const churnCache = new Map() // path -> { t, intensity }
   const ownerCache = new Map() // dir -> { t, owner }
@@ -143,13 +146,24 @@ export function attachGitSignals({ world, zones, fetchFn = fetch, intervalMs = D
     const cached = ownerCache.get(dir)
     if (cached && Date.now() - cached.t < intervalMs * 3) {
       if (cached.owner) zones.setOwner?.(zoneName, cached.owner)
+      ownership?.set?.(zoneName, cached.data)
       return
     }
     try {
       const data = await getJson(`/api/git/shortlog?dir=${encodeURIComponent(dir)}`)
       const owner = shortlogToOwner(data)
-      ownerCache.set(dir, { t: Date.now(), owner })
+      ownerCache.set(dir, { t: Date.now(), owner, data })
       if (owner) zones.setOwner?.(zoneName, owner)
+      // `ownership` gets the whole body (shares, runner-up, author count),
+      // not just the top name zones.setOwner wants — zoneowner.js's
+      // pickOwnership() is what turns that into plaque/rug/flourish
+      // decisions. Not wired into office.html's existing attachGitSignals()
+      // call this round: that call sits outside this round's append-only
+      // slice of the file (see STATE.md), so zoneowner.js runs its own
+      // poll loop for now rather than needing this sink. Left in place —
+      // cheap, tested, and it's the seam a future round should use instead
+      // of adding a third shortlog poller.
+      ownership?.set?.(zoneName, data)
     } catch {
       // leave whatever the zone last showed alone — a blip shouldn't erase it
     }

@@ -21,6 +21,13 @@ export interface ConnectOptions {
 export function connect(opts: ConnectOptions): { close(): void }
 export function hairFor(human: string): number
 
+export interface Region {
+  start: number
+  end: number
+}
+
+export function regionFromMsg(msg: Record<string, unknown>): Region | null
+
 export interface PresenceInfo {
   id: string
   human: string
@@ -31,6 +38,8 @@ export interface PresenceInfo {
   spawned: boolean
   contestWith: string | null
   shareWith: string | null
+  start: number | null
+  end: number | null
 }
 
 export interface LiveDirectorOptions {
