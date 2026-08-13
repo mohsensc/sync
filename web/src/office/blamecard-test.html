@@ -24,13 +24,18 @@
   <p>No THREE scene needed — blamecard.js is a plain DOM controller.
      fetchFn below is stubbed with canned blame/log JSON matching gitapi.mjs's
      real response shape. Press V (or the button in the card) to flip the
-     graphic/classic variant.</p>
+     graphic/classic variant, R to flip region/whole-file when a fixture
+     carries a range.</p>
   <div class="row">
     <button data-f="skewed">skewed ownership</button>
     <button data-f="even">even split, 3 authors</button>
     <button data-f="solo">one author only</button>
     <button data-f="empty">no history at path</button>
     <button data-f="long">12 commits, old + new</button>
+  </div>
+  <div class="row">
+    <button data-f="region">has a region (14 lines, mixed)</button>
+    <button data-f="regionFallback">region past EOF (falls back)</button>
   </div>
   <div class="row">
     <button id="bClose">close card</button>
@@ -84,6 +89,38 @@ const FIXTURES = {
     blame: { ok: false, reason: 'no blame available' },
     log: { ok: false, reason: 'no history' },
   },
+  region: {
+    blame: { ok: true, total: 340, owners: [
+      { author: 'mohsensc', lines: 260, share: 260 / 340 },
+      { author: 'agentai', lines: 80, share: 80 / 340 },
+    ], newestLineAgeDays: 40, oldestLineAgeDays: 400 },
+    log: { ok: true, entries: [
+      { sha: 'f00dcafe', author: 'mohsensc', when: '5 weeks ago', subject: 'refactor the region math' },
+      { sha: 'deadf00d', author: 'agentai', when: '9 months ago', subject: 'seed the module' },
+    ] },
+    // The lines this agent actually holds right now — a much fresher,
+    // much more one-sided slice than the whole-file bar above. This is
+    // the whole point of the region view: "mostly mohsen, newest 2h ago"
+    // reads completely differently from "260/340 lines, oldest a year".
+    regionBlame: { ok: true, total: 14, owners: [
+      { author: 'mohsensc', lines: 11, share: 11 / 14 },
+      { author: 'agentai', lines: 3, share: 3 / 14 },
+    ], newestLineAgeDays: 0, oldestLineAgeDays: 12 },
+    range: { start: 120, end: 134 },
+  },
+  regionFallback: {
+    blame: { ok: true, total: 90, owners: [{ author: 'mohsensc', lines: 90, share: 1 }],
+      newestLineAgeDays: 10, oldestLineAgeDays: 200 },
+    log: { ok: true, entries: [
+      { sha: 'ba5eba11', author: 'mohsensc', when: '10 days ago', subject: 'small file, big range' },
+    ] },
+    // A range that runs past EOF. gitapi.mjs's blame route tolerates this
+    // and returns {ok:false} the same way it does for "no blame at all" —
+    // the card is expected to fall back to the whole-file view silently,
+    // never show an empty region box.
+    regionBlame: { ok: false, reason: 'no blame available' },
+    range: { start: 9000, end: 9050 },
+  },
   long: {
     blame: { ok: true, total: 500, owners: [
       { author: 'mohsensc', lines: 260, share: 0.52 },
@@ -108,7 +145,9 @@ let current = 'skewed'
 function stubFetch(url) {
   const u = new URL(url, location.href)
   const data = FIXTURES[current]
-  const body = u.pathname.endsWith('/blame') ? data.blame : data.log
+  const isBlame = u.pathname.endsWith('/blame')
+  const isRanged = isBlame && u.searchParams.has('start')
+  const body = isRanged ? data.regionBlame : (isBlame ? data.blame : data.log)
   return Promise.resolve({ json: async () => body })
 }
 
@@ -116,7 +155,10 @@ const card = attachBlameCard({ fetchFn: stubFetch, onClose: () => card.hide() })
 
 function show(name) {
   current = name
-  card.show({ id: 'a1', name: 'a1', role: 'mohsensc', gitPath: `fixtures/${name}.js` })
+  const data = FIXTURES[name]
+  const agent = { id: 'a1', name: 'a1', role: 'mohsensc', gitPath: `fixtures/${name}.js` }
+  if (data.range) { agent.gitStart = data.range.start; agent.gitEnd = data.range.end }
+  card.show(agent)
 }
 
 document.querySelectorAll('[data-f]').forEach(b => {
