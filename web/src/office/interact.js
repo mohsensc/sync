@@ -56,6 +56,7 @@ const CSS = `
 #it.card .git{margin-top:7px;padding-top:7px;border-top:1px solid #E9E0CE;
   font-size:10.5px;color:#C0762A}
 #it.card .git.stale{color:#8A94A3}
+#it.card .git.own{border-top:none;margin-top:2px;padding-top:2px;color:#A5738C}
 @keyframes itin{from{opacity:0;transform:translateY(-3px)}to{opacity:1;transform:translateY(0)}}
 @media (prefers-reduced-motion: reduce){#it.card{animation:none}}
 `
@@ -68,6 +69,33 @@ function fmtAge(days) {
   if (days < 1) return 'today'
   if (days < 1.5) return '1d ago'
   return `${Math.round(days)}d ago`
+}
+
+/**
+ * Whose code is this, for one agent against one blame result.
+ *
+ * `identity` is whatever we have for the agent as a human name — `role` on
+ * live agents (the relay's `human` field), `name` as a last resort for the
+ * demo cast, which has no human attached to it at all. Matches loosely
+ * (case-insensitive substring either direction) because a demo identity like
+ * "agent-3" was never going to equal a real git author string, and even a
+ * real human's display name and git author name often differ by a nickname
+ * or a middle name — see this repo's own two author strings for `mohsensc`.
+ *
+ * Degrades to the top owner, `matched:false`, rather than nothing — a desk
+ * or hover line always has something honest to say, never an empty claim.
+ * Pure and exported so it's testable without a fetch or a DOM.
+ */
+export function ownershipShare(blame, identity) {
+  if (!blame || blame.ok === false || !blame.owners || blame.owners.length === 0) return null
+  const id = String(identity || '').trim().toLowerCase()
+  const hit = id && blame.owners.find(o => {
+    const a = String(o.author || '').toLowerCase()
+    return a === id || (a.length > 1 && id.includes(a)) || (id.length > 1 && a.includes(id))
+  })
+  const top = blame.owners[0]
+  if (hit) return { pct: Math.round(hit.share * 100), matched: true, name: hit.author }
+  return { pct: Math.round(top.share * 100), matched: false, name: top.author }
 }
 
 export function attachInteraction(cfg) {
@@ -111,6 +139,30 @@ export function attachInteraction(cfg) {
       v = r.ok ? await r.json() : { ok:false }
     } catch { v = { ok:false } }
     gitCache.set(path, { t:now, v })
+    return v
+  }
+
+  // ---- git blame, cached separately -----------------------------------
+  // Ownership (desk tint + the hover card's "whose code" line) needs the
+  // full blame breakdown, not the one-line stat summary above — different
+  // endpoint, different shape, so it gets its own cache rather than being
+  // squeezed into gitCache. STATE.md already flags that gitsignals.js runs
+  // its own poller against a *different* endpoint (stat) with no shared
+  // cache between the two files; this is a third, still-separate cache
+  // against blame specifically. Not worth a shared module for one round.
+  const BLAME_TTL = 60000
+  const blameCache = new Map()
+  async function fetchBlame(path) {
+    const now = Date.now()
+    const hit = blameCache.get(path)
+    if (hit && now - hit.t < BLAME_TTL) return hit.v
+    let v
+    try {
+      if (!fetchFn) throw new Error('no fetch')
+      const r = await fetchFn(`/api/git/blame?path=${encodeURIComponent(path)}`)
+      v = r.ok ? await r.json() : { ok:false }
+    } catch { v = { ok:false } }
+    blameCache.set(path, { t:now, v })
     return v
   }
 
@@ -243,6 +295,81 @@ export function attachInteraction(cfg) {
     }
   }
 
+  // ---- whose desk is this -------------------------------------------
+  // A desk's "resting" colour is no longer always the bare base — if the
+  // agent seated there is mostly typing their own code it rests tinted in
+  // their own colour, and if it's mostly someone else's it rests in a
+  // shared neutral. `restState()` is what setHover() restores TO instead
+  // of null, so hovering a tinted desk and moving on doesn't wipe the tint.
+  const TEAMMATE_HUE = P.slate
+  function restState(pick) {
+    if (!pick || pick.kind !== 'desk') return null
+    return pick.ref.ownership || null
+  }
+  function applyRest(pick) {
+    if (!pick) return
+    const r = restState(pick)
+    if (r) tint(matsOf(pick), r.hex, r.alpha)
+    else tint(matsOf(pick), null)
+  }
+
+  // Two treatments to compare, toggled with T: a steady low-alpha wash, or
+  // a slow breathe between the agent's own hue and the neutral teammate hue
+  // — same "breathe" idea as the hover pulse above, just much slower and
+  // driven by ownership rather than mouse attention. `desk.ownership` (set
+  // by scanDesks below) always carries BOTH ends of that gradient so this
+  // loop never has to re-derive them.
+  let deskTintMode = 'steady'
+  let breathePhase = 0
+  let pulseDeskT = performance.now()
+  function pulseDesks(t) {
+    const dt = Math.min(0.05, (t - pulseDeskT) / 1000)
+    pulseDeskT = t
+    if (deskTintMode === 'breathe') {
+      breathePhase += dt * 0.6                 // ~10s round trip — a mood, not a blink
+      const k = 0.5 + 0.5 * Math.sin(breathePhase)
+      for (const d of desks) {
+        if (!d.ownership) continue
+        if (hovered && hovered.kind === 'desk' && hovered.ref === d) continue // hover pulse owns this one
+        const hex = k > 0.5 ? d.ownership.hex : d.ownership.otherHex
+        tint(d.mats, hex, 0.14 + 0.14 * Math.abs(k - 0.5) * 2)
+      }
+    }
+    requestAnimationFrame(pulseDesks)
+  }
+  requestAnimationFrame(pulseDesks)
+
+  /** Who's sitting at this desk right now, if anyone — same "seated and
+   *  within reach of the seat mark" test office.html uses for its own
+   *  chair-slide animation, just read here instead of owned here. */
+  function seatedAt(d) {
+    return world.agents.find(a => a.seated &&
+      Math.hypot(a.pos.x - d.seat[0], a.pos.z - d.seat[1]) < 0.55)
+  }
+
+  const DESK_SCAN_MS = 3000
+  async function scanDesks() {
+    for (const d of desks) {
+      const a = seatedAt(d)
+      if (!a || !a.gitPath) {
+        d.ownership = null
+        if (!(hovered && hovered.kind === 'desk' && hovered.ref === d)) applyRest({ kind:'desk', ref:d })
+        continue
+      }
+      const blame = await fetchBlame(a.gitPath)
+      const share = ownershipShare(blame, a.role || a.name)
+      d.ownership = share ? {
+        hex: share.matched && share.pct >= 50 ? a.color : TEAMMATE_HUE,
+        otherHex: share.matched && share.pct >= 50 ? TEAMMATE_HUE : a.color,
+        alpha: 0.22,
+        share,
+      } : null
+      if (!(hovered && hovered.kind === 'desk' && hovered.ref === d)) applyRest({ kind:'desk', ref:d })
+    }
+  }
+  scanDesks()
+  setInterval(scanDesks, DESK_SCAN_MS)
+
   // A flat hover tint reads as a UI state change; a pulsing one reads as
   // something alive noticing you. Runs its own rAF rather than piggybacking
   // office.html's render loop, since interact.js has no other hook into it.
@@ -285,11 +412,23 @@ export function attachInteraction(cfg) {
       row.textContent = `last touched ${fmtAge(v.lastAgeDays)} by ${v.lastAuthor} · ${v.commits} commits · ${authors}`
       host.after(row)
     })
+    fetchBlame(a.gitPath).then(v => {
+      if (token !== hoverToken) return
+      const host = tip.querySelector('dl')
+      const share = ownershipShare(v, a.role || a.name)
+      if (!host || !share) return              // no blame at all — omit, don't claim
+      const row = document.createElement('div')
+      row.className = 'git own'
+      row.textContent = share.matched
+        ? `code is ${share.pct}% theirs`
+        : `mostly ${share.name}'s code`
+      host.after(row)
+    })
   }
   function setHover(pick) {
     if (pick === hovered) return
     if (hovered && !(selected && hovered.kind === 'agent' && hovered.ref === selected))
-      tint(matsOf(hovered), null)
+      applyRest(hovered)
     hovered = pick
     hoverPhase = 0
     hoverToken++
@@ -382,6 +521,16 @@ export function attachInteraction(cfg) {
   // click from a drag, so track how far the pointer travelled while down.
   let down = false, dx0 = 0, dy0 = 0, t0 = 0, moved = 0, hoverAt = 0
 
+  // T swaps the two desk-ownership treatments, steady wash vs. slow breathe,
+  // so they can be sat side by side rather than argued about from memory.
+  addEventListener('keydown', e => {
+    if (e.key !== 't' && e.key !== 'T') return
+    if (e.target && /input|textarea/i.test(e.target.tagName)) return
+    deskTintMode = deskTintMode === 'steady' ? 'breathe' : 'steady'
+    log(`desk ownership tint: ${deskTintMode}`)
+    if (deskTintMode === 'steady') for (const d of desks) applyRest({ kind:'desk', ref:d })
+  })
+
   canvas.addEventListener('pointerdown', e => {
     down = true; dx0 = e.clientX; dy0 = e.clientY; t0 = performance.now(); moved = 0
   })
@@ -402,6 +551,14 @@ export function attachInteraction(cfg) {
   const api = {
     pickAt, click, select, paint, pickable, desks,
     get selected() { return selected },
+    /** Force an ownership rescan now instead of waiting for the 3s poll —
+     *  for scripted browser verification. */
+    scanDesks,
+    get deskTintMode() { return deskTintMode },
+    setDeskTintMode(mode) {
+      deskTintMode = mode === 'breathe' ? 'breathe' : 'steady'
+      if (deskTintMode === 'steady') for (const d of desks) applyRest({ kind:'desk', ref:d })
+    },
     hoverAt(x, y) { const h = pickAt(x, y); setHover(h ? h.pick : null); return h ? h.pick.label : null },
     /** Register a click target for an agent added after attachInteraction()
      *  ran — every live-spawned character, since the roster at setup time is
