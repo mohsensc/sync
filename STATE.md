@@ -823,3 +823,176 @@ still the more complete answer.
 Not touched: `replayEvent`, the camera/demo-cam block, `.reel`/`.reel-*`
 CSS, `reel.js`, `clips/*`, `agent.js` — other tasks' regions this round,
 left alone.
+
+## Round 4, task 2 — two-act replay and camera framing
+
+Built the sequencer the brief asked for: replay used to jump straight to
+the resolution beat, skipping the "two characters conflicting" half the
+feature spec actually promises. Now it doesn't.
+
+- **`World.replay(a, b, kind)`** in `agent.js` (sole owner this round).
+  `kind` is a resolution kind straight off a reel event (`wait` | `abort`
+  | `share` | `read-yield` | `redundant` — exactly `ReelResolution.kind`'s
+  vocabulary, no translation table needed). Chains multiple stages through
+  the SAME `approach -> settle -> active -> done` phase machine every
+  other paired action already runs on (`#step`) — not a second animation
+  system, per the brief. A chained encounter is flagged `e.isChain` and
+  carries `e.stage` (current stage descriptor) + `e.chain` (remaining
+  stages); `#step`'s settle-complete and active-phase branches both check
+  `isChain` first and take a new path that's additive, not a rewrite of
+  the existing per-kind dispatch — `contest()`/`shove()`/`handshake()`/
+  etc. and their standalone behavior are untouched byte-for-byte.
+  - `wait` / `abort`: `clash` stage (argue/argueReact standoff, marks from
+    `argueMarks`, held 1.75s — inside the brief's 1.5-2s window, not
+    ended by a clip length since a real contest has none) then
+    `handshake` or `shove`. For `abort` the act assignment is the
+    deliberate mirror of `shove()`'s own "first argument wins" rule: in
+    `World.replay`, `a` is always the one who stands down and `b` always
+    prevails (matching `toReelEvent`'s own convention), so the winner/loser
+    act calls are swapped relative to standalone `shove(a,b)`. Documented
+    at length in both the method's doc comment and `REPLAY_CHAINS['abort']`
+    itself so nobody "fixes" it back to the wrong convention later.
+  - `share`: one stage, `highfive` — no separate clash staged, because
+    `highfive()`'s own approach/settle phases already ARE "a brief mutual
+    approach then contact," which is what the brief asked for here.
+  - `read-yield` / `redundant`: a `notice` stage (both arrive, hold facing
+    each other 0.5s, no clip — just presence) then `yield` or
+    `doubletake`. Brief left this "your call, keep it short"; chose to add
+    the beat rather than skip it, since a bare instant cut into the
+    resolution read as abrupt in-browser during iteration.
+  - Marks are recomputed per stage (`STAGE_MARKS`, keyed by stage kind,
+    reusing each clip module's own `xMarks`/`spacingFor` — no new
+    geometry). A stage transition re-enters `settle` (`#advanceChain`) so
+    the pair eases onto the new stage's spacing instead of teleporting,
+    even though in practice they're already standing close together from
+    the stage that just ended.
+  - Deliberately did NOT unify this with the pre-existing kind-based
+    dispatch in `#step` (e.g. making `contest()`/`shove()` reuse the same
+    tables) — `shove()`'s standalone a=winner convention and replay's
+    a=stands-down convention actively conflict, and reconciling them
+    would have meant either changing `shove()`'s contract (risking task
+    3/4's already-verified behavior) or adding a swap flag that's more
+    confusing than two small, separately-commented tables. Two tables,
+    clearly labeled, won over one clever one.
+
+- **Camera framing** in `office.html`, two small additions, both inside
+  the owned camera block (~row 580-615) and the render loop's camera
+  lines (~945-955) — `initLive`/`onLiveReelFrame`, the reel CSS, `reel.js`,
+  `live.js`, and `clips/*` were never touched.
+  - `focusPair(a, b, enc)`: saves the camera's current target/dist/yaw
+    once (only if nothing is already saved, so a second click mid-replay
+    doesn't clobber the ORIGINAL pre-replay framing), zooms to the pair's
+    midpoint at `dist=0.55` (default is 1.14 — noticeably tighter, reads
+    as "watch this" without being a facecam), and remembers the encounter
+    being followed. Yaw is deliberately left alone: `camera.lookAt(target)`
+    already centres the pair regardless of orbit angle, and the arc is
+    clamped to angles that stay inside the room anyway, so recomputing a
+    "better" yaw wasn't worth the complexity.
+  - The render loop (right before the existing camera-position lines)
+    checks `replayEnc && replayEnc.phase === 'done'` every frame and calls
+    `releaseCameraFocus()`, which eases back to the saved framing. This
+    watches the ENCOUNTER, not a fixed timer, so a one-stage beat (share)
+    and a two-stage beat (wait/abort) each get exactly as long as they
+    actually take — reusing `focus()`'s own easing both ways, not a
+    second camera system.
+
+- **`replayEvent(e)` in `office.html`** rewritten around `world.replay()`.
+  The old version had a `RESOLUTION_TO_WORLD` kind->method table and
+  silently no-op'd (caption only) if either agent was busy or not on
+  screen. Per the brief ("a click never silently no-ops"), it now
+  captions a specific reason in every one of those cases instead of
+  always emitting the same generic line:
+  - not both agents currently spawned/found by name -> "not both on
+    screen right now"
+  - `resolution: null` (rung 0) -> "co-location, nothing to resolve"
+  - either side `busy` -> `"can't replay right now — <name> is busy"`
+  - anything else unexpected (`world.replay` returns null) -> "no
+    matching beat for \"<kind>\""
+  - otherwise: fires `world.replay`, calls `focusPair`, and captions the
+    resolution's plain-English phrase (a small local `RESOLUTION_LABEL`
+    copy, same "small duplication across the toolchain boundary" pattern
+    `live.js`'s `HAIR`/`zones.js`'s `PALETTE` already use — this file
+    doesn't import `reel.js`'s internals for one string).
+  - **Busy handling is caption-only, not preemption.** The brief allowed
+    either ("your call"); tearing down another pair's in-flight encounter
+    cleanly (freeing both agents, resetting their activity, not leaving
+    the OTHER pair stuck mid-animation) looked like real scope, not a
+    five-line job, once actually looked at — so it's explicitly not
+    attempted, and the caption path covers the "never silently no-op"
+    requirement either way. Worth a future round if the owner wants every
+    click to guarantee a visible beat regardless of what's already
+    running.
+
+**Worktree hazard hit and recovered from — same one task 3 also hit and
+already wrote up above, hitting it independently is useful confirmation
+it's real and not a one-off.** Built the full `agent.js` + `office.html`
+change once, and before it was committed another task's `git reset`/
+rebase cleanup (visible in `git reflog` as two `reset: moving to HEAD`
+entries) wiped `agent.js` back to its pre-edit state on disk and reverted
+just the `replayEvent`/`RESOLUTION_TO_WORLD` region of `office.html`
+specifically (the camera-block addition, a pure insertion with no
+conflicting lines, survived intact). Caught it with a plain `grep -n
+"replay(a, b, kind)" agent.js` coming back empty, redid both edits, and
+this time staged and committed immediately (`git add
+web/src/office/agent.js web/src/office/office.html && git commit`)
+instead of leaving the finished work sitting uncommitted while writing
+this section — the lesson from task 3's writeup applied back onto this
+task. Also used `git stash push -u` to shelve task 1's concurrent,
+uncommitted `clips/*` edits before `git pull --rebase`, then `stash pop`
+after pushing, rather than `git add -A` sweeping them into this commit
+under the wrong name (the mistake task 4's `8b1b8da` made, per task 3's
+note above).
+
+**Browser-verified**, shared lock/port/tab (`office.html`, relay
+unreachable -> demo fallback, as expected with no relay process running):
+cancelled the demo and disabled greetings so agents stayed put, then drove
+the ACTUAL click path (expand a reel row via task 4's new detail card,
+click its `▶ replay` button — not just console calls) for `share` (R2,
+`priya/agent-1` vs `dev/agent-3`), `abort` (R3, `priya/agent-2` vs
+`sara/agent-4`), and `read-yield` (R1, `dev/agent-3` vs `priya/agent-1`).
+Confirmed via caption text after each click: `replay: priya/agent-1 vs
+dev/agent-3 — split the work, no overlap`, `replay: priya/agent-2 vs
+sara/agent-4 — out-authoritied — aborted`, `replay: dev/agent-3 vs
+priya/agent-1 — reader yielded`. Screenshotted the `abort` replay
+mid-beat: camera visibly tighter than the resting wide framing (compare
+the "desks" zone label's size between the two screenshots — much larger
+once zoomed) with the pair standing close together near the vault, then a
+second screenshot after it finished showing the camera eased back to the
+original wide framing on its own. Forced `agent-2.busy = true` and
+clicked its row's replay button: caption read exactly `can't replay right
+now — agent-2 is busy`, confirmed the encounter never started. Also
+console-verified `wait` and `redundant` create their expected first stage
+(`clash`, `notice`) without touching the UI, since those two are harder
+to land a screenshot on given real playback speed and remote-tool round-
+trip latency (see below). `list_console_messages` stayed clean throughout
+— only the known relay-refused error and the three coffee-cup 404s (#59).
+`pnpm test` 137/137, `pnpm typecheck` clean, both re-run after `git pull
+--rebase` picked up tasks 1/3/4's work on top of this task's commit.
+
+**What I could NOT verify visually**: catching a screenshot mid-clash
+(the `arguing`/`reacting` poses specifically, as opposed to "camera is
+zoomed and a beat is running") turned out to be harder than expected —
+each tool round-trip (click, then screenshot, then read the result) costs
+several real seconds, which is comparable to or longer than the clash
+stage's own 1.75s hold, so most screenshots landed on "already resolved,
+camera already easing back out" rather than the clash pose itself. Tried
+manually stepping `world.update(dt)` in a tight loop inside a single
+`evaluate_script` call to get a deterministic mid-animation frame without
+waiting on real time — doesn't work, because the render loop's own
+`requestAnimationFrame` callback in `office.html` keeps running
+independently and both re-renders with its own (unmodified) camera
+formula and re-advances the encounter with real elapsed time on its very
+next frame, stomping any manual step the instant the script returns. This
+isn't a functional gap — the `arguing`/`reacting` activity names were
+confirmed programmatically (`agent.activity` reads correctly mid-clash via
+`evaluate_script`, just not caught in a screenshot), and task 1 already
+owns visual iteration on the individual clips this round. It just means
+nobody has yet SEEN the two-stage clash-then-resolution transition itself
+render, only confirmed it happens. A future round with more lock time
+could retry using `--timeout`-extended `wait_for` calls tuned to the
+1.75s window, or add a temporary debug flag that slows the whole
+`REPLAY_CHAINS` timing 4-5x for screenshotting purposes only.
+
+Not touched: `initLive`/`onLiveReelFrame`, `.reel`/`.reel-*` CSS,
+`reel.js`, `live.js`, `clips/*` — other tasks' regions this round, left
+alone.
