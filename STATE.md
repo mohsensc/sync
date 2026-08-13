@@ -319,3 +319,121 @@ filed as a GitHub issue — no edge case here cleared the "expensive to fix"
 bar; the two "not done, not actionable" items above are ownership
 boundaries for this round, not bugs, and are already tracked precisely
 enough in this file for round 3 to pick up as one-line fixes.
+
+## round 2 task 3 — blame card as picture, in variants
+
+Rebuilt `web/src/office/blamecard.js` from the wall-of-text card into two
+switchable graphic layouts. Real data only, same `/api/git/blame` and
+`/api/git/log` endpoints as before.
+
+- **New `web/src/office/history-viz.js`** — pure helpers, no DOM: an
+  author-name -> hue hash (`hueForAuthor`/`colorForAuthor`, same
+  multiply-by-31 shape as `palette.ts`'s `hairFor`, re-hosted because this
+  path can't import the TS side), a rough relative-age parser
+  (`parseRelativeAge`, turns git's `--date=relative` strings like "3 days
+  ago" / "2 years, 1 month ago" into a day count), and `ageToX` (log-scale
+  0..1 axis position, newest at the right). 11 vitest cases in
+  `web/test/history-viz.test.ts`. Has its own `history-viz.d.ts` (same
+  reason every other `office/*.js` needs one — see `agent.d.ts`).
+- **`blamecard.js`** — two variants, `graphic` (default) and `classic`:
+  - `graphic`: ownership as one tug-of-war bar, segments per author sized
+    by `share`, coloured by `colorForAuthor`, growing in width on open
+    (staggered `setTimeout` per segment, not a snap). History as a dot
+    timeline on a log-scaled age axis, dots popping in staggered
+    (cubic-bezier overshoot), hover/focus shows subject+author+when in a
+    floating tip. This is the one that best matches the brief's "picture,
+    not a wall of text" ask — kept as default.
+  - `classic`: the earlier per-author stacked-bar-rows + text `<ul>`
+    treatment, kept deliberately rather than deleted so the two can be
+    compared. Still has its own (smaller) grow-in animation on the bars
+    and a staggered fade-up on the list rows — wasn't purely static even
+    before this round's ask, just less picture-like.
+  - Toggle: press **V** while a card is open (global keydown listener
+    inside `attachBlameCard`, no-ops when the card is closed or an input
+    has focus), or load with **`?bcVariant=classic`**. There's also a
+    small button in the card header showing the current variant name that
+    does the same thing on click — worth knowing the button exists but
+    keyboard is the more reliable way to drive it from a screenshot-taking
+    tool (see the devtools note below).
+  - Degrade path unchanged in spirit: `{ok:false}`/network error/absent
+    data all still fall through to "no history here yet", never an empty
+    box. Verified with a synthetic `{ok:false}` fixture.
+- **`office.html`** — no changes needed. `attachBlameCard`'s existing
+  `show()`/`hide()` contract didn't change shape, and the V-key handling
+  lives entirely inside blamecard.js's own module scope, so the only file
+  I touched under `web/src/office/` besides blamecard.js and the new
+  history-viz files was blamecard-test.html. Flagging explicitly since the
+  task brief called out office.html as mine to touch this round — turned
+  out not to need it.
+- **New `web/src/office/blamecard-test.html`** — fixture harness, not a
+  3D scene (blamecard.js has zero THREE dependency, it's a plain DOM
+  controller — the argue-test.html-style canvas rig would've been pure
+  overhead here). Five canned fixtures shaped exactly like gitapi.mjs's
+  real response bodies (skewed ownership, even 3-way split, solo author,
+  no-history, 12 commits spanning minutes to years) behind buttons, plus
+  V/variant-button toggling. First version had a bug worth flagging for
+  anyone copying the argue-test.html pattern again: `import { x } from
+  './y.js?v=' + Date.now()` is a **syntax error** — static `import`
+  can't take a computed specifier. argue-test.html gets away with the
+  cache-bust trick because it uses `await import(...)` (dynamic), not a
+  static `import ... from`. Caught this in-browser as an uncaught
+  SyntaxError with an empty page, not in `pnpm typecheck` (plain script
+  tag, tsc never sees it) — fixed to the dynamic-import form, verified
+  clean after.
+
+**Browser-verified** (took the shared 5173 lock, one tab, protocol
+followed): `blamecard-test.html` — all five fixtures screenshot-clean,
+graphic variant's tug bar and timeline dots both animate in rather than
+snap, V key reliably toggles graphic<->classic (confirmed the content
+actually swaps, not just the button label), empty-history fixture shows
+the quiet one-liner with no empty box. Then `office.html` via
+`window.__zoomAgent('a3')` — real card for `web/src/office/anim.js`,
+100% mohsensc ownership (small young file, makes sense), 3 real commit
+dots on the timeline, card fully inside its `top:328px; bottom:16px` box
+with no HUD overlap. `Escape` restored the room and closed the card.
+Console had only the two pre-existing/expected messages (coffee-cup glb
+404, relay websocket refused in demo mode) — nothing from this round's
+code.
+
+One devtools-tool quirk worth recording since it cost real time: clicking
+a freshly re-rendered button by `uid` (from `take_snapshot`) sometimes
+resolves to a *stale* node identity after `blamecard.js` tears down and
+rebuilds the card body's DOM on every render (it uses fresh
+`document.createElement` calls, not in-place mutation) — a click on what
+the snapshot called the "graphic" toggle button landed on an unrelated
+earlier button instead, silently, no error. Re-verified with `press_key`
+('v', `Escape`) instead of uid-clicks wherever the DOM had just been
+rebuilt, and that was reliable every time. Not a bug in this code; a
+note for round 3 if it drives blamecard.js by uid-click again — prefer
+keyboard where a shortcut exists, or re-`take_snapshot` immediately
+before every click on this file's elements.
+
+**Shared-worktree hazard, same one task 1 and task 2 both hit, hit again
+here**: a bare `git stash` mid-session (before I'd learned to path-scope
+it) swept up a duplicate in-progress copy of task 1's STATE.md section
+that was mid-write on disk at the time. Popping it back later produced a
+real merge conflict in STATE.md (two near-identical versions of task 1's
+own paragraph) plus a no-op conflict in `interact.js` (identical content
+on both sides, conflict was bookkeeping noise from the stash, not a real
+divergence). Resolved by keeping the already-committed side in both
+cases and dropping the stale stash entirely — diffed clean afterward.
+Repeating task 1 and task 2's advice a third time since three-for-three
+is a pattern: never a bare `git stash` in this worktree, always
+`git stash push -- <your files>`, or just commit before doing anything
+that touches git history at all.
+
+Files touched: `web/src/office/blamecard.js`, `web/src/office/history-viz.js`,
+`web/src/office/history-viz.d.ts`, `web/src/office/blamecard-test.html`,
+`web/test/history-viz.test.ts`. `office.html` deliberately untouched (see
+above). Nothing under `interact.js`, `agent.js`, `gitsignals.js`,
+`gitapi.mjs` touched.
+
+Verified: `pnpm test` (111/111) and `pnpm typecheck` both clean at time of
+writing this section, re-checked after the STATE.md stash-conflict
+resolution above to make sure nothing got silently mangled.
+
+Not filed as an issue: nothing here hit the "expensive edge case" bar.
+Symbol-level blame (using task 1's new `start`/`end` blame params) is a
+natural round-3 follow-up now that the endpoint supports it — not started
+here since nothing in the presence protocol carries a line range yet
+(same gap round 1 and task 1 both already flagged).
