@@ -414,3 +414,97 @@ task) or keep using the direct-binary invocation.
 Nothing filed as an issue this round — the endpoint shapes were locked in
 the plan already and matched what landed on the other three tasks with zero
 back-and-forth needed.
+
+### task 2
+
+Built hover: glow pulse plus a git-aware agent card. Files touched:
+`web/src/office/interact.js` (whole file, mine) and two narrow regions of
+`web/src/office/office.html` (`AGENT_CAST`/`setupCast()`, `spawnLive`), plus
+one line inside `onLivePresence` (see below).
+
+- **Cast wiring.** `AGENT_CAST` now carries a `file:` field — five real,
+  verified repo paths chosen for a spread of history: `python/src/
+  agent_presence/__init__.py` (untouched since the repo's first commit),
+  `cpp/hook/hook.cpp` (mid-age, 10 commits), `web/src/office/anim.js`
+  (recent, actively edited), `go/cmd/gorelay/main.go` (landed yesterday),
+  `README.md` (highest churn, 17 commits). `setupCast()` stashes it as
+  `a.gitPath` on the created agent. `spawnLive(id, human, path)` takes a
+  third arg and does the same for live agents. Its call site is inside
+  `onLivePresence`, one function outside my two assigned regions — changed
+  the single line `spawnLive(info.id, info.human)` to pass `info.path` too,
+  since without it live-mode `gitPath` would never populate at all. One
+  token, no restructuring; flagging it here since it's technically outside
+  scope. Note this only sets `gitPath` at spawn time — if a live agent moves
+  to a different file later, `gitPath` goes stale (spawnLive only runs once
+  per id). Fine for round 1 (nothing reads it more than once every ~30s
+  through the cache anyway); worth a follow-up if per-frame accuracy starts
+  to matter.
+- **Hover card.** `interact.js`'s `#it` tooltip now renders one of two
+  things: the original one-line `.tag` pill for floor/desk/prop (unchanged
+  visually, just reclassed), or a `.card` for agents — name, role/note,
+  doing, zone, file, then a git line appended asynchronously once `GET
+  /api/git/stat?path=` resolves: "last touched 1d ago by mohsensc · 8
+  commits · 1 author". `{ok:false}`/fetch failure/no `gitPath` just omits
+  that row — no empty box, confirmed by testing before task 1's endpoint
+  landed (fetch 404'd, card still rendered clean with the other four rows).
+  A `hoverToken` counter guards against a slow fetch resolving after the
+  hover has moved on to something else. Cached per path with a 30s TTL
+  (`Map`, not per-frame — one fetch per hover, reused on repeat hovers).
+  `fetchFn` is injectable (defaults to `window.fetch`) so this stays unit
+  a11y testable elsewhere later, though I didn't add an interact.js test
+  file this round — none existed before and none of the shared test
+  files import it.
+- **Pulse.** `tint()` gained a third `alpha` arg (default 0.6, matches the
+  old fixed blend everywhere else). A standalone `requestAnimationFrame`
+  loop inside `attachInteraction` breathes the hovered object's tint alpha
+  between ~0.4 and ~0.62 on a sine wave while something is hovered — reads
+  as "noticing you" rather than a flat on/off wash. Runs independently of
+  office.html's render loop since interact.js has no other per-frame hook.
+  Verified live: sampled a hovered agent's material hex three times 250ms
+  apart in the browser console and got three different values.
+- **`onSelect` hook.** Added `onSelect` to `attachInteraction`'s destructured
+  cfg and one line in `select()`: `onSelect?.(selected)`, called after every
+  selection change including deselect (`null`). Task 3 had already wired the
+  `attachInteraction({...})` call site's `onSelect:` key to
+  `zoomToAgent`/`blameCard.show`/`zoomRestore`/`blameCard.hide` before I got
+  to this — the two sides matched with no changes needed on either end.
+
+Verified in browser: took the lock, `npx vite --port 5173 --strictPort` from
+this worktree, reused the existing tab. `window.__ready` gate, then drove
+hover with `window.__interact.project(x,z)` + `window.__hoverAt(sx, sy-40)`
+(same torso-offset trick `window.__clickAgent` already used) since there's
+no per-agent DOM element to `hover()` on a canvas scene. Screenshotted the
+card mid-render showing real data for `go/cmd/gorelay/main.go`: "agent-4 ·
+agent · doing reading · zone desks · file go/cmd/gorelay/main.go · last
+touched 1d ago by mohsensc · 2 commits · 1 author", colored warm/caramel
+(the `fresh` class, <2 days). Confirmed the plain `.tag` path still renders
+correctly for a desk ("desk 1"). Checked `list_network_requests` — every
+`/api/git/stat` call came back 200, including task 4's `gitsignals.js`
+polling loop picking up the same `gitPath` field I wired, which was a nice
+confirmation the two tasks' work actually composes. `list_console_messages`
+showed only the two pre-existing unrelated warnings (missing
+`coffee-cup-v2.glb` prop asset, relay websocket refused in demo mode) —
+nothing new from this round. Killed the server, released the lock.
+
+Given the repo is only 6 days old, nothing in it is old enough to actually
+hit the `stale` (>180 days) bucket in either the hover card's fresh/stale
+coloring or task 4's freshness halo — every file's `lastAgeDays` tops out
+around 5-6. Not a bug, just a ceiling on what round 1 could visually prove;
+worth re-checking once the repo has more history, or temporarily lowering
+the stale threshold locally to eyeball it.
+
+Also fixed a shared blocker while I was in here: `web/pnpm-workspace.yaml`
+existed but with a placeholder value (`esbuild: set this to true or false`)
+that made pnpm refuse to install/run anything
+(`ERR_PNPM_IGNORED_BUILDS`) — tasks 1, 3, and 4 all independently worked
+around it with direct binary invocations rather than `pnpm test`/`pnpm
+typecheck`. Ran `pnpm approve-builds --all`, which rewrote the file to
+`allowBuilds: esbuild: true` and let esbuild's postinstall run. Committed it
+separately (`web: approve esbuild build script for pnpm install`) so `cd
+web && pnpm test`/`pnpm typecheck` work as the literal documented commands
+again, no more workaround needed for round 2.
+
+Nothing filed as a GitHub issue this round — no edge case surfaced that was
+expensive enough to defer rather than just handle (the `spawnLive` path
+going stale after the first frame, noted above, felt like a "worth knowing"
+not a "worth an issue" — it doesn't break anything, it just doesn't refresh).
