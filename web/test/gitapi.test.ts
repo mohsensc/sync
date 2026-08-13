@@ -3,6 +3,7 @@ import {
   ageDays,
   parseBlamePorcelain,
   parseLog,
+  parseRecentLog,
   parseShortlog,
   parseCanonicalNames,
   mergeAuthorsByEmail,
@@ -233,6 +234,59 @@ describe('parseLog', () => {
   })
 })
 
+// canned `git log -n --format=\x01%h\x1f%ae\x1f%an\x1f%at\x1f%s --numstat`
+// output, hand-shaped after the real thing (see the terminal check in this
+// route's commit body): header, blank line, numstat rows, repeat.
+const CANNED_RECENT = [
+  '\x01aaa1111\x1fsara@example.com\x1fSara\x1f1700000000\x1ffix the thing',
+  '',
+  '3\t1\tfoo.ts',
+  '\x01bbb2222\x1fdev@old.example.com\x1fDev Old Name\x1f1690000000\x1fadd the thing',
+  '',
+  '10\t0\tbar.ts',
+  '5\t2\tbaz.ts',
+  '\x01ccc3333\x1fsara@example.com\x1fSara\x1f1680000000\x1fmerge conflict binary blob',
+  '',
+  '-\t-\tbin.dat',
+].join('\n')
+
+describe('parseRecentLog', () => {
+  it('pairs each header with its own numstat rows into a files count', () => {
+    const now = 1700000000_000 + 1000 * 86400 // arbitrary "now" past every entry
+    const entries = parseRecentLog(CANNED_RECENT, now)
+    expect(entries).toEqual([
+      { sha: 'aaa1111', author: 'Sara', subject: 'fix the thing', ageDays: expect.any(Number), files: 1 },
+      { sha: 'bbb2222', author: 'Dev Old Name', subject: 'add the thing', ageDays: expect.any(Number), files: 2 },
+      { sha: 'ccc3333', author: 'Sara', subject: 'merge conflict binary blob', ageDays: expect.any(Number), files: 1 },
+    ])
+  })
+
+  it('resolves display name from canonicalNames by email, same dedup as shortlog', () => {
+    const canonical = new Map([['dev@old.example.com', 'Dev New Name']])
+    const entries = parseRecentLog(CANNED_RECENT, Date.now(), canonical)
+    expect(entries[1].author).toBe('Dev New Name')
+    // sara has no canonical override, falls back to the commit's own %an
+    expect(entries[0].author).toBe('Sara')
+  })
+
+  it('a binary numstat row ("-\\t-\\t...") still counts as one touched file', () => {
+    const entries = parseRecentLog(CANNED_RECENT)
+    expect(entries[2].files).toBe(1)
+  })
+
+  it('returns an empty array for no history', () => {
+    expect(parseRecentLog('')).toEqual([])
+    expect(parseRecentLog('\n')).toEqual([])
+  })
+
+  it('handles a single commit with no trailing blank line', () => {
+    const text = '\x01aaa1111\x1fsara@example.com\x1fSara\x1f1700000000\x1fonly commit\n2\t0\tf.ts'
+    expect(parseRecentLog(text)).toEqual([
+      { sha: 'aaa1111', author: 'Sara', subject: 'only commit', ageDays: expect.any(Number), files: 1 },
+    ])
+  })
+})
+
 describe('parseShortlog', () => {
   it('parses "<count>\\t<name> <email>" lines, whitespace and all', () => {
     expect(parseShortlog(CANNED_SHORTLOG)).toEqual([
@@ -458,6 +512,35 @@ describe('gitApiMiddleware against the real repo', () => {
   it('log: gives ok:false for a made-up path', async () => {
     const r: any = await callMiddleware(mw, `/api/git/log?path=${encodeURIComponent(FAKE_PATH)}`)
     expect(r.json).toEqual({ ok: false, reason: 'not a tracked path' })
+  })
+
+  it('recent: gives repo-wide entries, newest first, capped by count', async () => {
+    const r: any = await callMiddleware(mw, '/api/git/recent?count=4')
+    expect(r.status).toBe(200)
+    expect(r.json.ok).toBe(true)
+    expect(r.json.entries.length).toBeGreaterThan(0)
+    expect(r.json.entries.length).toBeLessThanOrEqual(4)
+    for (const e of r.json.entries) {
+      expect(typeof e.sha).toBe('string')
+      expect(typeof e.author).toBe('string')
+      expect(typeof e.subject).toBe('string')
+      expect(e.ageDays === null || typeof e.ageDays === 'number').toBe(true)
+      expect(typeof e.files).toBe('number')
+      expect(e.files).toBeGreaterThan(0)
+    }
+  })
+
+  it('recent: defaults count to 8 and clamps an out-of-range count to 30', async () => {
+    const noCount: any = await callMiddleware(mw, '/api/git/recent')
+    expect(noCount.json.entries.length).toBeLessThanOrEqual(8)
+    const huge: any = await callMiddleware(mw, '/api/git/recent?count=999')
+    expect(huge.json.entries.length).toBeLessThanOrEqual(30)
+  })
+
+  it('recent: dedups this repo\'s own split identity the same way shortlog does', async () => {
+    const r: any = await callMiddleware(mw, '/api/git/recent?count=30')
+    const names = new Set(r.json.entries.map((e: any) => e.author))
+    expect([...names].filter((n) => n.toLowerCase().includes('mohsen')).length).toBeLessThanOrEqual(1)
   })
 
   it('shortlog: gives owners with shares summing to 1 for a real dir', async () => {

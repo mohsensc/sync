@@ -42,6 +42,20 @@ export interface LogEntry {
 
 export function parseLog(text: string): LogEntry[]
 
+export interface RecentLogEntry {
+  sha: string
+  author: string
+  subject: string
+  ageDays: number | null
+  files: number
+}
+
+export function parseRecentLog(
+  text: string,
+  now?: number,
+  canonicalNames?: Map<string, string>
+): RecentLogEntry[]
+
 export interface ShortlogRow {
   author: string
   email: string

@@ -122,6 +122,43 @@ export function parseBlamePorcelain(text, now = Date.now(), opts = {}) {
   return result
 }
 
+// `git log -<count> --numstat --format=\x01%h<US>%ae<US>%an<US>%at<US>%s`,
+// repo-wide (no `--` path filter, no `--follow`). \x01 marks the start of a
+// commit's header line — chosen over reusing US alone because a header line
+// carries several US-joined fields and the numstat rows that follow it don't
+// have a marker of their own, so something has to say "new commit starts
+// here". Not the same 40-hex sha-only line trick churn parsing uses (that
+// only works there because sha and numstat never sit next to arbitrary
+// text). \x01 is control-code territory same as US; a commit subject
+// containing it is exactly as unlikely as one containing \x1f.
+//
+// canonicalNames (email -> display name, see parseCanonicalNames) resolves
+// each commit's author the same way shortlog's dedup does, so a split
+// identity (this repo's own `mohsensc` / `Mohsen Sarrafan Chaharsoughi`)
+// shows one name on the board, not two.
+export function parseRecentLog(text, now = Date.now(), canonicalNames = new Map()) {
+  const lines = text.split('\n')
+  const raw = []
+  let cur = null
+  for (const line of lines) {
+    if (line.startsWith('\x01')) {
+      if (cur) raw.push(cur)
+      const [sha, email, author, at, ...subjectParts] = line.slice(1).split(US)
+      cur = { sha, email, author, at: parseInt(at, 10), subject: subjectParts.join(US), files: 0 }
+    } else if (cur && NUMSTAT_LINE.test(line)) {
+      cur.files++
+    }
+  }
+  if (cur) raw.push(cur)
+  return raw.map((e) => ({
+    sha: e.sha,
+    author: (canonicalNames && canonicalNames.get(e.email)) || e.author,
+    subject: e.subject,
+    ageDays: ageDays(e.at, now),
+    files: e.files,
+  }))
+}
+
 // `git log --follow -n <n> --date=relative --format=%h<US>%an<US>%ad<US>%s`
 export function parseLog(text) {
   if (!text.trim()) return []
@@ -401,6 +438,28 @@ export function gitApiMiddleware(repoRoot) {
           { cwd: repoRoot }
         )
         return sendJson(res, { ok: true, entries: parseLog(stdout) })
+      }
+
+      if (route === 'recent') {
+        // Repo-wide, no path/dir — the commit board's "what's been
+        // happening in here" prop, not tied to one file or zone. `count`
+        // mirrors `log`'s `n` param name/clamp but under its own name since
+        // this is a distinct route with a distinct (numstat-bearing, no
+        // `--follow`, no path filter) shape rather than `log` with an
+        // optional path — changing `log` itself would mean auditing every
+        // existing caller (blamecard.js's per-file commit list) for a
+        // param it never asked for.
+        const count = Math.max(1, Math.min(30, parseInt(url.searchParams.get('count') || '8', 10) || 8))
+        const [recentOut, namesOut] = await Promise.all([
+          execFileP(
+            'git',
+            ['log', `-${count}`, `--format=%x01%h${US}%ae${US}%an${US}%at${US}%s`, '--numstat'],
+            { cwd: repoRoot }
+          ),
+          execFileP('git', ['log', `--format=%ae${US}%an`], { cwd: repoRoot }),
+        ])
+        const canonicalNames = parseCanonicalNames(namesOut.stdout)
+        return sendJson(res, { ok: true, entries: parseRecentLog(recentOut.stdout, Date.now(), canonicalNames) })
       }
 
       if (route === 'shortlog') {
