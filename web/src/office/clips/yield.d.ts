@@ -24,10 +24,30 @@ export interface ClipSpec {
   loop: boolean
 }
 
+export interface YieldTiming {
+  dur: number
+  lookPeak: number
+  lookWidth: number
+  armPeak: number
+  armWidth: number
+  stepAmp: number
+  hipsLiftAmp: number
+  nodPeak: number
+  nodWidth: number
+}
+
 export const YIELD_DUR: number
 export const YIELD_SPACING: number
+export const DEFAULT_TIMING: YieldTiming
+export const EMPHATIC_TIMING: YieldTiming
 
-export const registry: { yieldStep: ClipSpec; yieldKeep: ClipSpec }
+export type YieldRegistry = { yieldStep: ClipSpec; yieldKeep: ClipSpec }
+
+/** The picked take — the only one World ever sees. */
+export const registry: YieldRegistry
+
+/** Alternate takes for side-by-side comparison in yield-test.html only. */
+export const variants: { default: YieldRegistry; emphatic: YieldRegistry }
 
 export function spacingFor(height?: number): number
 export function yieldMarks(
@@ -35,7 +55,7 @@ export function yieldMarks(
   bPos: THREE.Vector3 | [number, number?, number?],
   spacing?: number
 ): Marks
-export function getClip(name: 'yieldStep' | 'yieldKeep'): THREE.AnimationClip
+export function getClip(name: 'yieldStep' | 'yieldKeep', reg?: YieldRegistry): THREE.AnimationClip
 
 export interface RigPuppet {
   group: THREE.Object3D

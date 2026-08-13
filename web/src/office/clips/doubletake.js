@@ -11,8 +11,8 @@
 //   the actual double-take) -> hold -> palms-up "oh, you too" shrug -> rest
 //
 // The pause between the first and second look is the whole joke, so it's
-// authored as its own named window (DT_PAUSE) rather than left to fall out
-// of two overlapping bump()s — see doubletakePose below.
+// authored as its own named, tunable window (`pauseS` in buildDoubletakeTiming
+// below) rather than left to fall out of two overlapping bump()s.
 //
 // Not a contact action (nobody touches), so like argue.js and yield.js the
 // marks distance is chosen directly rather than measured off a contact
@@ -43,37 +43,54 @@ function pose(...parts) {
 }
 
 // ---------------------------------------------------------------------------
-// Beat timing. Named windows, not bump()s laid on top of each other, because
-// the GAP between look-away and snap-back is the punchline and needs to be
-// an honest, tunable number rather than an emergent side effect.
+// Beat timing. Segment lengths in SECONDS, not fractions, and built by a
+// factory rather than hand-picked fractions — see round 2 task 4's own
+// notes in STATE.md: this clip was "a first draft off the pose math alone,
+// not off how it actually reads," and the two things a visual pass actually
+// needed to touch were (a) whether the pause holds still long enough to
+// read as a pause, and (b) whether the snap has enough SAMPLES to look
+// sudden rather than mushy. Seconds, not fractions, because "longer pause"
+// should only grow the pause — with fractions of a fixed total, stretching
+// one segment silently stretches (or the total silently swallows) the
+// others, and the snap is the one segment that must never get slower.
 // ---------------------------------------------------------------------------
-const DT_LOOK1_END  = 0.14   // already looking at the start of the clip
-const DT_AWAY_END   = 0.30   // glances off — "wait, that looks familiar..."
-const DT_PAUSE_END  = 0.46   // the hold. Comic timing lives in this gap.
-const DT_SNAP_END   = 0.54   // FAST — the actual double-take, back in <0.3s
-const DT_HOLD_END   = 0.66   // wide-eyed hold on the partner
-const DT_SHRUG_END  = 0.90   // palms up, "...oh, you too"
-// 1.0: eases back to rest
+const DT_LOOK1_S = 0.364   // already looking at the start of the clip
+const DT_AWAY_S  = 0.416   // glances off — "wait, that looks familiar..."
+const DT_SNAP_S  = 0.208   // FAST — the actual double-take, back in <0.3s
+const DT_HOLD_S  = 0.312   // wide-eyed hold on the partner
+const DT_SHRUG_S = 0.624   // palms up, "...oh, you too"
+const DT_REST_S  = 0.260   // eases back to rest
 
-/** Segment table: [end t, headYaw, headNod, browRaise, shrugK, easing]. brow
- *  raise has no dedicated bone, so it rides the neck/Head nod's sign instead
- *  (a small upward tip reads as "surprised" on this rig — same trick the
- *  argue/react clips use for their head shake). */
-const DT_SEGS = [
-  [DT_LOOK1_END, 0,  0,  0,  0, smooth],
-  [DT_AWAY_END, -22, 4, -1, 0, smooth],
-  [DT_PAUSE_END, -22, 4, -1, 0, u => u],           // hold the away-look
-  [DT_SNAP_END,  4, -6,  3, 0, u => Math.pow(u, 0.4)],  // snap: fast in, no ease-out
-  [DT_HOLD_END,  4, -6,  3, 0, u => u],             // hold the wide-eyed look
-  [DT_SHRUG_END, 0,  2,  1, 1, smooth],
-  [1.00,         0,  0,  0, 0, smooth],
-]
+/** Segment table + total duration for a given pause length (seconds) and
+ *  shrug peak amplitude. Returns [end t, headYaw, headNod, browRaise,
+ *  shrugK, easing] rows — brow raise has no dedicated bone, so it rides the
+ *  neck/Head nod's sign instead (a small upward tip reads as "surprised" on
+ *  this rig — same trick the argue/react clips use for their head shake).
+ *  `shrugAmp` is just the shrug segment's target K: shrugRight(k) is a
+ *  plain mix(a,b,k), so K > 1 extrapolates past the authored pose instead
+ *  of clamping — the cheapest possible "bigger shrug" knob. */
+function buildDoubletakeTiming(pauseS, shrugAmp) {
+  const durs = [DT_LOOK1_S, DT_AWAY_S, pauseS, DT_SNAP_S, DT_HOLD_S, DT_SHRUG_S, DT_REST_S]
+  const dur = durs.reduce((a, b) => a + b, 0)
+  let acc = 0
+  const ends = durs.map(d => { acc += d; return acc / dur })
+  const segs = [
+    [ends[0], 0,  0,  0,  0,        smooth],
+    [ends[1], -22, 4, -1, 0,        smooth],
+    [ends[2], -22, 4, -1, 0,        u => u],                 // hold the away-look
+    [ends[3],  4, -6,  3, 0,        u => Math.pow(u, 0.4)],  // snap: fast in, no ease-out
+    [ends[4],  4, -6,  3, 0,        u => u],                 // hold the wide-eyed look
+    [ends[5],  0,  2,  1, shrugAmp, smooth],
+    [ends[6],  0,  0,  0, 0,        smooth],
+  ]
+  return { dur, segs, pauseS, shrugAmp }
+}
 
-function dtBlend(t) {
+function dtBlend(t, segs) {
   let i = 0
-  while (i < DT_SEGS.length - 1 && t >= DT_SEGS[i][0]) i++
-  const row = DT_SEGS[i]
-  const prev = i === 0 ? row : DT_SEGS[i - 1]  // first window holds row0's own values from t=0
+  while (i < segs.length - 1 && t >= segs[i][0]) i++
+  const row = segs[i]
+  const prev = i === 0 ? row : segs[i - 1]  // first window holds row0's own values from t=0
   const t0 = i === 0 ? 0 : prev[0]
   const t1 = row[0]
   const [, yaw, nod, brow, shrug, easing] = row
@@ -85,6 +102,22 @@ function dtBlend(t) {
     shrug: mix(prev[4], shrug, u),
   }
 }
+
+// The picked take: pause length and shrug amplitude match the original
+// first-draft values exactly (0.416s pause, shrug K peaks at 1) — the visual
+// pass didn't find the STRUCTURE wrong, just the sampling (below) and it's
+// worth comparing against the two variants to confirm that's still true.
+const DEFAULT_TIMING = buildDoubletakeTiming(0.416, 1)
+
+// Alternate takes for side-by-side comparison in doubletake-test.html only
+// — neither is folded into ANIM.CLIPS, neither is reachable from World.
+//   longPause — the hold before the snap stretched by half a second, to
+//     check whether the joke actually plays better with more "wait for it."
+//   bigShrug  — the "oh, you too" amplified 40%, same timing otherwise.
+const LONGPAUSE_TIMING = buildDoubletakeTiming(0.416 + 0.5, 1)
+const BIGSHRUG_TIMING = buildDoubletakeTiming(0.416, 1.4)
+
+export { DEFAULT_TIMING, LONGPAUSE_TIMING, BIGSHRUG_TIMING }
 
 // Shrug arms: both come up and out, palms up, shoulders lift a touch — the
 // universal "not my fault" gesture. Symmetric (LeftArm mirrors RightArm),
@@ -100,8 +133,8 @@ function shrugRight(k) {
   }
 }
 
-function doubletakePose(t) {
-  const { yaw, nod, brow, shrug } = dtBlend(t)
+function doubletakePose(t, timing = DEFAULT_TIMING) {
+  const { yaw, nod, brow, shrug } = dtBlend(t, timing.segs)
   return pose(ANIM.STANDING,
     { hips: [0, 0, 0] },
     {
@@ -115,20 +148,39 @@ function doubletakePose(t) {
 }
 
 // ---------------------------------------------------------------------------
-// Clip spec
+// Clip specs
 // ---------------------------------------------------------------------------
-export const DOUBLETAKE_DUR = 2.6
-// The snap (DT_AWAY_END -> DT_SNAP_END, 0.24 of the clip = ~0.62s) is the
-// fastest thing here and has no zero-slope requirement at its inner edge —
-// it's meant to look sudden — so it wants more samples than the smooth
-// segments around it. 40 keys over 2.6s is 65ms/sample, enough that the snap
-// doesn't facet even sped up with pow(u, 0.4).
-const DOUBLETAKE_KEYS = 40
+export const DOUBLETAKE_DUR = DEFAULT_TIMING.dur
 
-const DOUBLETAKE_SPEC = { fn: doubletakePose, dur: DOUBLETAKE_DUR, keys: DOUBLETAKE_KEYS, loop: false }
+// Key density in samples/SECOND, not a flat key count. The snap is a fixed
+// 0.208s regardless of which timing variant is playing, but the total
+// duration isn't (longPause is ~0.5s longer) — a flat key count would
+// under-sample the snap on the longer variant even though it left the snap
+// itself untouched. The visual pass this round found the snap under-sampled
+// at the original flat 40 keys/2.6s: 0.208s / (2.6/39) is only ~3.1 samples
+// across the whole fast-in window, and the brief's own rule of thumb is
+// "under ~4 frames of easing and it mushes." 40 keys/sec puts ~8 samples
+// across the snap on every variant here, comfortably clear of that line.
+const DT_KEY_DENSITY = 40
+function keysFor(dur) { return Math.round(dur * DT_KEY_DENSITY) + 1 }
 
-/** Registry an integrator can fold straight into anim.js's own CLIPS table. */
+function specFor(timing) {
+  return { fn: t => doubletakePose(t, timing), dur: timing.dur, keys: keysFor(timing.dur), loop: false }
+}
+
+const DOUBLETAKE_SPEC = specFor(DEFAULT_TIMING)
+
+/** Registry an integrator can fold straight into anim.js's own CLIPS table.
+ *  This is the picked take — the only one World ever sees. */
 export const registry = { doubletake: DOUBLETAKE_SPEC }
+
+// Alternate takes for comparison in doubletake-test.html only — neither is
+// folded into ANIM.CLIPS, neither is reachable from World.
+export const variants = {
+  default: registry,
+  longPause: { doubletake: specFor(LONGPAUSE_TIMING) },
+  bigShrug: { doubletake: specFor(BIGSHRUG_TIMING) },
+}
 
 // ---------------------------------------------------------------------------
 // Scratch rig — same topology every clips/ file carries its own copy of.
@@ -188,11 +240,15 @@ function buildClipFromSpec(name, { fn, dur, keys, loop }) {
   return clip
 }
 
-let _clip = null
-/** Build (and memoise) the doubletake AnimationClip. */
-export function getClip() {
-  if (!_clip) _clip = buildClipFromSpec('doubletake', DOUBLETAKE_SPEC)
-  return _clip
+const _clipsByRegistry = new WeakMap()
+/** Build (and memoise) the doubletake AnimationClip. Takes an optional
+ *  registry (`variants.longPause` etc) so the test harness can scrub an
+ *  alternate take without this file growing a second getClip. */
+export function getClip(reg = registry) {
+  let cache = _clipsByRegistry.get(reg)
+  if (!cache) { cache = {}; _clipsByRegistry.set(reg, cache) }
+  if (!cache.doubletake) cache.doubletake = buildClipFromSpec('doubletake', reg.doubletake)
+  return cache.doubletake
 }
 
 // ---------------------------------------------------------------------------
@@ -228,10 +284,10 @@ function turn(g, yaw, max) {
 /** Start the doubletake clip on `root`, crossfading in from whatever the
  *  mixer is currently playing. Not registered in anim.js, so this does what
  *  ANIM.crossfade does but by hand, same per-object mixer cache. */
-export function playDoubletake(root, fade = 0.16) {
+export function playDoubletake(root, fade = 0.16, reg = registry) {
   const idle = ANIM.makeAction(root, 'idle')
   const mixer = ANIM.getMixer(root)
-  const clip = getClip()
+  const clip = getClip(reg)
   const action = mixer.clipAction(clip)
   action.setLoop(THREE.LoopOnce, 1)
   action.clampWhenFinished = true

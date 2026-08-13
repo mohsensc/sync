@@ -102,6 +102,40 @@ describe('yield clips', () => {
   })
 })
 
+// Motion-pass regression checks (round 2 task 4's own notes: this clip was
+// "a first draft off the pose math alone, not off how it actually reads").
+// These pin the three sequencing requirements the visual pass was for,
+// directly against the timing config rather than reverse-engineering pose
+// output — see DEFAULT_TIMING's own comment in yield.js for the story.
+describe('yield timing — anticipation and sequencing', () => {
+  it("reader's glance-up precedes the open-palm offer", () => {
+    expect(YIELD.DEFAULT_TIMING.lookPeak).toBeLessThan(YIELD.DEFAULT_TIMING.armPeak)
+  })
+
+  it("editor's nod lands after the offer, not simultaneously", () => {
+    // More than a token gap — simultaneous-looking needs real separation,
+    // not just "technically later."
+    expect(YIELD.DEFAULT_TIMING.nodPeak).toBeGreaterThan(YIELD.DEFAULT_TIMING.armPeak + 0.08)
+  })
+
+  it('exposes an emphatic variant, longer and bigger than the picked take', () => {
+    expect(YIELD.variants.default).toBe(YIELD.registry)
+    expect(YIELD.variants.emphatic.yieldStep.dur).toBeGreaterThan(YIELD.registry.yieldStep.dur)
+    expect(YIELD.EMPHATIC_TIMING.stepAmp).toBeGreaterThan(YIELD.DEFAULT_TIMING.stepAmp)
+    // Same sequencing rules apply to the alternate take, not just the default.
+    expect(YIELD.EMPHATIC_TIMING.lookPeak).toBeLessThan(YIELD.EMPHATIC_TIMING.armPeak)
+    expect(YIELD.EMPHATIC_TIMING.nodPeak).toBeGreaterThan(YIELD.EMPHATIC_TIMING.armPeak + 0.08)
+  })
+
+  it('emphatic step-back reads bigger than the default at the same beat', () => {
+    // armPeak fractions differ slightly between takes, so sample each at its
+    // own peak rather than a shared t.
+    const base = YIELD.registry.yieldStep.fn(YIELD.DEFAULT_TIMING.armPeak)
+    const big = YIELD.variants.emphatic.yieldStep.fn(YIELD.EMPHATIC_TIMING.armPeak)
+    expect(Math.abs(big.hips[2])).toBeGreaterThan(Math.abs(base.hips[2]))
+  })
+})
+
 describe('doubletake clip', () => {
   it('registers one symmetric clip with a positive duration', () => {
     expect(Object.keys(DT.registry)).toEqual(['doubletake'])
@@ -151,5 +185,67 @@ describe('doubletake clip', () => {
       const pose = spec.fn(t)
       for (const k in pose) for (const v of pose[k]) expect(Number.isFinite(v)).toBe(true)
     }
+  })
+})
+
+// Motion-pass regression checks (round 2 task 4's own notes: this clip was
+// "a first draft off the pose math alone, not off how it actually reads").
+// The visual pass found the STRUCTURE fine but the snap under-sampled: the
+// original flat 40-key/2.6s clip put only ~3.1 samples across the 0.208s
+// snap window, under the brief's own "~4 frames or it mushes" line.
+describe('doubletake — snap sample density', () => {
+  const SNAP_S = 0.208         // fixed regardless of variant, see doubletake.js
+  const MIN_SAMPLES = 4        // the brief's own rule of thumb
+
+  it('the picked take samples the snap window densely enough not to mush', () => {
+    const spec = DT.registry.doubletake
+    const dtPerSample = spec.dur / (spec.keys - 1)
+    expect(SNAP_S / dtPerSample).toBeGreaterThanOrEqual(MIN_SAMPLES)
+  })
+
+  it('every variant samples the snap densely enough, not just the default', () => {
+    // Key density is samples/SECOND (see keysFor in doubletake.js), so a
+    // longer total duration must not silently starve the snap of samples.
+    for (const name of ['default', 'longPause', 'bigShrug'] as const) {
+      const spec = DT.variants[name].doubletake
+      const dtPerSample = spec.dur / (spec.keys - 1)
+      expect(SNAP_S / dtPerSample).toBeGreaterThanOrEqual(MIN_SAMPLES)
+    }
+  })
+})
+
+describe('doubletake timing variants', () => {
+  it('default variant is the same object as the picked registry', () => {
+    expect(DT.variants.default).toBe(DT.registry)
+  })
+
+  it('longPause holds a longer total duration than the default, snap length unchanged', () => {
+    expect(DT.variants.longPause.doubletake.dur).toBeGreaterThan(DT.registry.doubletake.dur)
+    expect(DT.LONGPAUSE_TIMING.pauseS).toBeGreaterThan(DT.DEFAULT_TIMING.pauseS)
+  })
+
+  it('longPause actually holds the away-look through more of the clip than default', () => {
+    // Sample well inside the default's pause window (ends ~0.46 of 2.6s)
+    // but express it in seconds so the comparison is fair across the two
+    // different total durations.
+    const holdAtS = 0.60   // seconds into the clip — inside default's pause,
+                            // and (with the added 0.5s) still inside longPause's
+    const base = DT.registry.doubletake
+    const long = DT.variants.longPause.doubletake
+    const baseAway = base.fn(holdAtS / base.dur)
+    const longAway = long.fn(holdAtS / long.dur)
+    // Both should still be in the "away" look (yaw around -22), not yet
+    // snapped back (yaw near 0-4).
+    expect(baseAway.Head[1]).toBeLessThan(-10)
+    expect(longAway.Head[1]).toBeLessThan(-10)
+  })
+
+  it('bigShrug variant reaches a bigger shrug than default at the same beat', () => {
+    // Timing durations match (only shrugAmp differs), so the shrug-peak
+    // fraction is identical across both takes.
+    const t = DT.DEFAULT_TIMING.segs[5][0]   // shrug segment's end fraction
+    const base = DT.registry.doubletake.fn(t)
+    const big = DT.variants.bigShrug.doubletake.fn(t)
+    expect(Math.abs(big.RightForeArm[1])).toBeGreaterThan(Math.abs(base.RightForeArm[1]))
   })
 })

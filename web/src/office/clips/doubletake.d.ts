@@ -22,10 +22,28 @@ export interface ClipSpec {
   loop: boolean
 }
 
+export type DoubletakeSeg = [number, number, number, number, number, (u: number) => number]
+
+export interface DoubletakeTiming {
+  dur: number
+  segs: DoubletakeSeg[]
+  pauseS: number
+  shrugAmp: number
+}
+
 export const DOUBLETAKE_DUR: number
 export const DOUBLETAKE_SPACING: number
+export const DEFAULT_TIMING: DoubletakeTiming
+export const LONGPAUSE_TIMING: DoubletakeTiming
+export const BIGSHRUG_TIMING: DoubletakeTiming
 
-export const registry: { doubletake: ClipSpec }
+export type DoubletakeRegistry = { doubletake: ClipSpec }
+
+/** The picked take — the only one World ever sees. */
+export const registry: DoubletakeRegistry
+
+/** Alternate takes for comparison in doubletake-test.html only. */
+export const variants: { default: DoubletakeRegistry; longPause: DoubletakeRegistry; bigShrug: DoubletakeRegistry }
 
 export function spacingFor(height?: number): number
 export function doubletakeMarks(
@@ -33,8 +51,8 @@ export function doubletakeMarks(
   bPos: THREE.Vector3 | [number, number?, number?],
   spacing?: number
 ): Marks
-export function getClip(): THREE.AnimationClip
-export function playDoubletake(root: THREE.Object3D, fade?: number): THREE.AnimationAction
+export function getClip(reg?: DoubletakeRegistry): THREE.AnimationClip
+export function playDoubletake(root: THREE.Object3D, fade?: number, reg?: DoubletakeRegistry): THREE.AnimationAction
 
 export interface RigPuppet {
   group: THREE.Object3D

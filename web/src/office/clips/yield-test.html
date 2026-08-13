@@ -43,6 +43,11 @@
     <button id="bSlow" aria-pressed="false">Half speed</button>
   </div>
   <div class="row">
+    <span>take</span>
+    <button id="vDefault" aria-pressed="true">default</button>
+    <button id="vEmphatic" aria-pressed="false">emphatic</button>
+  </div>
+  <div class="row">
     <label>t <input id="tScrub" type="range" min="0" max="1" step="0.005" value="0"></label>
     <span id="tVal">0.000</span>
   </div>
@@ -118,6 +123,8 @@ let a = null, b = null   // a: reader / yieldStep, b: editor / yieldKeep
 let marks = null
 const markDots = new THREE.Group(); markDots.visible = false; scene.add(markDots)
 let scrubMode = false
+let curVariant = 'default'
+let curReg = YIELD.variants.default
 
 function buildRun() {
   if (a) { scene.remove(a.group); ANIM.dispose(a.root) }
@@ -158,8 +165,8 @@ loader.load('../glb/character.glb', gltf => {
 }, undefined, e => { tabEl.textContent = 'load failed: ' + e })
 
 function currentT(root, name) {
-  const act = ANIM.getMixer(root).clipAction(YIELD.getClip(name))
-  return act.time / YIELD.getClip(name).duration
+  const act = ANIM.getMixer(root).clipAction(YIELD.getClip(name, curReg))
+  return act.time / YIELD.getClip(name, curReg).duration
 }
 
 function report() {
@@ -167,8 +174,10 @@ function report() {
   const ta = currentT(a.root, 'yieldStep')
   const tb = currentT(b.root, 'yieldKeep')
   tabEl.innerHTML =
+    `take      ${curVariant}\n` +
     `reader (yieldStep) t = ${ta.toFixed(3)}\n` +
     `editor (yieldKeep) t = ${tb.toFixed(3)}\n` +
+    `dur       ${curReg.yieldStep.dur.toFixed(3)}s\n` +
     `spacing   ${YIELD.YIELD_SPACING.toFixed(3)} m`
 }
 
@@ -182,8 +191,8 @@ window.__play = () => {
   scrubMode = false; running = true
   ANIM.crossfade(a.root, 'idle', 0)
   ANIM.crossfade(b.root, 'idle', 0)
-  const act1 = YIELD.getClip('yieldStep')
-  const act2 = YIELD.getClip('yieldKeep')
+  const act1 = YIELD.getClip('yieldStep', curReg)
+  const act2 = YIELD.getClip('yieldKeep', curReg)
   const ma = ANIM.getMixer(a.root).clipAction(act1)
   const mb = ANIM.getMixer(b.root).clipAction(act2)
   ma.setLoop(THREE.LoopOnce, 1); ma.clampWhenFinished = true; ma.reset(); ma.play()
@@ -197,19 +206,31 @@ window.__setT = (t01) => {
   for (const [c, name] of pairs) {
     const mixer = ANIM.getMixer(c.root)
     mixer.stopAllAction()
-    const act = mixer.clipAction(YIELD.getClip(name))
+    const act = mixer.clipAction(YIELD.getClip(name, curReg))
     act.reset(); act.play(); act.paused = true
-    act.time = t01 * YIELD.getClip(name).duration
+    act.time = t01 * YIELD.getClip(name, curReg).duration
     ANIM.update(c.root, 0)
     c.root.updateMatrixWorld(true)
   }
   report()
 }
 
+/** Switch which timing take is currently loaded — default / emphatic (see
+ *  yield.js's `variants` export). Re-parks at rest so a mid-scrub switch
+ *  doesn't leave a stale pose from the old take. */
+window.__setVariant = (name) => {
+  curVariant = name
+  curReg = YIELD.variants[name]
+  for (const [id, n] of [['vDefault','default'],['vEmphatic','emphatic']])
+    document.getElementById(id).setAttribute('aria-pressed', String(n === name))
+  if (a && b) window.__setT(scrubMode ? +document.getElementById('tScrub').value : 0)
+  report()
+}
+
 /** Non-finite scan across every sampled key of both clips. */
 window.__finiteCheck = () => {
   for (const name of ['yieldStep', 'yieldKeep']) {
-    const spec = YIELD.registry[name]
+    const spec = curReg[name]
     for (let i = 0; i < spec.keys; i++) {
       const t = i / (spec.keys - 1)
       const p = spec.fn(t)
@@ -220,6 +241,8 @@ window.__finiteCheck = () => {
 }
 
 document.getElementById('bRun').onclick = () => buildRun()
+document.getElementById('vDefault').onclick = () => window.__setVariant('default')
+document.getElementById('vEmphatic').onclick = () => window.__setVariant('emphatic')
 document.getElementById('bMark').onclick = e => {
   markDots.visible = !markDots.visible
   e.target.setAttribute('aria-pressed', String(markDots.visible))

@@ -50,13 +50,55 @@ function pose(...parts) {
 }
 
 // ---------------------------------------------------------------------------
+// Timing — glance, offer, weight shift, nod
+// ---------------------------------------------------------------------------
+// A factory, not four bare bump() calls, so the -test.html harness (and this
+// file) can hold more than one timed take on the same beat side by side —
+// see EMPHATIC_TIMING below. The motion pass this config exists to fix (see
+// STATE.md, round 2 task 4's own words: "a first draft off the pose math
+// alone, not off how it actually reads"):
+//
+//   1. the reader's glance-up has to visibly PRECEDE the open-palm offer
+//      (anticipation) — lookPeak sits well before armPeak, and lookWidth is
+//      narrow enough that the glance has mostly resolved before the arm
+//      starts moving, not just technically-first.
+//   2. the backward weight shift needs to actually read — stepAmp/
+//      hipsLiftAmp bumped up from the first-draft values.
+//   3. the editor's nod has to land AFTER the offer, not simultaneously —
+//      nodPeak sits comfortably past armPeak, not just a few percent later.
+const DEFAULT_TIMING = {
+  dur: 1.7,
+  lookPeak: 0.20, lookWidth: 0.30,   // reader's glance up — first
+  armPeak: 0.50,  armWidth: 0.50,    // reader's open-palm offer — after the glance
+  stepAmp: 3.6,   hipsLiftAmp: 5.5,  // reader's backward weight shift, rides the offer
+  nodPeak: 0.64,  nodWidth: 0.34,    // editor's nod — after the offer, not with it
+}
+
+// Alternate take: a longer beat, a bigger step back, a nod that waits even
+// longer before landing. Doubletake's variants (see doubletake.js) are
+// "longer pause" and "bigger shrug"; this clip has no discrete pause to
+// stretch, so its analogue is "everything a little more deliberate."
+// Exposed through `variants.emphatic` for side-by-side comparison in
+// yield-test.html — not wired into World.
+const EMPHATIC_TIMING = {
+  dur: 2.1,
+  lookPeak: 0.17, lookWidth: 0.26,
+  armPeak: 0.46,  armWidth: 0.44,
+  stepAmp: 6.0,   hipsLiftAmp: 8.5,
+  nodPeak: 0.70,  nodWidth: 0.28,
+}
+
+export { DEFAULT_TIMING, EMPHATIC_TIMING }
+
+// ---------------------------------------------------------------------------
 // yieldStep — the reader stands down
 // ---------------------------------------------------------------------------
-// One beat: look up (k rises), open-palm offer at chest height (peaks with
-// the look), settle back a half step (a small backward hip offset, same
-// "weight shift, not real footwork" convention argue.js's `hips` uses — a
-// real step belongs to the controller's marks/pathing, not a static clip).
-// k eases 0 -> 1 -> 0 across the whole clip so it starts and ends at rest.
+// One beat: look up (lookUp rises first), open-palm offer at chest height
+// (k rises after), settle back a half step (a small backward hip offset,
+// same "weight shift, not real footwork" convention argue.js's `hips` uses
+// — a real step belongs to the controller's marks/pathing, not a static
+// clip). Both ease 0 -> 1 -> 0 across the whole clip so it starts and ends
+// at rest.
 
 function yieldStepArm(k) {
   return {
@@ -70,12 +112,13 @@ function yieldStepArm(k) {
   }
 }
 
-function yieldStepPose(t) {
-  const k = bump(t, 0.42, 0.62)
-  const lookUp = bump(t, 0.30, 0.46)
+function yieldStepPose(t, timing = DEFAULT_TIMING) {
+  const { lookPeak, lookWidth, armPeak, armWidth, stepAmp, hipsLiftAmp } = timing
+  const k = bump(t, armPeak, armWidth)
+  const lookUp = bump(t, lookPeak, lookWidth)
   return pose(ANIM.STANDING,
-    { hips: [0, 0, -2.5 * k] },   // half step back, read as a weight shift
-    { Hips: [0, 4 * k, 0] },
+    { hips: [0, 0, -stepAmp * k] },   // half step back, read as a weight shift
+    { Hips: [0, hipsLiftAmp * k, 0] },
     {
       Spine02: [-2 * lookUp, -3 * k, 0],
       Spine01: [-1 * lookUp, -2 * k, 0],
@@ -92,9 +135,8 @@ function yieldStepPose(t) {
 // ---------------------------------------------------------------------------
 // Hands stay in a typing-adjacent posture throughout (forward, low, close to
 // the body — approximating anim.js's own `type` clip without reaching into
-// it) while just the head/neck carries a short nod. Same duration as
-// yieldStep and phase-aligned to its look-up (nod peaks right after the
-// reader's glance), so the two read as one exchange, not two solo bits.
+// it) while just the head/neck carries a short nod, timed to land after the
+// reader's offer has already landed — an acknowledgment, not a reflex.
 
 const KEEP_ARMS = {
   LeftArm:  [-38, -6, -60], RightArm:  [-38, 6, 60],
@@ -103,8 +145,9 @@ const KEEP_ARMS = {
   LeftPalm: [0.1, -0.9, -0.4], RightPalm: [0.1, 0.9, -0.4],
 }
 
-function yieldKeepPose(t) {
-  const nod = bump(t, 0.46, 0.40)
+function yieldKeepPose(t, timing = DEFAULT_TIMING) {
+  const { nodPeak, nodWidth } = timing
+  const nod = bump(t, nodPeak, nodWidth)
   return pose(ANIM.STANDING, KEEP_ARMS,
     {
       Spine02: [1 * nod, 0, 0],
@@ -116,17 +159,29 @@ function yieldKeepPose(t) {
 // ---------------------------------------------------------------------------
 // Clip specs
 // ---------------------------------------------------------------------------
-export const YIELD_DUR = 1.7
-// One-shot, so keys just need to resolve the two bump()s (widths 0.62/0.46
-// and 0.40) cleanly — 24 samples over 1.7s is ~70ms/sample, comfortably
-// inside that.
+export const YIELD_DUR = DEFAULT_TIMING.dur
+// One-shot, so keys just need to resolve three bump()s cleanly — none of
+// them are a fast snap (that's doubletake's problem, see doubletake.js), so
+// a flat sample rate is fine. 24 samples over 1.7s is ~70ms/sample.
 const YIELD_KEYS = 24
 
-const YIELD_STEP_SPEC = { fn: yieldStepPose, dur: YIELD_DUR, keys: YIELD_KEYS, loop: false }
-const YIELD_KEEP_SPEC = { fn: yieldKeepPose, dur: YIELD_DUR, keys: YIELD_KEYS, loop: false }
+const YIELD_STEP_SPEC = { fn: t => yieldStepPose(t, DEFAULT_TIMING), dur: YIELD_DUR, keys: YIELD_KEYS, loop: false }
+const YIELD_KEEP_SPEC = { fn: t => yieldKeepPose(t, DEFAULT_TIMING), dur: YIELD_DUR, keys: YIELD_KEYS, loop: false }
 
-/** Registry an integrator can fold straight into anim.js's own CLIPS table. */
+/** Registry an integrator can fold straight into anim.js's own CLIPS table.
+ *  This is the picked take — the only one World ever sees. */
 export const registry = { yieldStep: YIELD_STEP_SPEC, yieldKeep: YIELD_KEEP_SPEC }
+
+// Alternate timing, same key count, longer duration. Compare against
+// `registry` in yield-test.html's variant picker; not folded into
+// ANIM.CLIPS, not reachable from World.
+const YIELD_STEP_SPEC_EMPHATIC = { fn: t => yieldStepPose(t, EMPHATIC_TIMING), dur: EMPHATIC_TIMING.dur, keys: 30, loop: false }
+const YIELD_KEEP_SPEC_EMPHATIC = { fn: t => yieldKeepPose(t, EMPHATIC_TIMING), dur: EMPHATIC_TIMING.dur, keys: 30, loop: false }
+
+export const variants = {
+  default: registry,
+  emphatic: { yieldStep: YIELD_STEP_SPEC_EMPHATIC, yieldKeep: YIELD_KEEP_SPEC_EMPHATIC },
+}
 
 // ---------------------------------------------------------------------------
 // Scratch rig — identical topology to handshake.js/argue.js's copy. Each
@@ -187,12 +242,17 @@ function buildClipFromSpec(name, { fn, dur, keys, loop }) {
   return clip
 }
 
-const _clips = {}
-/** Build (and memoise) one of this module's clips: 'yieldStep' or 'yieldKeep'. */
-export function getClip(name) {
-  if (!registry[name]) throw new Error(`yield: no clip "${name}". Have: ${Object.keys(registry).join(', ')}`)
-  if (!_clips[name]) _clips[name] = buildClipFromSpec(name, registry[name])
-  return _clips[name]
+const _clipsByRegistry = new WeakMap()
+/** Build (and memoise) one of this module's clips: 'yieldStep' or 'yieldKeep'.
+ *  Takes an optional registry ('variants.emphatic' etc) so the test harness
+ *  can scrub an alternate take without this file growing a second getClip. */
+export function getClip(name, reg = registry) {
+  const spec = reg[name]
+  if (!spec) throw new Error(`yield: no clip "${name}" in that registry. Have: ${Object.keys(reg).join(', ')}`)
+  let cache = _clipsByRegistry.get(reg)
+  if (!cache) { cache = {}; _clipsByRegistry.set(reg, cache) }
+  if (!cache[name]) cache[name] = buildClipFromSpec(name, spec)
+  return cache[name]
 }
 
 // ---------------------------------------------------------------------------

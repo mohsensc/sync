@@ -40,6 +40,12 @@
     <button id="bSlow" aria-pressed="false">Half speed</button>
   </div>
   <div class="row">
+    <span>take</span>
+    <button id="vDefault" aria-pressed="true">default</button>
+    <button id="vLongPause" aria-pressed="false">long pause</button>
+    <button id="vBigShrug" aria-pressed="false">big shrug</button>
+  </div>
+  <div class="row">
     <label>t <input id="tScrub" type="range" min="0" max="1" step="0.005" value="0"></label>
     <span id="tVal">0.000</span>
   </div>
@@ -115,6 +121,8 @@ let a = null, b = null
 let marks = null
 const markDots = new THREE.Group(); markDots.visible = false; scene.add(markDots)
 let scrubMode = false
+let curVariant = 'default'
+let curReg = DT.variants.default
 
 function buildRun() {
   if (a) { scene.remove(a.group); ANIM.dispose(a.root) }
@@ -154,15 +162,19 @@ loader.load('../glb/character.glb', gltf => {
 }, undefined, e => { tabEl.textContent = 'load failed: ' + e })
 
 function currentT(root) {
-  const act = ANIM.getMixer(root).clipAction(DT.getClip())
-  return act.time / DT.getClip().duration
+  const act = ANIM.getMixer(root).clipAction(DT.getClip(curReg))
+  return act.time / DT.getClip(curReg).duration
 }
 
 function report() {
   if (!a || !b) return
   const t = currentT(a.root)
+  const spec = curReg.doubletake
   tabEl.innerHTML =
+    `take      ${curVariant}\n` +
     `t = ${t.toFixed(3)}\n` +
+    `dur       ${spec.dur.toFixed(3)}s\n` +
+    `keys      ${spec.keys}\n` +
     `spacing   ${DT.DOUBLETAKE_SPACING.toFixed(3)} m`
 }
 
@@ -176,7 +188,7 @@ window.__play = () => {
   scrubMode = false; running = true
   for (const c of [a, b]) {
     ANIM.crossfade(c.root, 'idle', 0)
-    const act = ANIM.getMixer(c.root).clipAction(DT.getClip())
+    const act = ANIM.getMixer(c.root).clipAction(DT.getClip(curReg))
     act.setLoop(THREE.LoopOnce, 1); act.clampWhenFinished = true; act.reset(); act.play()
   }
 }
@@ -187,19 +199,31 @@ window.__setT = (t01) => {
   for (const c of [a, b]) {
     const mixer = ANIM.getMixer(c.root)
     mixer.stopAllAction()
-    const act = mixer.clipAction(DT.getClip())
+    const act = mixer.clipAction(DT.getClip(curReg))
     act.reset(); act.play(); act.paused = true
-    act.time = t01 * DT.getClip().duration
+    act.time = t01 * DT.getClip(curReg).duration
     ANIM.update(c.root, 0)
     c.root.updateMatrixWorld(true)
   }
   report()
 }
 
+/** Switch which timing take is currently loaded — default / longPause /
+ *  bigShrug (see doubletake.js's `variants` export). Re-parks on marks at
+ *  rest so a mid-scrub switch doesn't leave a stale pose from the old take. */
+window.__setVariant = (name) => {
+  curVariant = name
+  curReg = DT.variants[name]
+  for (const [id, n] of [['vDefault','default'],['vLongPause','longPause'],['vBigShrug','bigShrug']])
+    document.getElementById(id).setAttribute('aria-pressed', String(n === name))
+  if (a && b) window.__setT(scrubMode ? +document.getElementById('tScrub').value : 0)
+  report()
+}
+
 /** Loop-seam delta on the raw pose arrays. Doubletake is a one-shot, but
  *  authored to return to rest at both ends anyway, so this should read ~0. */
 window.__seamDelta = () => {
-  const spec = DT.registry.doubletake
+  const spec = curReg.doubletake
   const p0 = spec.fn(0), p1 = spec.fn(1)
   let max = 0
   for (const k in p0) {
@@ -213,7 +237,7 @@ window.__seamDelta = () => {
 
 /** Non-finite scan across every sampled key of the clip. */
 window.__finiteCheck = () => {
-  const spec = DT.registry.doubletake
+  const spec = curReg.doubletake
   for (let i = 0; i < spec.keys; i++) {
     const t = i / (spec.keys - 1)
     const p = spec.fn(t)
@@ -223,6 +247,9 @@ window.__finiteCheck = () => {
 }
 
 document.getElementById('bRun').onclick = () => buildRun()
+document.getElementById('vDefault').onclick = () => window.__setVariant('default')
+document.getElementById('vLongPause').onclick = () => window.__setVariant('longPause')
+document.getElementById('vBigShrug').onclick = () => window.__setVariant('bigShrug')
 document.getElementById('bMark').onclick = e => {
   markDots.visible = !markDots.visible
   e.target.setAttribute('aria-pressed', String(markDots.visible))
