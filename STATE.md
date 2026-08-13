@@ -437,3 +437,127 @@ Symbol-level blame (using task 1's new `start`/`end` blame params) is a
 natural round-3 follow-up now that the endpoint supports it — not started
 here since nothing in the presence protocol carries a line range yet
 (same gap round 1 and task 1 both already flagged).
+
+## round 2 task 4 — whose code is this: desk tint + hover ownership line
+
+All in `web/src/office/interact.js`, browser-verified with real blame data.
+
+- **`ownershipShare(blame, identity)`** — new pure export. Matches an
+  agent's identity (`a.role || a.name` — `role` carries the relay's
+  `human` field for live agents, `name` is the only thing the demo cast
+  has) against blame's `owners[]` loosely: exact, or a substring either
+  direction, case-insensitive. Falls back to the top owner with
+  `matched:false` rather than nothing — always something honest to say.
+  5 tests in `web/test/ownership.test.ts`, plus a hand-written
+  `interact.d.ts` (same pattern as `agent.d.ts`/`live.d.ts`) so the test
+  typechecks.
+- **Hover card line** — after the existing git-stat row, a second row:
+  `code is 72% theirs` when the agent's identity matches a blame author,
+  `mostly mohsensc's code` when it doesn't (which is every demo agent
+  against this repo's real history — "agent-3" was never going to match
+  "mohsensc" — confirmed live, see below). Cached separately from the
+  existing `gitCache` (stat) — a third independent blame cache, 60s TTL.
+  STATE.md already flags two duplicate `/api/git/stat` pollers between
+  this file and gitsignals.js; now there's also an uncoordinated blame
+  cache in here that duplicates blamecard.js's own blame fetch. Not
+  building a shared cache module this round per the task brief — three
+  separate small caches against a repo this size is still cheap, but if a
+  round 3 touches any of these files, collapsing all of it (stat + blame,
+  interact.js + gitsignals.js + blamecard.js) into one shared client-side
+  cache module is worth doing once rather than flagging a fourth time.
+- **Desk ownership tint, two treatments** — a desk's "resting" colour
+  (what `setHover()` restores to instead of raw base) is now
+  `d.ownership`: the seated agent's own colour at low alpha if blame says
+  the code is mostly theirs, a neutral slate hue if not. Two treatments,
+  toggled with **T** or `interaction.setDeskTintMode('steady'|'breathe')`:
+  steady is a constant 0.22-alpha wash; breathe is a slow (~10s) sine
+  crossfade between the agent's own hue and the neutral hue, same
+  "breathe" idea as the existing hover pulse just much slower and driven
+  by ownership instead of mouse attention. Recomputed every 3s
+  (`scanDesks`, using the same "seated and within 0.55m of the seat mark"
+  test `office.html`'s own chair-slide code uses) for whichever desk has
+  someone sitting at it with a `gitPath`; desks with nobody seated, or a
+  seated background character with no `gitPath` (the demo's `b2`/`b3`),
+  correctly resolve to `ownership:null` and stay untinted rather than
+  claiming something false.
+- **Real bug found and fixed during browser verification**: the ownership
+  scan calls `applyRest({kind:'desk', ref:d})` to reapply a desk's resting
+  tint outside of an actual hover/click — but `matsOf()` only ever read
+  `pick.mats` (present on a real raycast pick from `boxProxy`, absent on
+  these synthetic ones). Result: `d.ownership` computed correctly, but the
+  material color never actually changed — verified this by reading
+  `d.mats[0].color.getHex()` in-browser and finding it stuck at `0xffffff`
+  despite `d.ownership.hex` being right. Fixed `matsOf()` to fall back to
+  `pick.ref.mats` when `pick.mats` is absent. Confirmed fixed by rereading
+  the same material color after the fix: moved from `#ffffff` to
+  `#efe9ec` (matched branch, agent's own mauve at low alpha) and
+  `#ecedef` (unmatched branch, neutral slate) on two different desks in
+  the same scan — both real blame data (`web/src/office/anim.js` for the
+  matched case since this repo's whole history on that file is
+  `mohsensc`; `go/cmd/gorelay/main.go` for the neutral case with a
+  non-matching demo identity).
+
+**Browser verification**, same lock/tab protocol as usual — hit the
+"shared worktree" instability hard this round (see below), and also hit
+the tab genuinely in use by another builder (`builder3-blamecard`) mid-
+session; waited it out, reacquired, restarted the killed vite server.
+Cancelled the running demo (`window.__demo.cancel()`) so scripted movement
+didn't fight manual placement, seated `a3` at desk 1 (its real `gitPath`,
+`web/src/office/anim.js`, all-`mohsensc` history) and gave the demo's `b2`
+a synthetic `gitPath` pointing at `go/cmd/gorelay/main.go` for the neutral
+case, then drove `scanDesks()`/`hoverAt()` directly through
+`window.__interact` — confirmed both desk tint treatments actually paint
+(color values above), the hover card's ownership line renders real text
+(`mostly mohsensc's code` for `cpp/hook/hook.cpp`, backed by an actual
+`last touched 2d ago by mohsensc · 10 commits · 1 author` row from the
+existing stat fetch on the same card), and switching `T`/`setDeskTintMode`
+between `steady` and `breathe` changes the live material color with no
+new console errors (checked `list_console_messages` before and after —
+only the two pre-existing, already-understood warnings: the missing
+`coffee-cup-v2.glb` asset and the relay websocket refusing to connect,
+same as every prior round).
+
+**Screenshot note**: didn't capture a clean side-by-side screenshot of the
+two desk tints — the low alpha (0.22) that makes the "ambient, not a UI
+badge" call from the task brief is genuinely subtle at this camera
+distance/lighting, visible in the material-color readout above but not
+obviously so in a full-scene screenshot next to seven other desks. Verified
+correctness via material colour, not via a screenshot that would look
+underwhelming. If the owner wants the tint more legible at a glance, the
+honest fix is raising `alpha` in `interact.js`'s `scanDesks()` (currently
+`0.22`), not changing the underlying logic — flagging rather than doing it
+unasked since "make it beautiful" and "keep it honestly subtle" pulled in
+different directions here and I picked correctness-first.
+
+**On the shared-worktree instability**: hit this hard and repeatedly —
+`interact.js` got silently reverted to its pre-round-2 state TWICE mid-task
+(once with no trace beyond a system note, once traceable to a `git stash`
+race leaving literal `<<<<<<< Updated upstream` / `>>>>>>> Stashed changes`
+conflict markers IN the file, which is what actually broke the browser
+load — Chrome's parser choked on the raw `<<` with an
+`Unexpected token '<<'` `SyntaxError`, no glb/character content, blank
+room). Same stash race also left conflict markers in `STATE.md` itself
+(two near-duplicate task 1/task 2 write-ups, one per side of the conflict)
+— resolved by keeping the more complete "Updated upstream" side and
+dropping the redundant duplicate, rather than hand-merging line by line.
+Recovered by: reapplying my interact.js edits from what I'd already
+written in-session (not from git history, since nothing was committed
+yet), committing immediately in small chunks instead of batching, and
+`node --check`-ing before every commit rather than trusting the previous
+read. If you're round 3 and this worktree is still shared live across
+concurrent builders: commit far more often than feels necessary, and treat
+"the file I just edited looks different than I left it" as expected, not
+a hallucination.
+
+Files touched: `web/src/office/interact.js`, `web/src/office/interact.d.ts`
+(new), `web/test/ownership.test.ts` (new). Nothing else — `office.html`,
+`blamecard.js`, `agent.js`, `gitsignals.js` untouched, per this task's
+ownership boundary.
+
+Verified: `pnpm test` (111/111) and `pnpm typecheck` both clean at the end
+of the round, after all four tasks' work landed together.
+
+Nothing filed as a GitHub issue this task — the one real bug (the
+`matsOf()` fallback) was cheap enough to catch and fix inline during
+verification rather than defer.
+
