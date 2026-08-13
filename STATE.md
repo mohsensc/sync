@@ -221,3 +221,54 @@ Nothing built yet, so nothing rejected. This round was scoping only.
 
 None yet. No edge case has been hit hard enough to need one — round 1 was
 reading, not building.
+
+## Round 2, task 4 — rung 1 and rung 4 clips, unwired
+
+Built `clips/yield.js` and `clips/doubletake.js`, following handshake.js's
+scaffold (own scratch rig, own `buildClipFromSpec`, no shared internals
+with anim.js — same reason as every other file in `clips/`). No browser
+this task; verified with `web/test/office-clips-geometry.test.ts` (marks
+centred/facing, spacing positive and height-scaled, real `AnimationClip`
+track shapes, finite poses across the sampled range, plus a specific check
+that doubletake's pre-snap pause actually holds still before the snap).
+`pnpm test` and `pnpm typecheck` both pass (89 tests total across the
+branch as of this commit).
+
+- `clips/yield.js` — rung 1, read-vs-edit. Asymmetric pair: `yieldStep`
+  (the reader — glance up, open-palm "after you", small backward weight
+  shift) and `yieldKeep` (the editor — a brief nod, arms stay in a
+  typing-adjacent posture). Deliberately smaller/shorter (1.7s, tighter
+  0.62m spacing) than the paired routines — a beat, not a scene, per the
+  brief. Exports `spacingFor`, `yieldMarks`, `registry`, `getClip`, plus a
+  `yieldRoutine` for parity with handshake.js/argue.js even though nothing
+  calls it yet.
+- `clips/doubletake.js` — rung 4, redundant work. Symmetric pair, same clip
+  both play (mirrored by facing, like highfive/handshake): look, look away,
+  a held pause, a fast snap back, hold, then a mirrored palms-up shrug. The
+  pause before the snap (`DT_PAUSE_END`) is an explicit named window, not
+  an emergent side effect of overlapping bump()s — that gap is the whole
+  joke. 2.6s one-shot, 1.35m spacing (wider than a greeting; redundant work
+  is usually spotted across the room). Same export shape as yield.js.
+- `.d.ts` files added for both (`yield.d.ts`, `doubletake.d.ts`) — office/
+  is outside tsconfig's `allowJs` surface, same reason `live.d.ts`/
+  `reel.d.ts` exist; without them the geometry test fails typecheck with
+  TS7016.
+- `-test.html` harnesses for both, modeled on handshake-test.html (one pair
+  per run, re-randomized on "Run again", a scrub slider, mark dots,
+  finite/seam checks exposed on `window`). **Neither has been opened in a
+  browser** — this task was scoped no-browser. Say this plainly for round
+  3: the motion is a first draft off the pose math alone, not off how it
+  actually reads. Load `yield-test.html` and `doubletake-test.html` and
+  iterate before wiring them into `World`.
+- Not touched: `agent.js`, `office.html`, `live.js`, `reel.js`, `seed.js`,
+  `shove.js` (another task's file, in progress in the same tree this
+  round — left alone).
+- No rig limitation blocked anything here (open-palm and palms-up shrug are
+  both just wrist/palm targets, same mechanism highfive/handshake already
+  use) — no issue filed.
+- Wiring for round 3+: `World.yield(a, b)` and `World.doubletake(a, b)`
+  following `World.handshake`'s shape once that lands (marks from
+  `yieldMarks`/`doubletakeMarks`, `Object.assign(ANIM.CLIPS, registry)` for
+  each, ACTS entries `yielding: { clip:'yieldStep', ... }` /
+  `keeping: { clip:'yieldKeep', ... }` / `doubletaking: { clip:'doubletake',
+  ... }`). Genuinely close to the five-line job the brief describes.
