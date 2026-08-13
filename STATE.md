@@ -306,3 +306,107 @@ attribution; rewriting shared branch history mid-round is worse than a
 mislabeled commit. If a future round sees a file show up in an unrelated
 commit, this is why — check `git log --all -- <path>` before assuming
 something's missing.
+
+## Task 2 — zone ownership flourishes (round 3)
+
+Built the "who owns this area of the repo" flourish the brief asked for:
+shortlog data rendered as physical dressing per zone, not just the text
+label zones.js's `setOwner` already draws.
+
+**New file `web/src/office/zoneowner.js`** (+`.d.ts`, +`zoneowner-test.html`
+fixture harness, +`web/test/zoneowner.test.ts`, 28 tests):
+
+- `pickOwnership(shortlogBody)` — pure, top/second author, deterministic
+  tie-break (commits desc, then author name), `possessive` (>=80% share)
+  and `contested` (top/second within 15%) flags.
+- `hairFor(human)` / `HAIR_COLORS` — palette.ts's `hairFor` re-hosted the
+  same way history-viz.js re-hosted its own hash (office/*.js can't import
+  the .ts side). Six swatches copied verbatim so a human's hair colour and
+  their zone plaque never disagree; a vitest case reproduces the
+  multiply-by-31 hash by hand for a known string to pin the parity, not
+  just assert the two happen to agree today.
+- Two treatments behind key **U** (grepped office.html's keydown handlers
+  first — H, T, V, Z, B were all already spoken for by the time I got to
+  this, U was still open):
+  - `plaque` (default) — a floating sign per zone, canvas-textured, owner
+    name in their hair colour with a tinted rule, sized by
+    `plaqueScale(share)`. Deliberately drawn as a warm plate rather than
+    reusing zones.js's own label-pill look, so it doesn't read as the same
+    "mostly X" text twice.
+  - `rug` — a floor mat (CircleGeometry, inset inside the zone ring so the
+    ring stays visible as a boundary) tinted by owner colour with a second
+    woven stripe for the runner-up (`rugSplit`, floored at 12% so the
+    stripe is always visible, capped at 45% so it never eclipses the lead).
+  - Ambient extra: a small trophy prop (gold stem, owner-tinted cup) when
+    one human has >=80% of a zone; two mugs side by side, one per top
+    author's colour, when the top two are within 15% of each other.
+    Neither renders in the "wide middle" case — most zones most of the
+    time get dressing but no flourish, which is the point.
+- Degrade: `pickOwnership` returns `null` on `ok:false`, an empty owners
+  list (fresh dir), or a malformed body — `render()` removes and disposes
+  any existing group for that zone and draws nothing. No blank plaque, no
+  colourless rug.
+
+**`web/src/office/gitsignals.js`/`.d.ts`** — extended `attachGitSignals`
+with an optional `ownership: { set(zoneName, rawShortlogBody) }` sink,
+called from `pollZone` alongside the existing `zones.setOwner` call, both
+on a fresh fetch and on a cache hit. This is the seam the brief asked for
+("extend pollZone to feed your renderer") but it is **not** actually wired
+to `zoneowner.js` from `office.html` — see below for why — so today it's
+tested (existing `gitsignals.test.ts`'s `zones.setOwner` assertions still
+pass unchanged, since `ownership` defaults to `undefined` and the `?.`
+calls no-op) but inert in the running scene. Left in on purpose as the seam
+a future round should use instead of what's actually wired.
+
+**Why `zoneowner.js` polls on its own instead**: office.html's existing
+`attachGitSignals({ world, zones: zoneUI })` call lives at line ~470, deep
+inside the shared file, not in this round's append-only trailing slice —
+the brief's own file-ownership rule for `office.html` this round is
+"append ONLY at the end... touch nothing else in that file." Editing that
+call site to pass the new `ownership` sink would violate that. So
+`attachZoneOwner()` runs its own self-contained shortlog poll (same
+pattern `histshelf.js` already uses for its own log fetch: own cache, own
+interval, no hook into the existing poller) using `gitsignals.js`'s
+exported `ZONE_DIRS` for the same dir mapping so at least the zone→dir
+answer has one source of truth. This is a third independent shortlog
+fetcher against the same three dirs (gitsignals.js's `pollZone`, now
+`zoneowner.js`'s own loop) — same "several independent, all-cheap git
+fetchers, none sharing a cache" pattern this file has documented since
+round 2's task 2, not new debt, but worth collapsing (route
+`attachGitSignals`'s `ownership` sink into `zoneowner.setZoneOwnership`
+from a single wiring call) the next time someone can touch both the
+existing `attachGitSignals()` call site and the trailing fence in the same
+round.
+
+**Tests**: `pnpm test` and `pnpm typecheck` green (see the running total in
+the task-1 section above — my 28 `zoneowner.test.ts` cases and the
+`gitsignals.test.ts` extension are both counted in that 182/12). Hit one
+flaky `gitApiMiddleware` test timeout (`blame: ignores malformed start/end`,
+5s timeout) once under heavy concurrent load — a real `git` subprocess
+call racing three other agents' own git/vitest/server activity in the same
+repo, not a regression; reran in isolation and it passed in under a
+second. Nothing to file, just naming it in case a later round sees the
+same flake and wonders if it's new.
+
+**Browser: not verified this round** (task 2 was a no-browser slot). What
+to check once a browser slot picks this up: press **U** with an agent
+selected/deselected doesn't matter — zone dressing isn't agent-scoped, it
+should just be visible on load. Confirm plaques/rugs appear over
+`desks`/`vault`/`whiteboard` (the three dirs `ZONE_DIRS` maps), the plaque
+text names a real committer and the share percentage looks plausible
+against `git shortlog -sn -- web/src` etc. by hand, and that toggling U a
+few times in a row doesn't leak geometry (`renderer.info.memory.geometries`
+before/after a dozen toggles — `disposeGroup` should keep it flat). The
+fixture harness (`zoneowner-test.html`) covers the visual cases
+(lopsided/trophy, near-even/mugs, clear-lead/no-flourish, solo-author,
+three-way split, empty) without needing the dev server or real repo data,
+so that's the fast first look if the lock is scarce.
+
+**Not built / left as debt, on purpose**: didn't touch `dressing.js` —
+the trophy/mug props live in `zoneowner.js` itself since they need a
+dynamic add/remove lifecycle tied to a live poll, unlike `dressing.js`'s
+build-once-at-startup furniture. Didn't add a second `attachGitSignals`
+call from the wiring fence to actually exercise the new `ownership` sink
+live (would mean double-polling shortlog through two different call
+sites, which felt worse than one self-contained poller) — see the "why"
+section above.
