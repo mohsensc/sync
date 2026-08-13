@@ -410,3 +410,132 @@ call from the wiring fence to actually exercise the new `ownership` sink
 live (would mean double-polling shortlog through two different call
 sites, which felt worse than one self-contained poller) — see the "why"
 section above.
+
+## Task 3 — browser slot A: verification backlog + zoom/hover motion (round 3)
+
+### Backlog, in the priority order round 2's integrator left
+
+1. **Both `c7e995b` fixes, confirmed live.** Called `window.__live.onPresence`
+   directly with a well-formed presence frame (`{type:'presence', agent, human,
+   verb, region:{path}, rung}` — the earlier note's sketch used the wrong
+   field names, `id`/`path` instead of `agent`/`region.path`, so it 400'd on
+   `msg.region.path` until corrected) for one agent id, then a second frame
+   for the same id with a different `region.path`. `a.gitPath` followed the
+   second frame's path, not the spawn-time one — the fix holds.
+   For the despawn leak: dropped `director.ttlMs` to 80ms, spawned and let
+   six different agent ids expire one at a time via the real `tick()` loop
+   (not a manual despawn call — this exercises `expireLive` exactly as a live
+   session would), and read `renderer.info.memory.geometries` after each
+   cycle. Flat at 97 across all six. No creep.
+2. **Round-2 features together in one scene**, agent-2 selected
+   (`cpp/hook/hook.cpp`, the flagged busy file): got one clean screenshot with
+   the region-blame panel (task 4's work, landed since the last STATE.md
+   revision — "WHOSE LINES THESE ARE" toggle, ownership bar at 100%
+   mohsensc, commit dot timeline) rendered together with the click-to-zoom
+   flight and the corner hover/click panel. Did not get a clean second
+   screenshot with T's breathe mode and V's classic variant layered on top
+   before losing the tab to port contention (see below) — the steady/graphic
+   combo is confirmed rendering correctly and not fighting with the region
+   panel, which was the open question.
+3. **Churn typing-speed / paper-stack visuals**: not verified. Lost the
+   browser slot (below) before getting to this one. Still open for whoever
+   gets the next slot — `agent2`/`cpp/hook/hook.cpp` is still the strongest
+   real signal per round 2's own note.
+4. **Console sweep**: clean both times the page loaded successfully. Only
+   the two expected lines — `coffee-cup-v2.glb` 404 (issue #59) and the relay
+   `ECONNREFUSED` in demo mode. No new errors from this round's changes.
+
+### Port contention this round, worse than the protocol anticipates
+
+Filed **issue #61**. Short version: featB (`sync-featB`, `feat/highlight-reel`)
+had their own vite bound to 5173 *while I held the lock*, twice in one
+session — I'd steal a stale lock, start my server, confirm via curl it was
+serving my worktree's `office.html`, run one or two checks successfully,
+and a few calls later `evaluate_script` would come back with featB's DOM
+(`.reel-item`/`.reel-chip` elements, `reel.js`/`seed.js` in the network
+log) because their `--strictPort` vite had bound 5173 out from under mine
+mid-session. `lsof -i :5173` confirmed their process both times. Neither
+side's server appears to check the lock file before binding — the lock
+only serializes agents that actually watch it, and killing/restarting
+doesn't fix a race where the other side restarts a beat later. Cost real
+time — most of a browser slot went into re-fighting for the port rather
+than testing. Backlog items above are as far as I got before giving up on
+further live verification per this round.
+
+### Zoom and hover motion — built, typechecked, one live check
+
+**Camera flight (`web/src/office/office.html`)**: `zoomToAgent`/`zoomRestore`
+used to ride the same per-frame exponential-decay `goal.active` lerp as every
+other camera move in the file — smooth, but shapeless, a dolly rather than a
+look. Replaced just those two call sites with a `flight` object that has an
+actual start, end and duration, so it can carry a shape the continuous decay
+never could:
+
+- **`ease`** (default) — ease-in-out cubic over ~0.92s, with a lateral arc:
+  the flight path bows sideways off the straight line between old and new
+  camera target, peaking at the midpoint and returning to zero at both ends
+  (`Math.sin(Math.PI * p)`), so a head zoom reads as leaning in to look
+  rather than a rig sliding on a rail.
+- **`snap`** — ease-out-back over ~0.42s, so the camera overshoots the
+  final framing slightly and settles back — a flinch-and-focus instead of a
+  glide. No lateral arc; the overshoot itself is the character here.
+
+**Z** toggles which one the *next* flight uses (deliberately doesn't retarget
+a flight already in progress — switching mid-zoom shouldn't jump). `focus()`/
+`goal` is untouched and still drives every other camera move in the file
+(demo.js's scripted shots, the top-down/auto-rotate buttons) — this is
+additive, not a rewrite of the camera system. Manual camera input (drag,
+wheel) cancels an in-progress flight the same way it already cancelled
+`goal.active`. Exposed `window.__zoomMode` (`get`/`set`/`flying`) for
+scripted checks.
+
+**Hover treatments (`web/src/office/interact.js`)**: three now, cycled with
+**H**:
+
+- **`card`** (default, unchanged) — the existing corner card, doing/zone/file
+  plus the two git rows that fade in once their fetches resolve.
+- **`nameplate`** — stripped down to just name + role, floating in 3D over
+  the character's head (projected from world space every frame via the
+  existing `pulseHover` rAF loop, not pinned to the cursor like the other
+  two) — for when the corner card is more chrome than the moment needs.
+- **`rich`** — the same card, but the ownership line ("code is N% theirs")
+  moves up to sit right under the role, ahead of doing/zone/file, via CSS
+  `order` on a flex column rather than restructuring the DOM insertion order
+  — the row still lands async off `host.after(row)` exactly like before, CSS
+  just repositions it. For when whose-code-is-this is the thing worth
+  reading first.
+
+Exposed `interaction.hoverTreatment` (getter) and `setHoverTreatment(mode)`
+for scripted checks.
+
+**Live verification**: got one clean screenshot of the eased zoom flight
+completing correctly (agent-2, head-framed, `window.__zoomMode.flying` false
+after settle, no console errors) before the first port-contention loss.
+Did **not** get clean screenshots of `snap` mode or any of the three hover
+treatments — every attempt after the first lost the tab to featB's server
+mid-check (see above). Code is typechecked and exercised by hand via
+`evaluate_script` (confirmed `hoverTreatment` cycles and `HOVER_TREATMENTS`
+order is right), just not eyeballed as pixels. Next browser slot on this
+branch: press **H** three times with an agent hovered and screenshot each,
+press **Z** once and zoom a second agent to see the overshoot-settle, both
+fast checks once the port stops changing hands mid-session.
+
+### Tests / typecheck
+
+`pnpm test` — 182/182 passing, 12 files (includes tasks 1/2/4's new test
+files, landed via `git pull --rebase` through this session — this round's
+own changes added no new test file, `interact.js`'s `ownershipShare` export
+is unchanged). `pnpm typecheck` — clean. Hit one flaky `gitApiMiddleware`
+timeout under heavy concurrent load (four agents' worth of `git`/vitest/vite
+all hitting the same repo at once) — reran in isolation, passed in under a
+second. Not a regression, just naming it in case a later round sees the
+same flake.
+
+### Files touched this round
+
+`web/src/office/office.html` (camera flight, Z toggle, `window.__zoomMode`
+test hook — touched outside task 1/2's trailing wiring fences per the
+boundary), `web/src/office/interact.js` (hover treatments, H toggle, CSS for
+`nameplate`/`rich`). No new files. `interact.d.ts` untouched — no new
+exported pure function this round, `ownershipShare`'s signature didn't
+change.
