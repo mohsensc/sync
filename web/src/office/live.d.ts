@@ -54,6 +54,12 @@ export function toReelEvent(
   now?: number,
   requester?: { agent: string; human: string } | null,
 ): ReelEvent | null
+export interface Region {
+  start: number
+  end: number
+}
+
+export function regionFromMsg(msg: Record<string, unknown>): Region | null
 
 export interface PresenceInfo {
   id: string
@@ -65,6 +71,8 @@ export interface PresenceInfo {
   spawned: boolean
   contestWith: string | null
   shareWith: string | null
+  start: number | null
+  end: number | null
 }
 
 export interface LiveDirectorOptions {

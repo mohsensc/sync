@@ -99,6 +99,20 @@ function isPresence(m) {
     !!m.region && typeof m.region === 'object' && typeof m.region.path === 'string'
 }
 
+/** region.start/region.end are optional on a presence frame — most verbs
+ *  (read a whole file, run a command) have no line range at all. Pull them
+ *  out defensively: both must be finite and end past start, or this reads
+ *  as "no region", same as the field being absent. Never throws on a
+ *  malformed frame; that's what the presence-frame guard above is for. */
+export function regionFromMsg(msg) {
+  const r = msg && msg.region
+  if (!r) return null
+  const start = r.start
+  const end = r.end
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null
+  return { start, end }
+}
+
 function isLeasesSnapshot(m) {
   return !!m && typeof m === 'object' && m.type === 'leases' && Array.isArray(m.presence)
 }
@@ -310,8 +324,9 @@ export class LiveDirector {
     const rung = typeof msg.rung === 'number' ? msg.rung : 0
     const zone = this.zoneFor(verb, path)
     const spawned = !this.records.has(id)
+    const region = regionFromMsg(msg)
 
-    this.records.set(id, { human, verb, path, zone, rung, lastSeen: now })
+    this.records.set(id, { human, verb, path, zone, rung, lastSeen: now, region })
 
     let contestWith = null
     if (rung >= 3) {
@@ -330,7 +345,15 @@ export class LiveDirector {
       }
     }
 
-    return { id, human, verb, path, zone, rung, spawned, contestWith, shareWith }
+    return {
+      id, human, verb, path, zone, rung, spawned, contestWith, shareWith,
+      // Absent (null) means whole-file, today's behaviour, unchanged — a
+      // consumer that never reads these two fields sees no difference at
+      // all. office.html's onLivePresence forwards these onto
+      // `a.gitStart`/`a.gitEnd` right after `.path`.
+      start: region ? region.start : null,
+      end: region ? region.end : null,
+    }
   }
 
   /** The human for a live agent id, or '' if we've never seen a presence

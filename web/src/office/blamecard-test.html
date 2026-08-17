@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Blame card — fixture harness</title>
+<style>
+  html,body{margin:0;height:100%;background:#F0ECE6;
+    font:14px/1.5 ui-sans-serif,-apple-system,Segoe UI,sans-serif;color:#35455C}
+  #hud{position:fixed;left:18px;top:16px;background:#fffdfaee;border:1px solid #C3B39B;
+    border-radius:10px;padding:12px 14px;max-width:320px;box-shadow:0 6px 24px #4a1f3d18;
+    top:16px;height:296px;box-sizing:border-box}
+  #hud h1{font-size:15px;margin:0 0 3px;letter-spacing:-.01em}
+  #hud p{margin:0 0 10px;font-size:12px;color:#6b5f56}
+  .row{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}
+  button{font:inherit;font-size:12px;padding:5px 10px;border-radius:6px;
+    border:1px solid #C3B39B;background:#fff;color:#35455C;cursor:pointer}
+  button:hover{background:#E9E0CE}
+  button[aria-pressed="true"]{background:#35455C;color:#F0ECE6;border-color:#35455C}
+</style>
+</head>
+<body>
+<div id="hud">
+  <h1>Blame card fixtures</h1>
+  <p>No THREE scene needed — blamecard.js is a plain DOM controller.
+     fetchFn below is stubbed with canned blame/log/stat JSON matching
+     gitapi.mjs's real response shapes. Press V (or the button in the card)
+     to cycle graphic → classic → gutter → story, R to flip region/whole-file
+     when a fixture carries a range (graphic/classic only — gutter and story
+     always show the whole file / a fallback note). The two "auto-picks
+     story" fixtures load with the card already open on story, no V press
+     needed — that's pickDefaultVariant firing on a single-author blame.</p>
+  <div class="row">
+    <button data-f="skewed">skewed ownership</button>
+    <button data-f="even">even split, 3 authors</button>
+    <button data-f="solo">one author only — collapses</button>
+    <button data-f="empty">no history at path</button>
+    <button data-f="long">12 commits, old + new</button>
+  </div>
+  <div class="row">
+    <button data-f="stacked">8 commits, same day (stacking)</button>
+  </div>
+  <div class="row">
+    <button data-f="region">has a region (14 lines, mixed)</button>
+    <button data-f="regionFallback">region past EOF (falls back)</button>
+  </div>
+  <div class="row">
+    <button data-f="gutter">gutter: real lines + source</button>
+    <button data-f="gutterFallback">gutter: server predates it</button>
+  </div>
+  <div class="row">
+    <button data-f="storySolo">story: single-author (auto-picked)</button>
+    <button data-f="storyMulti">story: multi-author, busy week</button>
+    <button data-f="storyOneCommit">story: single commit, no stat</button>
+    <button data-f="storyEmpty">story: untracked file</button>
+  </div>
+  <div class="row">
+    <button id="bClose">close card</button>
+  </div>
+</div>
+
+<script type="module">
+// Cache-busted so an edit to blamecard.js always shows up on reload —
+// static `import ... from` can't take a computed specifier, so this has to
+// be a dynamic import (same pattern as clips/argue-test.html).
+const { attachBlameCard } = await import('./blamecard.js?v=' + Date.now())
+
+// Canned data shaped exactly like gitapi.mjs's real response bodies —
+// {ok:true, total, owners:[{author,lines,share}], newestLineAgeDays,
+// oldestLineAgeDays} for blame, {ok:true, entries:[{sha,author,when,subject}]}
+// for log, `when` as a real `--date=relative` string since history-viz's
+// parseRelativeAge is what turns that into an axis position.
+const FIXTURES = {
+  skewed: {
+    blame: { ok: true, total: 210, owners: [
+      { author: 'mohsensc', lines: 178, share: 178 / 210 },
+      { author: 'agentai', lines: 32, share: 32 / 210 },
+    ], newestLineAgeDays: 0, oldestLineAgeDays: 340 },
+    log: { ok: true, entries: [
+      { sha: 'a1b2c3d', author: 'mohsensc', when: '3 hours ago', subject: 'fix zoom easing on head-lock' },
+      { sha: 'b2c3d4e', author: 'mohsensc', when: '2 days ago', subject: 'add churn poll to gitsignals' },
+      { sha: 'c3d4e5f', author: 'agentai', when: '3 weeks ago', subject: 'seed office cast positions' },
+      { sha: 'd4e5f6a', author: 'mohsensc', when: '11 months ago', subject: 'initial office scene' },
+    ] },
+  },
+  even: {
+    blame: { ok: true, total: 90, owners: [
+      { author: 'mohsensc', lines: 31, share: 31 / 90 },
+      { author: 'agentai', lines: 30, share: 30 / 90 },
+      { author: 'rae', lines: 29, share: 29 / 90 },
+    ], newestLineAgeDays: 1, oldestLineAgeDays: 60 },
+    log: { ok: true, entries: [
+      { sha: 'e5f6a7b', author: 'rae', when: 'yesterday', subject: 'tune desk tint alpha' },
+      { sha: 'f6a7b8c', author: 'agentai', when: '1 week ago', subject: 'wire ownership fetch' },
+      { sha: 'a7b8c9d', author: 'mohsensc', when: '2 months ago', subject: 'stub desk mats' },
+    ] },
+  },
+  // isSingleOwner(blame) is true here — the graphic variant should
+  // collapse the tug-bar to one sentence and hand the freed space to the
+  // classic commit list, per gitapi.mjs task 3's email dedup making this
+  // the common case across the demo repo, not the exception.
+  solo: {
+    blame: { ok: true, total: 40, owners: [{ author: 'mohsensc', lines: 40, share: 1 }],
+      newestLineAgeDays: 5, oldestLineAgeDays: 5 },
+    log: { ok: true, entries: [
+      { sha: 'b8c9d0e', author: 'mohsensc', when: '5 days ago', subject: 'add new prop mesh' },
+    ] },
+  },
+  // A file with a real burst of same-day activity — ageToX collapses all
+  // eight onto one x position, which is exactly the "8 commits render as
+  // 1 dot" bug stackTimelinePositions exists to fix. Look for a badged
+  // stack of dots instead of one lonely one.
+  stacked: {
+    blame: { ok: true, total: 120, owners: [
+      { author: 'mohsensc', lines: 90, share: 0.75 },
+      { author: 'agentai', lines: 30, share: 0.25 },
+    ], newestLineAgeDays: 0, oldestLineAgeDays: 2 },
+    log: { ok: true, entries: [
+      ...Array.from({ length: 8 }, (_, i) => ({
+        sha: `${(i + 1).toString(16)}c0ffee0`,
+        author: i % 2 === 0 ? 'mohsensc' : 'agentai',
+        when: '2 days ago',
+        subject: `steer loop pass #${i + 1}`,
+      })),
+      { sha: 'aaaa1111', author: 'mohsensc', when: '3 weeks ago', subject: 'first cut of the steer loop' },
+    ] },
+  },
+  empty: {
+    blame: { ok: false, reason: 'no blame available' },
+    log: { ok: false, reason: 'no history' },
+  },
+  region: {
+    blame: { ok: true, total: 340, owners: [
+      { author: 'mohsensc', lines: 260, share: 260 / 340 },
+      { author: 'agentai', lines: 80, share: 80 / 340 },
+    ], newestLineAgeDays: 40, oldestLineAgeDays: 400 },
+    log: { ok: true, entries: [
+      { sha: 'f00dcafe', author: 'mohsensc', when: '5 weeks ago', subject: 'refactor the region math' },
+      { sha: 'deadf00d', author: 'agentai', when: '9 months ago', subject: 'seed the module' },
+    ] },
+    // The lines this agent actually holds right now — a much fresher,
+    // much more one-sided slice than the whole-file bar above. This is
+    // the whole point of the region view: "mostly mohsen, newest 2h ago"
+    // reads completely differently from "260/340 lines, oldest a year".
+    regionBlame: { ok: true, total: 14, owners: [
+      { author: 'mohsensc', lines: 11, share: 11 / 14 },
+      { author: 'agentai', lines: 3, share: 3 / 14 },
+    ], newestLineAgeDays: 0, oldestLineAgeDays: 12 },
+    range: { start: 120, end: 134 },
+  },
+  regionFallback: {
+    blame: { ok: true, total: 90, owners: [{ author: 'mohsensc', lines: 90, share: 1 }],
+      newestLineAgeDays: 10, oldestLineAgeDays: 200 },
+    log: { ok: true, entries: [
+      { sha: 'ba5eba11', author: 'mohsensc', when: '10 days ago', subject: 'small file, big range' },
+    ] },
+    // A range that runs past EOF. gitapi.mjs's blame route tolerates this
+    // and returns {ok:false} the same way it does for "no blame at all" —
+    // the card is expected to fall back to the whole-file view silently,
+    // never show an empty region box.
+    regionBlame: { ok: false, reason: 'no blame available' },
+    range: { start: 9000, end: 9050 },
+  },
+  long: {
+    blame: { ok: true, total: 500, owners: [
+      { author: 'mohsensc', lines: 260, share: 0.52 },
+      { author: 'agentai', lines: 140, share: 0.28 },
+      { author: 'rae', lines: 60, share: 0.12 },
+      { author: 'kade', lines: 40, share: 0.08 },
+    ], newestLineAgeDays: 0, oldestLineAgeDays: 900 },
+    log: { ok: true, entries: Array.from({ length: 12 }, (_, i) => ({
+      sha: `${(i + 10).toString(16)}deadbeef`,
+      author: ['mohsensc', 'agentai', 'rae', 'kade'][i % 4],
+      when: [
+        '20 minutes ago', '4 hours ago', 'yesterday', '3 days ago', '1 week ago',
+        '2 weeks ago', '1 month ago', '3 months ago', '6 months ago',
+        '1 year ago', '2 years, 1 month ago', '2 years, 6 months ago',
+      ][i],
+      subject: `commit #${i + 1} in the fixture history`,
+    })) },
+  },
+  // The gutter variant's happy path: real source text paired with real
+  // per-line blame, matching gitapi.mjs's /api/git/source + blame's
+  // &lines=1 shapes exactly (task 3's contract). Six lines, two authors,
+  // a range of ages so the opacity fade is visible line to line.
+  gutter: {
+    blame: { ok: true, total: 60, owners: [{ author: 'mohsensc', lines: 60, share: 1 }],
+      newestLineAgeDays: 2, oldestLineAgeDays: 40 },
+    log: { ok: true, entries: [
+      { sha: 'f00dc0de', author: 'mohsensc', when: '2 days ago', subject: 'guard the tick delta' },
+    ] },
+    regionBlame: { ok: true, total: 6, owners: [
+      { author: 'mohsensc', lines: 4, share: 4 / 6 },
+      { author: 'agentai', lines: 2, share: 2 / 6 },
+    ], newestLineAgeDays: 0, oldestLineAgeDays: 40 },
+    range: { start: 40, end: 46 },
+    gutterSource: { ok: true, lines: [
+      'function tick(dt) {',
+      '  updateAgents(dt)',
+      '  camera.update(dt)',
+      '  // agentai: clamp so a tab-out spike can\'t blow up physics',
+      '  if (dt > 0.25) dt = 0.25',
+      '  render(scene, camera)',
+    ] },
+    gutterLineBlame: { ok: true, total: 6, owners: [
+      { author: 'mohsensc', lines: 4, share: 4 / 6 },
+      { author: 'agentai', lines: 2, share: 2 / 6 },
+    ], lines: [
+      { n: 40, author: 'mohsensc', ageDays: 40 },
+      { n: 41, author: 'mohsensc', ageDays: 40 },
+      { n: 42, author: 'mohsensc', ageDays: 40 },
+      { n: 43, author: 'agentai', ageDays: 0 },
+      { n: 44, author: 'agentai', ageDays: 0 },
+      { n: 45, author: 'mohsensc', ageDays: 40 },
+    ] },
+  },
+  // Same region, but the server predates the &lines=1 / /api/git/source
+  // contract (or the fetch just failed) — buildGutterRows must come back
+  // null and the gutter variant falls back to the region strip with a
+  // quiet note, never an empty box or a thrown error.
+  gutterFallback: {
+    blame: { ok: true, total: 90, owners: [{ author: 'mohsensc', lines: 90, share: 1 }],
+      newestLineAgeDays: 10, oldestLineAgeDays: 200 },
+    log: { ok: true, entries: [
+      { sha: 'ba5eba11', author: 'mohsensc', when: '10 days ago', subject: 'old server, no line detail yet' },
+    ] },
+    regionBlame: { ok: true, total: 8, owners: [{ author: 'mohsensc', lines: 8, share: 1 }],
+      newestLineAgeDays: 3, oldestLineAgeDays: 3 },
+    range: { start: 5, end: 13 },
+    gutterSource: { ok: false, reason: 'not available at HEAD' },
+    gutterLineBlame: { ok: true, total: 8, owners: [{ author: 'mohsensc', lines: 8, share: 1 }] }, // no `lines` field
+  },
+  // story variant fixtures. `stat` mirrors gitapi.mjs's /api/git/stat body
+  // (parseStatLog's shape) — the story variant is the only view that reads
+  // it. This one has a single-author blame, so it should auto-pick story
+  // on load without pressing V — pickDefaultVariant's whole reason to exist.
+  storySolo: {
+    blame: { ok: true, total: 340, owners: [{ author: 'mohsensc', lines: 340, share: 1 }],
+      newestLineAgeDays: 2, oldestLineAgeDays: 42 },
+    log: { ok: true, entries: [
+      { sha: 'a1a1a1a', author: 'mohsensc', when: '2 days ago', subject: 'tune heat wisp opacity' },
+      { sha: 'b2b2b2b', author: 'mohsensc', when: '4 days ago', subject: 'add cold-day override' },
+      { sha: 'c3c3c3c', author: 'mohsensc', when: '6 weeks ago', subject: 'first cut of the churn view' },
+    ] },
+    stat: { ok: true, commits: 8, authorCount: 1, lastAuthor: 'mohsensc', lastAgeDays: 2, firstAgeDays: 42, lastSummary: 'tune heat wisp opacity' },
+  },
+  // multi-author with a real cluster in the fetched log, so the busiest-
+  // stretch sentence has something to say.
+  storyMulti: {
+    blame: { ok: true, total: 500, owners: [
+      { author: 'mohsensc', lines: 350, share: 0.7 },
+      { author: 'agentai', lines: 150, share: 0.3 },
+    ], newestLineAgeDays: 1, oldestLineAgeDays: 60 },
+    log: { ok: true, entries: [
+      { sha: 'd4d4d4d', author: 'mohsensc', when: '1 day ago', subject: 'wire board poll' },
+      { sha: 'e5e5e5e', author: 'agentai', when: '2 days ago', subject: 'ticker treatment' },
+      { sha: 'f6f6f6f', author: 'mohsensc', when: '3 days ago', subject: 'sticky note colours' },
+      { sha: 'a7a7a7a', author: 'mohsensc', when: '20 days ago', subject: 'departures animation' },
+      { sha: 'b8b8b8b', author: 'agentai', when: '35 days ago', subject: 'first commit board pass' },
+    ] },
+    stat: { ok: true, commits: 14, authorCount: 2, lastAuthor: 'mohsensc', lastAgeDays: 1, firstAgeDays: 60, lastSummary: 'wire board poll' },
+  },
+  // Single commit and no /api/git/stat data at all (older server, or the
+  // fetch failed) — composeStory has to fall back to the log entry alone.
+  storyOneCommit: {
+    blame: { ok: true, total: 6, owners: [{ author: 'rae', lines: 6, share: 1 }],
+      newestLineAgeDays: 3, oldestLineAgeDays: 3 },
+    log: { ok: true, entries: [
+      { sha: 'c9c9c9c', author: 'rae', when: '3 days ago', subject: 'stub the ghost fixture' },
+    ] },
+    stat: { ok: false, reason: 'no history' },
+  },
+  // No history at all anywhere — story degrades to the single "no history
+  // here yet" line, same wording every other variant uses, never a blank
+  // panel or a stack trace in the console.
+  storyEmpty: {
+    blame: { ok: false, reason: 'no blame available' },
+    log: { ok: false, reason: 'no history' },
+    stat: { ok: false, reason: 'no history' },
+  },
+}
+
+let current = 'skewed'
+function stubFetch(url) {
+  const u = new URL(url, location.href)
+  const data = FIXTURES[current]
+  if (u.pathname.endsWith('/source')) {
+    return Promise.resolve({ json: async () => data.gutterSource ?? { ok: false, reason: 'no fixture' } })
+  }
+  if (u.pathname.endsWith('/stat')) {
+    return Promise.resolve({ json: async () => data.stat ?? { ok: false, reason: 'no fixture' } })
+  }
+  const isBlame = u.pathname.endsWith('/blame')
+  const isLines = isBlame && u.searchParams.get('lines') === '1'
+  const isRanged = isBlame && u.searchParams.has('start')
+  const body = isLines ? (data.gutterLineBlame ?? { ok: false, reason: 'no fixture' })
+    : isRanged ? data.regionBlame
+    : (isBlame ? data.blame : data.log)
+  return Promise.resolve({ json: async () => body })
+}
+
+const card = attachBlameCard({ fetchFn: stubFetch, onClose: () => card.hide() })
+
+function show(name) {
+  current = name
+  const data = FIXTURES[name]
+  const agent = { id: 'a1', name: 'a1', role: 'mohsensc', gitPath: `fixtures/${name}.js` }
+  if (data.range) { agent.gitStart = data.range.start; agent.gitEnd = data.range.end }
+  card.show(agent)
+}
+
+document.querySelectorAll('[data-f]').forEach(b => {
+  b.addEventListener('click', () => show(b.dataset.f))
+})
+document.getElementById('bClose').addEventListener('click', () => card.hide())
+
+show('skewed')
+window.__card = card
+</script>
+</body>
+</html>

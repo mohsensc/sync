@@ -160,6 +160,45 @@ const TONE = {
   idle: '#8A94A3', done: '#4A1F3D',
 }
 
+// Freshness is a second, orthogonal halo channel — not TONE. TONE says what
+// the agent is doing right now (ok/working/blocked); freshness says how old
+// the ground they're standing on is (git stat's lastAgeDays). Both ride the
+// feet at once: TONE owns the inner ring's color, freshness owns an outer
+// ring's color/radius/pulse rate. An agent editing code from this morning
+// should not read the same as one editing a file nobody's touched all year.
+const FRESH = {
+  fresh:  { color: '#E8946C', radius: 1.34, pulse: 2.6, opacity: 0.46 }, // <2d: warm, big, quick
+  warm:   { color: '#D6B45C', radius: 1.14, pulse: 1.5, opacity: 0.34 }, // <21d
+  normal: { color: '#8A94A3', radius: 1.00, pulse: 0.9, opacity: 0.16 }, // <180d, barely there
+  stale:  { color: '#3E4A5E', radius: 0.86, pulse: 0.35, opacity: 0.24 }, // >=180d: cold, small, slow
+}
+
+// Churn is the third signal, separate from both TONE and FRESH: freshness
+// says how OLD the ground under an agent is, churn says how FAST it is
+// moving right now (gitsignals.js's churnToIntensity, working-tree diff
+// weighted over 14-day history). It shows up two ways — see setChurn() and
+// update() below — a subtle typing-speed bump and a paper stack that grows
+// on the desk beside them. Ranges picked to read as "busier", never
+// "broken": the fastest typing is 1.6x, not a caffeinated blur.
+const CHURN_TYPE_SPEED = [1.0, 1.6]   // idle..maxed-out typing timeScale
+const CHURN_EASE = 2.2                 // 1/s, how fast _churn chases its target
+const CHURN_MAX_H = 0.22               // metres, tallest the paper stack gets
+// Desk surfaces sit at office.html's DESK_TOP (0.76m). The stack is a decoration
+// riding the agent root, not a real desk-relative object (agent.js has no
+// reference to which desk mesh an agent is at), so this is a fixed guess at
+// "about desk height, off to one side" rather than a measured position.
+const CHURN_BASE_Y = 0.74
+
+/** ageDays -> a FRESH bucket name, or null for "no signal, show nothing".
+ *  Pure so it's unit-testable without a THREE scene. */
+export function freshnessBucket(ageDays) {
+  if (ageDays == null || !Number.isFinite(ageDays) || ageDays < 0) return null
+  if (ageDays < 2) return 'fresh'
+  if (ageDays < 21) return 'warm'
+  if (ageDays < 180) return 'normal'
+  return 'stale'
+}
+
 function badgeTexture(text, tone) {
   const c = document.createElement('canvas')
   c.width = 512; c.height = 128
@@ -249,9 +288,45 @@ export class Agent {
     this.halo.userData.decor = true
     this.badge.userData.decor = true
 
+    // Outer ring for the freshness channel. Starts invisible (opacity 0,
+    // bucket null) until setFreshness() has something to say.
+    this.freshHalo = new THREE.Mesh(
+      new THREE.RingGeometry(0.46, 0.58, 32),
+      new THREE.MeshBasicMaterial({ color: 0x8A94A3, transparent: true, opacity: 0,
+        depthWrite: false, side: THREE.DoubleSide }))
+    this.freshHalo.rotation.x = -Math.PI / 2
+    this.freshHalo.position.y = 0.05
+    this.freshHalo.renderOrder = 2
+    this.freshHalo.userData.decor = true
+    this._freshness = null
+    this._freshPulse = 0
+
+    // Churn prop: a tray plus a block whose height IS the eased churn value,
+    // so it grows continuously instead of popping in sheet by sheet. Both
+    // start fully transparent (0 papers at intensity 0) and scale up from
+    // the tray's surface, never from the block's own center, so it reads as
+    // stacking UP rather than swelling from the middle.
+    this._churn = 0
+    this._churnTarget = 0
+    this.churnGroup = new THREE.Group()
+    this.churnGroup.position.set(0.34 * scale, 0, 0.22 * scale)
+    this.churnGroup.userData.decor = true
+    this.churnTray = new THREE.Mesh(
+      new THREE.BoxGeometry(0.30, 0.03, 0.22),
+      new THREE.MeshStandardMaterial({ color: 0xC3B39B, roughness: 0.9, transparent: true, opacity: 0, depthWrite: false }))
+    this.churnTray.position.y = CHURN_BASE_Y * scale
+    this.churnPapers = new THREE.Mesh(
+      new THREE.BoxGeometry(0.26, 1, 0.18), // unit height; scale.y IS the stack height in metres
+      new THREE.MeshStandardMaterial({ color: 0xFFFDFA, roughness: 0.85, transparent: true, opacity: 0, depthWrite: false }))
+    this.churnPapers.position.y = CHURN_BASE_Y * scale + 0.02
+    this.churnPapers.scale.y = 0.0001
+    this.churnGroup.add(this.churnTray, this.churnPapers)
+
     if (root) {
       root.add(this.badge)
       root.add(this.halo)
+      root.add(this.freshHalo)
+      root.add(this.churnGroup)
       root.position.set(this.pos.x, 0, this.pos.z)
       root.rotation.y = this.yaw + YAW_OFFSET
       ANIM.crossfade(root, 'idle', 0)
@@ -329,6 +404,29 @@ export class Agent {
     this.state = s
     this.halo.material.color.setStyle(TONE[s] || TONE.ok)
     this.halo.material.opacity = s === 'blocked' ? 0.95 : 0.55
+    return this
+  }
+
+  /** ageDays of the last commit touching whatever this agent is holding, or
+   *  null to clear the ring (unknown / no gitPath / lookup failed). Orthogonal
+   *  to setState — see the FRESH table above. */
+  setFreshness(ageDays) {
+    this._freshness = freshnessBucket(ageDays)
+    if (!this._freshness) {
+      this.freshHalo.material.opacity = 0
+      return this
+    }
+    const cfg = FRESH[this._freshness]
+    this.freshHalo.material.color.setStyle(cfg.color)
+    return this
+  }
+
+  /** intensity 0..1 from gitsignals.js's churnToIntensity: how much this
+   *  agent's current file has moved lately. Only sets a target — update()
+   *  eases toward it every frame (CHURN_EASE), so a poll landing mid-typing
+   *  never snaps the animation speed or the paper stack. */
+  setChurn(intensity) {
+    this._churnTarget = clamp(Number.isFinite(intensity) ? intensity : 0, 0, 1)
     return this
   }
 
@@ -415,6 +513,36 @@ export class Agent {
       this.halo.scale.setScalar(1 + 0.14 * k)
     } else {
       this.halo.scale.setScalar(1)
+    }
+
+    if (this._freshness) {
+      const cfg = FRESH[this._freshness]
+      this._freshPulse += dt * cfg.pulse
+      const k = 0.5 + 0.5 * Math.sin(this._freshPulse)
+      this.freshHalo.material.opacity = cfg.opacity * (0.7 + 0.3 * k)
+      this.freshHalo.scale.setScalar(cfg.radius * (0.96 + 0.06 * k))
+    }
+
+    // Ease _churn toward whatever setChurn() last requested — never snap it,
+    // a poll landing mid-keystroke should not visibly jump the typing speed.
+    this._churn += (this._churnTarget - this._churn) * Math.min(1, dt * CHURN_EASE)
+    if (this._churn > 0.004) {
+      const h = CHURN_MAX_H * this._churn
+      this.churnPapers.visible = true
+      this.churnTray.visible = true
+      this.churnPapers.scale.y = h
+      this.churnPapers.position.y = this.churnTray.position.y + 0.02 + h / 2
+      this.churnPapers.material.opacity = 0.25 + 0.65 * this._churn
+      this.churnTray.material.opacity = 0.2 + 0.5 * this._churn
+    } else {
+      this.churnPapers.visible = false
+      this.churnTray.visible = false
+    }
+    // Typing reads faster on a hot file — only while actually typing, so an
+    // idle/walking agent doesn't carry a phantom speed-up. See CHURN_TYPE_SPEED.
+    if (this.activity === 'typing') {
+      const [lo, hi] = CHURN_TYPE_SPEED
+      ANIM.setTimeScale(this.root, 'type', lo + (hi - lo) * this._churn)
     }
 
     this.root.position.set(this.pos.x, 0, this.pos.z)

@@ -60,6 +60,10 @@
   .rcard.strip{background:#35455Cf2;border-radius:999px;padding:8px 16px;
     box-shadow:0 6px 20px #4a1f3d33;display:flex;align-items:center;gap:8px;
     font:12px ui-monospace,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #caption.declutter{opacity:0}
+  #beat{position:fixed;right:18px;top:16px;background:#fffdfaee;border:1px solid #C3B39B;
+    border-radius:10px;padding:9px 12px;font:11px ui-monospace,monospace;color:#6b5f56}
+  #beat b{color:#35455C}
   #mode{position:fixed;left:50%;top:16px;transform:translateX(-50%);
     background:#35455Cf2;color:#F0ECE6;border-radius:999px;padding:6px 16px;
     font:600 11px ui-monospace,monospace;letter-spacing:.04em;text-transform:uppercase;
@@ -358,6 +362,7 @@ import * as ANIM from './anim.js'
 import * as Z from './zones.js'
 import { createAgent, World } from './agent.js'
 import { attachInteraction } from './interact.js'
+import { attachBlameCard } from './blamecard.js'
 import { runDemo } from './demo.js'
 import { buildDressing } from './dressing.js'
 import * as Live from './live.js'
@@ -365,6 +370,7 @@ import { ReelStore, SAMPLE_EVENTS, mountReel, resolveSkin } from './reel.js'
 import { seedEvents } from './seed.js'
 import { createCaptionArbiter, PRIORITY } from './caption.js'
 import { createReplayCard } from './replay-card.js'
+import { attachGitSignals } from './gitsignals.js'
 
 const P = { cream:0xF0ECE6, sand:0xE9E0CE, taupe:0xC3B39B, sage:0xE5E1D2, butter:0xF7DFAF,
             mustard:0xD6B45C, caramel:0xC0762A, coffee:0xB0674F, terracotta:0xD9714F,
@@ -667,12 +673,17 @@ PLAN.forEach(load)
 // left-wall shelving, and 8.2 clipped the crate stack; both put a figure half
 // buried in furniture on first paint. Kept identical to demo.js's park row so
 // a demo restart doesn't teleport anyone.
+// `file` is a real repo-relative path, picked for a spread of git history:
+// a1 hasn't moved since the repo's first commit, a4 landed yesterday. Stashed
+// onto the spawned agent as `.gitPath` in setupCast() below — everything that
+// reads git data off a demo agent (hover card, blame card, ambient signals)
+// reads that field, not this list.
 const AGENT_CAST = [
-  { id:'a1', name:'agent-1', color:P.navy,       start:[-7.7,-3.4] },
-  { id:'a2', name:'agent-2', color:P.caramel,    start:[-7.7,-2.2] },
-  { id:'a3', name:'agent-3', color:P.mauve,      start:[-7.7,-1.0] },
-  { id:'a4', name:'agent-4', color:P.terracotta, start:[ 7.5,-0.4] },
-  { id:'a5', name:'agent-5', color:P.slate,      start:[ 7.5, 1.4] },
+  { id:'a1', name:'agent-1', color:P.navy,       start:[-7.7,-3.4], file:'python/src/agent_presence/__init__.py' },
+  { id:'a2', name:'agent-2', color:P.caramel,    start:[-7.7,-2.2], file:'cpp/hook/hook.cpp' },
+  { id:'a3', name:'agent-3', color:P.mauve,      start:[-7.7,-1.0], file:'web/src/office/anim.js' },
+  { id:'a4', name:'agent-4', color:P.terracotta, start:[ 7.5,-0.4], file:'go/cmd/gorelay/main.go' },
+  { id:'a5', name:'agent-5', color:P.slate,      start:[ 7.5, 1.4], file:'README.md' },
 ]
 // Three more so the office is not empty between beats. They are full agents —
 // selectable, sendable — they just start with somewhere to be. The demo never
@@ -735,17 +746,20 @@ function makeCharacterRoot(gltfScene, height = 1.68, bodyColor = null) {
 // The seated background characters need their desks placed first, and the
 // interaction layer needs every prop, so setup waits for the whole load.
 let charGLTF = null, interaction = null
+const blameCard = attachBlameCard({ onClose: () => interaction && interaction.select(null) })
 function setupCast() {
   if (!charGLTF || interaction || done < pending) return
   const gltf = charGLTF
   for (const spec of AGENT_CAST) {
     const root = makeCharacterRoot(skinnedClone(gltf.scene), 1.68, spec.color)
     scene.add(root)
-    agents.push(world.add(createAgent({
+    const a = world.add(createAgent({
       root, id: spec.id, name: spec.name, color: spec.color,
       pos: spec.start, yaw: Math.PI / 2, height: 1.68,
       scale: root.userData.scale,
-    })))
+    }))
+    a.gitPath = spec.file
+    agents.push(a)
   }
   for (const b of BACKGROUND) {
     const root = makeCharacterRoot(skinnedClone(gltf.scene), 1.68, b.color)
@@ -779,8 +793,14 @@ function setupCast() {
   interaction = attachInteraction({
     canvas, camera, scene, world, floor, rug, props, desks,
     log: s => { logEl.textContent = s },
+    // interact.js's select() calls this after selection changes (null on
+    // deselect); it's the hook zoomToAgent/blameCard ride on. Guarded below
+    // in case this lands before interact.js starts calling it.
+    onSelect: a => { if (a) { zoomToAgent(a); blameCard.show(a) }
+                      else { zoomRestore(); blameCard.hide() } },
   })
   window.__interact = interaction
+  window.__gitSignals = attachGitSignals({ world, zones: zoneUI })
   window.__ready = true
   initLive()
 }
@@ -798,6 +818,20 @@ let yaw = 0.78, pitch = 0.46, dist = 1.14, spin = false, top = false, wire = fal
 // The room is a cutaway, open on +x and +z only. Orbiting past these puts the
 // camera behind a wall and the view goes blank, so the arc is clamped.
 const YAW_MIN = 0.18, YAW_MAX = 1.39
+const YAW_MID = (YAW_MIN + YAW_MAX) / 2
+/** Clamp a yaw into the room's valid orbit arc, correctly on the circle. A
+ *  plain Math.max/min is periodicity-blind: an angle just past a full turn
+ *  clamps to the FAR boundary instead of wrapping back to the near one. The
+ *  room's own orbit never noticed because dragging only ever fed this small,
+ *  already-nearby deltas — but head framing routinely computes something
+ *  like `a.yaw + PI`, which lands anywhere across a full turn, and the arc
+ *  here (1.21 rad) is well under PI wide, so "wrap to the representative
+ *  nearest the arc's centre, then clamp" always finds the true closest
+ *  reachable point instead of whichever raw number happens to be smaller. */
+function clampYaw(y) {
+  const d = ((y - YAW_MID) % (Math.PI * 2) + Math.PI * 3) % (Math.PI * 2) - Math.PI
+  return Math.max(YAW_MIN, Math.min(YAW_MAX, YAW_MID + d))
+}
 let spinDir = 1
 const target = new THREE.Vector3(0.2, 1.0, 0.7)
 const goal = { target: target.clone(), dist: 1.14, yaw: 0.78, active: false }
@@ -805,9 +839,11 @@ const goal = { target: target.clone(), dist: 1.14, yaw: 0.78, active: false }
 // middle of the frame with a wide band of empty background around it.
 const RADIUS = 18
 
-/** Demo camera: ease toward a floor point at a given zoom and yaw. */
-function focus([x, z], d = 1, y = null) {
-  goal.target.set(x, 1.15, z)
+/** Demo camera: ease toward a floor point at a given zoom, yaw and look-height.
+ *  targetY defaults to 1.15 (roughly torso height on the floor plate) so every
+ *  existing demo.js call site — none of which pass a 4th arg — is unaffected. */
+function focus([x, z], d = 1, y = null, targetY = 1.15) {
+  goal.target.set(x, targetY, z)
   goal.dist = d
   if (y != null) goal.yaw = Math.max(YAW_MIN, Math.min(YAW_MAX, y))
   goal.active = true
@@ -872,9 +908,168 @@ function beginReplayOutro() {
   }, REPLAY_HOLD_MS)
 }
 
+// ---- click-to-zoom on a character's head -------------------------------
+// A character is 1.68 tall; the head sits near the top of that, not at the
+// torso height focus() aims at by default. Zooming there needs its own
+// close, slightly-off-axis framing — a dead-on close-up on a low-poly face
+// reads as a mugshot, a few degrees of yaw off center reads as a look.
+const HEAD_Y = 1.5
+const HEAD_DIST = 0.24
+const HEAD_YAW_OFFSET = 0.16
+// The old flight never touched pitch at all — it just carried over whatever
+// the room happened to be at, top-down button included. That's the "scalp"
+// the reviewer landed on: select someone right after pressing top-down and
+// the head zoom stayed looking almost straight down. A close portrait wants
+// something closer to eye level.
+const HEAD_PITCH = 0.26
+// "Over the shoulder": lower and a little further back than the front
+// portrait, so the desk/monitor the character is facing has room in frame.
+const SHOULDER_DIST = 0.27
+const SHOULDER_Y = 1.42
+const SHOULDER_YAW_OFFSET = 0.22
+const SHOULDER_PITCH = 0.16
+
+let priorFraming = null   // { target, dist, yaw, pitch } to restore to on deselect/Escape
+
+// ---- zoom flight ---------------------------------------------------------
+// The head zoom used to ride the same asymptotic goal.active lerp as every
+// other camera move (see tick() below) — smooth, but it decays toward the
+// target with no shape to it: a dolly, not a look. A flight has a start, an
+// end and a duration, which is what lets it carry an arc and a distinct feel
+// per mode, neither of which a per-frame "close 0.15% of the gap" loop can
+// express. `focus()`/goal is untouched and still drives every other camera
+// move in the file (demo.js's scripted shots, the top/spin buttons) — this
+// is additive, only zoomToAgent/zoomRestore start a flight.
+//
+// Z toggles between two feels, so both are sitting in the room to compare
+// rather than argued about from memory:
+//   'ease' (default) — ease-in-out over ~0.9s, with a lateral arc that bows
+//     the flight path off the straight line between old and new target. A
+//     dead-straight dolly into a face reads as a camera rig; a few degrees
+//     of curve reads as someone leaning in to look.
+//   'snap' — fast, ~0.4s, ease-out-back so the camera overshoots the framing
+//     slightly and settles back — a flinch-and-focus instead of a glide.
+let zoomMode = 'ease'
+let flight = null   // { mode, t, dur, fromTarget, toTarget, fromDist, toDist, fromYaw, toYaw }
+
+function easeInOutCubic(p) { return p < 0.5 ? 4*p*p*p : 1 - Math.pow(-2*p + 2, 3) / 2 }
+function easeOutBack(p) {
+  const c1 = 1.70158, c3 = c1 + 1
+  return 1 + c3 * Math.pow(p - 1, 3) + c1 * Math.pow(p - 1, 2)
+}
+
+function startFlight(toXZ, toDist, toYaw, toTargetY, toPitch) {
+  flight = {
+    mode: zoomMode, t: 0, dur: zoomMode === 'snap' ? 0.42 : 0.92,
+    fromTarget: target.clone(),
+    toTarget: new THREE.Vector3(toXZ[0], toTargetY, toXZ[1]),
+    fromDist: dist, toDist,
+    fromYaw: yaw, toYaw: clampYaw(toYaw),
+    fromPitch: pitch, toPitch: toPitch != null ? toPitch : pitch,
+  }
+  goal.active = false
+}
+
+// Two ?frame= choices for where the head-zoom camera lands, switchable live
+// via window.__zoomMode.setFrame() so both sit in the room to compare rather
+// than argued about from memory (same spirit as the ease/snap toggle below).
+let frameMode = new URLSearchParams(location.search).get('frame') === 'shoulder' ? 'shoulder' : 'threequarter'
+
+/**
+ * Where the head-zoom camera should land, derived from the character's own
+ * facing (a.yaw — external convention, forward is -(sin y, 0, cos y), see
+ * zones.js's header note) instead of whatever the room camera happened to be
+ * pointed at before the click. That was the bug: landing on a face was luck,
+ * because the old flight kept the room's yaw *and* pitch untouched.
+ *
+ *   'threequarter' (default) — camera sits roughly opposite the character's
+ *     forward direction (a.yaw + PI), so it looks back at their face. A few
+ *     degrees off dead-on so a head-on close-up doesn't read as a mugshot.
+ *   'shoulder' — camera sits roughly behind the character, on their own
+ *     forward side (a.yaw), a little further back and lower, framing past
+ *     their shoulder toward whatever they're facing.
+ *
+ * Either result still gets clamped to [YAW_MIN, YAW_MAX] by startFlight. The
+ * room is a cutaway open only on +x/+z — a character planted facing the back
+ * or left wall genuinely cannot be framed face-on from the camera's side of
+ * the room. That clamp is the honest degrade, not a bug still to chase.
+ */
+function headFraming(a, mode) {
+  if (mode === 'shoulder') {
+    return { yaw: a.yaw + SHOULDER_YAW_OFFSET, pitch: SHOULDER_PITCH, dist: SHOULDER_DIST, y: SHOULDER_Y }
+  }
+  return { yaw: a.yaw + Math.PI + HEAD_YAW_OFFSET, pitch: HEAD_PITCH, dist: HEAD_DIST, y: HEAD_Y }
+}
+
+function zoomToAgent(a) {
+  if (!priorFraming) {
+    // Only the FIRST zoom in a selection streak snapshots the room shot —
+    // selecting a second agent while already zoomed in should ease from head
+    // to head, and Escape/deselect should still land back on the room, not
+    // on whichever head came before it.
+    priorFraming = { target: target.clone(), dist, yaw, pitch }
+  }
+  interaction?.clearHover()
+  const f = headFraming(a, frameMode)
+  startFlight([a.pos.x, a.pos.z], f.dist, f.yaw, f.y, f.pitch)
+  updateDeclutter()
+}
+
+function zoomRestore() {
+  if (!priorFraming) return
+  const p = priorFraming
+  priorFraming = null
+  startFlight([p.target.x, p.target.z], p.dist, p.yaw, p.target.y, p.pitch)
+  updateDeclutter()
+}
+
+// ---- focus mode: declutter the zoomed state ----------------------------
+// The reviewer's verdict on the zoomed state: blame card + stale hover card
+// + selection panel + zone pill + zoneowner plaque/rug + demo caption all
+// pile up, stating the same fact four different ways. Focus mode drops
+// everything but the character and the blame card for as long as a head
+// zoom holds the camera (priorFraming is set) — on by default, off via the
+// F key or ?focus=off for the owner to compare against.
+let focusEnabled = new URLSearchParams(location.search).get('focus') !== 'off'
+let declutterOn = false
+function setDeclutter(on) {
+  if (on === declutterOn) return
+  declutterOn = on
+  interaction?.setFocusMode(on)
+  zoneUI.setFocusHidden(on)
+  capEl.classList.toggle('declutter', on)
+  const zo = scene.getObjectByName('zoneowner-root')
+  if (zo) zo.visible = !on
+}
+function updateDeclutter() { setDeclutter(focusEnabled && !!priorFraming) }
+
+addEventListener('keydown', e => {
+  if (e.key !== 'f' && e.key !== 'F') return
+  if (e.target && /input|textarea/i.test(e.target.tagName)) return
+  focusEnabled = !focusEnabled
+  logEl.textContent = `focus mode: ${focusEnabled ? 'on' : 'off'}`
+  updateDeclutter()
+})
+
+addEventListener('keydown', e => {
+  if (e.key === 'Escape' && priorFraming) {
+    interaction.select(null); zoomRestore(); blameCard.hide()
+  }
+})
+
+// Z swaps the head-zoom feel between the eased arc and the fast snap-back
+// overshoot. Only affects the NEXT flight — deliberately doesn't retarget
+// one already in progress, so switching mid-zoom doesn't jump.
+addEventListener('keydown', e => {
+  if (e.key !== 'z' && e.key !== 'Z') return
+  if (e.target && /input|textarea/i.test(e.target.tagName)) return
+  zoomMode = zoomMode === 'ease' ? 'snap' : 'ease'
+  logEl.textContent = `zoom feel: ${zoomMode}`
+})
+
 let drag=false, px=0, py=0
 canvas.addEventListener('pointerdown', e => { drag=true; px=e.clientX; py=e.clientY
-  spin=false; setB(bSpin,false); goal.active=false })
+  spin=false; setB(bSpin,false); goal.active=false; flight=null })
 addEventListener('pointerup', () => drag=false)
 addEventListener('pointermove', e => {
   if(!drag) return
@@ -882,7 +1077,7 @@ addEventListener('pointermove', e => {
   pitch = Math.max(0.08, Math.min(1.45, pitch + (e.clientY-py)*0.005))
   px=e.clientX; py=e.clientY
 })
-canvas.addEventListener('wheel', e => { e.preventDefault(); goal.active=false
+canvas.addEventListener('wheel', e => { e.preventDefault(); goal.active=false; flight=null
   dist = Math.max(0.35, Math.min(2.2, dist + e.deltaY*0.0012)) }, {passive:false})
 
 const bSpin=document.getElementById('bSpin'), bTop=document.getElementById('bTop')
@@ -935,7 +1130,7 @@ function setMode(kind, text) { modeEl.className = kind; modeEl.textContent = tex
  *  the exact same rig setup the demo cast gets — same clone, same tint math,
  *  same shadow flags — so a live figure and a demo figure are indistinguishable
  *  except for what they are actually doing. */
-function spawnLive(id, human) {
+function spawnLive(id, human, path) {
   if (!charGLTF) return null      // frame arrived before the rig finished loading
   const color = Live.hairFor(human)
   const before = meshes.length
@@ -949,6 +1144,7 @@ function spawnLive(id, human) {
     pos: [Z.ZONES.reception.at[0], Z.ZONES.reception.at[1]], yaw: Math.PI / 2,
     scale: root.userData.scale,
   }))
+  a.gitPath = path   // same field the demo cast carries; git-aware UI reads only this
   liveAgents.set(id, a)
   if (interaction) interaction.addAgent(a)
   return a
@@ -979,6 +1175,16 @@ function despawnLive(id) {
   a.badge.material.dispose()
   a.halo.geometry.dispose()
   a.halo.material.dispose()
+  // freshHalo and the churn props (tray + paper block) all get their own
+  // per-instance geometry in the Agent constructor, same as halo above —
+  // the material-only traverse a few lines up doesn't touch geometry, so
+  // these leaked on every live despawn until now.
+  a.freshHalo.geometry.dispose()
+  a.freshHalo.material.dispose()
+  a.churnTray.geometry.dispose()
+  a.churnTray.material.dispose()
+  a.churnPapers.geometry.dispose()
+  a.churnPapers.material.dispose()
 }
 
 function endContestFor(a, partnerId) {
@@ -995,8 +1201,10 @@ function endContestFor(a, partnerId) {
 function onLivePresence(msg) {
   const now = Date.now()
   const info = director.onPresence(msg, now)
-  const a = liveAgents.get(info.id) || spawnLive(info.id, info.human)
+  const a = liveAgents.get(info.id) || spawnLive(info.id, info.human, info.path)
   if (!a) return   // rig still loading; the next frame for this agent will spawn it
+  a.gitPath = info.path   // keep the git-aware UI pointed at whatever file this frame is actually about
+  a.gitStart = info.start; a.gitEnd = info.end   // region blame, when the frame carries a range (null = whole file, unchanged)
 
   if (info.contestWith) {
     const b = liveAgents.get(info.contestWith)
@@ -1353,7 +1561,29 @@ function tick(){
     if(yaw>YAW_MAX){ yaw=YAW_MAX; spinDir=-1 }
     if(yaw<YAW_MIN){ yaw=YAW_MIN; spinDir=1 } }
 
-  if (goal.active) {
+  if (flight) {
+    flight.t += dt
+    const p = Math.min(1, flight.t / flight.dur)
+    const e = flight.mode === 'snap' ? easeOutBack(p) : easeInOutCubic(p)
+    const dx = flight.toTarget.x - flight.fromTarget.x
+    const dz = flight.toTarget.z - flight.fromTarget.z
+    const len = Math.hypot(dx, dz)
+    // Perpendicular to the travel line, in the floor plane, so the arc
+    // bows sideways rather than up through the floor or ceiling.
+    const px = len > 1e-4 ? -dz / len : 0, pz = len > 1e-4 ? dx / len : 0
+    const amp = flight.mode === 'snap' ? 0 : Math.min(0.4, len * 0.22)
+    const bow = Math.sin(Math.PI * p)   // zero at both ends, peak mid-flight
+    target.x = flight.fromTarget.x + dx * e + px * amp * bow
+    target.z = flight.fromTarget.z + dz * e + pz * amp * bow
+    target.y = flight.fromTarget.y + (flight.toTarget.y - flight.fromTarget.y) * e
+    dist = flight.fromDist + (flight.toDist - flight.fromDist) * e
+    yaw = flight.fromYaw + (flight.toYaw - flight.fromYaw) * e
+    pitch = flight.fromPitch + (flight.toPitch - flight.fromPitch) * e
+    if (p >= 1) {
+      flight = null
+      goal.target.copy(target); goal.dist = dist; goal.yaw = yaw
+    }
+  } else if (goal.active) {
     const k = 1 - Math.pow(0.0015, dt)
     target.lerp(goal.target, k)
     dist += (goal.dist - dist) * k
@@ -1365,6 +1595,8 @@ function tick(){
   expireLive(Date.now())
   if (demo) demo.update(dt)
   if (interaction) interaction.paint()
+  zoneUI.updateCamera(camera)
+  if (window.__zoneOwner) window.__zoneOwner.updateCamera(camera)
 
   // A replay's whole chain (clash, then resolution) can be one stage or
   // two, so this watches the encounter itself rather than a fixed timer —
@@ -1417,12 +1649,64 @@ window.__startDemo = startDemo
 window.__caption = () => capEl.textContent
 window.__live = { director, liveAgents, mode: () => (liveMode ? 'live' : 'demo'), onPresence: onLivePresence }
 window.__focus = focus
-window.__setCam = (y,p,d) => { goal.active=false; yaw=y; pitch=p; dist=d }
+window.__setCam = (y,p,d) => { goal.active=false; flight=null; yaw=y; pitch=p; dist=d }
+window.__zoomMode = { get: () => zoomMode, set: m => { zoomMode = m === 'snap' ? 'snap' : 'ease' },
+  get flying() { return !!flight },
+  get frame() { return frameMode },
+  setFrame(m) { frameMode = m === 'shoulder' ? 'shoulder' : 'threequarter' } }
+window.__focusMode = { get: () => focusEnabled, set: v => { focusEnabled = !!v; updateDeclutter() },
+  get active() { return declutterOn } }
 window.__agentState = () => world.agents.map(a => ({
   ...a.describe(),
   note: a.note || null,
   zone: Z.zoneAt(a.pos.x, a.pos.z),
 }))
+// Drives the zoom-to-head + blame card flow without going through a real
+// click — useful for testing before interact.js's onSelect hook lands, and
+// for a console-driven demo beat later. Matches on id first, then name, so
+// either `__zoomAgent('a1')` or `__zoomAgent('reception')` works.
+window.__zoomAgent = name => {
+  if (!name) { interaction && interaction.select(null); zoomRestore(); blameCard.hide(); return null }
+  const a = world.agents.find(x => x.id === name || x.name === name)
+  if (!a) return null
+  if (interaction) interaction.select(a)
+  zoomToAgent(a)
+  blameCard.show(a)
+  return a.id
+}
+
+// --- histshelf wiring ---
+import { attachHistShelf } from './histshelf.js'
+
+// interact.js's onSelect hook (see setupCast() above) already drives
+// zoomToAgent/blameCard, and reassigning it here would just clobber that —
+// so this polls interaction.selected instead, same low-cost pattern
+// gitsignals.js uses for its own ambient poll. Catches every selection
+// path uniformly: real clicks, Escape/deselect, and __zoomAgent() in
+// the console, since they all funnel through interaction.select().
+const histShelf = attachHistShelf({ scene, camera, canvas })
+let histShelfFor = null
+setInterval(() => {
+  if (!interaction) return
+  const sel = interaction.selected
+  if (sel === histShelfFor) return
+  histShelfFor = sel
+  if (sel) histShelf.show(sel); else histShelf.hide()
+}, 150)
+window.__histShelf = histShelf
+
+// --- zoneowner wiring ---
+import { attachZoneOwner } from './zoneowner.js'
+import { ZONE_DIRS } from './gitsignals.js'
+
+// Runs its own shortlog poll rather than piggybacking the attachGitSignals()
+// call above: that call sits outside this round's append-only slice of this
+// file and can't be edited to add a new sink this round. gitsignals.js grew
+// an `ownership` option for a future round to collapse this into — see its
+// own note. Same "a few independent, all-cheap git fetchers" tradeoff
+// STATE.md has documented since round 2, not new debt.
+const zoneOwner = attachZoneOwner({ scene, zoneDirs: ZONE_DIRS })
+window.__zoneOwner = zoneOwner
 </script>
 </body>
 </html>

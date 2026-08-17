@@ -361,6 +361,31 @@ export function buildZoneMarkers({ labels = true, y = 0.045 } = {}) {
     }
   }
 
+  const owners = {} // zone name -> last-set owner label, so re-renders don't need it re-passed
+
+  // ---- camera-distance fade for the label pills ------------------------
+  // These are sized to read from the normal wide room shot. The head-zoom
+  // camera flight (office.html's Z/zoomToAgent) can park a couple of metres
+  // from a desk zone's pill, and a sprite sized for the room shot fills most
+  // of the frame from there and bleeds through the blame card sitting on top
+  // of it — the exact bug zoneowner.js's plaques hit and fixed in 09b6ca3.
+  // Same fade shape here: hidden below FADE_NEAR, full above FADE_FAR.
+  //
+  // `highlight()` above still owns each sprite's BASE opacity (1 when lit,
+  // 0.2 when dimmed for a spotlighted neighbour, 0.95 as the resting
+  // default) — updateCamera() multiplies that by the distance factor rather
+  // than overwriting it, so a demo beat's spotlight and a close camera don't
+  // fight each other for the same number.
+  const FADE_NEAR = 3.0
+  const FADE_FAR = 5.5
+  let highlighted = undefined  // undefined: never called; null: cleared; name: one zone lit
+  let forceHidden = false
+  function baseOpacity(n) {
+    if (highlighted === undefined) return 0.95
+    if (highlighted === null) return 1
+    return n === highlighted ? 1 : 0.2
+  }
+
   group.userData.rings = rings
   group.userData.sprites = sprites
   return {
@@ -368,11 +393,50 @@ export function buildZoneMarkers({ labels = true, y = 0.045 } = {}) {
     setVisible(v) { group.visible = v },
     /** Pulse one zone and dim the rest. Pass null to clear. */
     highlight(name) {
+      highlighted = name
       for (const n of ZONE_NAMES) {
         const on = name == null || n === name
         rings[n].material.opacity = on ? (name ? 0.75 : 0.42) : 0.12
         if (sprites[n]) sprites[n].material.opacity = on ? 1 : 0.2
       }
+    },
+    /** Focus mode: hide every label pill outright, regardless of camera
+     *  distance — office.html flips this on for the duration of a head-zoom
+     *  dwell so the zoomed state is the character and the blame card, not a
+     *  faded-but-still-there pill hovering behind them. Distinct from
+     *  setVisible(), which is the room's own "Zones" button. */
+    setFocusHidden(v) {
+      forceHidden = !!v
+      if (forceHidden) for (const n of ZONE_NAMES) if (sprites[n]) sprites[n].material.opacity = 0
+    },
+    /** Call every frame with the live camera. No-op while forceHidden — the
+     *  pills stay at 0 until focus mode releases them. */
+    updateCamera(camera) {
+      if (!camera || forceHidden) return
+      for (const n of ZONE_NAMES) {
+        const sp = sprites[n]
+        if (!sp) continue
+        // sp.position is already in world space: `group` never gets its own
+        // transform set, so local and world coincide here.
+        const d = camera.position.distanceTo(sp.position)
+        const t = Math.min(1, Math.max(0, (d - FADE_NEAR) / (FADE_FAR - FADE_NEAR)))
+        sp.material.opacity = baseOpacity(n) * t
+      }
+    },
+    /** Shortlog-driven area ownership: repaint a zone's pill with "mostly
+     *  <name>" under its usual meaning line. Pass null/undefined to clear
+     *  back to plain `means`. No-op on an unknown zone or a labels:false
+     *  build (no sprites to repaint). */
+    setOwner(name, ownerLabel) {
+      const zn = ZONES[name]
+      const sp = sprites[name]
+      if (!zn || !sp) return
+      owners[name] = ownerLabel || null
+      const sub = owners[name] ? `${zn.means} · mostly ${owners[name]}` : zn.means
+      const old = sp.material.map
+      sp.material.map = labelTexture(zn.label, sub, zn.color)
+      sp.material.needsUpdate = true
+      if (old) old.dispose()
     },
   }
 }

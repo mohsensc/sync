@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Zone ownership — fixture harness</title>
+<style>
+  html,body{margin:0;height:100%;background:#F0ECE6;overflow:hidden;
+    font:14px/1.5 ui-sans-serif,-apple-system,Segoe UI,sans-serif;color:#35455C}
+  #c{display:block;width:100%;height:100%;cursor:grab}
+  #c:active{cursor:grabbing}
+  #hud{position:fixed;left:18px;top:16px;background:#fffdfaee;border:1px solid #C3B39B;
+    border-radius:10px;padding:12px 14px;max-width:360px;box-shadow:0 6px 24px #4a1f3d18}
+  #hud h1{font-size:15px;margin:0 0 3px;letter-spacing:-.01em}
+  #hud p{margin:0 0 10px;font-size:12px;color:#6b5f56}
+  .row{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}
+  .row .label{font-size:11px;color:#8A94A3;width:100%;margin-bottom:2px}
+  button{font:inherit;font-size:12px;padding:5px 10px;border-radius:6px;
+    border:1px solid #C3B39B;background:#fff;color:#35455C;cursor:pointer}
+  button:hover{background:#E9E0CE}
+  button[aria-pressed="true"]{background:#35455C;color:#F0ECE6;border-color:#35455C}
+  #status{position:fixed;left:18px;bottom:16px;font:11px ui-monospace,monospace;color:#6b5f56;
+    background:#fffdfacc;border-radius:8px;padding:7px 10px;max-width:70vw;white-space:pre}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">
+  <h1>Zone ownership fixtures</h1>
+  <p>Real THREE scene with the three zones gitsignals.js already maps
+     (desks/vault/whiteboard), canned <code>/api/git/shortlog</code>
+     JSON — no dev server required. Press <b>U</b> (or the button) to flip
+     the plaque / rug treatment, matching office.html's toggle.</p>
+  <div class="row">
+    <span class="label">desks</span>
+    <button data-z="desks" data-f="lopsided">lopsided (trophy)</button>
+    <button data-z="desks" data-f="split">near-even (mugs)</button>
+    <button data-z="desks" data-f="lead">clear lead, no flourish</button>
+    <button data-z="desks" data-f="empty">fresh dir — nothing</button>
+  </div>
+  <div class="row">
+    <span class="label">vault</span>
+    <button data-z="vault" data-f="solo">one author only</button>
+  </div>
+  <div class="row">
+    <span class="label">whiteboard</span>
+    <button data-z="whiteboard" data-f="threeway">three authors, close split</button>
+  </div>
+  <div class="row">
+    <button id="bMode">mode: —</button>
+    <button id="bClear">clear all</button>
+  </div>
+</div>
+<div id="status">loading…</div>
+
+<script type="importmap">
+{"imports":{"three":"/vendor/three.module.js","three/addons/":"/vendor/addons/"}}
+</script>
+<script type="module">
+import * as THREE from 'three'
+import * as Z from './zones.js'
+// Cache-busted so an edit to zoneowner.js always shows up on reload — same
+// pattern as blamecard-test.html / histshelf-test.html's dynamic import.
+const { attachZoneOwner } = await import('./zoneowner.js?v=' + Date.now())
+
+const canvas = document.getElementById('c')
+const statusEl = document.getElementById('status')
+
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true })
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2))
+
+const scene = new THREE.Scene()
+scene.background = new THREE.Color(0xF0ECE6)
+const camera = new THREE.PerspectiveCamera(34, 1, 0.1, 100)
+
+scene.add(new THREE.AmbientLight(0xffffff, 1.0))
+const key = new THREE.DirectionalLight(0xfff0d8, 1.8)
+key.position.set(3, 6, 4)
+scene.add(key)
+
+const floor = new THREE.Mesh(new THREE.PlaneGeometry(24, 18),
+  new THREE.MeshStandardMaterial({ color: 0xE9E0CE, roughness: 1 }))
+floor.rotation.x = -Math.PI / 2
+scene.add(floor)
+
+// Real zone markers, same builder office.html uses — confirms the plaque
+// and rug actually line up with a zone's real position/radius, not a
+// stand-in.
+const zoneUI = Z.buildZoneMarkers()
+scene.add(zoneUI.group)
+
+let yaw = -0.5, pitch = 0.55, dist = 13
+function place() {
+  camera.position.set(Math.sin(yaw) * dist * Math.cos(pitch),
+    1.5 + Math.sin(pitch) * dist, Math.cos(yaw) * dist * Math.cos(pitch))
+  camera.lookAt(-2, 0.6, -1)
+}
+place()
+
+let drag = false, px = 0, py = 0
+canvas.addEventListener('pointerdown', e => { drag = true; px = e.clientX; py = e.clientY })
+addEventListener('pointerup', () => drag = false)
+addEventListener('pointermove', e => {
+  if (!drag) return
+  yaw += (e.clientX - px) * 0.006
+  pitch = Math.max(0.1, Math.min(1.2, pitch + (e.clientY - py) * 0.006))
+  px = e.clientX; py = e.clientY
+  place()
+})
+canvas.addEventListener('wheel', e => {
+  dist = Math.max(4, Math.min(28, dist + e.deltaY * 0.01)); place()
+}, { passive: true })
+
+function resize() {
+  const w = canvas.clientWidth, h = canvas.clientHeight
+  if (canvas.width !== w || canvas.height !== h) {
+    renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix()
+  }
+}
+function tick() { resize(); renderer.render(scene, camera); requestAnimationFrame(tick) }
+tick()
+
+// Canned /api/git/shortlog bodies, same shape gitapi.mjs's real 'shortlog'
+// route returns: { ok, owners: [{ author, commits, share }] }.
+const FIXTURES = {
+  lopsided: { ok: true, owners: [
+    { author: 'mohsensc', commits: 94, share: 0.94 },
+    { author: 'agentai', commits: 6, share: 0.06 },
+  ] },
+  split: { ok: true, owners: [
+    { author: 'mohsensc', commits: 27, share: 0.54 },
+    { author: 'rae', commits: 23, share: 0.46 },
+  ] },
+  lead: { ok: true, owners: [
+    { author: 'mohsensc', commits: 62, share: 0.62 },
+    { author: 'agentai', commits: 38, share: 0.38 },
+  ] },
+  solo: { ok: true, owners: [{ author: 'kade', commits: 11, share: 1 }] },
+  threeway: { ok: true, owners: [
+    { author: 'rae', commits: 18, share: 0.375 },
+    { author: 'agentai', commits: 17, share: 0.354 },
+    { author: 'mohsensc', commits: 13, share: 0.271 },
+  ] },
+  empty: { ok: true, owners: [] },
+}
+
+const owner = attachZoneOwner({ scene, zoneDirs: {} }) // no auto-poll; driven by hand below
+
+function setZone(zoneName, fixtureName) {
+  owner.setZoneOwnership(zoneName, FIXTURES[fixtureName])
+  statusEl.textContent = `${zoneName}: ${fixtureName}`
+}
+function updateModeButton() {
+  document.getElementById('bMode').textContent = `mode: ${owner.mode}`
+}
+
+document.querySelectorAll('[data-f]').forEach(b => {
+  b.addEventListener('click', () => setZone(b.dataset.z, b.dataset.f))
+})
+document.getElementById('bMode').addEventListener('click', () => {
+  owner.setMode(owner.mode === 'plaque' ? 'rug' : 'plaque')
+  updateModeButton()
+})
+document.getElementById('bClear').addEventListener('click', () => {
+  ['desks', 'vault', 'whiteboard'].forEach(z => owner.setZoneOwnership(z, { ok: false }))
+  statusEl.textContent = 'cleared'
+})
+addEventListener('keydown', e => {
+  if (e.key === 'u' || e.key === 'U') setTimeout(updateModeButton, 0)
+})
+
+setZone('desks', 'lopsided')
+setZone('vault', 'solo')
+setZone('whiteboard', 'threeway')
+updateModeButton()
+window.__owner = owner
+window.__ready = true
+</script>
+</body>
+</html>
