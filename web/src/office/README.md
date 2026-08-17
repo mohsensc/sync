@@ -8,8 +8,7 @@ The GLB ships no usable motion, so every clip is authored from keyframe tracks.
 - `anim.js` — procedural clips against the rig's 24 bones (`BIND` has the table).
   Mixamo naming, root `Hips`, spine inverted (Spine02 is the belly).
 - `highfive.js`, `handshake.js`, `clips/*.js` — paired-agent routines, one per
-  ladder beat and its variants, each with a `*-test.html` harness. `clips/`
-  `tiptoe`, `facepalm` and `sustain` are built and tested but unimported.
+  ladder beat and its variants, each with a `*-test.html` harness.
 - `agent.js` — `Agent` (activity machine plus steering) and `World` (owns agents,
   brokers paired actions); `createAgent()` is the contract everything else uses.
 - `zones.js` — 10 floor regions anchored to props; `zoneFor(verb, path)`.
