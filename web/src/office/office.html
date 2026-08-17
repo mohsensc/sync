@@ -1526,6 +1526,15 @@ function goDemoFallback(reason) {
 function initLive() {
   const room = new URLSearchParams(location.search).get('room') ?? ''
   const human = new URLSearchParams(location.search).get('human') ?? ''
+  // No room, no live. relaysrv/server.go's join handler `continue`s on an
+  // empty room, so the socket opens, onOpen fires, goLive() paints the LIVE
+  // badge — and the connection is in no room at all, so not one frame ever
+  // arrives. An empty office insisting it's connected is worse than the demo.
+  //
+  // There's nothing to default to: a room id is a hash of the checkout's
+  // origin remote (go/internal/repo, python's room_key.py), which this page
+  // has no way to derive. Whoever opens it has to say which room.
+  if (!room) { goDemoFallback('no ?room= to join'); return }
   fallbackTimer = setTimeout(() => goDemoFallback(`no relay at ${Live.RELAY_URL}`), LIVE_TIMEOUT_MS)
   liveConn = Live.connect({
     room, human,
