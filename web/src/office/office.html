@@ -932,7 +932,6 @@ function beginReplayOutro() {
     setTimeout(() => {
       releaseCameraFocus()
       zoneUI.setVisible(zonesOn)
-      if (typeof world.clearFocusDim === 'function') world.clearFocusDim()
       // Write '' before releasing the hold — release() alone only frees the
       // priority slot, it doesn't touch the DOM, so without this the last
       // replay caption (or the empty string standing in for the versus
@@ -1412,17 +1411,17 @@ function replayEvent(e) {
   const variant = pickReplayVariant(kind, e.id)
   const isBaseVariant = variant === null ||
     (kind === 'share' && variant === 'highfive') || (kind === 'abort' && variant === 'shove')
-  // Preferred path: world.replay(a, b, kind, variant) splices the variant's
-  // contact clip in as the resolution act after the existing clash stage,
-  // normalizing the abort family's winner-first arg order internally — see
-  // the comment below on why the fallback path has to do that swap itself.
-  // Only take that 4-arg path once it's actually landed (arity check, not a
-  // feature flag) so this file works whether or not agent.js's replay() has
-  // grown the param yet.
+  // world.replay(a, b, kind) chains the clash and its base resolution. A
+  // non-base variant has no chained form, so it goes straight to the
+  // standalone World method.
+  //
+  // There used to be a `world.replay.length >= 4` branch here waiting on a
+  // 4-arg replay(a, b, kind, variant) that would splice the variant's clip
+  // in as the resolution act. That agent.js change never landed on main (it
+  // is still an uncommitted stash on feat/highlight-reel), so the branch was
+  // permanently dead and its two live siblings did all the work.
   let enc
-  if (world.replay.length >= 4) {
-    enc = world.replay(a, b, kind, isBaseVariant ? undefined : variant)
-  } else if (isBaseVariant) {
+  if (isBaseVariant) {
     enc = world.replay(a, b, kind)
   } else {
     // A direct (non-chained) variant call skips world.replay()'s own arg
@@ -1457,7 +1456,6 @@ function replayEvent(e) {
   // sign hanging over the pair mid-beat was one of the round review's
   // complaints); restored to whatever the toggle says once the outro ends.
   zoneUI.setVisible(false)
-  if (typeof world.setFocusDim === 'function') world.setFocusDim(a, b)
   focusPair(a, b, enc)
 }
 
