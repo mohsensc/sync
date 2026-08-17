@@ -43,6 +43,13 @@ export function ageDays(epochSeconds, now = Date.now()) {
 // caller, since a whole-file per-line dump isn't something the UI wants.
 export function parseBlamePorcelain(text, now = Date.now(), opts = {}) {
   const includeLines = !!opts.includeLines
+  // The same address -> display name map the recent and shortlog routes use.
+  // Without it this function still dedupes by address, but names the person
+  // from the newest line *in this file*, which is a different answer than the
+  // one the zone plaque gives for the same human — one office showing
+  // "mohsensc" on a blame card and "Mohsen Sarrafan Chaharsoughi" on a plaque,
+  // at once. Repo-wide is the only scope where every surface agrees.
+  const canonicalNames = opts.canonicalNames || null
   const lines = text.split('\n')
   const meta = new Map() // sha -> { author, mail, time }
   const perLine = [] // { sha, finalLine }
@@ -99,8 +106,11 @@ export function parseBlamePorcelain(text, now = Date.now(), opts = {}) {
     }
   }
 
+  const nameFor = (mail, fallback) =>
+    (canonicalNames && canonicalNames.get(mail)) || fallback
+
   const owners = [...byMail.entries()]
-    .map(([, v]) => ({ author: v.name, lines: v.lines, share: v.lines / total }))
+    .map(([mail, v]) => ({ author: nameFor(mail, v.name), lines: v.lines, share: v.lines / total }))
     .sort((a, b) => b.lines - a.lines)
 
   const result = {
@@ -115,7 +125,8 @@ export function parseBlamePorcelain(text, now = Date.now(), opts = {}) {
     result.lines = perLine.map(({ sha, finalLine }) => {
       const m = meta.get(sha) || {}
       const mail = m.mail || m.author || 'unknown'
-      return { n: finalLine, author: nameByMail.get(mail) || m.author || 'unknown', ageDays: ageDays(m.time, now) }
+      const own = nameByMail.get(mail) || m.author || 'unknown'
+      return { n: finalLine, author: nameFor(mail, own), ageDays: ageDays(m.time, now) }
     })
   }
 
@@ -217,19 +228,22 @@ export function mergeAuthorsByEmail(rows, canonicalNames) {
 }
 
 // `git log --follow --format=%an<US>%at<US>%s` (newest first, no -n cap).
-export function parseStatLog(text, now = Date.now()) {
+export function parseStatLog(text, now = Date.now(), canonicalNames = new Map()) {
   const rows = text.split('\n').filter(Boolean).map((line) => {
-    const [author, at, ...rest] = line.split(US)
-    return { author, at: parseInt(at, 10), subject: rest.join(US) }
+    const [addr, author, at, ...rest] = line.split(US)
+    return { addr, author, at: parseInt(at, 10), subject: rest.join(US) }
   })
   if (rows.length === 0) return null
-  const authors = new Set(rows.map((r) => r.author))
+  // By address, not by name: one person committing as both `mohsensc` and
+  // `Mohsen Sarrafan Chaharsoughi` is one author, and "2 authors" on a file
+  // only they have ever touched is a wrong fact, not a cosmetic one.
+  const authors = new Set(rows.map((r) => r.addr || r.author))
   const newest = rows[0]
   const oldest = rows[rows.length - 1]
   return {
     commits: rows.length,
     authorCount: authors.size,
-    lastAuthor: newest.author,
+    lastAuthor: (canonicalNames && canonicalNames.get(newest.addr)) || newest.author,
     lastAgeDays: ageDays(newest.at, now),
     firstAgeDays: ageDays(oldest.at, now),
     lastSummary: newest.subject,
@@ -325,6 +339,16 @@ async function trackedFiles(repoRoot) {
   return stdout.split('\n').filter(Boolean)
 }
 
+/** Repo-wide address -> display name, newest commit wins. Every route that
+ *  puts a person's name on screen resolves through this, so the blame card,
+ *  the zone plaque, the commit board and the ambient stats can't disagree
+ *  about what one human is called. Uncached, same as trackedFiles above —
+ *  this is a dev-server middleware and a `git log` on this repo is a few ms. */
+async function canonicalNamesFor(repoRoot) {
+  const { stdout } = await execFileP('git', ['log', `--format=%ae${US}%an`], { cwd: repoRoot })
+  return parseCanonicalNames(stdout)
+}
+
 function isTrackedPath(p, files) {
   return typeof p === 'string' && p.length > 0 && files.includes(p)
 }
@@ -359,11 +383,14 @@ export function gitApiMiddleware(repoRoot) {
       if (route === 'stat') {
         const p = url.searchParams.get('path')
         if (!isTrackedPath(p, files)) return sendJson(res, { ok: false, reason: 'not a tracked path' })
-        const { stdout } = await execFileP(
-          'git', ['log', '--follow', `--format=%an${US}%at${US}%s`, '--', p],
-          { cwd: repoRoot }
-        )
-        const stat = parseStatLog(stdout)
+        const [{ stdout }, canonicalNames] = await Promise.all([
+          execFileP(
+            'git', ['log', '--follow', `--format=%ae${US}%an${US}%at${US}%s`, '--', p],
+            { cwd: repoRoot }
+          ),
+          canonicalNamesFor(repoRoot),
+        ])
+        const stat = parseStatLog(stdout, Date.now(), canonicalNames)
         if (!stat) return sendJson(res, { ok: false, reason: 'no history' })
         return sendJson(res, { ok: true, ...stat })
       }
@@ -381,10 +408,12 @@ export function gitApiMiddleware(repoRoot) {
         const wantLines = url.searchParams.get('lines') === '1'
           && rangeArgs.length > 0 && (end - start + 1) <= 150
         try {
-          const { stdout } = await execFileP(
-            'git', ['blame', '--porcelain', ...rangeArgs, '--', p], { cwd: repoRoot }
-          )
-          return sendJson(res, { ok: true, ...parseBlamePorcelain(stdout, Date.now(), { includeLines: wantLines }) })
+          const [{ stdout }, canonicalNames] = await Promise.all([
+            execFileP('git', ['blame', '--porcelain', ...rangeArgs, '--', p], { cwd: repoRoot }),
+            canonicalNamesFor(repoRoot),
+          ])
+          return sendJson(res, { ok: true, ...parseBlamePorcelain(stdout, Date.now(),
+            { includeLines: wantLines, canonicalNames }) })
         } catch {
           // untracked, binary, or empty file — git blame exits non-zero for
           // all of these. Design for it, don't special-case it. A bogus
@@ -450,7 +479,7 @@ export function gitApiMiddleware(repoRoot) {
         // existing caller (blamecard.js's per-file commit list) for a
         // param it never asked for.
         const count = Math.max(1, Math.min(30, parseInt(url.searchParams.get('count') || '8', 10) || 8))
-        const [recentOut, namesOut] = await Promise.all([
+        const [recentOut, canonicalNames] = await Promise.all([
           // --no-merges: a merge commit has no numstat rows of its own, so it
           // arrives as `files: 0` and the board renders "0 files" next to
           // "Merge pull request #58". `-m` would fix the count by emitting one
@@ -464,9 +493,8 @@ export function gitApiMiddleware(repoRoot) {
             ['log', `-${count}`, '--no-merges', `--format=%x01%h${US}%ae${US}%an${US}%at${US}%s`, '--numstat'],
             { cwd: repoRoot }
           ),
-          execFileP('git', ['log', `--format=%ae${US}%an`], { cwd: repoRoot }),
+          canonicalNamesFor(repoRoot),
         ])
-        const canonicalNames = parseCanonicalNames(namesOut.stdout)
         return sendJson(res, { ok: true, entries: parseRecentLog(recentOut.stdout, Date.now(), canonicalNames) })
       }
 
@@ -474,15 +502,21 @@ export function gitApiMiddleware(repoRoot) {
         const d = url.searchParams.get('dir') || ''
         if (!isTrackedDir(d, files)) return sendJson(res, { ok: false, reason: 'not a tracked dir' })
         const pathArgs = d === '' || d === '.' ? [] : ['--', d]
-        // Two calls: -sne for the counts, a plain log for canonical
-        // display names, so a split identity (same inbox, two name
-        // spellings) merges into one owner instead of two.
-        const [shortlogOut, namesOut] = await Promise.all([
+        // Two calls: -sne for the counts, canonicalNamesFor for the display
+        // names, so a split identity (one inbox, two name spellings) merges
+        // into one owner instead of two.
+        //
+        // The name map is repo-wide even though the counts are dir-scoped.
+        // Scoped, it answered "the spelling they last used in this folder",
+        // which is a different name than the same person gets on a blame card
+        // or the commit board — that mismatch was visible in one frame, a
+        // plaque reading "Mohsen Sarrafan Chaharsoughi" over a card reading
+        // "mohsensc".
+        const [shortlogOut, canonicalNames] = await Promise.all([
           execFileP('git', ['shortlog', '-sne', 'HEAD', ...pathArgs], { cwd: repoRoot }),
-          execFileP('git', ['log', `--format=%ae${US}%an`, 'HEAD', ...pathArgs], { cwd: repoRoot }),
+          canonicalNamesFor(repoRoot),
         ])
         const rows = parseShortlog(shortlogOut.stdout)
-        const canonicalNames = parseCanonicalNames(namesOut.stdout)
         const owners = mergeAuthorsByEmail(rows, canonicalNames)
         const total = owners.reduce((sum, o) => sum + o.commits, 0)
         return sendJson(res, {

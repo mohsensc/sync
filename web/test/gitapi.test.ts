@@ -121,8 +121,15 @@ const CANNED_LOG = [
 ].join('\n') + '\n'
 
 const CANNED_STAT_LOG = [
-  ['sara', '1750000000', 'fix the thing'].join(US),
-  ['dev', '1700000000', 'add the thing'].join(US),
+  ['sara@example.com', 'sara', '1750000000', 'fix the thing'].join(US),
+  ['dev@example.com', 'dev', '1700000000', 'add the thing'].join(US),
+].join('\n') + '\n'
+
+// One person, two name spellings, one inbox — this repo's own history in
+// miniature. Counting names says two authors; counting inboxes says one.
+const CANNED_STAT_LOG_SPLIT_IDENTITY = [
+  ['dev@example.com', 'Dev New Name', '1750000000', 'fix the thing'].join(US),
+  ['dev@example.com', 'dev', '1700000000', 'add the thing'].join(US),
 ].join('\n') + '\n'
 
 // shaped after real `git log --numstat --format=%H` output: sha line,
@@ -361,6 +368,21 @@ describe('parseStatLog', () => {
       firstAgeDays: Math.floor((now - 1_700_000_000 * 1000) / 86400000),
       lastSummary: 'fix the thing',
     })
+  })
+
+  it('counts one author for one inbox under two name spellings', () => {
+    expect(parseStatLog(CANNED_STAT_LOG_SPLIT_IDENTITY)?.authorCount).toBe(1)
+  })
+
+  it('names the last author from the canonical map, not the commit line', () => {
+    const canonical = new Map([['dev@example.com', 'Dev New Name']])
+    expect(parseStatLog(CANNED_STAT_LOG, Date.now(), canonical)?.lastAuthor).toBe('sara')
+    expect(parseStatLog(CANNED_STAT_LOG_SPLIT_IDENTITY, Date.now(), canonical)?.lastAuthor)
+      .toBe('Dev New Name')
+  })
+
+  it('falls back to the commit line when no canonical map is passed', () => {
+    expect(parseStatLog(CANNED_STAT_LOG_SPLIT_IDENTITY)?.lastAuthor).toBe('Dev New Name')
   })
 
   it('returns null for a file with no history', () => {

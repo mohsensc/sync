@@ -29,6 +29,9 @@ export interface BlameResult {
 
 export interface ParseBlamePorcelainOpts {
   includeLines?: boolean
+  /** Repo-wide address -> display name, so a split identity is named the
+   *  same here as it is on the commit board and the zone plaque. */
+  canonicalNames?: Map<string, string>
 }
 
 export function parseBlamePorcelain(text: string, now?: number, opts?: ParseBlamePorcelainOpts): BlameResult
@@ -85,7 +88,7 @@ export interface StatResult {
   lastSummary: string
 }
 
-export function parseStatLog(text: string, now?: number): StatResult | null
+export function parseStatLog(text: string, now?: number, canonicalNames?: Map<string, string>): StatResult | null
 
 export interface ChurnLogResult {
   commits: number
