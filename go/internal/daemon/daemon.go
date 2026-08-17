@@ -7,9 +7,13 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/mohsensc/sync/go/internal/coalesce"
 	"github.com/mohsensc/sync/go/internal/contend"
@@ -17,11 +21,19 @@ import (
 	"github.com/mohsensc/sync/go/internal/hooksock"
 	"github.com/mohsensc/sync/go/internal/journal"
 	"github.com/mohsensc/sync/go/internal/leases"
+	"github.com/mohsensc/sync/go/internal/metrics"
 	"github.com/mohsensc/sync/go/internal/policy"
 	"github.com/mohsensc/sync/go/internal/presence"
 	"github.com/mohsensc/sync/go/internal/relay"
+	"github.com/mohsensc/sync/go/internal/repo"
 	"github.com/mohsensc/sync/go/internal/wire"
 )
+
+// noopObserver stands in for DecideDuration when no Registry is configured.
+// A package-level singleton, not a per-daemon allocation: onRequest resolves
+// which Observer to call once, in New, so the decision path itself never
+// branches on whether metrics are on — see Options.Metrics.
+var noopObserver prometheus.Observer = prometheus.ObserverFunc(func(float64) {})
 
 // How long an agent stays on the statusline after its last event, how often
 // the snapshot is rewritten even when nothing changed, and the daemon's
@@ -35,6 +47,12 @@ const (
 	// Coalescer window: cpp/daemon/main.cpp's Coalescer(1000, 200).
 	coalesceWindowMs  = 1000
 	coalesceMaxPerWin = 200
+
+	// statsTickMs is how often a stats frame goes up to the relay — tens
+	// of seconds, not per event, same reasoning as snapshotTickMs but
+	// slower: this is fleet-wide observability, not a file a person is
+	// staring at. See daemon.pushStats and stats.go's frame shape.
+	statsTickMs = 30_000
 )
 
 type Options struct {
@@ -50,6 +68,16 @@ type Options struct {
 	Room     string
 	Agent    string
 	Human    string
+
+	// Root is the repo root this checkout was found under — the same root
+	// repo.DiscoverRoom already walked to derive Room, carried here so
+	// every path a hook sends can be turned into the region key every
+	// checkout of this repo agrees on (repo.RegionKey). Empty means New
+	// resolves it itself from the process's cwd: the caller is free to
+	// pass it explicitly (tests do), but a daemon nobody wired this for
+	// must not silently fall back to the raw-absolute-path bug this field
+	// exists to close.
+	Root string
 
 	Principal  string
 	Token      string
@@ -70,6 +98,20 @@ type Options struct {
 	PolicyCache string
 	// Journal is where `ap why` reads from. Empty disables recording.
 	Journal string
+
+	// Metrics is where this daemon's numbers go — the decision-path
+	// histogram, relay connection state, the coalescer, the journal, and
+	// (via periodic stats frames — see daemon.tick) the numbers gorelay's
+	// own /metrics ends up serving on this daemon's behalf, since a laptop
+	// behind NAT cannot be scraped directly.
+	//
+	// Nil is a real, supported state, not "metrics forgotten": every
+	// call site off the decision path checks it directly (a nil check
+	// nobody would ever measure), and onRequest resolves DecideDuration to
+	// a single no-op Observer once, here in New, rather than branching on
+	// every decision — see noopObserver. A daemon built without a Registry
+	// costs nothing for not having brought one.
+	Metrics *metrics.Registry
 }
 
 // Daemon is a running instance.
@@ -94,6 +136,12 @@ type Daemon struct {
 	coalesceMu sync.Mutex
 	coalescer  *coalesce.Coalescer
 
+	// metrics is nil-safe at every call site below except decideObs (see
+	// Options.Metrics); decideObs is what onRequest actually calls, so the
+	// decision path never tests metrics itself.
+	metrics   *metrics.Registry
+	decideObs prometheus.Observer
+
 	dirty atomic.Bool
 }
 
@@ -101,6 +149,19 @@ type Daemon struct {
 // in the background when RelayURL and Room are both set. The returned
 // Daemon must be stopped by cancelling ctx.
 func New(ctx context.Context, opts Options) (*Daemon, error) {
+	// Resolved once, here, rather than shelled out to git per request —
+	// the 5ms decision budget can't absorb a fork. An explicit opts.Root
+	// (tests, and eventually main.go alongside its DiscoverRoom call) wins
+	// outright; otherwise this is the same cwd main.go already walks to
+	// derive Room, so a daemon started the ordinary way still gets one.
+	if opts.Root == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			if root, ok := repo.FindRepoRoot(cwd); ok {
+				opts.Root = root
+			}
+		}
+	}
+
 	d := &Daemon{
 		opts:      opts,
 		leases:    leases.New(),
@@ -108,10 +169,15 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 		presence:  presence.NewTable(presenceTTLMs),
 		contend:   contend.New(),
 		coalescer: coalesce.New(coalesceWindowMs, coalesceMaxPerWin),
+		metrics:   opts.Metrics,
+		decideObs: noopObserver,
+	}
+	if opts.Metrics != nil {
+		d.decideObs = opts.Metrics.DecideDuration
 	}
 
 	if opts.Journal != "" {
-		d.journal = journal.New(opts.Journal)
+		d.journal = journal.New(opts.Journal, opts.Metrics)
 	}
 
 	// Once before the sockets are up, so the first decision of the session
@@ -132,6 +198,8 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 
 			TLSCAFile:             opts.RelayTLSCAFile,
 			TLSInsecureSkipVerify: opts.RelayTLSInsecureSkipVerify,
+
+			Metrics: opts.Metrics,
 		}, d.leases)
 		d.relay.OnPeer(func(p wire.Presence) {
 			if p.Agent == "" {
@@ -211,6 +279,7 @@ func (d *Daemon) tick(ctx context.Context) {
 	defer ticker.Stop()
 
 	lastWrite := nowMs()
+	lastStats := nowMs()
 	lastProblem := d.policy.Problem()
 
 	for {
@@ -238,6 +307,11 @@ func (d *Daemon) tick(ctx context.Context) {
 				lastWrite = t
 				d.dirty.Store(false)
 			}
+
+			if t-lastStats >= statsTickMs {
+				d.pushStats()
+				lastStats = t
+			}
 		}
 	}
 }
@@ -255,7 +329,10 @@ func (d *Daemon) drainContend() {
 		if !d.admitCoalesce(coalesce.Ev{Verb: "contend", Path: path, Agent: d.selfAgent()}, now) {
 			continue
 		}
-		if frame := decide.ContendFrame(path); frame != nil {
+		if frame := decide.ContendFrame(path, d.opts.Root); frame != nil {
+			if d.metrics != nil {
+				d.metrics.RegionKey(regionShape(repo.RegionKeyResolved(d.opts.Root, path)))
+			}
 			d.relay.SendText(frame)
 		}
 	}
@@ -263,8 +340,20 @@ func (d *Daemon) drainContend() {
 
 func (d *Daemon) admitCoalesce(e coalesce.Ev, nowMs int64) bool {
 	d.coalesceMu.Lock()
-	defer d.coalesceMu.Unlock()
-	return d.coalescer.Admit(e, nowMs)
+	admitted := d.coalescer.Admit(e, nowMs)
+	d.coalesceMu.Unlock()
+
+	// Recorded outside the lock: nothing about a Prometheus counter add
+	// needs coalesceMu, and this is one-way relay traffic, never the
+	// decision path (see coalesceMu's own comment above).
+	if d.metrics != nil {
+		outcome := metrics.AdmitDropped
+		if admitted {
+			outcome = metrics.AdmitAdmitted
+		}
+		d.metrics.Coalesce(outcome)
+	}
+	return admitted
 }
 
 // selfAgent is the id this daemon joined the room under — see decide.hpp's
@@ -289,7 +378,14 @@ func (d *Daemon) onLine(line []byte) {
 	if human == "" {
 		human = req.Agent
 	}
-	if d.presence.Touch(req.Agent, human, req.Verb, req.Path, nowMs()) {
+	// The same region key that goes on the wire, not the raw hook path.
+	// presence.Table compares a local entry's path against a peer's to spot
+	// rung 1 ("one reading while another edits"), and a peer's path arrived
+	// already repo-relative — an absolute local path could never match it.
+	// Computed once and reused below for the metric, rather than a second
+	// call into repo.RegionKeyResolved just to learn its shape.
+	regionKey := repo.RegionKeyResolved(d.opts.Root, req.Path)
+	if d.presence.Touch(req.Agent, human, req.Verb, regionKey, nowMs()) {
 		d.dirty.Store(true)
 	}
 
@@ -299,17 +395,41 @@ func (d *Daemon) onLine(line []byte) {
 	if !d.admitCoalesce(coalesce.Ev{Verb: req.Verb, Path: req.Path, Agent: req.Agent}, nowMs()) {
 		return
 	}
-	if frame := decide.EventFrame(req); frame != nil {
+	if frame := decide.EventFrame(req, d.opts.Root); frame != nil {
+		if d.metrics != nil {
+			d.metrics.RegionKey(regionShape(regionKey))
+		}
 		d.relay.SendText(frame)
 	}
 }
 
+// regionShape reports whether a region key came out relative to the repo
+// root or fell back to an absolute path — see repo.RegionKey's doc comment.
+// Its output is always forward-slashed regardless of OS, so a leading "/"
+// is the whole test; filepath.IsAbs would ask the wrong question on
+// Windows, where an absolute path looks like "C:\\..." instead.
+func regionShape(key string) string {
+	if strings.HasPrefix(key, "/") {
+		return metrics.ShapeAbsolute
+	}
+	return metrics.ShapeRelative
+}
+
+// onRequest answers one hook decision. ap_decide_duration_seconds times
+// everything from here to the marshaled response, since that is what
+// actually keeps the hook blocked — not just the local-cache lookup inside
+// decide.Decide. Timed with two monotonic reads and one Observe call, no
+// closure, no allocation of its own: see Options.Metrics for why
+// d.decideObs is always safe to call and never itself branches on whether
+// a Registry is configured.
 func (d *Daemon) onRequest(line []byte) []byte {
 	req := decide.ParseRequest(line)
 	if !req.WantsDecision() {
 		return nil
 	}
-	resp := decide.Decide(req, d.leases, d.policy, nowMs(), d.selfAgent())
+
+	start := time.Now()
+	resp := decide.Decide(req, d.leases, d.policy, nowMs(), d.selfAgent(), d.opts.Root)
 	if decide.BlockedByLease(resp) {
 		// Noted here rather than inside Decide, which stays a pure
 		// function of the request and the two caches. Both callers — the
@@ -321,6 +441,7 @@ func (d *Daemon) onRequest(line []byte) []byte {
 		d.journal.Record(journalRecord(req, resp, d.policy))
 	}
 	out, err := json.Marshal(resp)
+	d.decideObs.Observe(time.Since(start).Seconds())
 	if err != nil {
 		return nil
 	}

@@ -33,6 +33,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/mohsensc/sync/go/internal/leases"
+	"github.com/mohsensc/sync/go/internal/metrics"
 	"github.com/mohsensc/sync/go/internal/outbound"
 	"github.com/mohsensc/sync/go/internal/policy"
 	"github.com/mohsensc/sync/go/internal/wire"
@@ -88,6 +89,14 @@ type Config struct {
 	// for. Logged loudly on every Run — this is not meant to be a quiet
 	// flag to flip and forget. Prefer TLSCAFile.
 	TLSInsecureSkipVerify bool
+
+	// Metrics is where connection-state and lease-cache-divergence numbers
+	// go. Nil is a real, supported state — every call site here checks it
+	// rather than the daemon inventing a private registry nobody reads;
+	// see daemon.Options.Metrics's comment for the same call on the
+	// decision path, which is the one place a nil check wasn't free
+	// enough to leave in.
+	Metrics *metrics.Registry
 }
 
 func (c Config) withDefaults() Config {
@@ -119,6 +128,7 @@ type Client struct {
 	cfg      Config
 	outbound *outbound.Queue
 	leases   *leases.Cache
+	metrics  *metrics.Registry // nil is valid; every call site below checks it
 
 	onPeer   func(wire.Presence)
 	onPolicy func(floor policy.Table, source string)
@@ -138,6 +148,31 @@ type Client struct {
 	// see docs/go-daemon.md's "every remaining mutex, checked on merit").
 	mu        sync.Mutex
 	lastError string
+
+	// believed mirrors exactly the region keys this Client has told
+	// leases.Cache about, plus enough of each entry (agent, expiry) to
+	// answer "does this still matter" at the next reconcile. leases.Cache
+	// exposes no way to enumerate what it holds — Conflict and OwnHandover
+	// are both scoped to one path — and this Client is the cache's only
+	// writer (dispatch's "lease"/"leases"/"claim_result" cases are the
+	// whole of it), so keeping a shadow here in lockstep is exact, not an
+	// approximation.
+	//
+	// Must always be a map this Client owns outright, never one handed to
+	// leases.Cache.Replace: the "leases" case used to set
+	// c.believed = table, the same map object passed to Replace, which
+	// made believed the cache's live byRegion table under a completely
+	// different lock than Cache.mu — a genuine race (-race caught it: a
+	// later applyLease write here landing mid-Conflict-iteration over the
+	// same memory), not a missing-lock one. See that case's own comment.
+	//
+	// dispatch only ever runs on the read pump's own goroutine, so
+	// believedMu isn't load-bearing for that reason — it is here because
+	// this is off the decision path, a mutex costs nothing anyone would
+	// measure, and not resting correctness on "only one goroutine ever
+	// calls this" is worth the two lines.
+	believedMu sync.Mutex
+	believed   map[string]leases.Lease
 }
 
 func New(cfg Config, lc *leases.Cache) *Client {
@@ -146,6 +181,8 @@ func New(cfg Config, lc *leases.Cache) *Client {
 		cfg:      cfg,
 		outbound: outbound.New(cfg.OutboundCapacity),
 		leases:   lc,
+		metrics:  cfg.Metrics,
+		believed: make(map[string]leases.Lease),
 	}
 }
 
@@ -205,6 +242,14 @@ func (c *Client) Run(ctx context.Context) {
 		dialer = &d
 	}
 
+	// everConnected and downSince exist only to word the log line right:
+	// the first successful dial of a fresh process is "connected", every
+	// one after a drop is "reconnected after N ms" — the number an
+	// operator actually wants after a relay outage, which nothing in this
+	// package used to print at all.
+	var everConnected bool
+	downSince := time.Now()
+
 	backoff := time.Duration(0)
 	for {
 		if ctx.Err() != nil {
@@ -213,14 +258,17 @@ func (c *Client) Run(ctx context.Context) {
 
 		c.state.Store(int32(StateConnecting))
 		c.connectAttempts.Add(1)
+		log.Printf("relay: connecting to %s", c.cfg.URL)
 		conn, resp, err := dialer.DialContext(ctx, c.cfg.URL, nil)
 		if err != nil {
 			if resp != nil {
 				resp.Body.Close()
 			}
-			c.setError("connect failed: " + err.Error())
+			reason := "connect failed: " + err.Error()
+			c.setError(reason)
 			c.state.Store(int32(StateBackoff))
 			backoff = c.nextBackoff(backoff)
+			log.Printf("relay: %s — backing off %v before retrying", reason, backoff)
 			if !c.sleepBackoff(ctx, backoff) {
 				return
 			}
@@ -228,13 +276,31 @@ func (c *Client) Run(ctx context.Context) {
 		}
 
 		c.state.Store(int32(StateOpen))
+		if c.metrics != nil {
+			c.metrics.DaemonConnected.Set(1)
+		}
+		if everConnected {
+			log.Printf("relay: reconnected to %s after %d ms", c.cfg.URL, time.Since(downSince).Milliseconds())
+			if c.metrics != nil {
+				c.metrics.Reconnects.Inc()
+			}
+		} else {
+			log.Printf("relay: connected to %s", c.cfg.URL)
+			everConnected = true
+		}
 		backoff = 0
 		err = c.runConnection(ctx, conn)
 		c.drops.Add(1)
-		c.setError(err.Error())
+		reason := err.Error()
+		c.setError(reason)
 		c.state.Store(int32(StateBackoff))
+		if c.metrics != nil {
+			c.metrics.DaemonConnected.Set(0)
+		}
+		downSince = time.Now()
 
 		backoff = c.nextBackoff(backoff)
+		log.Printf("relay: connection lost: %s — backing off %v before retrying", reason, backoff)
 		if !c.sleepBackoff(ctx, backoff) {
 			return
 		}
@@ -478,13 +544,27 @@ func (c *Client) dispatch(data []byte) error {
 			return nil
 		}
 		table := make(map[string]leases.Lease, len(entries))
+		shadow := make(map[string]leases.Lease, len(entries))
 		for _, e := range entries {
 			key, lease, ok := c.toLease(e)
 			if ok {
 				table[key] = lease
+				shadow[key] = lease
 			}
 		}
+		c.recordDivergence(table)
 		c.leases.Replace(table)
+		// The snapshot just became truth; the shadow matches it exactly
+		// until the next lease/leases/claim_result frame moves it again.
+		// Built as its own map here, deliberately not `c.believed = table`:
+		// Replace hands table to leases.Cache as its live backing store,
+		// and the two maps being the same object let a later applyLease
+		// write land inside the cache's own table mid-Conflict, under a
+		// completely different lock than the one protecting it there —
+		// a real bug -race caught, not a false positive.
+		c.believedMu.Lock()
+		c.believed = shadow
+		c.believedMu.Unlock()
 	case "lease":
 		var e wire.LeaseFrame
 		if err := json.Unmarshal(data, &e); err != nil {
@@ -592,6 +672,13 @@ func (c *Client) applyLease(e wire.LeaseFrame) {
 		// getting this wrong is the silent-loss bug this daemon exists to
 		// prevent.
 		c.leases.EraseIfHeldBy(key, e.Agent)
+		// Mirror the exact same guard on the shadow: an unattributed
+		// erase must not silently believe a lease is gone either.
+		c.believedMu.Lock()
+		if l, ok := c.believed[key]; ok && l.Agent == e.Agent {
+			delete(c.believed, key)
+		}
+		c.believedMu.Unlock()
 		if e.State == "handover" && e.Agent == c.cfg.Agent {
 			// It was ours. Remember who has it now — this is the only
 			// frame that ever explains why a region stopped being this
@@ -609,6 +696,9 @@ func (c *Client) applyLease(e wire.LeaseFrame) {
 		return
 	}
 	c.leases.Upsert(k, lease)
+	c.believedMu.Lock()
+	c.believed[k] = lease
+	c.believedMu.Unlock()
 }
 
 func (c *Client) applyClaimResult(e wire.LeaseFrame) {
@@ -630,6 +720,37 @@ func (c *Client) applyClaimResult(e wire.LeaseFrame) {
 		return
 	}
 	c.leases.Upsert(k, lease)
+	c.believedMu.Lock()
+	c.believed[k] = lease
+	c.believedMu.Unlock()
+}
+
+// recordDivergence sets ap_lease_cache_divergence to the number of leases
+// this daemon still believed in, at the moment a fresh snapshot arrived,
+// that the snapshot does not list — the reconcile point named in the
+// gauge's help text. Only unexpired entries count: after a long outage
+// every held lease has aged past its own ExpiresAtMs, the relay's snapshot
+// legitimately drops them the same way, and Conflict already skips them
+// (see leases.Cache.Conflict's "ages out on its own" comment) — counting
+// those would fire the gauge loudest exactly when nothing is blocking on
+// anything.
+func (c *Client) recordDivergence(fresh map[string]leases.Lease) {
+	if c.metrics == nil {
+		return
+	}
+	now := nowMs()
+	c.believedMu.Lock()
+	defer c.believedMu.Unlock()
+	var diverged float64
+	for key, l := range c.believed {
+		if l.ExpiresAtMs <= now {
+			continue
+		}
+		if _, ok := fresh[key]; !ok {
+			diverged++
+		}
+	}
+	c.metrics.LeaseCacheDiverge.Set(diverged)
 }
 
 // nowMs is wall time, not monotonic. Known deviation from the C++ side: see

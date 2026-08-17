@@ -16,6 +16,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/mohsensc/sync/go/internal/metrics"
 	"github.com/mohsensc/sync/go/internal/wire"
 )
 
@@ -125,6 +126,61 @@ func TestEndToEndJoinReceiveRoundTrip(t *testing.T) {
 	}
 }
 
+// TestRootNorm (named short — see TestDecideSocket's comment on
+// t.TempDir()'s socket-path length against AF_UNIX's sun_path limit) is item
+// 1 of the region-key fix,
+// exercised through the real daemon rather than decide's own types: a peer
+// that already normalized (any client that also carries this fix) files its
+// lease under the repo-relative path, exactly what fr.leasePath sends here.
+// A hook asking about the same file by its own absolute path — a different
+// checkout, Options.Root pointing somewhere else entirely — has to resolve
+// to that same lease, or the two are strangers again.
+func TestRootNorm(t *testing.T) {
+	fr := &fakeRelay{joined: make(chan wire.Join, 4), leasePath: "src/orders.py"}
+	srv := httptest.NewServer(http.HandlerFunc(fr.handler))
+	defer srv.Close()
+
+	sock := filepath.Join(t.TempDir(), "s")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	d, err := New(ctx, Options{
+		Sock:     sock,
+		RelayURL: "ws://" + srv.Listener.Addr().String() + "/",
+		Room:     "test-room",
+		Agent:    "go-daemon-test",
+		Human:    "mohsen",
+		// A different machine's checkout than wherever the lease's
+		// original claimant sat — that is the whole point.
+		Root: "/Users/dan/dev/repo",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_ = d
+
+	select {
+	case <-fr.joined:
+	case <-time.After(5 * time.Second):
+		t.Fatal("daemon never joined the room")
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		resp := decideOverSocket(t, sock, `{"verb":"edit","path":"/Users/dan/dev/repo/src/orders.py","agent":"sess1","want":"decision"}`)
+		if resp["rung"] == float64(3) {
+			if resp["holder"] != "other-agent" {
+				t.Fatalf("blocked by wrong holder: %+v", resp)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("an absolute path under the configured root never matched the relatively-keyed lease; last response: %+v", resp)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // TestDecideSocket proves the daemon serves decisions on Sock+".decide" —
 // the path hook/protocol.hpp's decision_sock_path derives, and the one the
 // real ap-hook binary dials first (see hook.cpp's run_hook). Wave 1 only
@@ -195,8 +251,8 @@ func decideOverSocket(t *testing.T, sock, line string) map[string]any {
 }
 
 // hookBinary is the real cpp/build/ap-hook, not a Go stand-in. It exists
-// only when the cpp toolchain has run — a separate CI job from this one
-// (.github/workflows/ci.yml) — so a Go-only run skips rather than fails.
+// only when the cpp toolchain has run — scripts/ci-local.sh's cpp job, a
+// separate job from this one — so a Go-only run skips rather than fails.
 func hookBinary(t *testing.T) string {
 	t.Helper()
 	root, err := filepath.Abs(filepath.Join("..", "..", ".."))
@@ -280,5 +336,133 @@ func TestRoundTripSpecialCharsHookToDaemon(t *testing.T) {
 			t.Fatalf("daemon never saw the round-tripped path; peers seen: %q", seen)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestDecideDurationObserves is the wiring check
+// for ap_decide_duration_seconds: every answered decision request adds
+// exactly one histogram observation, over the real decision socket a hook
+// actually uses, not a direct call into onRequest.
+func TestDecideDurationObserves(t *testing.T) {
+	m := metrics.New()
+	sock := filepath.Join(t.TempDir(), "s")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if _, err := New(ctx, Options{Sock: sock, Metrics: m}); err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	decideOverSocket(t, sock, `{"verb":"edit","path":"src/auth.py","agent":"sess1","want":"decision"}`)
+	decideOverSocket(t, sock, `{"verb":"edit","path":"src/other.py","agent":"sess1","want":"decision"}`)
+
+	families, err := m.Gatherer().Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	var count uint64
+	for _, fam := range families {
+		if fam.GetName() == "ap_decide_duration_seconds" {
+			count = fam.GetMetric()[0].GetHistogram().GetSampleCount()
+		}
+	}
+	if count != 2 {
+		t.Fatalf("ap_decide_duration_seconds sample count = %d, want 2", count)
+	}
+}
+
+// TestOnLineRecordsRegionKeyShape is the wiring check for RegionKey: a
+// path inside the repo root goes on the wire relative and is counted
+// "relative"; a path outside it (or with no root at all) keeps its
+// absolute form and is counted "absolute" — the live regression detector
+// for the bug where a region was named by its raw filesystem path.
+func TestOnLineRecordsRegionKeyShape(t *testing.T) {
+	fr := &fakeRelay{joined: make(chan wire.Join, 4)}
+	srv := httptest.NewServer(http.HandlerFunc(fr.handler))
+	defer srv.Close()
+
+	m := metrics.New()
+	sock := filepath.Join(t.TempDir(), "s")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	d, err := New(ctx, Options{
+		Sock:     sock,
+		RelayURL: "ws://" + srv.Listener.Addr().String() + "/",
+		Room:     "test-room",
+		Agent:    "go-daemon-test",
+		Human:    "mohsen",
+		Metrics:  m,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	select {
+	case <-fr.joined:
+	case <-time.After(5 * time.Second):
+		t.Fatal("daemon never joined the room")
+	}
+
+	// No Root configured, so this stays absolute — same shape a checkout
+	// with no discoverable repo root produces.
+	d.onLine([]byte(`{"verb":"edit","path":"/abs/path/auth.py","agent":"sess1"}`))
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		families, err := m.Gatherer().Gather()
+		if err != nil {
+			t.Fatalf("gather: %v", err)
+		}
+		var absolute uint64
+		for _, fam := range families {
+			if fam.GetName() != "ap_region_keys_total" {
+				continue
+			}
+			for _, metric := range fam.GetMetric() {
+				for _, lp := range metric.GetLabel() {
+					if lp.GetName() == "shape" && lp.GetValue() == "absolute" {
+						absolute = uint64(metric.GetCounter().GetValue())
+					}
+				}
+			}
+		}
+		if absolute == 1 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("ap_region_keys_total{shape=\"absolute\"} never reached 1")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// BenchmarkOnRequestDecide is the decide path with and without metrics —
+// the comparison Options.Metrics's nil case exists to keep cheap. Run with
+// -benchmem: allocs/op is what "no allocation on that path" claims, not
+// ns/op alone.
+func BenchmarkOnRequestDecide(b *testing.B) {
+	for _, tc := range []struct {
+		name string
+		reg  *metrics.Registry
+	}{
+		{"NoMetrics", nil},
+		{"WithMetrics", metrics.New()},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			sock := filepath.Join(b.TempDir(), "s")
+			d, err := New(ctx, Options{Sock: sock, Metrics: tc.reg})
+			if err != nil {
+				b.Fatalf("New: %v", err)
+			}
+			line := []byte(`{"verb":"edit","path":"src/auth.py","agent":"sess1","want":"decision"}`)
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				d.onRequest(line)
+			}
+		})
 	}
 }

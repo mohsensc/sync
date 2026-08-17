@@ -119,25 +119,58 @@ func (c *Cache) EraseIfHeldBy(key, agent string) {
 	}
 }
 
+// heldByMe answers whether agent is one of myAgents — package level, not a
+// closure, because Conflict runs under the cache's RLock on the 5ms
+// decision path and a closure captured per call is an allocation this hot
+// path doesn't need. Empty strings never match: an unconfigured relay
+// identity or a hook line with no session id both come through as "", and
+// a lease is never legitimately held by nobody.
+func heldByMe(agent string, myAgents []string) bool { return IsMine(agent, myAgents) }
+
+// IsMine reports whether an agent id is one of the caller's own. Exported
+// because decide asks the same question about a handover target that this
+// package asks about a lease holder, and two spellings of "is that me" is
+// how the namespace bug it fixes got in.
+func IsMine(agent string, myAgents []string) bool {
+	if agent == "" {
+		return false
+	}
+	for _, a := range myAgents {
+		if a != "" && a == agent {
+			return true
+		}
+	}
+	return false
+}
+
 // Conflict is the whole-file question a hook decision asks, extended to
 // tell a same-symbol conflict (rung 3) from a disjoint-symbol one (rung 2):
 // is there a live lease anywhere under this path, held by somebody other
-// than myAgent, and if so, does it actually overlap what myAgent is known
+// than myAgents, and if so, does it actually overlap what myAgents is known
 // to be touching?
+//
+// myAgents is a set, not a single id, because a lease can be held under
+// either of two different namespaces for the same requester: the daemon's
+// own relay identity, and the hook session's id (the MCP surface claims
+// under the session id; the daemon's decision path used to check only its
+// own relay identity, so a session that had just claimed a region through
+// MCP was denied editing it — see decide.Decide's note on the two
+// namespaces, and cpp/hook/hook.hpp's handover_to_me comment for the same
+// disease in a different spot). A lease held by either identity is mine.
 //
 // Region keys are "path|symbol", so the path match is a prefix match — a
 // live claim on "path|sign_in" contends with a plain edit on "path" even
 // though the hook names no symbol. See same_region() in types.py, which is
 // the authority both this and the relay's own classifier answer to.
 //
-// "What myAgent is known to be touching" is never the incoming edit
+// "What myAgents is known to be touching" is never the incoming edit
 // itself — a hook-observed Edit/Write carries no symbol at all, only a
 // path (cpp/hook/hook.cpp's build_event has no field for one). The only
 // place symbol information about *this* agent's own work ever reaches the
-// daemon is a claim myAgent declared through MCP's claim_work, which is
-// already sitting in this same cache. So "mine" below means "every symbol
-// myAgent currently holds a live lease on at this path" — evidence, not a
-// guess.
+// daemon is a claim one of myAgents declared through MCP's claim_work,
+// which is already sitting in this same cache. So "mine" below means
+// "every symbol any of myAgents currently holds a live lease on at this
+// path" — evidence, not a guess.
 //
 // No claim of my own, or a claim on the whole file on either side, is read
 // the same way same_region() reads a nil symbol: it contends with
@@ -147,7 +180,7 @@ func (c *Cache) EraseIfHeldBy(key, agent string) {
 // never fires — it makes the ladder lie. When several other agents hold
 // leases on the path, the worse of the two rungs wins, the same way
 // ladder.classify keeps the highest rung across every other activity.
-func (c *Cache) Conflict(path, myAgent string, nowMs int64) (held Lease, rung int, ok bool) {
+func (c *Cache) Conflict(path string, myAgents []string, nowMs int64) (held Lease, rung int, ok bool) {
 	prefix := path + "|"
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -157,7 +190,7 @@ func (c *Cache) Conflict(path, myAgent string, nowMs int64) (held Lease, rung in
 		if !strings.HasPrefix(key, prefix) {
 			continue
 		}
-		if l.Agent != myAgent || l.ExpiresAtMs <= nowMs {
+		if !heldByMe(l.Agent, myAgents) || l.ExpiresAtMs <= nowMs {
 			continue
 		}
 		mine = append(mine, l.Symbol)
@@ -167,7 +200,7 @@ func (c *Cache) Conflict(path, myAgent string, nowMs int64) (held Lease, rung in
 		if !strings.HasPrefix(key, prefix) {
 			continue
 		}
-		if l.Agent == "" || l.Agent == myAgent {
+		if l.Agent == "" || heldByMe(l.Agent, myAgents) {
 			continue
 		}
 		if l.ExpiresAtMs <= nowMs {
@@ -209,8 +242,13 @@ func symbolsConflict(held string, mine []string) bool {
 // agent test, and only ever answers when there is a deadline to report.
 // This is how a holder finds out it is on the clock; there is no push
 // channel to an agent, so the warning rides on its next edit.
-func (c *Cache) OwnHandover(path, myAgent string, nowMs int64) (Lease, bool) {
-	if path == "" || myAgent == "" {
+// Takes the same identity set Conflict does, and for the same reason: the
+// daemon's relay identity and the requesting session's id are different
+// strings for one agent, so a region claimed under a session id has a
+// handover deadline the daemon would otherwise never mention to the session
+// it belongs to.
+func (c *Cache) OwnHandover(path string, myAgents []string, nowMs int64) (Lease, bool) {
+	if path == "" || len(myAgents) == 0 {
 		return Lease{}, false
 	}
 	prefix := path + "|"
@@ -222,7 +260,7 @@ func (c *Cache) OwnHandover(path, myAgent string, nowMs int64) (Lease, bool) {
 		if !strings.HasPrefix(key, prefix) {
 			continue
 		}
-		if l.Agent != myAgent {
+		if !heldByMe(l.Agent, myAgents) {
 			continue
 		}
 		if l.ExpiresAtMs <= nowMs {
