@@ -1,0 +1,94 @@
+# Alerting rules for the relay's exposed catalogue (go/internal/metrics).
+#
+# Few and meaningful, on purpose — an alert that fires and asks the human
+# to go read a dashboard is worse than no alert. Every one of these says
+# what fired *and* what to go do about it, in the annotation, so a 3am page
+# doesn't start with ten minutes of context-gathering.
+#
+# Keep every expr on one line: ops/verify_metrics.py extracts them with a
+# regex, not a YAML-aware PromQL parser, to avoid a dependency this repo
+# doesn't otherwise need.
+groups:
+  - name: agent-presence
+    rules:
+      - alert: AbsoluteRegionKeysDetected
+        expr: increase(ap_region_keys_total{shape="absolute"}[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "an absolute region key crossed the wire"
+          description: >-
+            Collision detection has silently stopped working across at
+            least one pair of checkouts — an absolute key never matches a
+            teammate's. Grep recent decide logs for the region source and
+            check whatever changed it last against docs/monitoring.md's
+            note on this metric; this is the bug that shipped once already.
+
+      - alert: DecideLatencyP99OverBudget
+        expr: histogram_quantile(0.99, sum(rate(ap_decide_duration_seconds_bucket[5m])) by (le)) > 0.005
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "decide p99 has been over the hook's 5ms budget for 2m+"
+          description: >-
+            ap-hook fails open past its budget, so this reads to a user as
+            "collision detection stopped working," not as slowness. Check
+            presenced's own load (goroutines, GC pause, journal write rate)
+            on the Saturation row first, then whether the lease cache it
+            answers from has grown or is being rebuilt.
+
+      - alert: RelayDown
+        expr: up{job="gorelay"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "prometheus cannot scrape gorelay"
+          description: >-
+            Every daemon in the fleet is about to lose its relay
+            connection, if it hasn't already — leases stop renewing and
+            claims stop resolving. Check the relay process directly (it's
+            the one thing an operator runs); this alert only says
+            Prometheus can't reach --metrics-addr, not why.
+
+      - alert: DaemonsConnectedDroppedToZero
+        expr: ap_daemons_connected == 0 and (max_over_time(ap_daemons_connected[15m]) > 0)
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "the relay had daemons connected and now has none"
+          description: >-
+            Distinguish a real outage from a quiet office: if this fired
+            outside a deploy or a maintenance window, check the relay's
+            listener and any load balancer/proxy in front of it before
+            assuming every laptop disconnected at once.
+
+      - alert: DroppedFramesRising
+        expr: sum(rate(ap_frames_dropped_total[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "the relay is giving up on delivering frames"
+          description: >-
+            Break down by reason on the Saturation row's dropped-frames
+            panel. A slow-consumer reason means some client isn't draining
+            its queue — check ap_send_queue_depth for the same window; any
+            other reason is new and worth reading relaysrv's drop sites for.
+
+      - alert: LeaseCacheDivergenceSustained
+        expr: ap_lease_cache_divergence > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "a daemon's lease cache disagrees with the relay's, and it isn't converging"
+          description: >-
+            A short spike during a reconnect storm is normal; ten sustained
+            minutes isn't. Look for a daemon stuck retrying a stale
+            reconcile, or a relay restart that isn't replaying leases the
+            way daemons expect — this is exactly the class of bug the
+            Consistency row exists to catch before it reaches a user.

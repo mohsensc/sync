@@ -1,0 +1,12 @@
+# Provisions the one datasource the dashboard needs. uid must match the
+# "prometheus" uid every panel in agent-presence.json references.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
