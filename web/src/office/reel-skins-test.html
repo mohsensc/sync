@@ -251,6 +251,14 @@
   .reel-skin-ticker .reel-badge[data-rung="2"]{color:#E4BD5C;background:#241D10}
   .reel-skin-ticker .reel-badge[data-rung="3"]{color:#E08A4C;background:#26180E}
   .reel-skin-ticker .reel-badge[data-rung="4"]{color:#E06860;background:#26120F}
+
+  /* Kept in sync with office.html's own copy of this block — see the
+     "copied from office.html" note above for why. `.reel` here, `#reel`
+     there, same "no ID to hang a specificity trick on, none needed"
+     reason as everywhere else in this file. */
+  @media (prefers-reduced-motion: reduce){
+    .reel, .reel *{animation-duration:.01ms!important;transition-duration:.01ms!important}
+  }
 </style>
 </head>
 <body>

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { decideGhostTreatment, plateText, ENCOUNTER_ARGUE_DAYS } from '../src/office/ghost.js'
+import ghostSrc from '../src/office/ghost.js?raw'
 
 // -- degrade paths: never an empty ghost -------------------------------
 
@@ -128,5 +129,32 @@ describe('plateText', () => {
     expect(plateText('mohsensc', 0)).toBe('wrote most of this · today · mohsensc')
     expect(plateText('mohsensc', 1)).toBe('wrote most of this · 1d ago · mohsensc')
     expect(plateText('mohsensc', 62)).toBe('wrote most of this · 2mo ago · mohsensc')
+  })
+})
+
+// -- pose-once, not per-frame mixer update ---------------------------------
+//
+// A ghost is meant to read as parked, not animated (see the file header).
+// This used to mean ANIM.update(s.figRoot, dt) ran every frame for every
+// ghost on screen — a full AnimationMixer + skeleton evaluation on a
+// cloned skinned mesh, repeated for a figure that never actually needed
+// to move past its first pose. It's a THREE/AnimationMixer effect with no
+// pure-JS surface to unit test against rendered output, so this pins the
+// call-site structure instead: a static source scan, same shape as
+// office-frame-loop.test.ts's rAF scan above it in this round. Weaker than
+// a behavioural assertion, but it does fail against the old code (which
+// had neither the build-time pose-land call nor an empty tick(dt)) and
+// pass against the new.
+describe('ghost pose — mixer update happens once, at build, not per frame', () => {
+  it('lands the idle pose once, right after the crossfade that starts it', () => {
+    expect(ghostSrc).toContain('ANIM.crossfade(figRoot, \'idle\', 0)')
+    expect(ghostSrc).toContain('ANIM.update(figRoot, 0)')
+  })
+
+  it('never calls ANIM.update against a per-frame `dt` (the old per-ghost mixer step)', () => {
+    // The old frame loop called `ANIM.update(s.figRoot, dt)` on every
+    // tick. Any `ANIM.update(<anything>, dt)` call left in the file would
+    // mean some code path still drives the mixer every frame.
+    expect(ghostSrc).not.toMatch(/ANIM\.update\([^)]*,\s*dt\)/)
   })
 })

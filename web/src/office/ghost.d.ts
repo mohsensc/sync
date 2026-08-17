@@ -35,7 +35,12 @@ export function plateText(author: string, ageDays: number | null | undefined): s
 export interface GhostAuthorsHandle {
   setMode(mode: 'ghost' | 'plate' | 'off'): void
   readonly mode: 'ghost' | 'plate' | 'off'
-  tick(): Promise<void>
+  /** Poll blame for every held region now instead of waiting for the
+   *  interval. */
+  poll(): Promise<void>
+  /** Per-frame step (fade + sway), driven by office.html's one shared
+   *  frame loop — throttled internally, safe to call every frame. */
+  tick(dt: number): void
   dispose(): void
 }
 

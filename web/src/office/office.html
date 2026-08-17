@@ -289,6 +289,17 @@
   .reel-skin-ticker .reel-badge[data-rung="2"]{color:#E4BD5C;background:#241D10}
   .reel-skin-ticker .reel-badge[data-rung="3"]{color:#E08A4C;background:#26180E}
   .reel-skin-ticker .reel-badge[data-rung="4"]{color:#E06860;background:#26120F}
+
+  /* reel-pulse (above) already only runs under no-preference. Everything
+     else in #reel is a one-shot transition or entrance animation (row
+     arrival, detail expand/collapse) rather than a repeating one, but
+     "one-shot" still means motion — kill durations under reduce rather
+     than picking through each rule by hand. Standard blanket snippet:
+     near-zero rather than exactly zero, the usual hedge against a rule
+     that would otherwise depend on the transition actually firing. */
+  @media (prefers-reduced-motion: reduce){
+    #reel, #reel *{animation-duration:.01ms!important;transition-duration:.01ms!important}
+  }
 </style>
 </head>
 <body>
@@ -771,9 +782,9 @@ function setupCast() {
   // was in the repo and not in the room.
   //
   // Here rather than in an append block at the bottom (which is where the
-  // module's own header says to put it): attachGhostAuthors() ticks once on
+  // module's own header says to put it): attachGhostAuthors() polls once on
   // attach and then every 18s, and at the bottom of this file that first
-  // tick runs against an empty world.agents and a null charGLTF, so the room
+  // poll runs against an empty world.agents and a null charGLTF, so the room
   // stays ghostless for the first poll interval. attachGitSignals is here for
   // the same reason.
   //
@@ -1126,6 +1137,11 @@ const liveMeshes = new Map()     // agent id -> meshes pushed into the shared `m
 let liveMode = false
 let liveConn = null
 let fallbackTimer = null
+// Has the office ever actually joined a room? Distinguishes "never found a
+// relay" (the badge's original reason) from "had one, lost it" once
+// connectWithReconnect starts retrying below — onClose fires on every miss
+// either way, but the two deserve different badge text.
+let everConnected = false
 
 function setMode(kind, text) { modeEl.className = kind; modeEl.textContent = text }
 
@@ -1477,12 +1493,23 @@ function expireLive(now) {
 function goLive() {
   liveMode = true
   setMode('live', `live · room ${new URLSearchParams(location.search).get('room') || '(default)'}`)
+  // A demo that started because the relay was down (or during a retry) has
+  // no business still acting out its own script once real presence is
+  // back — "live" badge, five agents running a fiction underneath it is
+  // the badge lying by omission. Null it out, not just cancel: a later
+  // drop needs startDemo() to see "no demo running" and start a fresh one,
+  // not find a stale cancelled handle and skip it (see goDemoFallback).
+  if (demo) { demo.cancel(); demo = null }
 }
 
 function goDemoFallback(reason) {
   liveMode = false
   setMode('demo', `demo — ${reason}`)
-  startDemo()
+  // Only the first fallback (or the first after a reconnect) needs to
+  // start the story — connectWithReconnect's onClose fires again on every
+  // failed retry, and restarting the script from beat one on every miss
+  // would reset the cast each backoff tick instead of leaving it running.
+  if (!demo) startDemo()
 }
 
 function initLive() {
@@ -1498,10 +1525,21 @@ function initLive() {
   // has no way to derive. Whoever opens it has to say which room.
   if (!room) { goDemoFallback('no ?room= to join'); return }
   fallbackTimer = setTimeout(() => goDemoFallback(`no relay at ${Live.RELAY_URL}`), LIVE_TIMEOUT_MS)
-  liveConn = Live.connect({
+  // connectWithReconnect, not connect(): a relay that drops (or never
+  // showed up in the first place) gets retried with backoff instead of
+  // leaving the office stuck in demo mode until someone reloads the page.
+  liveConn = Live.connectWithReconnect({
     room, human,
-    onOpen: () => { clearTimeout(fallbackTimer); goLive() },
-    onClose: () => { clearTimeout(fallbackTimer); goDemoFallback('relay unreachable') },
+    onOpen: () => { clearTimeout(fallbackTimer); everConnected = true; goLive() },
+    onClose: () => {
+      clearTimeout(fallbackTimer)
+      // Same badge class either way (still demo mode), different text: a
+      // connection that never once succeeded reads as "no relay here",
+      // one that dropped after being live reads as "lost it, retrying" —
+      // repeating the first message forever while a retry is already
+      // under way would be the badge lying about which state it's in.
+      goDemoFallback(everConnected ? 'relay dropped, reconnecting…' : `no relay at ${Live.RELAY_URL}`)
+    },
     onPresence: onLivePresence,
     onDecision: onLiveReelFrame,
     onRedundant: onLiveReelFrame,
@@ -1615,9 +1653,23 @@ function tick(){
   updateChairs(dt)
   expireLive(Date.now())
   if (demo) demo.update(dt)
-  if (interaction) interaction.paint()
+  if (interaction) { interaction.paint(); interaction.tick(dt) }
   zoneUI.updateCamera(camera)
   if (window.__zoneOwner) window.__zoneOwner.updateCamera(camera)
+
+  // One frame loop for the whole page. Each of these used to run its own
+  // rAF loop; they now expose tick(dt) and this is the only place any of
+  // them gets called from. Read through window.__x rather than a bare
+  // identifier on purpose: gitSignals/ghostAuthors/histShelf are all
+  // assigned later in this file (after loads resolve, or further down the
+  // module), and this tick() function runs for the first time before any
+  // of those assignments happen — a bare identifier declared with const
+  // below this point would throw on that first call (temporal dead zone),
+  // where a property read on an object that doesn't have the key yet just
+  // reads undefined. window.__zoneOwner above already relies on this.
+  if (window.__gitSignals) window.__gitSignals.tick(dt)
+  if (window.__ghostAuthors) window.__ghostAuthors.tick(dt)
+  if (window.__histShelf) window.__histShelf.tick(dt)
 
   // A replay's whole chain (clash, then resolution) can be one stage or
   // two, so this watches the encounter itself rather than a fixed timer —

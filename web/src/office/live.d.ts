@@ -21,6 +21,12 @@ export interface ConnectOptions {
 }
 
 export function connect(opts: ConnectOptions): { close(): void }
+
+export const RECONNECT_BASE_MS: number
+export const RECONNECT_MAX_MS: number
+export function reconnectDelayMs(attempt: number, base?: number, cap?: number): number
+export function connectWithReconnect(opts: ConnectOptions): { close(): void }
+
 export function hairFor(human: string): number
 
 export const LIVE_ABORT_VARIANTS: string[]

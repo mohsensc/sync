@@ -84,6 +84,38 @@ describe('LiveDirector', () => {
     const d = new LiveDirector()
     expect(d.clearContest('nobody')).toBeNull()
   })
+
+  it('derives lastSeen from the frame\'s own ts (unix seconds), not arrival time', () => {
+    const d = new LiveDirector()
+    // relay clock: ts=1000 means the frame was stamped at 1,000,000ms. It
+    // "arrives" locally 25s later than that (e.g. queued in a join
+    // snapshot) — if lastSeen were taken from arrival it would read as
+    // freshly-seen at that moment; it must instead already be 25s stale on
+    // the relay's own clock.
+    const arrival = 1_000_000 + 25_000
+    d.onPresence({ ...presence('a1', 'sara'), ts: 1000 }, arrival)
+    // 25s already elapsed relative to ts; 4s more crosses the 30s TTL.
+    expect(d.expire(1_000_000 + 29_000)).toEqual([])
+    expect(d.expire(1_000_000 + 31_000)).toEqual(['a1'])
+  })
+
+  it('falls back to arrival time when the frame carries no ts', () => {
+    const d = new LiveDirector()
+    d.onPresence(presence('a1', 'sara'), 1_000_000)
+    expect(d.expire(1_000_000 + PRESENCE_TTL_MS - 1)).toEqual([])
+    expect(d.expire(1_000_000 + PRESENCE_TTL_MS + 1)).toEqual(['a1'])
+  })
+
+  it('clamps a ts from a relay clock running ahead of the browser to arrival time', () => {
+    const d = new LiveDirector()
+    // ts claims a moment 10s in the future relative to arrival — clock
+    // skew, not a real future frame. Must not read as fresher than the
+    // instant it actually arrived, or it would outlive its TTL by the skew.
+    const arrival = 1_000_000
+    d.onPresence({ ...presence('a1', 'sara'), ts: (arrival + 10_000) / 1000 }, arrival)
+    expect(d.expire(arrival + PRESENCE_TTL_MS - 1)).toEqual([])
+    expect(d.expire(arrival + PRESENCE_TTL_MS + 1)).toEqual(['a1'])
+  })
 })
 
 describe('hairFor', () => {

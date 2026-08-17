@@ -111,6 +111,18 @@ export function formatAge(days) {
   return `${Math.round(days / 365)} years`
 }
 
+// Every caller that wraps a formatAge() label in " ago" or " old" has to
+// skip that suffix on the one bucket that already reads as a complete
+// phrase — "today" — or the office's single most common case (a file
+// touched the day you're looking at it) renders as "last touched today
+// ago" / "newest today old". One function owns that exception so it can't
+// drift into four separate copies of the same "if today" check at each
+// call site.
+export function agePhrase(ageLabel, suffix) {
+  if (ageLabel == null) return null
+  return ageLabel === 'today' ? ageLabel : `${ageLabel} ${suffix}`
+}
+
 // Coarser than formatAge: for spans ("N commits over ___") rather than a
 // point in time, so "1 day" reads as "over a day" and small day counts
 // don't feel falsely precise.
@@ -155,21 +167,21 @@ export function composeStory(stat, log, blame) {
     // the single-commit case reads as one plain fact, not "mostly X" —
     // there's no "mostly" when there's only one commit to be mostly of
     const only = entries[0]
-    const age = formatAge(statOk ? stat.lastAgeDays : (only ? parseRelativeAge(only.when) : null))
+    const age = agePhrase(formatAge(statOk ? stat.lastAgeDays : (only ? parseRelativeAge(only.when) : null)), 'ago')
     const author = ownerName || (only && only.author) || null
-    const parts = ['one commit', age ? `${age} ago` : null, author].filter(Boolean)
+    const parts = ['one commit', age, author].filter(Boolean)
     lines.push(parts.join(', ') + '.')
   } else {
     const ownerPhrase = owners.length > 1
       ? `Mostly ${ownerName} (${Math.round((top.share || 0) * 100)}%)`
       : ownerName ? `Written entirely by ${ownerName}` : null
     const span = statOk ? formatSpan(stat.firstAgeDays) : null
-    const lastAge = formatAge(statOk ? stat.lastAgeDays : (entries[0] ? parseRelativeAge(entries[0].when) : null))
+    const lastAge = agePhrase(formatAge(statOk ? stat.lastAgeDays : (entries[0] ? parseRelativeAge(entries[0].when) : null)), 'ago')
     const volumeBits = [
       commitCount ? `${commitCount} commits` : null,
       span ? `over ${span}` : null,
     ].filter(Boolean).join(' ')
-    const lastBit = lastAge ? `last touched ${lastAge} ago` : null
+    const lastBit = lastAge ? `last touched ${lastAge}` : null
     const volumePhrase = [volumeBits, lastBit].filter(Boolean).join(', ')
 
     if (ownerPhrase && volumePhrase) lines.push(`${ownerPhrase} — ${volumePhrase}.`)

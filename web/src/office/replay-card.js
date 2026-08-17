@@ -147,6 +147,16 @@ const STYLE = `
   border:2px solid #E4574A;border-radius:5px;padding:2px 9px;color:#E4574A;
   font:800 10px ui-monospace,monospace;text-transform:uppercase;letter-spacing:.05em;
   background:#05060Ac0}
+
+/* Every variant's entrance is a CSS transition (opacity/transform) driven
+   by the .on class toggle in show()/hide() below, not a @keyframes
+   animation — near-zero duration is enough to turn "slides and fades in"
+   into "appears", same blanket pattern as office.html's #reel block. The
+   .rcard-stamp's rotate(-7deg) isn't animated, it's a static tilt, so
+   nothing to do for it here. */
+@media (prefers-reduced-motion: reduce){
+  .rcard, .rcard *{transition-duration:.01ms!important}
+}
 `
 
 let stylesInjected = false

@@ -121,4 +121,12 @@ export function sliceSourceLines(
 
 export type GitApiHandler = (req: { url?: string }, res: unknown, next: () => void) => void | Promise<void>
 
-export function gitApiMiddleware(repoRoot: string): GitApiHandler
+export interface GitApiMiddlewareOptions {
+  /** Overrides every route's canonicalNamesFor stdout cap (default 8MB).
+   *  Exists as a seam for test/gitapi-scratch.test.ts, which forces a real
+   *  maxBuffer overflow on a small scratch repo instead of needing a
+   *  many-thousand-commit fixture to prove the degrade path degrades. */
+  maxBuffer?: number
+}
+
+export function gitApiMiddleware(repoRoot: string, opts?: GitApiMiddlewareOptions): GitApiHandler

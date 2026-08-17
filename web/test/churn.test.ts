@@ -83,8 +83,8 @@ describe('attachGitSignals churn wiring', () => {
       return stubResponse(null, false)
     })
     const s = attachGitSignals({ world, zones, fetchFn, intervalMs: 999999 })
-    await s.tick()
-    // attachGitSignals fires its own tick() on construction as well as the
+    await s.poll()
+    // attachGitSignals fires its own poll() on construction as well as the
     // one this test awaits, so this can land once or twice depending on
     // timing — the count isn't the point, a real positive intensity is.
     expect(setChurn).toHaveBeenCalled()
@@ -98,7 +98,7 @@ describe('attachGitSignals churn wiring', () => {
     const zones = { setOwner: vi.fn() }
     const fetchFn: FetchStub = vi.fn(async () => stubResponse(null, false))
     const s = attachGitSignals({ world, zones, fetchFn, intervalMs: 999999 })
-    await s.tick()
+    await s.poll()
     expect(setChurn).not.toHaveBeenCalled()
     s.stop()
   })
@@ -109,7 +109,7 @@ describe('attachGitSignals churn wiring', () => {
     const zones = { setOwner: vi.fn() }
     const fetchFn: FetchStub = vi.fn(async () => { throw new Error('ECONNREFUSED') })
     const s = attachGitSignals({ world, zones, fetchFn, intervalMs: 999999 })
-    await expect(s.tick()).resolves.toBeUndefined()
+    await expect(s.poll()).resolves.toBeUndefined()
     expect(setChurn).not.toHaveBeenCalled()
     s.stop()
   })
@@ -120,7 +120,7 @@ describe('attachGitSignals churn wiring', () => {
     const zones = { setOwner: vi.fn() }
     const fetchFn: FetchStub = vi.fn(async () => stubResponse({ ok: true, recent: { commits: 1, added: 1, deleted: 0, windowDays: 14 }, working: { added: 0, deleted: 0 } }))
     const s = attachGitSignals({ world, zones, fetchFn, intervalMs: 999999 })
-    await s.tick()
+    await s.poll()
     expect(setChurn).not.toHaveBeenCalled()
     s.stop()
   })
@@ -197,13 +197,13 @@ describe('attachGitSignals churn-vis mode', () => {
       return stubResponse(null, false)
     })
     const s = attachGitSignals({ world, zones, fetchFn, intervalMs: 999999 })
-    await s.tick()
+    await s.poll()
     expect(setChurn).toHaveBeenCalled() // stack mode, same as the existing wiring test above
 
     setChurn.mockClear()
     s.setChurnMode('heat')
     expect(s.churnMode).toBe('heat')
-    await s.tick()
+    await s.poll()
     expect(setChurn).not.toHaveBeenCalled()
     // deskHeat + deskDust both attach a group onto the agent's root the
     // first time it's polled, regardless of which mode ends up visible.
@@ -220,7 +220,7 @@ describe('attachGitSignals churn-vis mode', () => {
     }))
     const s = attachGitSignals({ world, zones, fetchFn, intervalMs: 999999 })
     s.setChurnMode('cold')
-    await expect(s.tick()).resolves.toBeUndefined()
+    await expect(s.poll()).resolves.toBeUndefined()
     s.stop()
   })
 })
