@@ -1,0 +1,67 @@
+// Hand-written types for doubletake.js — see yield.d.ts's header for why
+// this exists (office/*.js is unbundled/untyped, outside tsconfig's allowJs
+// surface).
+
+import type * as THREE from 'three'
+
+export interface Mark {
+  pos: THREE.Vector3
+  yaw: number
+}
+
+export interface Marks {
+  a: Mark
+  b: Mark
+  spacing: number
+}
+
+export interface ClipSpec {
+  fn: (t01: number) => Record<string, number[]>
+  dur: number
+  keys: number
+  loop: boolean
+}
+
+export type DoubletakeSeg = [number, number, number, number, number, (u: number) => number]
+
+export interface DoubletakeTiming {
+  dur: number
+  segs: DoubletakeSeg[]
+  pauseS: number
+  shrugAmp: number
+}
+
+export const DOUBLETAKE_DUR: number
+export const DOUBLETAKE_SPACING: number
+export const DEFAULT_TIMING: DoubletakeTiming
+export const LONGPAUSE_TIMING: DoubletakeTiming
+export const BIGSHRUG_TIMING: DoubletakeTiming
+
+export type DoubletakeRegistry = { doubletake: ClipSpec }
+
+/** The picked take — the only one World ever sees. */
+export const registry: DoubletakeRegistry
+
+/** Alternate takes for comparison in doubletake-test.html only. */
+export const variants: { default: DoubletakeRegistry; longPause: DoubletakeRegistry; bigShrug: DoubletakeRegistry }
+
+export function spacingFor(height?: number): number
+export function doubletakeMarks(
+  aPos: THREE.Vector3 | [number, number?, number?],
+  bPos: THREE.Vector3 | [number, number?, number?],
+  spacing?: number
+): Marks
+export function getClip(reg?: DoubletakeRegistry): THREE.AnimationClip
+export function playDoubletake(root: THREE.Object3D, fade?: number, reg?: DoubletakeRegistry): THREE.AnimationAction
+
+export interface RigPuppet {
+  group: THREE.Object3D
+  root: THREE.Object3D
+  height: number
+}
+
+export function doubletakeRoutine(
+  a: RigPuppet,
+  b: RigPuppet,
+  opts?: { speed?: number; turnRate?: number; settle?: number; arriveEps?: number; height?: number }
+): { step: (dt: number) => string; marks: Marks; spacing: number; readonly phase: string }

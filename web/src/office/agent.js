@@ -36,11 +36,31 @@ import * as THREE from 'three'
 import * as ANIM from './anim.js'
 import { highfiveMarks, spacingFor } from './highfive.js'
 import { argueMarks, spacingFor as argueSpacingFor, registry as ARGUE_CLIPS } from './clips/argue.js'
+import { handshakeMarks, spacingFor as handshakeSpacingFor, registry as HANDSHAKE_CLIPS } from './clips/handshake.js'
+import { shoveMarks, spacingFor as shoveSpacingFor, registry as SHOVE_CLIPS } from './clips/shove.js'
+import { yieldMarks, spacingFor as yieldSpacingFor, registry as YIELD_CLIPS } from './clips/yield.js'
+import { doubletakeMarks, spacingFor as doubletakeSpacingFor, registry as DOUBLETAKE_CLIPS } from './clips/doubletake.js'
+// Rung-2 "collaboration" beat family — alternates to highfive. See
+// clips/chestbump.js / clips/fistbump.js headers.
+import { chestbumpMarks, spacingFor as chestbumpSpacingFor, registry as CHESTBUMP_CLIPS } from './clips/chestbump.js'
+import { fistbumpMarks, spacingFor as fistbumpSpacingFor, registry as FISTBUMP_CLIPS } from './clips/fistbump.js'
+// Rung-3 "abort"/out-authoritied beat family — alternates to shove. See
+// clips/waveoff.js / clips/slap.js headers.
+import { waveoffMarks, spacingFor as waveoffSpacingFor, registry as WAVEOFF_CLIPS } from './clips/waveoff.js'
+import { slapMarks, spacingFor as slapSpacingFor, registry as SLAP_CLIPS } from './clips/slap.js'
 
-// Fold the contested-write pair's clips into anim.js's own table, once, at
-// import time — before any agent has crossfaded into anything and cached the
-// clip list. See anim.js's CLIPS export and clips/argue.js's own header.
+// Fold the paired-action clips into anim.js's own table, once, at import
+// time — before any agent has crossfaded into anything and cached the clip
+// list. See anim.js's CLIPS export and each clip module's own header.
 Object.assign(ANIM.CLIPS, ARGUE_CLIPS)
+Object.assign(ANIM.CLIPS, HANDSHAKE_CLIPS)
+Object.assign(ANIM.CLIPS, SHOVE_CLIPS)
+Object.assign(ANIM.CLIPS, YIELD_CLIPS)
+Object.assign(ANIM.CLIPS, DOUBLETAKE_CLIPS)
+Object.assign(ANIM.CLIPS, CHESTBUMP_CLIPS)
+Object.assign(ANIM.CLIPS, FISTBUMP_CLIPS)
+Object.assign(ANIM.CLIPS, WAVEOFF_CLIPS)
+Object.assign(ANIM.CLIPS, SLAP_CLIPS)
 
 export const YAW_OFFSET = Math.PI
 
@@ -81,6 +101,32 @@ const ACTS = {
   // 'argueReact' once World.contest() folds them into ANIM.CLIPS.
   arguing:    { clip: 'argue',      fade: 0.25 },
   reacting:   { clip: 'argueReact', fade: 0.25 },
+  // Resolution beats — the reel plays these once a rung-3 collision clears.
+  // Rung 3, decision "wait": the requester agreed to hold off. clips/handshake.js.
+  handshaking: { clip: 'handshake', fade: 0.20, oneShot: true, next: 'idle' },
+  // Rung 3, decision "abort": wait-die or a straight priority-tier win.
+  // clips/shove.js — `shoving` is the winner, `shoveReacting` the loser.
+  shoving:        { clip: 'shove',      fade: 0.18, oneShot: true, next: 'idle' },
+  shoveReacting:  { clip: 'shoveReact', fade: 0.18, oneShot: true, next: 'idle' },
+  // Rung 3 "abort" beat family, alternates to shoving/shoveReacting above:
+  // same asymmetric a-wins convention, different beats. clips/waveoff.js
+  // (no contact, all contempt) / clips/slap.js (cartoon wind-up and hit).
+  wavingOff:       { clip: 'waveoff',      fade: 0.20, oneShot: true, next: 'idle' },
+  waveoffReacting: { clip: 'waveoffReact', fade: 0.20, oneShot: true, next: 'idle' },
+  slapping:        { clip: 'slap',         fade: 0.14, oneShot: true, next: 'idle' },
+  slapReacting:    { clip: 'slapReact',    fade: 0.14, oneShot: true, next: 'idle' },
+  // Rung 1: the reader notices the editor is already in there and steps
+  // back. clips/yield.js — `yielding` is the reader, `keeping` the editor.
+  yielding: { clip: 'yieldStep', fade: 0.18, oneShot: true, next: 'idle' },
+  keeping:  { clip: 'yieldKeep', fade: 0.18, oneShot: true, next: 'idle' },
+  // Rung 4: redundant work caught by similarity — same beat both sides,
+  // mirrored. clips/doubletake.js.
+  doubletaking: { clip: 'doubletake', fade: 0.16, oneShot: true, next: 'idle' },
+  // Rung 2 collaboration beat family, alternates to highfiving above: both
+  // sides play the same clip, same "facing each other is the mirror" trick.
+  // clips/chestbump.js (bigger, weightier) / clips/fistbump.js (understated).
+  chestbumping: { clip: 'chestbump', fade: 0.20, oneShot: true, next: 'idle' },
+  fistbumping:  { clip: 'fistbump',  fade: 0.16, oneShot: true, next: 'idle' },
 }
 export const ACTIVITIES = Object.keys(ACTS)
 
@@ -91,6 +137,11 @@ const ACT_OF_CLIP = {
   idle: 'idle', walk: 'walking', sit: 'sitting', type: 'typing',
   read: 'reading', sleep: 'sleeping', drink: 'drinking', wave: 'waving',
   highfive: 'highfiving', argue: 'arguing', argueReact: 'reacting',
+  handshake: 'handshaking', shove: 'shoving', shoveReact: 'shoveReacting',
+  yieldStep: 'yielding', yieldKeep: 'keeping', doubletake: 'doubletaking',
+  chestbump: 'chestbumping', fistbump: 'fistbumping',
+  waveoff: 'wavingOff', waveoffReact: 'waveoffReacting',
+  slap: 'slapping', slapReact: 'slapReacting',
 }
 
 const DOING = {
@@ -98,6 +149,10 @@ const DOING = {
   standing: 'getting up', typing: 'typing', sleeping: 'asleep at the desk',
   reading: 'reading', drinking: 'on a break', waving: 'waving',
   highfiving: 'high fiving', arguing: 'arguing over it', reacting: 'not having it',
+  handshaking: 'shaking on it', shoving: 'pulling rank', shoveReacting: 'shoved aside',
+  yielding: 'stepping back', keeping: 'keeping at it', doubletaking: 'wait, you too?',
+  wavingOff: 'waving them off', waveoffReacting: 'brushed off',
+  slapping: 'making a point', slapReacting: 'seeing stars',
 }
 
 const TONE = {
@@ -573,6 +628,89 @@ export class Agent {
 export function createAgent(opts) { return new Agent(opts) }
 
 // ---------------------------------------------------------------------------
+// World.replay()'s stage tables — see the method's own doc for why this
+// exists as a second, additive path rather than a rewrite of contest() /
+// shove() / etc. Those methods and their standalone kind dispatch in #step
+// are untouched; a chained encounter is flagged (e.isChain) and takes the
+// branches added above instead.
+// ---------------------------------------------------------------------------
+
+/** Marks (standing spots) for each stage kind a replay chain can pass
+ *  through. Purely spatial — see highfiveMarks: the marks straddle the
+ *  midpoint of the pair's CURRENT positions, so which side ends up on
+ *  marks.a vs marks.b has no winner/loser meaning by itself. That meaning
+ *  comes entirely from each stage's own start() below. */
+const STAGE_MARKS = {
+  // The argue-like standoff every rung-3 replay opens on, before it
+  // resolves. Reuses argue's own spacing — a beat, not the final contact.
+  clash:      (pa, pb, h) => argueMarks(pa, pb, argueSpacingFor(h)),
+  // The rung-1/4 pre-beat pause — same idea, same spacing, just no clip of
+  // its own (see REPLAY_CHAINS).
+  notice:     (pa, pb, h) => argueMarks(pa, pb, argueSpacingFor(h)),
+  handshake:  (pa, pb, h) => handshakeMarks(pa, pb, handshakeSpacingFor(h)),
+  shove:      (pa, pb, h) => shoveMarks(pa, pb, shoveSpacingFor(h)),
+  highfive:   (pa, pb, h) => highfiveMarks(pa, pb, spacingFor(h)),
+  yield:      (pa, pb, h) => yieldMarks(pa, pb, yieldSpacingFor(h)),
+  doubletake: (pa, pb, h) => doubletakeMarks(pa, pb, doubletakeSpacingFor(h)),
+  chestbump:  (pa, pb, h) => chestbumpMarks(pa, pb, chestbumpSpacingFor(h)),
+  fistbump:   (pa, pb, h) => fistbumpMarks(pa, pb, fistbumpSpacingFor(h)),
+  waveoff:    (pa, pb, h) => waveoffMarks(pa, pb, waveoffSpacingFor(h)),
+  slap:       (pa, pb, h) => slapMarks(pa, pb, slapSpacingFor(h)),
+}
+
+/**
+ * kind -> (a, b) -> stage list. Each stage is
+ *   { kind, clipName: string|null, holdSec: number|null, start(): void }
+ * `clipName` set means the stage ends on that clip's own length (like a
+ * plain encounter); `clipName` null means it ends after `holdSec` instead
+ * (the clash standoff and the notice pause have no natural end of their
+ * own — a real rung-3 collision loops until resolveContest() says so, but
+ * a replay isn't live, so a timed window standing in for "however long the
+ * standoff read" is deliberate here, ~1.5-2s per the brief).
+ */
+const REPLAY_CHAINS = {
+  // Rung 3, decision "wait": the standoff, then the requester agrees to
+  // hold off — no animosity, so it resolves into a handshake.
+  wait: (a, b) => [
+    { kind: 'clash', clipName: null, holdSec: 1.75,
+      start: () => { a.act('arguing'); b.act('reacting') } },
+    { kind: 'handshake', clipName: 'handshake', holdSec: null,
+      start: () => { a.act('handshaking'); b.act('handshaking') } },
+  ],
+  // Rung 3, decision "abort": the same standoff, but `b` (who prevails)
+  // shoves `a` (who stood down) out of the way. The act assignment is the
+  // deliberate mirror of shove()'s own a=winner convention — see replay()'s
+  // doc comment.
+  abort: (a, b) => [
+    { kind: 'clash', clipName: null, holdSec: 1.75,
+      start: () => { a.act('arguing'); b.act('reacting') } },
+    { kind: 'shove', clipName: 'shove', holdSec: null,
+      start: () => { b.act('shoving'); a.act('shoveReacting') } },
+  ],
+  // Rung 2: no real clash to stage first — highfive() already IS "a brief
+  // mutual approach, then contact" via its own approach/settle phases. One
+  // stage is the whole beat.
+  share: (a, b) => [
+    { kind: 'highfive', clipName: 'highfive', holdSec: null,
+      start: () => { a.act('highfiving'); b.act('highfiving') } },
+  ],
+  // Rung 1: a short held beat of both just having arrived and noticing each
+  // other, before the reader (a) steps back.
+  'read-yield': (a, b) => [
+    { kind: 'notice', clipName: null, holdSec: 0.5, start: () => {} },
+    { kind: 'yield', clipName: 'yieldStep', holdSec: null,
+      start: () => { a.act('yielding'); b.act('keeping') } },
+  ],
+  // Rung 4: same shape as read-yield — a beat of "...wait, is that the same
+  // change?" before the doubletake.
+  redundant: (a, b) => [
+    { kind: 'notice', clipName: null, holdSec: 0.5, start: () => {} },
+    { kind: 'doubletake', clipName: 'doubletake', holdSec: null,
+      start: () => { a.act('doubletaking'); b.act('doubletaking') } },
+  ],
+}
+
+// ---------------------------------------------------------------------------
 // World: owns the agents, runs paired actions.
 // ---------------------------------------------------------------------------
 
@@ -652,6 +790,83 @@ export class World {
   }
 
   /**
+   * Rung-2 collaboration beat, alternate take to highfive() — same contract,
+   * same (a, b) signature, same "both play the SAME clip, facing each other
+   * is already the mirror" trick. See clips/chestbump.js.
+   */
+  chestbump(a, b) {
+    if (!a || !b || a === b || a.busy || b.busy) return null
+    const height = (a.height + b.height) / 2
+    const marks = chestbumpMarks(
+      new THREE.Vector3(a.pos.x, 0, a.pos.z),
+      new THREE.Vector3(b.pos.x, 0, b.pos.z),
+      chestbumpSpacingFor(height))
+    const ax = marks.a.pos.x, az = marks.a.pos.z
+    const bx = marks.b.pos.x, bz = marks.b.pos.z
+
+    a.busy = b.busy = true
+    a.lastGreet = b.lastGreet = this.time
+    a.goTo(ax, az, { yaw: yawToward(ax, az, bx, bz), label: 'meeting ' + b.name })
+    b.goTo(bx, bz, { yaw: yawToward(bx, bz, ax, az), label: 'meeting ' + a.name })
+
+    const e = { a, b, kind: 'chestbump', phase: 'approach', t: 0, marks: { a:[ax, az], b:[bx, bz] } }
+    this.encounters.push(e)
+    return e
+  }
+
+  /**
+   * Rung-2 collaboration beat, understated alternate to highfive()/
+   * chestbump(). Same contract. See clips/fistbump.js.
+   */
+  fistbump(a, b) {
+    if (!a || !b || a === b || a.busy || b.busy) return null
+    const height = (a.height + b.height) / 2
+    const marks = fistbumpMarks(
+      new THREE.Vector3(a.pos.x, 0, a.pos.z),
+      new THREE.Vector3(b.pos.x, 0, b.pos.z),
+      fistbumpSpacingFor(height))
+    const ax = marks.a.pos.x, az = marks.a.pos.z
+    const bx = marks.b.pos.x, bz = marks.b.pos.z
+
+    a.busy = b.busy = true
+    a.lastGreet = b.lastGreet = this.time
+    a.goTo(ax, az, { yaw: yawToward(ax, az, bx, bz), label: 'meeting ' + b.name })
+    b.goTo(bx, bz, { yaw: yawToward(bx, bz, ax, az), label: 'meeting ' + a.name })
+
+    const e = { a, b, kind: 'fistbump', phase: 'approach', t: 0, marks: { a:[ax, az], b:[bx, bz] } }
+    this.encounters.push(e)
+    return e
+  }
+
+  /**
+   * The rung-3 "wait" resolution beat: the requester agreed to hold off, no
+   * animosity, so it's a handshake — a plain office "you go ahead". Same
+   * shape as highfive() exactly (same-frame same-clip pair, marks from
+   * clips/handshake.js's own spacing), just a different clip and a different
+   * ACTS entry. See clips/handshake.js for why this reuses highfive's
+   * "both play the SAME clip, facing each other is already the mirror" trick.
+   */
+  handshake(a, b) {
+    if (!a || !b || a === b || a.busy || b.busy) return null
+    const height = (a.height + b.height) / 2
+    const marks = handshakeMarks(
+      new THREE.Vector3(a.pos.x, 0, a.pos.z),
+      new THREE.Vector3(b.pos.x, 0, b.pos.z),
+      handshakeSpacingFor(height))
+    const ax = marks.a.pos.x, az = marks.a.pos.z
+    const bx = marks.b.pos.x, bz = marks.b.pos.z
+
+    a.busy = b.busy = true
+    a.lastGreet = b.lastGreet = this.time
+    a.goTo(ax, az, { yaw: yawToward(ax, az, bx, bz), label: 'settling with ' + b.name })
+    b.goTo(bx, bz, { yaw: yawToward(bx, bz, ax, az), label: 'settling with ' + a.name })
+
+    const e = { a, b, kind: 'handshake', phase: 'approach', t: 0, marks: { a:[ax, az], b:[bx, bz] } }
+    this.encounters.push(e)
+    return e
+  }
+
+  /**
    * Walk two agents onto the argue marks (clips/argue.js's spacing, same
    * geometry idea as highfive's) and start the contested-write pair: `a`
    * points, `b` throws its hands up. Unlike highfive() this has no natural
@@ -678,11 +893,205 @@ export class World {
     return e
   }
 
+  /**
+   * The rung-3 "abort" resolution beat: `a` out-authoritied `b` — wait-die
+   * aborted the younger transaction, or a straight priority-tier win — and
+   * `a` makes sure `b` knows it. Asymmetric like contest(), but this one has
+   * a natural end: it plays out once and is done, same as highfive(). `a` is
+   * always the winner.
+   */
+  shove(a, b) {
+    if (!a || !b || a === b || a.busy || b.busy) return null
+    const height = (a.height + b.height) / 2
+    const marks = shoveMarks(
+      new THREE.Vector3(a.pos.x, 0, a.pos.z),
+      new THREE.Vector3(b.pos.x, 0, b.pos.z),
+      shoveSpacingFor(height))
+    const ax = marks.a.pos.x, az = marks.a.pos.z
+    const bx = marks.b.pos.x, bz = marks.b.pos.z
+
+    a.busy = b.busy = true
+    a.goTo(ax, az, { yaw: yawToward(ax, az, bx, bz), label: 'pulling rank on ' + b.name })
+    b.goTo(bx, bz, { yaw: yawToward(bx, bz, ax, az), label: 'shoved by ' + a.name })
+
+    const e = { a, b, kind: 'shove', phase: 'approach', t: 0, marks: { a:[ax, az], b:[bx, bz] } }
+    this.encounters.push(e)
+    return e
+  }
+
+  /**
+   * The rung-3 "abort" beat, alternate to shove(): `a` still always wins,
+   * same convention, but spends nothing on it — a slow, barely-turned
+   * back-of-hand wave instead of a push. No contact, all contempt. See
+   * clips/waveoff.js.
+   */
+  waveoff(a, b) {
+    if (!a || !b || a === b || a.busy || b.busy) return null
+    const height = (a.height + b.height) / 2
+    const marks = waveoffMarks(
+      new THREE.Vector3(a.pos.x, 0, a.pos.z),
+      new THREE.Vector3(b.pos.x, 0, b.pos.z),
+      waveoffSpacingFor(height))
+    const ax = marks.a.pos.x, az = marks.a.pos.z
+    const bx = marks.b.pos.x, bz = marks.b.pos.z
+
+    a.busy = b.busy = true
+    a.goTo(ax, az, { yaw: yawToward(ax, az, bx, bz), label: 'waving off ' + b.name })
+    b.goTo(bx, bz, { yaw: yawToward(bx, bz, ax, az), label: 'waved off by ' + a.name })
+
+    const e = { a, b, kind: 'waveoff', phase: 'approach', t: 0, marks: { a:[ax, az], b:[bx, bz] } }
+    this.encounters.push(e)
+    return e
+  }
+
+  /**
+   * The rung-3 "abort" beat, alternate to shove(): `a` still always wins,
+   * same convention, but this one is the cartoon version — big wind-up,
+   * fast contact. See clips/slap.js.
+   */
+  slap(a, b) {
+    if (!a || !b || a === b || a.busy || b.busy) return null
+    const height = (a.height + b.height) / 2
+    const marks = slapMarks(
+      new THREE.Vector3(a.pos.x, 0, a.pos.z),
+      new THREE.Vector3(b.pos.x, 0, b.pos.z),
+      slapSpacingFor(height))
+    const ax = marks.a.pos.x, az = marks.a.pos.z
+    const bx = marks.b.pos.x, bz = marks.b.pos.z
+
+    a.busy = b.busy = true
+    a.goTo(ax, az, { yaw: yawToward(ax, az, bx, bz), label: 'settling it with ' + b.name })
+    b.goTo(bx, bz, { yaw: yawToward(bx, bz, ax, az), label: 'slapped by ' + a.name })
+
+    const e = { a, b, kind: 'slap', phase: 'approach', t: 0, marks: { a:[ax, az], b:[bx, bz] } }
+    this.encounters.push(e)
+    return e
+  }
+
+  /**
+   * The rung-1 beat: `a` is the reader, noticing `b` (the editor) is
+   * already in there, and gets out of the way. Asymmetric like shove() —
+   * two different clips, phase-matched — but there's no winner/loser
+   * framing here, just a reader standing down. See clips/yield.js.
+   */
+  yield(a, b) {
+    if (!a || !b || a === b || a.busy || b.busy) return null
+    const height = (a.height + b.height) / 2
+    const marks = yieldMarks(
+      new THREE.Vector3(a.pos.x, 0, a.pos.z),
+      new THREE.Vector3(b.pos.x, 0, b.pos.z),
+      yieldSpacingFor(height))
+    const ax = marks.a.pos.x, az = marks.a.pos.z
+    const bx = marks.b.pos.x, bz = marks.b.pos.z
+
+    a.busy = b.busy = true
+    a.goTo(ax, az, { yaw: yawToward(ax, az, bx, bz), label: 'yielding to ' + b.name })
+    b.goTo(bx, bz, { yaw: yawToward(bx, bz, ax, az), label: 'keeping the file' })
+
+    const e = { a, b, kind: 'yield', phase: 'approach', t: 0, marks: { a:[ax, az], b:[bx, bz] } }
+    this.encounters.push(e)
+    return e
+  }
+
+  /**
+   * The rung-4 beat: `a` and `b` discover they duplicated each other's
+   * work. Symmetric, same shape as highfive()/handshake() — same clip,
+   * mirrored by facing. See clips/doubletake.js.
+   */
+  doubletake(a, b) {
+    if (!a || !b || a === b || a.busy || b.busy) return null
+    const height = (a.height + b.height) / 2
+    const marks = doubletakeMarks(
+      new THREE.Vector3(a.pos.x, 0, a.pos.z),
+      new THREE.Vector3(b.pos.x, 0, b.pos.z),
+      doubletakeSpacingFor(height))
+    const ax = marks.a.pos.x, az = marks.a.pos.z
+    const bx = marks.b.pos.x, bz = marks.b.pos.z
+
+    a.busy = b.busy = true
+    a.lastGreet = b.lastGreet = this.time
+    a.goTo(ax, az, { yaw: yawToward(ax, az, bx, bz), label: 'noticing ' + b.name })
+    b.goTo(bx, bz, { yaw: yawToward(bx, bz, ax, az), label: 'noticing ' + a.name })
+
+    const e = { a, b, kind: 'doubletake', phase: 'approach', t: 0, marks: { a:[ax, az], b:[bx, bz] } }
+    this.encounters.push(e)
+    return e
+  }
+
   /** End a contest before it would end on its own — the region freed up, or
    *  one side went quiet. No-op on anything else (already done, or a plain
    *  highfive, which resolves itself). */
   resolveContest(e) {
     if (e && e.kind === 'contest' && e.phase !== 'done') this.#end(e)
+  }
+
+  /**
+   * The reel's "two-act" playback: the clash, THEN the beat that actually
+   * resolved it — per the feature brief, replay is not supposed to jump
+   * straight to the resolution. Chains multiple stages through the SAME
+   * approach -> settle -> active phase machine every other paired action
+   * already runs on (see #step) rather than inventing a second one: each
+   * stage just re-settles the pair onto its own marks and plays its own
+   * act(s), then either advances to the next stage or ends exactly like a
+   * plain encounter does.
+   *
+   * `a`/`b` follow the reel's own convention throughout (see reel.d.ts /
+   * live.js's toReelEvent) — `a` is the one who stands down, `b` is the one
+   * who prevails — NOT shove()'s standalone convention where the first
+   * argument always wins. `kind` is a resolution kind straight off a reel
+   * event (`wait` | `abort` | `share` | `read-yield` | `redundant`).
+   *
+   * Returns the encounter (so the caller can, e.g., frame a camera on it
+   * and watch for `phase === 'done'`), or null if either side is busy, the
+   * pair is degenerate, or `kind` has no chain.
+   */
+  replay(a, b, kind) {
+    if (!a || !b || a === b || a.busy || b.busy) return null
+    const build = REPLAY_CHAINS[kind]
+    if (!build) return null
+    return this.#startChain(a, b, build(a, b))
+  }
+
+  #startChain(a, b, stages) {
+    const [stage, ...rest] = stages
+    const height = (a.height + b.height) / 2
+    const marks = STAGE_MARKS[stage.kind](
+      new THREE.Vector3(a.pos.x, 0, a.pos.z),
+      new THREE.Vector3(b.pos.x, 0, b.pos.z), height)
+    const ax = marks.a.pos.x, az = marks.a.pos.z
+    const bx = marks.b.pos.x, bz = marks.b.pos.z
+
+    a.busy = b.busy = true
+    a.lastGreet = b.lastGreet = this.time
+    a.goTo(ax, az, { yaw: yawToward(ax, az, bx, bz), label: 'replaying with ' + b.name })
+    b.goTo(bx, bz, { yaw: yawToward(bx, bz, ax, az), label: 'replaying with ' + a.name })
+
+    const e = {
+      a, b, kind: stage.kind, phase: 'approach', t: 0,
+      marks: { a: [ax, az], b: [bx, bz] },
+      isChain: true, stage, chain: rest,
+    }
+    this.encounters.push(e)
+    return e
+  }
+
+  /** Advance a chained encounter to its next stage in place — no new
+   *  approach, just a quick re-settle onto the next stage's own marks
+   *  (reusing the 'settle' tween below), because the pair is already
+   *  standing close together from the stage that just finished. */
+  #advanceChain(e) {
+    const [stage, ...rest] = e.chain
+    e.stage = stage
+    e.kind = stage.kind
+    e.chain = rest
+    const height = (e.a.height + e.b.height) / 2
+    const marks = STAGE_MARKS[stage.kind](
+      new THREE.Vector3(e.a.pos.x, 0, e.a.pos.z),
+      new THREE.Vector3(e.b.pos.x, 0, e.b.pos.z), height)
+    e.marks = { a: [marks.a.pos.x, marks.a.pos.z], b: [marks.b.pos.x, marks.b.pos.z] }
+    e.from = { a: [e.a.pos.x, e.a.pos.z], b: [e.b.pos.x, e.b.pos.z] }
+    e.phase = 'settle'
+    e.t = 0
   }
 
   #step(e, dt) {
@@ -708,24 +1117,81 @@ export class World {
       }
       if (k >= 1) {
         e.phase = 'active'; e.t = 0
-        if (e.kind === 'contest') {
+        if (e.isChain) {
+          // A replay() stage owns its own act() calls (see REPLAY_CHAINS) —
+          // the role a given side plays (winner/loser, reader/editor) can
+          // differ from what the same kind means standalone, so this does
+          // not fall through to the kind-based dispatch below.
+          e.stage.start()
+        } else if (e.kind === 'contest') {
           // Different bodies doing different things — one points, the other
           // throws its hands up — but started the same frame, the same sync
           // story highfive's SAME clip trick tells; see clips/argue.js.
           a.act('arguing')
           b.act('reacting')
+        } else if (e.kind === 'shove') {
+          // Asymmetric like contest — the winner shoves, the loser eats it —
+          // but this one has a fixed length; see clips/shove.js.
+          a.act('shoving')
+          b.act('shoveReacting')
+        } else if (e.kind === 'waveoff') {
+          // Same abort-family shape as shove — `a` always wins — different
+          // beat; see clips/waveoff.js.
+          a.act('wavingOff')
+          b.act('waveoffReacting')
+        } else if (e.kind === 'slap') {
+          // Same abort-family shape as shove — `a` always wins — different
+          // beat; see clips/slap.js.
+          a.act('slapping')
+          b.act('slapReacting')
+        } else if (e.kind === 'yield') {
+          // Asymmetric like shove — reader and editor play different
+          // clips — but neither one "wins"; see clips/yield.js.
+          a.act('yielding')
+          b.act('keeping')
         } else {
-          // Same frame, same fade, both from time zero, both the SAME clip —
-          // facing each other is already the mirror. That is the whole sync
-          // story; see highfive.js.
-          a.act('highfiving')
-          b.act('highfiving')
+          // highfive, handshake, doubletake, chestbump, fistbump: same
+          // frame, same fade, both from time zero, both the SAME clip —
+          // facing each other is already the mirror. That is the whole
+          // sync story; see highfive.js.
+          const sameClipAct = {
+            handshake: 'handshaking', doubletake: 'doubletaking',
+            chestbump: 'chestbumping', fistbump: 'fistbumping',
+          }[e.kind] || 'highfiving'
+          a.act(sameClipAct)
+          b.act(sameClipAct)
         }
       }
     } else if (e.phase === 'active') {
+      if (e.isChain) {
+        // A stage with a clipName ends on its own clip's length, same as
+        // the plain encounters below; a stage without one (the argue-like
+        // clash, or the rung-1/4 "notice" beat) has no natural end and
+        // holds for its own timed window instead. Either way, once the
+        // current stage is done there's either another stage to re-settle
+        // onto (#advanceChain) or the whole replay ends like any encounter.
+        const stage = e.stage
+        const done = stage.clipName
+          ? e.t >= ANIM.getClip(stage.clipName).duration + 0.2
+          : e.t >= stage.holdSec
+        if (done) {
+          if (e.chain.length) this.#advanceChain(e)
+          else return this.#end(e)
+        }
+        return
+      }
       // A contest has no clip-length end: it lasts until resolveContest()
-      // says the region is free.
-      if (e.kind === 'highfive' && e.t >= ANIM.getClip('highfive').duration + 0.2) {
+      // says the region is free. Everything else (highfive, handshake,
+      // shove, yield, doubletake, chestbump, fistbump, waveoff, slap) plays
+      // out once and ends on its own clip's length.
+      const CLIP_OF_KIND = {
+        highfive: 'highfive', handshake: 'handshake', shove: 'shove',
+        yield: 'yieldStep', doubletake: 'doubletake',
+        chestbump: 'chestbump', fistbump: 'fistbump',
+        waveoff: 'waveoff', slap: 'slap',
+      }
+      const clipName = CLIP_OF_KIND[e.kind]
+      if (clipName && e.t >= ANIM.getClip(clipName).duration + 0.2) {
         return this.#end(e)
       }
     }

@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Versus card — split / strip / ticket / bout</title>
+<style>
+  /* Base page chrome only — no reel CSS here on purpose. Unlike
+     reel-skins-test.html, replay-card.js injects its own <style> the
+     first time createReplayCard() runs (see its ensureStyles()), so this
+     harness needs nothing copied from office.html to render correctly —
+     that's the whole point of keeping the card's CSS inside its own
+     module instead of office.html's block. If a card variant looks
+     different here than in office.html, that's a real bug, not a
+     stale-copy drift the way the old reel-skins split used to risk. */
+  html,body{margin:0;min-height:100%;
+    font:14px/1.5 ui-sans-serif,-apple-system,Segoe UI,sans-serif;color:#F3F5F8;
+    background:
+      radial-gradient(circle at 15% 20%, #E8946C33, transparent 40%),
+      radial-gradient(circle at 80% 10%, #A5738C33, transparent 45%),
+      radial-gradient(circle at 60% 80%, #5C8C7433, transparent 40%),
+      #1B2430}
+  #note{max-width:1040px;margin:0 auto;padding:22px 20px 6px}
+  #note h1{font-size:16px;margin:0 0 6px}
+  #note p{margin:0 0 8px;font-size:12.5px;color:#C7D0DC}
+  #note code{background:#0006;padding:1px 5px;border-radius:4px}
+  #grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));
+    gap:16px;padding:14px 20px 60px;max-width:1040px;margin:0 auto}
+  .cell{position:relative;height:220px;border:1px dashed #FFFFFF22;border-radius:10px;
+    background:#00000030;overflow:hidden;display:flex;flex-direction:column}
+  .cell h2{margin:0;font-size:11px;letter-spacing:.06em;text-transform:uppercase;
+    color:#C7D0DC;font-family:ui-monospace,monospace;padding:10px 12px 0}
+  .cell .stage{position:relative;flex:1;min-height:0}
+  /* The card itself is `position:fixed` in production (it floats over the
+     whole viewport, bottom-center) — pinning each stage to
+     position:relative/overflow:hidden and forcing the card's `left`/
+     `bottom` with an inline override below is what lets four independent
+     instances sit side by side in a grid instead of all stacking on the
+     real viewport's bottom-center at once. */
+  .stage .rcard{position:absolute !important;left:50% !important;
+    bottom:16px !important;transform:translateX(-50%) translateY(14px) !important}
+  .stage .rcard.on{transform:translateX(-50%) translateY(0) !important}
+  .row{display:flex;gap:6px;padding:8px 12px;flex-wrap:wrap}
+  button{font:600 10px ui-monospace,monospace;padding:5px 9px;border-radius:6px;
+    border:1px solid #ffffff33;background:#ffffff14;color:#F3F5F8;cursor:pointer;
+    text-transform:uppercase;letter-spacing:.02em}
+  button:hover{background:#ffffff22}
+</style>
+</head>
+<body>
+<div id="note">
+  <h1>versus card — four takes</h1>
+  <p>Mounts all four <code>?vcard=</code> variants side by side with fake
+  data. <code>show r3</code>/<code>show r0</code> swap the fixture between a
+  contested-abort caption and a co-location share caption, so a given
+  variant can be eyeballed with more than one badge color and label
+  length. <code>hide</code> exercises the ~300ms fade-out
+  (<code>replay-card.js</code>'s <code>EXIT_MS</code>) — click it, then
+  click a show button again mid-fade to see the cancel-pending-exit path
+  that <code>test/office-vcard.test.ts</code> covers at the logic level
+  but this harness is the only place that shows it landing on screen.</p>
+  <p>Browser-unverified as of this round — see STATE.md. In particular:
+  the <code>ticket</code> notch cutouts (css <code>mask-image</code>,
+  two radial-gradients) and the <code>bout</code> stamp's rotation/
+  clip-path corners are exactly the kind of thing that reads differently
+  on screen than in the source — check those two first.</p>
+</div>
+<div id="grid"></div>
+<script type="module">
+  import { createReplayCard } from './replay-card.js'
+
+  const FIXTURES = {
+    r3: { a: { human: 'sara', agent: 'agent-1' }, b: { human: 'dev', agent: 'agent-4' },
+          rung: 3, label: 'out-authoritied — aborted' },
+    r0: { a: { human: 'priya', agent: 'agent-2' }, b: { human: 'sara', agent: 'agent-1' },
+          rung: 0, label: 'split the work, no overlap' },
+    r2: { a: { human: 'dev', agent: 'agent-4' }, b: { human: 'priya', agent: 'agent-2' },
+          rung: 2, label: 'split the work, no overlap' },
+    long: { a: { human: 'a-very-long-human-name', agent: 'agent-with-a-long-id-7' },
+            b: { human: 'another-long-one', agent: 'agent-with-a-long-id-12' },
+            rung: 4, label: 'redundant work caught — same change, twice' },
+  }
+
+  const grid = document.getElementById('grid')
+  for (const variant of ['split', 'strip', 'ticket', 'bout']) {
+    const cell = document.createElement('div')
+    cell.className = 'cell'
+    cell.innerHTML = `
+      <h2>${variant}</h2>
+      <div class="stage"><div class="mount"></div></div>
+      <div class="row">
+        <button data-f="r3">show r3</button>
+        <button data-f="r0">show r0</button>
+        <button data-f="r2">show r2</button>
+        <button data-f="long">show long</button>
+        <button data-hide>hide</button>
+      </div>`
+    grid.appendChild(cell)
+    const mount = cell.querySelector('.mount')
+    const card = createReplayCard(mount, variant)
+    cell.querySelectorAll('[data-f]').forEach(btn => {
+      btn.addEventListener('click', () => card.show(FIXTURES[btn.dataset.f]))
+    })
+    cell.querySelector('[data-hide]').addEventListener('click', () => card.hide())
+    card.show(FIXTURES.r3)
+  }
+</script>
+</body>
+</html>

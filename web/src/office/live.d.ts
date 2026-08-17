@@ -14,6 +14,8 @@ export interface ConnectOptions {
   human: string
   url?: string
   onPresence?: (msg: unknown) => void
+  onDecision?: (msg: unknown) => void
+  onRedundant?: (msg: unknown) => void
   onOpen?: () => void
   onClose?: () => void
 }
@@ -21,6 +23,37 @@ export interface ConnectOptions {
 export function connect(opts: ConnectOptions): { close(): void }
 export function hairFor(human: string): number
 
+export const LIVE_ABORT_VARIANTS: string[]
+export function pickLiveVariant(
+  kind: 'wait' | 'abort',
+  winnerId: string,
+  loserId: string,
+): string | null
+
+// Mirrors reel.d.ts's ReelEvent shape. Duplicated by hand rather than
+// imported for the same reason live.js keeps its own copy of the hair
+// palette: office/*.js modules don't import each other's types across this
+// boundary, on purpose, so each stays independently buildable.
+export type ReelRung = 0 | 1 | 2 | 3 | 4
+export type ReelResolutionKind = 'wait' | 'abort' | 'share' | 'redundant' | 'read-yield'
+export interface ReelParty { agent: string; human: string }
+export interface ReelResolution { kind: ReelResolutionKind; detail?: string }
+export interface ReelEvent {
+  id: string
+  ts: number
+  rung: ReelRung
+  a: ReelParty
+  b: ReelParty
+  path: string
+  resolution: ReelResolution | null
+  source: 'live' | 'generated'
+}
+
+export function toReelEvent(
+  frame: unknown,
+  now?: number,
+  requester?: { agent: string; human: string } | null,
+): ReelEvent | null
 export interface Region {
   start: number
   end: number
@@ -47,12 +80,30 @@ export interface LiveDirectorOptions {
   zoneFor?: (verb: string, path: string) => string
 }
 
+export interface ContestResolution {
+  winnerId: string
+  loserId: string
+  kind: 'wait' | 'abort'
+}
+
+export interface ContestPair {
+  path: string
+  aId: string
+  bId: string
+}
+
 export class LiveDirector {
   constructor(opts?: LiveDirectorOptions)
+  // Exposed mainly for tests to assert on directly (see
+  // office-live-decisions.test.ts) — callers driving the scene should go
+  // through resolutionFor()/humanOf() rather than reading this map.
+  contestPairs: Map<string, ContestPair>
   onPresence(msg: Record<string, unknown>, now?: number): PresenceInfo
   expire(now?: number): string[]
   has(id: string): boolean
+  humanOf(id: string): string
   markContest(a: string, b: string): void
   clearContest(id: string): string | null
   contestPartner(id: string): string | null
+  resolutionFor(frame: unknown): ContestResolution | null
 }

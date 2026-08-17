@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fist bump — quick, understated</title>
+<style>
+  html,body{margin:0;height:100%;background:#F0ECE6;overflow:hidden;
+    font:14px/1.5 ui-sans-serif,-apple-system,Segoe UI,sans-serif;color:#35455C}
+  #c{display:block;width:100%;height:100%;cursor:grab}
+  #c:active{cursor:grabbing}
+  #hud{position:fixed;left:18px;top:16px;background:#fffdfaee;border:1px solid #C3B39B;
+    border-radius:10px;padding:12px 14px;max-width:340px;box-shadow:0 6px 24px #4a1f3d18}
+  #hud h1{font-size:15px;margin:0 0 3px;letter-spacing:-.01em}
+  #hud p{margin:0 0 10px;font-size:12px;color:#6b5f56}
+  .row{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;align-items:center}
+  button{font:inherit;font-size:12px;padding:5px 10px;border-radius:6px;
+    border:1px solid #C3B39B;background:#fff;color:#35455C;cursor:pointer}
+  button:hover{background:#E9E0CE}
+  button[aria-pressed="true"]{background:#35455C;color:#F0ECE6;border-color:#35455C}
+  input[type=range]{width:200px}
+  #tab{position:fixed;right:18px;top:16px;background:#fffdfaee;border:1px solid #C3B39B;
+    border-radius:10px;padding:10px 12px;font:12px/1.5 ui-monospace,monospace;
+    box-shadow:0 6px 24px #4a1f3d18;white-space:pre}
+  .ok{color:#3f7d4e;font-weight:700}
+  .bad{color:#D9714F;font-weight:700}
+  #now{position:fixed;left:50%;top:18px;transform:translateX(-50%);
+    font:600 15px ui-monospace,monospace;color:#4A1F3D;background:#fffdfacc;
+    padding:6px 18px;border-radius:8px}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="now">loading</div>
+<div id="hud">
+  <h1>Fist bump, paired marks</h1>
+  <p>No run-up. Both arrive at marks <span id="sp">…</span> apart, one crisp
+     reach to contact, a beat of hold, part. Same clip, both sides — facing
+     each other is already the mirror.</p>
+  <div class="row">
+    <button id="bRun">Run again</button>
+    <button id="bPlay">Play</button>
+    <button id="bMark" aria-pressed="false">Show marks</button>
+    <button id="bSlow" aria-pressed="false">Half speed</button>
+  </div>
+  <div class="row">
+    <label>t <input id="tScrub" type="range" min="0" max="1" step="0.005" value="0"></label>
+    <span id="tVal">0.000</span>
+  </div>
+  <div class="row">
+    <button id="bScrubMode" aria-pressed="false">Scrub mode</button>
+    <button id="bContact">Jump to contact</button>
+    <button id="bHoldEnd">Jump to hold end</button>
+  </div>
+</div>
+<div id="tab">loading…</div>
+
+<script type="importmap">
+{"imports":{"three":"../../../public/vendor/three.module.js","three/addons/":"../../../public/vendor/addons/"}}
+</script>
+<script type="module">
+import * as THREE from 'three'
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
+import { clone as skinnedClone } from 'three/addons/utils/SkeletonUtils.js'
+import * as ANIM from '../anim.js'
+import * as FB from './fistbump.js'
+
+const canvas = document.getElementById('c')
+const tabEl = document.getElementById('tab')
+const nowEl = document.getElementById('now')
+document.getElementById('sp').textContent = FB.FISTBUMP_SPACING.toFixed(3) + ' m'
+
+const renderer = new THREE.WebGLRenderer({ canvas, antialias:true, preserveDrawingBuffer:true })
+renderer.setPixelRatio(Math.min(devicePixelRatio,2))
+renderer.shadowMap.enabled = true
+renderer.shadowMap.type = THREE.PCFSoftShadowMap
+
+const scene = new THREE.Scene()
+scene.background = new THREE.Color(0xF0ECE6)
+const camera = new THREE.PerspectiveCamera(30, 1, 0.1, 200)
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.92))
+const key = new THREE.DirectionalLight(0xfff0d8, 2.0)
+key.position.set(6, 10, 8); key.castShadow = true
+key.shadow.mapSize.set(2048,2048)
+Object.assign(key.shadow.camera, { left:-6, right:6, top:6, bottom:-4, near:0.5, far:40 })
+scene.add(key)
+const fill = new THREE.DirectionalLight(0xd6e0f0, 0.5); fill.position.set(-7,5,-5); scene.add(fill)
+
+const floor = new THREE.Mesh(new THREE.BoxGeometry(20, 0.3, 16),
+  new THREE.MeshStandardMaterial({ color:0xE9E0CE, roughness:1 }))
+floor.position.y = -0.15; floor.receiveShadow = true; scene.add(floor)
+
+const CHAR_H = 1.68
+
+function place(src, pos, rotY) {
+  const o = skinnedClone(src)
+  o.updateMatrixWorld(true)
+  const box = new THREE.Box3().setFromObject(o)
+  const size = box.getSize(new THREE.Vector3())
+  const c = box.getCenter(new THREE.Vector3())
+  const s = CHAR_H / Math.max(size.y, 1e-4)
+  const g = new THREE.Group()
+  o.position.set(-c.x, -box.min.y, -c.z)
+  g.add(o); g.scale.setScalar(s)
+  g.position.copy(pos); g.rotation.y = rotY
+  o.traverse(n => { if (n.isMesh) { n.castShadow = true; n.receiveShadow = true } })
+  scene.add(g)
+  return { group:g, root:o, scale:s, height:CHAR_H }
+}
+
+let runSeed = 9
+function rnd() {
+  runSeed |= 0; runSeed = (runSeed + 0x6D2B79F5) | 0
+  let t = Math.imul(runSeed ^ (runSeed >>> 15), 1 | runSeed)
+  t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+}
+
+let src = null
+let a = null, b = null
+let marks = null
+const markDots = new THREE.Group(); markDots.visible = false; scene.add(markDots)
+let scrubMode = false
+
+function buildRun() {
+  if (a) { scene.remove(a.group); ANIM.dispose(a.root) }
+  if (b) { scene.remove(b.group); ANIM.dispose(b.root) }
+  markDots.clear()
+
+  const gap = 1.6 + rnd() * 2.4
+  const skew = (rnd() - 0.5) * 1.0
+  const aPos = new THREE.Vector3(-gap / 2, 0, skew)
+  const bPos = new THREE.Vector3( gap / 2, 0, -skew)
+  a = place(src, aPos, rnd() * 6.28)
+  b = place(src, bPos, rnd() * 6.28)
+  marks = FB.fistbumpMarks(a.group.position, b.group.position, FB.FISTBUMP_SPACING)
+
+  for (const m of [marks.a, marks.b]) {
+    const dot = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.16, 0.01, 24),
+      new THREE.MeshBasicMaterial({ color:0xD6B45C }))
+    dot.position.copy(m.pos); dot.position.y = 0.006
+    markDots.add(dot)
+  }
+
+  a.group.position.copy(marks.a.pos); a.group.rotation.y = marks.a.yaw
+  b.group.position.copy(marks.b.pos); b.group.rotation.y = marks.b.yaw
+  ANIM.crossfade(a.root, 'idle', 0)
+  ANIM.crossfade(b.root, 'idle', 0)
+  running = false
+  nowEl.textContent = 'parked on marks'
+  report()
+  window.__runReady = true
+}
+
+const loader = new GLTFLoader()
+loader.load('/glb/character.glb', gltf => {
+  src = gltf.scene
+  buildRun()
+  window.__ready = true
+}, undefined, e => { tabEl.textContent = 'load failed: ' + e })
+
+// ---- measurement ------------------------------------------------------------
+function measure() {
+  const pa = FB.palmPoint(a.root, 'Right', CHAR_H)
+  const pb = FB.palmPoint(b.root, 'Right', CHAR_H)
+  const ha = FB.handPoint(a.root, 'Right')
+  const hb = FB.handPoint(b.root, 'Right')
+  return { palm: pa.distanceTo(pb), hand: ha.distanceTo(hb) }
+}
+
+function toeMinAt(root) {
+  let m = Infinity
+  for (const n of ['LeftToeBase', 'RightToeBase']) {
+    const bone = root.getObjectByName(n)
+    if (!bone) continue
+    bone.updateWorldMatrix(true, false)
+    m = Math.min(m, new THREE.Vector3().setFromMatrixPosition(bone.matrixWorld).y)
+  }
+  return m
+}
+
+function currentT() {
+  const act = ANIM.getMixer(a.root).clipAction(FB.getClip())
+  return act.time / FB.getClip().duration
+}
+
+function report() {
+  if (!a || !b) return
+  const m = measure()
+  const t = currentT()
+  const nearContact = t >= FB.FISTBUMP_CONTACT_T - 0.03 && t <= FB.FISTBUMP_HOLD_END_T + 0.03
+  const cls = nearContact ? (m.palm < 0.05 ? 'ok' : 'bad') : ''
+  tabEl.innerHTML =
+    `t = ${t.toFixed(3)}\n` +
+    `palm gap  <span class="${cls}">${(m.palm*100).toFixed(1)} cm</span>\n` +
+    `wrist gap ${(m.hand*100).toFixed(1)} cm\n` +
+    `toe min   ${Math.min(toeMinAt(a.root), toeMinAt(b.root)).toFixed(4)} m`
+}
+
+// ---- assertions exposed for the browser harness ----------------------------
+window.__ANIM = ANIM
+window.__FB = FB
+window.__a = () => a
+window.__b = () => b
+window.__measure = () => measure()
+window.__toeMin = () => Math.min(toeMinAt(a.root), toeMinAt(b.root))
+
+window.__play = () => {
+  scrubMode = false; running = true
+  for (const c of [a, b]) {
+    ANIM.crossfade(c.root, 'idle', 0)
+    const act = ANIM.getMixer(c.root).clipAction(FB.getClip())
+    act.setLoop(THREE.LoopOnce, 1); act.clampWhenFinished = true; act.reset(); act.play()
+  }
+  nowEl.textContent = 'playing'
+}
+
+/** Park both on their marks with the fistbump action paused at time t01. */
+window.__setT = (t01) => {
+  scrubMode = true
+  for (const c of [a, b]) {
+    const mixer = ANIM.getMixer(c.root)
+    mixer.stopAllAction()
+    const act = mixer.clipAction(FB.getClip())
+    act.reset(); act.play(); act.paused = true
+    act.time = t01 * FB.getClip().duration
+    ANIM.update(c.root, 0)
+    c.root.updateMatrixWorld(true)
+  }
+  report()
+}
+
+window.__scanClip = (steps = 100) => {
+  const dur = FB.getClip().duration
+  const rows = []
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps
+    window.__setT(t)
+    const m = measure()
+    rows.push({ t: +t.toFixed(4), palm: +m.palm.toFixed(4), hand: +m.hand.toFixed(4), toe: +window.__toeMin().toFixed(4) })
+  }
+  return rows
+}
+
+window.__seamDelta = () => {
+  const spec = FB.registry.fistbump
+  const p0 = spec.fn(0), p1 = spec.fn(1)
+  let max = 0
+  for (const k in p0) {
+    const v0 = p0[k], v1 = p1[k]
+    if (!v1) continue
+    for (let i = 0; i < Math.max(v0.length, v1.length); i++)
+      max = Math.max(max, Math.abs((v0[i]||0) - (v1[i]||0)))
+  }
+  return max
+}
+
+window.__finiteCheck = () => {
+  const spec = FB.registry.fistbump
+  for (let i = 0; i < spec.keys; i++) {
+    const t = i / (spec.keys - 1)
+    const p = spec.fn(t)
+    for (const k in p) for (const v of p[k]) if (!Number.isFinite(v)) return { bad: true, t, k, v }
+  }
+  return { bad: false }
+}
+
+window.__measureContact = () => FB.measureContact()
+
+document.getElementById('bRun').onclick = () => buildRun()
+document.getElementById('bPlay').onclick = () => window.__play()
+document.getElementById('bMark').onclick = e => {
+  markDots.visible = !markDots.visible
+  e.target.setAttribute('aria-pressed', String(markDots.visible))
+}
+let slow = false
+document.getElementById('bSlow').onclick = e => { slow = !slow; e.target.setAttribute('aria-pressed', String(slow)) }
+document.getElementById('bScrubMode').onclick = e => {
+  scrubMode = !scrubMode
+  if (!scrubMode) window.__play()
+  e.target.setAttribute('aria-pressed', String(scrubMode))
+}
+function jumpTo(t) {
+  document.getElementById('tScrub').value = t
+  document.getElementById('tVal').textContent = t.toFixed(3)
+  window.__setT(t)
+  document.getElementById('bScrubMode').setAttribute('aria-pressed', 'true')
+}
+document.getElementById('bContact').onclick = () => jumpTo(FB.FISTBUMP_CONTACT_T)
+document.getElementById('bHoldEnd').onclick = () => jumpTo(FB.FISTBUMP_HOLD_END_T)
+document.getElementById('tScrub').oninput = e => {
+  const t = +e.target.value
+  document.getElementById('tVal').textContent = t.toFixed(3)
+  window.__setT(t)
+}
+
+// ---- run loop ---------------------------------------------------------------
+let running = false, clock = new THREE.Clock()
+function tick() {
+  resize()
+  const dt = clock.getDelta() * (slow ? 0.5 : 1)
+  if (a) ANIM.update(a.root, scrubMode ? 0 : dt)
+  if (b) ANIM.update(b.root, scrubMode ? 0 : dt)
+  if (a && !scrubMode) report()
+  const target = a && b
+    ? new THREE.Vector3().addVectors(a.group.position, b.group.position).multiplyScalar(0.5).setY(1.05)
+    : new THREE.Vector3(0, 0.9, 0)
+  if (a && b) {
+    const dir = new THREE.Vector3().subVectors(b.group.position, a.group.position).setY(0).normalize()
+    const side = new THREE.Vector3(-dir.z, 0, dir.x)
+    camera.position.set(target.x + side.x * 3.1, target.y + 0.75, target.z + side.z * 3.1)
+  } else {
+    camera.position.set(target.x + 2.6, target.y + 1.3, target.z + 3.4)
+  }
+  camera.lookAt(target)
+  renderer.render(scene, camera)
+  requestAnimationFrame(tick)
+}
+function resize() {
+  const w = canvas.clientWidth, h = canvas.clientHeight
+  if (canvas.width !== w || canvas.height !== h) {
+    renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix()
+  }
+}
+tick()
+window.__snap = () => { renderer.render(scene, camera); return canvas.toDataURL('image/jpeg', 0.92) }
+</script>
+</body>
+</html>
