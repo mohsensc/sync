@@ -207,12 +207,13 @@ jobs:
         # equal totals were only ever a proxy for it.
         run: |
           set -euo pipefail
-          find src test -name '*.ts' | sort > /tmp/ts-on-disk.txt
+          tmp=$(mktemp -d)
+          find src test -name '*.ts' | sort > "$tmp/on-disk"
           ./node_modules/.bin/tsc --noEmit --listFilesOnly |
-            grep -v node_modules | sed "s|^$PWD/||" | sort > /tmp/ts-checked.txt
-          echo "$(wc -l < /tmp/ts-checked.txt | tr -d ' ') files typechecked, \
-$(wc -l < /tmp/ts-on-disk.txt | tr -d ' ') project files on disk"
-          missing=$(comm -23 /tmp/ts-on-disk.txt /tmp/ts-checked.txt)
+            grep -v node_modules | sed "s|^$PWD/||" | sort > "$tmp/checked"
+          echo "$(wc -l < "$tmp/checked" | tr -d ' ') files typechecked, \
+$(wc -l < "$tmp/on-disk" | tr -d ' ') project files on disk"
+          missing=$(comm -23 "$tmp/on-disk" "$tmp/checked")
           [ -z "$missing" ] || {
             echo "error: tsc never read these; include globs are wrong:"
             echo "$missing"
