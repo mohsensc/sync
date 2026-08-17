@@ -156,7 +156,13 @@ jobs:
       # The repo's lockfile is pnpm-lock.yaml, so `npm ci` has nothing to read.
       - uses: pnpm/action-setup@v4
         with:
-          version: 9.15.4
+          # 10.x, not 9.15.4. web/pnpm-workspace.yaml (bce8319) is a pnpm 10
+          # file: it carries `allowBuilds: esbuild` and no `packages:` key,
+          # and pnpm 9 rejects a workspace file without one — "packages field
+          # missing or empty", before install does anything. So the pin was
+          # what made this job red, not the lockfile. 10.x reads both the
+          # workspace file and the lockfileVersion 9.0 lockfile unchanged.
+          version: 10.34.5
 
       - uses: actions/setup-node@v4
         with:
