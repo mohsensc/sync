@@ -5,7 +5,6 @@ requires-python = ">=3.12"
 dependencies = ["websockets>=13.0"]
 
 [project.scripts]
-agent-presence-relay = "agent_presence.serve:main"
 # Short on purpose. It gets typed mid-session, next to git.
 ap = "agent_presence.cli:main"
 
