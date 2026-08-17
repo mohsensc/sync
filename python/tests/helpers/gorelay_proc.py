@@ -6,9 +6,8 @@ This is the black-box parity harness docs/relay-parity.md and
 docs/languages.md's "dual-relay problem" section both name: the one that
 produced the 13/14 real-socket result and the golden-scenario diff, and
 that lived in a scratch dir instead of the repo. Checked in here so it
-runs in CI (see .github/workflows/ci.yml's python job) instead of
-depending on someone re-running it by hand before trusting a change to
-the relay.
+runs as part of scripts/ci-local.sh's python job instead of depending on
+someone re-running it by hand before trusting a change to the relay.
 
 Every test file that uses this swaps its `server`/`roster_server` fixture
 body for one that calls `start_gorelay()` — the test *functions* below
@@ -37,10 +36,11 @@ _GO_DIR = _REPO_ROOT / "go"
 
 def _find_or_build_gorelay() -> str:
     """Where the gorelay binary comes from, checked in the order an
-    operator (or CI) would expect: an explicit override, a release build
-    already sitting in go/bin, or a plain `go build` on demand — the same
-    fallback go/internal/relay's own integration test uses, so a bare
-    `pytest` needs nothing pre-built, only `go` on PATH.
+    operator (or ci-local.sh) would expect: an explicit override via the
+    AGENT_PRESENCE_GORELAY_BIN env var, a release build already sitting in
+    go/bin, or a plain `go build` on demand — the same fallback
+    go/internal/relay's own integration test uses, so a bare `pytest` needs
+    nothing pre-built, only `go` on PATH.
     """
     override = os.environ.get("AGENT_PRESENCE_GORELAY_BIN", "").strip()
     if override:

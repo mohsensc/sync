@@ -396,3 +396,71 @@ things it closed). Neither is issue #40, #47 or #48; neither blocks
 This machine was running other agents' work throughout, same caveat every
 prior load number in this file carries — read the relative shape, not the
 absolute ms.
+
+## 2026-08-17 — corrections from the ops/docs audit
+
+Everything above is what actually happened during the 2026-08-11 wave and
+stays as written. This section corrects the parts of the record that later
+became wrong, additively, rather than editing history in place.
+
+**CI is gone, permanently.** The "CI's Linux runner" and "CI scheduler"
+mentioned early in this file (in "Suites, run today") were real — a GitHub
+Actions workflow did exist and did catch that race on 2026-08-11. It doesn't
+any more: `.github/workflows/ci.yml` is deleted for good, out of GitHub
+Actions minutes and not going back (see `scripts/ci-local.sh`'s own header).
+Nothing left in this repo can reproduce "plus CI" the way that paragraph
+describes; `scripts/ci-local.sh` is what a PR gets checked against now.
+
+**The "Deleted, once nothing referenced it anymore" list is wrong about two
+entries.** It names `similarity.py` and `tools/tune_rung4.py` as deleted
+alongside `leases.py`/`wait_die.py`. Neither was: `python/src/agent_presence/similarity.py`
+exists today and is imported by `embedding_similarity.py`, `tools/tune_rung4.py`,
+`tools/bench_redundant_peer.py` and the test suite; `python/tools/tune_rung4.py`
+exists and is the offline corpus-scoring tool rung 4's threshold came from.
+What did leave with the Python relay is `similarity.go`'s Go port taking
+over the relay's own request path — `similarity.py` just isn't on it any
+more, which is a different claim than "deleted."
+
+**The suite-count summary (top of this file) and the later per-wave tables
+don't agree, and that's not a typo — they're counting two different trees.**
+The top table (`1094`/`856`/`77`/`36`) is this wave's numbers *before* the Go
+relay work below it deleted `python/tests/`'s Python-relay-only coverage; the
+later tables (`359`/`272`, then further down again after the MCP port) are
+*after*. Both were accurate for the tree they were measured against — the
+gap between them is the deletion itself, not drift. For where the numbers
+stand now:
+
+| suite | 2026-08-11 (top of this file) | today, 2026-08-17 |
+| --- | --- | --- |
+| `go test ./... -race -count=1` | 77 tests | 274 tests (measured by the audit) |
+| `python -m pytest` | 1094 passed | 380 passed, 1 skipped (measured by the audit) |
+| `ap_tests` (cpp) | 856 assertions / 43 cases | 855 assertions / 43 cases (re-run for this section, `cpp/build/ap_tests`) |
+| `pnpm test` (web, vitest) | 36 | 498 (measured by the audit) |
+
+The cpp count is one assertion lower than this file's own 2026-08-11 number,
+not the audit's — re-running the already-built `cpp/build/ap_tests` binary
+gets 855, and it's unclear from this file alone whether 856 was ever a typo
+or a real assertion added and later removed; not worth chasing further here.
+
+**`swarm50`'s "relay RSS after drain: 12.4 MiB" is corrected, not re-run
+here.** `tests/load/` was visibly in heavy use by other agents' sessions on
+this machine while this section was written (a full page of `.relay-*.log`
+files with today's timestamps in that directory), and `swarm50` binds
+several ports outside this task's assigned 9550-9559 range via
+`free_port()` — running it again risked colliding with, or muddying the
+results of, work already in flight, so this section relies on the audit's
+own measurement rather than a fresh one: three same-day runs at 34.0-34.7
+MiB, close to a freshly-started idle `gorelay`'s baseline. 12.4 MiB was
+reproducibly low by about 2.8x, almost exactly the gap between "idle" and
+"after actually draining 3000 grants." **Corrected value: ~34 MiB (the
+audit's measurement, not re-run for this section)**, dated 2026-08-17;
+re-run `tests/load/run.py swarm50` on a quiet machine to refresh it rather
+than trusting a number this old going forward.
+
+**Previously-undocumented env vars, now documented:** `AGENT_PRESENCE_PRINCIPALS`,
+`AGENT_PRESENCE_REPO_ROOT`, `AGENT_PRESENCE_RUNG4_THRESHOLD` and
+`AGENT_PRESENCE_LOG_LEVEL` are read by shipped code (`relaysrv`, `agent-presence-mcp`)
+and were documented nowhere; they're now listed in `docs/go-daemon.md` next
+to the vars `presenced` itself reads, with a note that they belong to other
+binaries. `AGENT_PRESENCE_GORELAY_BIN` is test-harness-only, documented in
+`python/tests/helpers/gorelay_proc.py`'s own docstring instead.

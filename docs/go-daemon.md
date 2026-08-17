@@ -25,8 +25,18 @@ rule as before.
 
 Tests: `cd go && go test ./... -race -count=1`. Cross-compiles with no cgo:
 `scripts/build-go-release.sh` builds linux/{amd64,arm64}, darwin/{amd64,arm64}
-and windows/amd64 from one machine, wired into CI on every PR and into
-`.github/workflows/release.yml` on a `v*` tag.
+and windows/amd64 from one machine — run by `scripts/ci-local.sh`'s go job
+before a PR, and by `.github/workflows/release.yml` on a `v*` tag.
+
+A handful of other `AGENT_PRESENCE_*` vars exist but aren't read by
+`presenced` itself, so they don't belong in the list above:
+`AGENT_PRESENCE_PRINCIPALS` (`relaysrv/principals.go`) overrides the roster
+file gorelay loads; `AGENT_PRESENCE_REPO_ROOT` (same file, plus `policy.py`/
+`cli.py` on the Python side) overrides where roster/policy discovery starts
+looking, instead of deriving it from the working directory;
+`AGENT_PRESENCE_RUNG4_THRESHOLD` (`relaysrv/similarity.go`) overrides rung
+4's default 0.82 score cutoff; `AGENT_PRESENCE_LOG_LEVEL` sets
+`agent-presence-mcp`'s log verbosity (default `INFO`).
 
 ## What's here
 

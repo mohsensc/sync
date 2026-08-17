@@ -22,7 +22,7 @@ call at a time so both eat the same thermal drift and background load, at
 idle and under 16 threads hammering the event socket the way
 `tests/load/scenarios.py`'s `storm()` does.
 
-Neither file is wired into the build, CI, or `install.sh`.
+Neither file is wired into the build, `scripts/ci-local.sh`, or `install.sh`.
 
 ## Conditions
 

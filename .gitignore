@@ -11,4 +11,5 @@ scratchpad/
 shots/
 spike/gohook/gohook
 go/bin/
+*.exe
 spike/relay/goprototype/gorelayd

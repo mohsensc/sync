@@ -15,8 +15,14 @@ unix-socket protocol between the two is unchanged.
 
 ```
 cmake -S cpp -B cpp/build && cmake --build cpp/build   # once, builds ap-hook
+cd python && python3 -m venv .venv && .venv/bin/pip install -e '.[dev]' && cd ..
 python/.venv/bin/python tests/load/run.py --all
 ```
+
+The venv step is only there for `websockets` (`scenarios.py`'s only
+non-stdlib import) — any interpreter that already has it on its path works
+too, including `.ci-local/venv312/bin/python` if `scripts/ci-local.sh`'s
+python job has already been run.
 
 `run.py` builds `presenced` itself on every run (`go build` is fast enough not
 to bother tracking staleness by hand) — nothing to do on the Go side first.
@@ -60,9 +66,10 @@ It compiles itself into `tests/load/build/` on first run. `cpp/CMakeLists.txt`
 is the product's and the harness has no business editing it. `presenced`
 (the Go binary) lands in the same directory, built fresh by `run.py`.
 
-`_relay_boot.py` starts the shipped relay with `LEASE_TTL_S` optionally patched.
-Nothing else about the relay is changed, and with `AP_LOAD_LEASE_TTL_S` unset it
-runs exactly as installed. Scenarios that watch a lease expire need it: 90
+`_lib.py`'s `RelayProc` builds and spawns `gorelay` directly (#40 — it's the
+only relay now, so there's no boot shim picking between two). `AP_LOAD_LEASE_TTL_S`
+is gorelay's own env var (`leases.go`), unset by default, in which case it
+runs exactly as installed. Scenarios that watch a lease expire set it: 90
 seconds per lease is not a thing you can churn.
 
 `hook_payload`'s compact JSON is still load-bearing: `hook/hook.cpp`'s own

@@ -1,27 +1,29 @@
 #!/usr/bin/env bash
-# Run .github/workflows/ci.yml locally, step for step, in the same order.
+# The test suite. Run this before finalising a pull request.
 #
-# Why: GitHub Actions minutes ran out. Without this the only way to know
-# whether main is green is to read the workflow and run the steps by hand,
-# which is how a `| tail` ended up eating a tsc failure's exit code.
+# There is no GitHub Actions workflow: the minutes are gone and this repo is
+# not going back. `.github/workflows/ci.yml` used to hold these four jobs and
+# was deleted — a green check nobody can run is worse than no check, and for
+# months the only way to know whether main was healthy was to read that file
+# and re-run its steps by hand, which is how a `| tail` ended up eating a tsc
+# failure's exit code.
 #
-# Every step's status is checked. Nothing is piped to tail. Logs land in
-# .ci-local/<job>.log; the summary at the end is the answer.
+# So: this script is the check. Every step's status is checked, nothing is
+# piped to tail, and the summary at the end is the answer that goes in the PR.
+# Logs land in .ci-local/<job>.log.
 #
 #   scripts/ci-local.sh              # all four jobs
 #   scripts/ci-local.sh web go       # just those
 #
-# Known deltas from the runner, since this is a mac and that's ubuntu-24.04:
-#   python  3.12 via uv, not actions/setup-python
-#   cpp     the system compiler (clang++), not g++
-#   web     node is whatever's on PATH, not pinned to 22
-# pnpm and the go toolchain are pinned to the same versions CI resolves.
+# Toolchains: python 3.12 via uv (pyproject's floor, not whatever is on
+# PATH), pnpm pinned to PNPM_VERSION below, the system compiler for cpp, and
+# the go toolchain go.mod asks for. Node is whatever is on PATH.
 
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOGS="$REPO/.ci-local"
-PNPM_VERSION=10.34.5    # .github/workflows/ci.yml, pnpm/action-setup
+PNPM_VERSION=10.34.5    # matches the lockfile's own resolution
 
 mkdir -p "$LOGS"
 : > "$LOGS/summary.txt"
@@ -46,8 +48,9 @@ job_start() {
 }
 
 # step <name> <command...> — runs it, tees to the job log, records failure.
-# Skipped once a step in this job has failed: CI stops the job at the first
-# red step, so continuing would report failures the runner never reaches.
+# Skipped once a step in this job has failed, same as the old GitHub Actions
+# jobs stopped at the first red step: continuing would report failures the
+# runner never reached.
 step() {
   local name="$1"; shift
   if [ "$JOB_FAILED" -ne 0 ]; then
@@ -96,16 +99,25 @@ py_install() {
 }
 
 py_pytest() {
-  # The black-box relay suite spawns this binary, same as the CI step's
-  # AGENT_PRESENCE_GORELAY_BIN export.
+  # The black-box relay suite spawns this binary, same as the old CI
+  # workflow's python job set AGENT_PRESENCE_GORELAY_BIN.
   ( cd "$REPO/python" &&
     AGENT_PRESENCE_GORELAY_BIN="$REPO/go/bin/gorelay" "$PY" -m pytest -q )
 }
 
+py_test_preflight() {
+  # tests/load/test_preflight.py sits next to the harness it guards, not
+  # under python/tests, so pytest's testpaths (python/tests) never collects
+  # it. Run it directly the way its own docstring says to — it's a plain
+  # unittest.TestCase, no pytest required.
+  "$PY" "$REPO/tests/load/test_preflight.py"
+}
+
 job_python() {
   job_start python
-  # actions/setup-python's stand-in. A 3.14 interpreter is not what CI runs
-  # and pyproject's floor is what we claim to support.
+  # actions/setup-python's stand-in from the old workflow. A 3.14 interpreter
+  # isn't what that job pinned, and pyproject's floor is what we claim to
+  # support.
   if ! command -v uv >/dev/null; then
     printf '  FAIL  uv is not on PATH; needed to get a 3.12 interpreter\n'
     JOB_FAILED=1; job_end; return
@@ -119,6 +131,7 @@ job_python() {
   step "build gorelay" py_build_gorelay
   step "install with dev extras" py_install
   step "pytest" py_pytest
+  step "load-harness preflight guard (no bare kill)" py_test_preflight
   job_end
 }
 
@@ -167,6 +180,8 @@ job_go() {
   step "test -race" go_in go test ./... -race -count=1
   step "cross-compile every release target" \
     bash "$REPO/scripts/build-go-release.sh" "$LOGS/dist"
+  step "install.sh partial-failure behaviour" \
+    bash "$REPO/scripts/test-install.sh"
   job_end
 }
 
@@ -174,11 +189,17 @@ job_go() {
 
 web_in() { ( cd "$REPO/web" && "$@" ); }
 
-# pnpm/action-setup pins 9.15.4. A newer pnpm on PATH resolves the same
-# lockfile but is not the thing CI runs, so go through npx at the pin.
+# pnpm/action-setup pinned 9.15.4 in the old workflow. A newer pnpm on PATH
+# resolves the same lockfile but isn't the version we're claiming to test
+# against, so go through npx at the pin.
 PNPM=(npx --yes "pnpm@$PNPM_VERSION")
 
-web_install() { web_in "${PNPM[@]}" install --frozen-lockfile; }
+# CI=true, because this script is the CI. Without it pnpm refuses to touch an
+# existing node_modules when there is no TTY to ask, aborts with
+# ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY, and takes the whole web job with
+# it — every time this runs from anything but an interactive shell, which is
+# most of the time now that agents run it before a PR.
+web_install() { web_in env CI=true "${PNPM[@]}" install --frozen-lockfile; }
 web_verify()  { web_in "${PNPM[@]}" run verify-toolchain; }
 web_test()    { web_in "${PNPM[@]}" run test; }
 web_types()   { web_in "${PNPM[@]}" run typecheck; }
@@ -208,9 +229,23 @@ job_web() {
   job_end
 }
 
+# --- ops ---------------------------------------------------------------
+
+# The dashboard and alert rules are hand-maintained JSON/YAML next to a Go
+# source file neither speaks; the usual way they rot is the metrics package
+# changes and nobody remembers the panel 400 lines away in ops/. This job
+# catches that before it ships instead of after Mohsen notices a blank
+# panel. Stdlib-only Python, so it doesn't need the venv job_python builds.
+job_ops() {
+  job_start ops
+  step "dashboard and alerts reference real metrics" \
+    python3 "$REPO/ops/verify_metrics.py"
+  job_end
+}
+
 # --- main ------------------------------------------------------------------
 
-ALL=(python cpp go web)
+ALL=(python cpp go web ops)
 WANT=("$@")
 [ "${#WANT[@]}" -eq 0 ] && WANT=("${ALL[@]}")
 
@@ -220,6 +255,7 @@ for j in "${WANT[@]}"; do
     cpp)    job_cpp ;;
     go)     job_go ;;
     web)    job_web ;;
+    ops)    job_ops ;;
     *)      echo "unknown job: $j (have: ${ALL[*]})" >&2; exit 2 ;;
   esac
 done
