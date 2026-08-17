@@ -29,41 +29,7 @@
     box-shadow:0 8px 30px #4a1f3d33;opacity:0;transition:opacity .35s;pointer-events:none}
   #caption.on{opacity:1}
 
-  /* ---- replay versus card -------------------------------------------
-     Off by default (see replay-card.js — createReplayCard returns a
-     no-op unless ?vcard=split|strip is set), so nothing here changes the
-     look of a plain checkout. Two variants, one shared box: 'split' is a
-     wide lower-third that slides its two halves in from the edges,
-     'strip' is one dense line, both replacing the plain #caption text
-     for the duration of a reel replay (see office.html's replayEvent). */
-  .rcard{position:fixed;left:50%;bottom:34px;transform:translateX(-50%) translateY(14px);
-    max-width:min(720px,90vw);opacity:0;pointer-events:none;
-    transition:opacity .3s,transform .3s;font:14px ui-sans-serif,sans-serif;color:#F0ECE6}
-  .rcard.on{opacity:1;transform:translateX(-50%) translateY(0)}
-  .rcard-badge{font:700 10px ui-monospace,monospace;text-transform:uppercase;
-    letter-spacing:.04em;border-radius:999px;padding:2px 8px}
-  .rcard.split{display:flex;align-items:stretch;gap:0;
-    background:#35455Cf2;border-radius:12px;box-shadow:0 8px 30px #4a1f3d33;overflow:hidden}
-  .rcard.split .rcard-side{flex:1 1 0;padding:12px 18px;display:flex;flex-direction:column;
-    gap:2px;min-width:0;transition:transform .4s cubic-bezier(.2,.8,.2,1)}
-  .rcard.split .rcard-side b{font-size:14px;letter-spacing:-.01em}
-  .rcard.split .rcard-side span{font:11px ui-monospace,monospace;color:#C7CDD8;
-    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .rcard.split .rcard-a{text-align:right;align-items:flex-end;
-    border-right:1px solid #ffffff22}
-  .rcard.split .rcard-b{text-align:left;align-items:flex-start}
-  .rcard.split:not(.on) .rcard-a{transform:translateX(-24px)}
-  .rcard.split:not(.on) .rcard-b{transform:translateX(24px)}
-  .rcard.split .rcard-mid{flex:0 0 auto;padding:10px 16px;display:flex;
-    flex-direction:column;align-items:center;gap:5px;justify-content:center}
-  .rcard.split .rcard-verdict{font-size:12px;color:#F0ECE6;text-align:center;max-width:180px}
-  .rcard.strip{background:#35455Cf2;border-radius:999px;padding:8px 16px;
-    box-shadow:0 6px 20px #4a1f3d33;display:flex;align-items:center;gap:8px;
-    font:12px ui-monospace,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   #caption.declutter{opacity:0}
-  #beat{position:fixed;right:18px;top:16px;background:#fffdfaee;border:1px solid #C3B39B;
-    border-radius:10px;padding:9px 12px;font:11px ui-monospace,monospace;color:#6b5f56}
-  #beat b{color:#35455C}
   #mode{position:fixed;left:50%;top:16px;transform:translateX(-50%);
     background:#35455Cf2;color:#F0ECE6;border-radius:999px;padding:6px 16px;
     font:600 11px ui-monospace,monospace;letter-spacing:.04em;text-transform:uppercase;
