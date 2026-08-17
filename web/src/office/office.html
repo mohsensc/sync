@@ -1486,8 +1486,18 @@ function onLiveReelFrame(msg) {
     const enc = world.encounters.find(e => e.kind === 'contest' &&
       (e.a === winner || e.b === winner || e.a === loser || e.b === loser))
     if (enc) world.resolveContest(enc)
-    if (res.kind === 'wait') world.handshake(winner, loser)
-    else world.shove(winner, loser)
+    if (res.kind === 'wait') {
+      world.handshake(winner, loser)
+    } else {
+      // A live abort varies the same way a reel replay of one does — shove,
+      // waveoff or slap — instead of always playing the literal shove. The
+      // pick is live.js's (pure, so it's the same answer everywhere and
+      // testable on its own); whether the method exists this session is
+      // this file's to know, same guard shape pickReplayVariant uses.
+      const variant = Live.pickLiveVariant(res.kind, res.winnerId, res.loserId)
+      const beat = variant && typeof world[variant] === 'function' ? variant : 'shove'
+      world[beat](winner, loser)
+    }
   } else if (partner) {
     // One side isn't a live character right now (despawned mid-contest, or
     // this viewer's own presence view never spawned it) — nothing to play
