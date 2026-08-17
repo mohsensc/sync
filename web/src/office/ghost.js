@@ -31,8 +31,10 @@
 //
 // office.html can't export makeCharacterRoot (it's a local function, not
 // a module) or skinnedClone (three/addons import), so both get passed in
-// here rather than duplicated — same for live.js's hairFor. See the
-// ghost-authors append block at the bottom of office.html for the wiring.
+// here rather than duplicated — same for live.js's hairFor. The wiring is
+// in office.html's setupCast(), next to attachGitSignals: tick() runs once
+// on attach, and anywhere earlier than that it would run against an empty
+// world.agents and a rig that hasn't loaded.
 
 import * as THREE from 'three'
 import * as ANIM from './anim.js'

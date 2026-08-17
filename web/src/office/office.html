@@ -362,6 +362,7 @@ import * as ANIM from './anim.js'
 import * as Z from './zones.js'
 import { createAgent, World } from './agent.js'
 import { attachInteraction } from './interact.js'
+import { attachGhostAuthors } from './ghost.js'
 import { attachBlameCard } from './blamecard.js'
 import { runDemo } from './demo.js'
 import { buildDressing } from './dressing.js'
@@ -801,6 +802,29 @@ function setupCast() {
   })
   window.__interact = interaction
   window.__gitSignals = attachGitSignals({ world, zones: zoneUI })
+  // Ghost authors: who wrote the code each agent is standing in. ghost.js
+  // landed as a module plus tests and nothing ever called it, so the feature
+  // was in the repo and not in the room.
+  //
+  // Here rather than in an append block at the bottom (which is where the
+  // module's own header says to put it): attachGhostAuthors() ticks once on
+  // attach and then every 18s, and at the bottom of this file that first
+  // tick runs against an empty world.agents and a null charGLTF, so the room
+  // stays ghostless for the first poll interval. attachGitSignals is here for
+  // the same reason.
+  //
+  // makeCharacterRoot and skinnedClone are local to this file — a function
+  // declaration and an addons import, neither reachable from a module — which
+  // is why they get passed in rather than imported over there.
+  window.__ghostAuthors = attachGhostAuthors({
+    world, scene, skinnedClone, makeCharacterRoot,
+    getGltf: () => charGLTF,
+    // Live.hairFor answers 0xRRGGBB. THREE.Color takes that; canvas
+    // strokeStyle silently rejects it and keeps the previous value, so the
+    // nameplate border would come out black. Convert in one place, here,
+    // rather than teach either side about the other's format.
+    hairFor: human => '#' + Live.hairFor(human).toString(16).padStart(6, '0'),
+  })
   window.__ready = true
   initLive()
 }
