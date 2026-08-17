@@ -3,6 +3,7 @@ package mcptools
 import (
 	"context"
 	"fmt"
+	"time"
 )
 
 // Dispatch routes a tool call to the matching method. Returns an error on
@@ -16,36 +17,51 @@ import (
 // once their required arguments are in hand: an invented negotiation move
 // comes back as a refusal carrying the valid moves, not a Go error.
 func Dispatch(ctx context.Context, tools *Tools, name string, args map[string]any) (any, error) {
+	start := time.Now()
 	switch name {
 	case "who_else_is_here":
 		return tools.WhoElseIsHere(ctx), nil
 	case "claim_work":
 		path, err := requireStr(args, "path")
 		if err != nil {
+			// The call never reaches ClaimWork, so it never records
+			// itself; this is the one place that gets to. The tool name
+			// is one of the switch's own literals, not client input, so
+			// it's safe as a label without going through mcpToolUnknown.
+			tools.recordCall(mcpToolClaimWork, mcpOutcomeError, start)
 			return nil, err
 		}
 		intent, err := requireStr(args, "intent")
 		if err != nil {
+			tools.recordCall(mcpToolClaimWork, mcpOutcomeError, start)
 			return nil, err
 		}
 		return tools.ClaimWork(ctx, path, symbolArg(args), intent), nil
 	case "release":
 		path, err := requireStr(args, "path")
 		if err != nil {
+			tools.recordCall(mcpToolRelease, mcpOutcomeError, start)
 			return nil, err
 		}
 		return tools.Release(ctx, path, symbolArg(args)), nil
 	case "respond":
 		path, err := requireStr(args, "path")
 		if err != nil {
+			tools.recordCall(mcpToolRespond, mcpOutcomeError, start)
 			return nil, err
 		}
 		move, err := requireStr(args, "move")
 		if err != nil {
+			tools.recordCall(mcpToolRespond, mcpOutcomeError, start)
 			return nil, err
 		}
 		return tools.Respond(ctx, path, symbolArg(args), move, strOf(args["reason"])), nil
 	}
+	// name came from the caller and was never one of ours — bucketed to
+	// mcpToolUnknown rather than recorded as-is, or a client could mint an
+	// unbounded number of ap_mcp_calls_total series just by asking for
+	// tools that don't exist.
+	tools.recordCall(mcpToolUnknown, mcpOutcomeError, start)
 	return nil, fmt.Errorf("unknown tool: %q", name)
 }
 

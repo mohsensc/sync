@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/mohsensc/sync/go/internal/metrics"
 )
 
 // Ported from python/tests/test_policy.py — the org-floor-relevant subset.
@@ -351,7 +353,7 @@ func TestARelayStackIsBuiltinPlusOrgOnly(t *testing.T) {
 	}
 	t.Setenv("AGENT_PRESENCE_ORG_POLICY", org)
 
-	pf := NewPolicyFileForRelay(NewVirtualClock(0))
+	pf := NewPolicyFileForRelay(NewVirtualClock(0), metrics.New())
 	policy := pf.Current()
 
 	names := map[layerName]bool{}
@@ -375,7 +377,7 @@ func TestEditingTheOrgFileTakesEffectWithoutARestart(t *testing.T) {
 	t.Setenv("AGENT_PRESENCE_ORG_POLICY", org)
 
 	clock := NewVirtualClock(0)
-	pf := NewPolicyFileForRelay(clock)
+	pf := NewPolicyFileForRelay(clock, metrics.New())
 	if got := pf.Current().Resolve(3, anyPath, false).Effect; got != EffectAsk {
 		t.Fatalf("got %s, want ask", got)
 	}
@@ -398,7 +400,7 @@ func TestOrgFileNotRestattedOnEveryCall(t *testing.T) {
 	t.Setenv("AGENT_PRESENCE_ORG_POLICY", org)
 
 	clock := NewVirtualClock(0)
-	pf := NewPolicyFileForRelay(clock)
+	pf := NewPolicyFileForRelay(clock, metrics.New())
 	first := pf.Current()
 
 	if err := os.WriteFile(org, []byte("[effects]\nrung3 = \"context\"\n"), 0o644); err != nil {
@@ -420,7 +422,7 @@ func TestOrgFileThatStopsParsingKeepsTheLastGoodTable(t *testing.T) {
 	t.Setenv("AGENT_PRESENCE_ORG_POLICY", org)
 
 	clock := NewVirtualClock(0)
-	pf := NewPolicyFileForRelay(clock)
+	pf := NewPolicyFileForRelay(clock, metrics.New())
 	if got := pf.Current().Resolve(3, anyPath, false).Effect; got != EffectAsk {
 		t.Fatalf("got %s, want ask", got)
 	}
@@ -449,7 +451,7 @@ func TestOrgFileThatStartsBrokenFallsBackToBuiltinAndSaysSo(t *testing.T) {
 	}
 	t.Setenv("AGENT_PRESENCE_ORG_POLICY", org)
 
-	pf := NewPolicyFileForRelay(NewVirtualClock(0))
+	pf := NewPolicyFileForRelay(NewVirtualClock(0), metrics.New())
 	policy := pf.Current()
 	if got := policy.Resolve(3, anyPath, false).Effect; got != builtinTable[3] {
 		t.Fatalf("got %s, want builtin %s", got, builtinTable[3])
@@ -468,7 +470,7 @@ func TestOrgFileDeletedFallsBackWithoutPretendingItIsFine(t *testing.T) {
 	t.Setenv("AGENT_PRESENCE_ORG_POLICY", org)
 
 	clock := NewVirtualClock(0)
-	pf := NewPolicyFileForRelay(clock)
+	pf := NewPolicyFileForRelay(clock, metrics.New())
 	if got := pf.Current().Resolve(3, anyPath, false).Effect; got != EffectContext {
 		t.Fatalf("got %s, want context", got)
 	}
@@ -486,11 +488,23 @@ func TestOrgFileDeletedFallsBackWithoutPretendingItIsFine(t *testing.T) {
 	}
 }
 
+// TestNoOrgFileMeansNoPolicyFrame used to assert that policyFrame() itself
+// returned nil with no org file. It now always returns a frame — see
+// policyFrame's doc comment for why (issue #2 of the system-seams audit:
+// a relay has to have *something* to broadcast when an org floor that was
+// configured goes away) — so what actually distinguishes "nothing
+// configured" moved to the second return value, and it is Join (see
+// TestARelayWithNoOrgPolicySendsNoPolicyFrame in relay_policy_test.go) that
+// acts on it to keep the wire silent, not this function.
 func TestNoOrgFileMeansNoPolicyFrame(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("AGENT_PRESENCE_ORG_POLICY", filepath.Join(dir, "does-not-exist.toml"))
-	relay := NewRelay(NewVirtualClock(0), InertRoster())
-	if frame := relay.policyFrame(); frame != nil {
-		t.Fatalf("expected no policy frame with no org file, got %+v", frame)
+	relay := NewRelay(NewVirtualClock(0), InertRoster(), metrics.New())
+	frame, configured := relay.policyFrame(relay.policy.Current())
+	if configured {
+		t.Fatalf("expected org unconfigured with no org file")
+	}
+	if frame == nil || frame["source"] != "builtin" {
+		t.Fatalf("expected a builtin-sourced frame even with nothing configured, got %+v", frame)
 	}
 }

@@ -11,9 +11,12 @@ package mcptools
 
 import (
 	"context"
+	"time"
 
 	"github.com/mohsensc/sync/go/internal/mcprelay"
+	"github.com/mohsensc/sync/go/internal/metrics"
 	"github.com/mohsensc/sync/go/internal/negotiation"
+	"github.com/mohsensc/sync/go/internal/repo"
 	"github.com/mohsensc/sync/go/internal/wire"
 )
 
@@ -22,17 +25,27 @@ import (
 // join: a session that could rename itself mid-call could release a
 // teammate's leases.
 type Tools struct {
-	conn  *mcprelay.Conn
-	room  string
-	agent string
-	human string
+	conn    *mcprelay.Conn
+	root    string // repo root, resolved once at construction; "" outside any repo
+	room    string
+	agent   string
+	human   string
+	metrics *metrics.Registry
 }
 
 // NewTools assembles the tool surface around an already-configured
 // connection. The connection itself dials out lazily, so this never blocks
 // on a relay that isn't running yet — see mcprelay.Conn's doc comment.
-func NewTools(conn *mcprelay.Conn, room, agent, human string) *Tools {
-	return &Tools{conn: conn, room: room, agent: agent, human: human}
+//
+// root is resolved once by the caller (repo.FindRepoRoot), not
+// re-derived per call: every claim_work/release/respond in the session
+// needs the same root or two calls in the same process could disagree
+// with each other, never mind with the daemon.
+//
+// reg is required, not defaulted: a Tools that silently fell back to a
+// private registry nobody reads would look instrumented and not be.
+func NewTools(conn *mcprelay.Conn, root, room, agent, human string, reg *metrics.Registry) *Tools {
+	return &Tools{conn: conn, root: root, room: room, agent: agent, human: human, metrics: reg}
 }
 
 func (t *Tools) Room() string  { return t.room }
@@ -49,8 +62,18 @@ func (t *Tools) Close() { t.conn.Close() }
 // symbol and lines always spelled out, null rather than omitted, matching
 // what mcp_server.py's _region_dict (and redact.clean_region_dict, on the
 // relay side) always produces.
-func region(path string, symbol *string) wire.Region {
-	return wire.Region{Path: path, Symbol: symbol}
+//
+// The path goes through repo.RegionKey against this session's root before
+// it ever reaches the wire: a raw absolute path is only a shared name on
+// the machine that sent it, and the daemon that answers PreToolUse for
+// the same file keys its own lookups by repo.RegionKey too — sending
+// anything else here is a claim nobody else's lookup ever matches.
+func (t *Tools) region(path string, symbol *string) wire.Region {
+	key := repo.RegionKeyResolved(t.root, path)
+	if shape, ok := regionShape(key); ok {
+		t.metrics.RegionKey(shape)
+	}
+	return wire.Region{Path: key, Symbol: symbol}
 }
 
 // PeerInfo is one who_else_is_here entry — the shape
@@ -73,10 +96,17 @@ type PeerInfo struct {
 // the same claim as "nobody is here" — but it is the only answer a dead
 // relay leaves available.
 func (t *Tools) WhoElseIsHere(ctx context.Context) []PeerInfo {
+	start := time.Now()
 	peers, err := t.conn.Presence(ctx, t.agent)
 	if err != nil {
+		// Fails open in the reply — "no news of peers" is the only answer
+		// a dead relay leaves available — but not silently in the metric:
+		// this is the relay being unreachable, not a genuine "you're
+		// alone", and the two must not look the same on a dashboard.
+		t.recordCall(mcpToolWhoElseIsHere, outcomeForErr(err), start)
 		return []PeerInfo{}
 	}
+	t.recordCall(mcpToolWhoElseIsHere, mcpOutcomeOK, start)
 	out := make([]PeerInfo, len(peers))
 	for i, p := range peers {
 		out[i] = PeerInfo{Human: p.Human, Agent: p.Agent, Verb: p.Verb, Path: p.Path, Symbol: p.Symbol}
@@ -86,20 +116,32 @@ func (t *Tools) WhoElseIsHere(ctx context.Context) []PeerInfo {
 
 // ClaimWork declares intent to modify a region before editing it.
 func (t *Tools) ClaimWork(ctx context.Context, path string, symbol *string, intent string) map[string]any {
-	reply, err := t.conn.Claim(ctx, region(path, symbol), intent)
+	start := time.Now()
+	reply, err := t.conn.Claim(ctx, t.region(path, symbol), intent)
 	if err != nil {
+		t.recordCall(mcpToolClaimWork, outcomeForErr(err), start)
 		// Fail closed, deliberately: granting locally when the relay
 		// cannot be told is exactly the bug this tool exists to not have
 		// anymore. An error the agent can see beats a claim nobody else
 		// ever learns about.
 		return map[string]any{"granted": false, "error": err.Error()}
 	}
+	// A losing claim is a relay verdict, not a failure of this call — see
+	// mcpOutcomeRefused's doc comment.
+	outcome := mcpOutcomeRefused
+	if boolOf(reply["granted"]) {
+		outcome = mcpOutcomeOK
+	}
+	t.recordCall(mcpToolClaimWork, outcome, start)
 	return claimReply(reply, t.agent)
 }
 
 // Release gives up a previously claimed region.
 func (t *Tools) Release(ctx context.Context, path string, symbol *string) map[string]any {
-	if err := t.conn.Release(ctx, region(path, symbol)); err != nil {
+	start := time.Now()
+	err := t.conn.Release(ctx, t.region(path, symbol))
+	t.recordCall(mcpToolRelease, outcomeForErr(err), start)
+	if err != nil {
 		return map[string]any{"released": false, "error": err.Error()}
 	}
 	return map[string]any{"released": true}
@@ -108,23 +150,34 @@ func (t *Tools) Release(ctx context.Context, path string, symbol *string) map[st
 // Respond replies to a contested claim with DEFER, SPLIT, HANDOFF or
 // PROCEED.
 func (t *Tools) Respond(ctx context.Context, path string, symbol *string, move, reason string) map[string]any {
+	start := time.Now()
 	canonical := negotiation.Normalize(move)
 	if canonical == "" {
 		// Checked locally rather than round-tripped: an invented move is
 		// never valid no matter what the relay says, and this keeps the
 		// tool surface total — respond never throws — without a network
-		// call to learn something already known.
+		// call to learn something already known. Recorded as refused, not
+		// error: the request was understood well enough to know it's
+		// invalid, the same way a losing claim is refused rather than
+		// erroring.
+		t.recordCall(mcpToolRespond, mcpOutcomeRefused, start)
 		return map[string]any{
 			"granted":     false,
 			"error":       "unknown move: " + move,
 			"valid_moves": append([]string{}, negotiation.Moves...),
 		}
 	}
-	reply, err := t.conn.Move(ctx, region(path, symbol), canonical, reason)
+	reply, err := t.conn.Move(ctx, t.region(path, symbol), canonical, reason)
 	if err != nil {
+		t.recordCall(mcpToolRespond, outcomeForErr(err), start)
 		return map[string]any{"granted": false, "error": err.Error()}
 	}
 	action := strOf(reply["action"])
+	outcome := mcpOutcomeRefused
+	if boolOf(reply["granted"]) {
+		outcome = mcpOutcomeOK
+	}
+	t.recordCall(mcpToolRespond, outcome, start)
 	result := map[string]any{
 		"granted": boolOf(reply["granted"]),
 		"action":  action,

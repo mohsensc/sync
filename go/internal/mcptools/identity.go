@@ -8,7 +8,6 @@ package mcptools
 import (
 	"bufio"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"os"
 	"os/exec"
@@ -16,7 +15,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mohsensc/sync/go/internal/envflag"
 	"github.com/mohsensc/sync/go/internal/mcprelay"
+	"github.com/mohsensc/sync/go/internal/metrics"
 	"github.com/mohsensc/sync/go/internal/repo"
 )
 
@@ -52,55 +53,19 @@ func gitQuery(cwd string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// RepoRoot is the checkout `cwd` belongs to, or `cwd` itself when git
-// doesn't know of one — repo_root().
-func RepoRoot(cwd string) string {
-	abs, err := filepath.Abs(cwd)
-	if err != nil {
-		abs = cwd
-	}
-	if root := gitQuery(abs, "rev-parse", "--show-toplevel"); root != "" {
-		return root
-	}
-	return abs
-}
-
-// GitRemote is the remote this repo pushes to, if there is one — origin
-// first, then whichever remote git lists first, so a fork with no origin
-// still keys a room. Mirrors mcp_server.py's git_remote.
-func GitRemote(cwd string) string {
-	abs, err := filepath.Abs(cwd)
-	if err != nil {
-		abs = cwd
-	}
-	if remote := gitQuery(abs, "remote", "get-url", "origin"); remote != "" {
-		return remote
-	}
-	names := gitQuery(abs, "remote")
-	if names == "" {
-		return ""
-	}
-	first := strings.TrimSpace(strings.SplitN(names, "\n", 2)[0])
-	if first == "" {
-		return ""
-	}
-	return gitQuery(abs, "remote", "get-url", first)
-}
-
 // RoomFor is the room id for a working directory: the env override, else
 // the hash of the git remote, else a hash of the checkout's own path in
 // local-only mode — a room that is real but nobody else can ever be in.
 // Mirrors mcp_server.py's room_for.
+//
+// This used to reimplement the override, the remote selection and the
+// no-remote fallback on its own, and disagreed with presenced's
+// repo.DiscoverRoom: on a checkout whose only remote was `upstream`,
+// presenced sat offline while this joined a room anyway — same machine,
+// same env, two answers. repo.DiscoverRoomOrLocal is the one place that
+// logic lives now.
 func RoomFor(cwd string) string {
-	if override := strings.TrimSpace(os.Getenv(RoomEnv)); override != "" {
-		return override
-	}
-	if remote := GitRemote(cwd); remote != "" {
-		return repo.RoomIDFromRemote(remote)
-	}
-	root := RepoRoot(cwd)
-	sum := sha256.Sum256([]byte(root))
-	return "local-" + hex.EncodeToString(sum[:])[:16]
+	return repo.DiscoverRoomOrLocal(os.Getenv(RoomEnv), cwd)
 }
 
 // AgentID is one MCP server process's id: Claude Code's session id when
@@ -193,11 +158,7 @@ func ReadToken() string {
 }
 
 func unattendedFlag() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(unattendedEnv))) {
-	case "1", "true", "yes", "on":
-		return true
-	}
-	return false
+	return envflag.Truthy(os.Getenv(unattendedEnv))
 }
 
 // LocalIdentityFromEnv reads the same three env vars local_identity() does.
@@ -231,8 +192,18 @@ func RelayURL() string {
 // until the first tool call — see mcprelay.Conn's doc comment — so this
 // never blocks on a relay that isn't running yet. Mirrors mcp_server.py's
 // build_tools.
-func BuildTools(cwd, url string) *Tools {
+//
+// reg is this process's one catalogue — see metrics.Registry's doc
+// comment on why there's exactly one per process — threaded to both the
+// connection (connection state, reconnects, claim roundtrip) and the tool
+// surface itself (call outcomes, region key shape), so a Conn fact and a
+// Tools fact about the same session land in the same registry.
+func BuildTools(cwd, url string, reg *metrics.Registry) *Tools {
 	room, agent, human := RoomFor(cwd), AgentID(), HumanID(cwd)
+	// Resolved once, here, rather than inside every claim_work/release/
+	// respond call — every region key this session puts on the wire has
+	// to agree with the room it just joined.
+	root, _ := repo.FindRepoRoot(cwd)
 	if url == "" {
 		url = RelayURL()
 	}
@@ -240,6 +211,7 @@ func BuildTools(cwd, url string) *Tools {
 	conn := mcprelay.New(mcprelay.Config{
 		URL: url, Room: room, Agent: agent, Human: human,
 		Principal: who.Principal, Token: who.Token, Unattended: who.Unattended,
+		Metrics: reg,
 	})
-	return NewTools(conn, room, agent, human)
+	return NewTools(conn, root, room, agent, human, reg)
 }

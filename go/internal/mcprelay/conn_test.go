@@ -11,6 +11,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/mohsensc/sync/go/internal/metrics"
 	"github.com/mohsensc/sync/go/internal/wire"
 )
 
@@ -149,6 +150,7 @@ func testCfg(url string) Config {
 	return Config{
 		URL: url, Room: "r1", Agent: "a1", Human: "sara",
 		ConnectTimeout: 2 * time.Second, RequestTimeout: 2 * time.Second,
+		Metrics: metrics.New(),
 	}
 }
 
@@ -156,6 +158,7 @@ func TestConnectFailsClosedWhenNoRelay(t *testing.T) {
 	c := New(Config{
 		URL: "ws://127.0.0.1:1", Room: "r1", Agent: "a1", Human: "sara",
 		ConnectTimeout: 1 * time.Second, RequestTimeout: 1 * time.Second,
+		Metrics: metrics.New(),
 	})
 	defer c.Close()
 
@@ -309,6 +312,7 @@ func TestRequestTimesOutInsteadOfHanging(t *testing.T) {
 	c := New(Config{
 		URL: url, Room: "r1", Agent: "a1", Human: "sara",
 		ConnectTimeout: 2 * time.Second, RequestTimeout: 300 * time.Millisecond,
+		Metrics: metrics.New(),
 	})
 	defer c.Close()
 

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+
+	"github.com/mohsensc/sync/go/internal/metrics"
 )
 
 // TestConcurrentClaimsAcrossRoomsAndRegions hammers the sharded registry
@@ -17,7 +19,7 @@ import (
 func TestConcurrentClaimsAcrossRoomsAndRegions(t *testing.T) {
 	clock := RealClock{}
 	pub := &fakePublisher{}
-	reg := NewRegistry(clock, pub)
+	reg := NewRegistry(clock, pub, metrics.New())
 
 	const goroutines = 64
 	const opsEach = 200
@@ -70,7 +72,7 @@ func TestConcurrentClaimsAcrossRoomsAndRegions(t *testing.T) {
 // constantly — the property that matters is that it returns, never that a
 // particular frame survives.
 func TestConcurrentSendNeverBlocks(t *testing.T) {
-	c := &WsConn{clock: RealClock{}, out: make(chan []byte, 4), closed: make(chan struct{})}
+	c := &WsConn{clock: RealClock{}, metrics: metrics.New(), out: make(chan []byte, 4), closed: make(chan struct{})}
 	var wg sync.WaitGroup
 	for g := 0; g < 32; g++ {
 		wg.Add(1)
@@ -100,7 +102,7 @@ func TestConcurrentSendNeverBlocks(t *testing.T) {
 func TestReleaseEverywhereSeesRoomsCreatedDuringItsOwnSweep(t *testing.T) {
 	clock := RealClock{}
 	pub := &fakePublisher{}
-	reg := NewRegistry(clock, pub)
+	reg := NewRegistry(clock, pub, metrics.New())
 
 	const agent = "reclaimed-agent"
 	var wg sync.WaitGroup

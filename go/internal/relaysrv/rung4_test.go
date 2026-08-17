@@ -1,6 +1,10 @@
 package relaysrv
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/mohsensc/sync/go/internal/metrics"
+)
 
 // Ported from python/tests/test_rung4.py's core cases — rung 4 is a
 // straight port (task instructions: port it as-is, off by default,
@@ -112,7 +116,7 @@ func TestRung4SamePathIsNotRung4(t *testing.T) {
 func TestClaimGrantCarriesRung4RedundantWork(t *testing.T) {
 	t.Setenv("AGENT_PRESENCE_RUNG4", "1")
 	clock := NewVirtualClock(1000.0)
-	relay := NewRelay(clock, InertRoster())
+	relay := NewRelay(clock, InertRoster(), metrics.New())
 	a := &recorder{agent: "a1", human: "sara"}
 	b := &recorder{agent: "a2", human: "dev"}
 	relay.Join("r1", a)

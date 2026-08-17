@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/mohsensc/sync/go/internal/metrics"
 )
 
 // TestClientInitiatedCloseCompletesPromptly is a real-server regression
@@ -20,7 +21,7 @@ import (
 // the close frames crossed. Confirmed directly against an unpatched
 // gorelay before this fix landed.
 func TestClientInitiatedCloseCompletesPromptly(t *testing.T) {
-	relay := NewRelay(NewVirtualClock(0), InertRoster())
+	relay := NewRelay(NewVirtualClock(0), InertRoster(), metrics.New())
 	srv := &Server{Addr: "127.0.0.1:0", Relay: relay}
 	addr, err := srv.Listen()
 	if err != nil {

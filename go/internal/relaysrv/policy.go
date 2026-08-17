@@ -22,8 +22,10 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/mohsensc/sync/go/internal/metrics"
 )
 
 // -- effects ------------------------------------------------------------
@@ -992,8 +994,9 @@ const policyRecheckS = 1.0
 // policy.py's PolicyFile, narrowed to the one entry the relay ever reads
 // (PolicyFile.for_relay): builtin plus one org layer.
 type PolicyFile struct {
-	path  string
-	clock Clock
+	path    string
+	clock   Clock
+	metrics *metrics.Registry
 
 	mu        sync.Mutex
 	policy    *Policy
@@ -1004,8 +1007,8 @@ type PolicyFile struct {
 }
 
 // NewPolicyFileForRelay mirrors policy.py's PolicyFile.for_relay.
-func NewPolicyFileForRelay(clock Clock) *PolicyFile {
-	return &PolicyFile{path: orgPolicyPath(), clock: clock}
+func NewPolicyFileForRelay(clock Clock, m *metrics.Registry) *PolicyFile {
+	return &PolicyFile{path: orgPolicyPath(), clock: clock, metrics: m}
 }
 
 type stamp struct {
@@ -1040,6 +1043,14 @@ func (pf *PolicyFile) Current() Policy {
 		return *pf.policy
 	}
 	pf.stampSet, pf.stampMod, pf.stampSize = st.ok, st.mod, st.size
+
+	// Everything below is the actual re-read-and-recompile — the gated
+	// checks above are the cheap steady-state path, not what this
+	// histogram is asking about. Current returns right after this block
+	// either way, so a defer set up here times exactly the reload and
+	// nothing else.
+	reloadStart := time.Now()
+	defer func() { pf.metrics.PolicyReload.Observe(time.Since(reloadStart).Seconds()) }()
 
 	layers := []policyLayer{builtinLayer()}
 	org := loadLayer(pf.path, layerOrg)

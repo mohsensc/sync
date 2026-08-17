@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/mohsensc/sync/go/internal/metrics"
 )
 
 // Timings. Identical values to python's leases.py — these are the numbers
@@ -160,8 +162,9 @@ type agentEntry struct {
 // that could possibly have changed, so there is nothing left to diff that
 // isn't already known at the call site.
 type Registry struct {
-	clock Clock
-	pub   Publisher
+	clock   Clock
+	pub     Publisher
+	metrics *metrics.Registry
 
 	roomsMu sync.RWMutex
 	rooms   map[string]*roomShards
@@ -174,12 +177,13 @@ type roomShards struct {
 	shards [shardsPerRoom]*shard
 }
 
-func NewRegistry(clock Clock, pub Publisher) *Registry {
+func NewRegistry(clock Clock, pub Publisher, m *metrics.Registry) *Registry {
 	return &Registry{
-		clock:  clock,
-		pub:    pub,
-		rooms:  make(map[string]*roomShards),
-		agents: make(map[string]*agentEntry),
+		clock:   clock,
+		pub:     pub,
+		metrics: m,
+		rooms:   make(map[string]*roomShards),
+		agents:  make(map[string]*agentEntry),
 	}
 }
 
@@ -345,6 +349,13 @@ func (r *Registry) pruneExpired(room string, s *shard, now float64, actor Conn) 
 		delete(s.claims, key)
 		r.agentClaimRemoved(c.Agent, now)
 		reservation := r.handOver(s, c, now)
+		// departureFrame only says "expired" when handOver didn't just
+		// upgrade this departure to a handover (see its own doc comment) —
+		// recording both here would double-count a departure the wire
+		// only ever describes one way. handOver records its own outcome.
+		if reservation == nil {
+			r.metrics.Lease(metrics.OutcomeExpired)
+		}
 		frame := departureFrame(c.Room, c.Human, c.Agent, c.Scope, now, "expired", winner, reservation)
 		r.pub.Publish(room, frame, actor)
 	}
@@ -379,6 +390,12 @@ func (r *Registry) handOver(s *shard, c *Claim, now float64) *Reservation {
 		FromAgent: c.Agent, FromHuman: c.Human,
 	}
 	s.reservations = append(s.reservations, res)
+	// The one place a handover actually happens, whichever caller's claim
+	// triggered it (lazy expiry, an explicit release, a session ending) —
+	// recording here once covers all of them, rather than guessing at the
+	// outcome back at each call site from what departureFrame decided to
+	// call it.
+	r.metrics.Lease(metrics.OutcomeHandover)
 	return res
 }
 
@@ -615,6 +632,14 @@ func (r *Registry) Acquire(room, human, agent string, scope Region, intent strin
 		contendLocked(held, agent, human, tier, decision, now)
 		r.emitChange(room, held, before, now, actor)
 		ha := held.HandoverAt
+		// wait and abort are peers in the outcome vocabulary, not one
+		// outcome refining the other — a losing requester is refused
+		// either way, but only wait-die's abort branch is "abort".
+		if decision == decisionAbort {
+			r.metrics.Lease(metrics.OutcomeAbort)
+		} else {
+			r.metrics.Lease(metrics.OutcomeRefused)
+		}
 		return AcquireResult{Ok: false, HeldBy: held, Decision: decision, HandoverAt: ha}
 	}
 
@@ -622,11 +647,13 @@ func (r *Registry) Acquire(room, human, agent string, scope Region, intent strin
 		before := snapshotOf(held)
 		held.ExpiresAt = renewTo(held, now)
 		r.emitChange(room, held, before, now, actor)
+		r.metrics.Lease(metrics.OutcomeGranted)
 		return AcquireResult{Ok: true, Claim: held}
 	}
 
 	reserved := reservationForLocked(s, scope, now)
 	if reserved != nil && reserved.Agent != agent {
+		r.metrics.Lease(metrics.OutcomeRefused)
 		return AcquireResult{Ok: false, Decision: decisionWait, ReservedBy: reserved}
 	}
 
@@ -640,6 +667,7 @@ func (r *Registry) Acquire(room, human, agent string, scope Region, intent strin
 	s.claims[claimKey(scope)] = claim
 	r.agentClaimAdded(agent, claim.AcquiredAt, tier)
 	r.emitNew(room, claim, now, actor)
+	r.metrics.Lease(metrics.OutcomeGranted)
 	return AcquireResult{Ok: true, Claim: claim, Inherited: inherited}
 }
 

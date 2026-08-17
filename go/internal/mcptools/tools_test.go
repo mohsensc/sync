@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/mohsensc/sync/go/internal/mcprelay"
+	"github.com/mohsensc/sync/go/internal/metrics"
 	"github.com/mohsensc/sync/go/internal/wire"
 )
 
@@ -128,18 +130,27 @@ func startScriptedRelay(t *testing.T) (url string, relay *scriptedRelay, stop fu
 	return "ws://" + ln.Addr().String() + "/", relay, func() { srv.Close() }
 }
 
-func newTestTools(url, room, agent, human string) *Tools {
+func newTestTools(url, root, room, agent, human string) *Tools {
+	tools, _ := newTestToolsWithMetrics(url, root, room, agent, human)
+	return tools
+}
+
+// newTestToolsWithMetrics is newTestTools plus a handle on the registry it
+// wired in, for tests that need to inspect what got recorded.
+func newTestToolsWithMetrics(url, root, room, agent, human string) (*Tools, *metrics.Registry) {
+	reg := metrics.New()
 	conn := mcprelay.New(mcprelay.Config{
 		URL: url, Room: room, Agent: agent, Human: human,
 		ConnectTimeout: 2 * time.Second, RequestTimeout: 2 * time.Second,
+		Metrics: reg,
 	})
-	return NewTools(conn, room, agent, human)
+	return NewTools(conn, root, room, agent, human, reg), reg
 }
 
 func TestWhoElseIsHereIsEmptyWhenAlone(t *testing.T) {
 	url, _, stop := startScriptedRelay(t)
 	defer stop()
-	tools := newTestTools(url, "r1", "a1", "sara")
+	tools := newTestTools(url, "", "r1", "a1", "sara")
 	defer tools.Close()
 
 	peers := tools.WhoElseIsHere(context.Background())
@@ -151,7 +162,7 @@ func TestWhoElseIsHereIsEmptyWhenAlone(t *testing.T) {
 func TestClaimWorkGrantsAnUncontestedRegion(t *testing.T) {
 	url, _, stop := startScriptedRelay(t)
 	defer stop()
-	tools := newTestTools(url, "r1", "a1", "sara")
+	tools := newTestTools(url, "", "r1", "a1", "sara")
 	defer tools.Close()
 
 	result := tools.ClaimWork(context.Background(), "src/db.py", strp("query"), "add index")
@@ -163,9 +174,9 @@ func TestClaimWorkGrantsAnUncontestedRegion(t *testing.T) {
 func TestClaimWorkIsRefusedAndNamesTheHolder(t *testing.T) {
 	url, _, stop := startScriptedRelay(t)
 	defer stop()
-	holder := newTestTools(url, "r1", "a1", "sara")
+	holder := newTestTools(url, "", "r1", "a1", "sara")
 	defer holder.Close()
-	challenger := newTestTools(url, "r1", "a2", "dev")
+	challenger := newTestTools(url, "", "r1", "a2", "dev")
 	defer challenger.Close()
 
 	if r := holder.ClaimWork(context.Background(), "src/db.py", strp("query"), "rewriting query"); r["granted"] != true {
@@ -180,7 +191,7 @@ func TestClaimWorkIsRefusedAndNamesTheHolder(t *testing.T) {
 func TestReleaseFreesTheRegionForOthers(t *testing.T) {
 	url, relay, stop := startScriptedRelay(t)
 	defer stop()
-	tools := newTestTools(url, "r1", "a1", "sara")
+	tools := newTestTools(url, "", "r1", "a1", "sara")
 	defer tools.Close()
 
 	tools.ClaimWork(context.Background(), "src/db.py", strp("query"), "add index")
@@ -206,7 +217,7 @@ func TestReleaseFreesTheRegionForOthers(t *testing.T) {
 func TestRespondRefusesAnInventedMoveWithoutRaising(t *testing.T) {
 	url, _, stop := startScriptedRelay(t)
 	defer stop()
-	tools := newTestTools(url, "r1", "a1", "sara")
+	tools := newTestTools(url, "", "r1", "a1", "sara")
 	defer tools.Close()
 
 	result := tools.Respond(context.Background(), "src/db.py", strp("query"), "ARGUE", "")
@@ -225,9 +236,9 @@ func TestRespondRefusesAnInventedMoveWithoutRaising(t *testing.T) {
 func TestRespondAcceptsMovesCaseInsensitively(t *testing.T) {
 	url, _, stop := startScriptedRelay(t)
 	defer stop()
-	holder := newTestTools(url, "r1", "a1", "sara")
+	holder := newTestTools(url, "", "r1", "a1", "sara")
 	defer holder.Close()
-	challenger := newTestTools(url, "r1", "a2", "dev")
+	challenger := newTestTools(url, "", "r1", "a2", "dev")
 	defer challenger.Close()
 
 	holder.ClaimWork(context.Background(), "src/db.py", strp("query"), "x")
@@ -243,9 +254,9 @@ func TestRespondAcceptsMovesCaseInsensitively(t *testing.T) {
 func TestRespondHandoffReleasesForASecondConnection(t *testing.T) {
 	url, _, stop := startScriptedRelay(t)
 	defer stop()
-	holder := newTestTools(url, "r1", "a1", "sara")
+	holder := newTestTools(url, "", "r1", "a1", "sara")
 	defer holder.Close()
-	other := newTestTools(url, "r1", "a2", "dev")
+	other := newTestTools(url, "", "r1", "a2", "dev")
 	defer other.Close()
 
 	holder.ClaimWork(context.Background(), "src/pay.py", strp("charge"), "work")
@@ -260,7 +271,7 @@ func TestRespondHandoffReleasesForASecondConnection(t *testing.T) {
 }
 
 func TestClaimWorkErrorsInsteadOfHangingWhenTheRelayIsNotRunning(t *testing.T) {
-	tools := newTestTools("ws://127.0.0.1:1", "r1", "a1", "sara")
+	tools := newTestTools("ws://127.0.0.1:1", "", "r1", "a1", "sara")
 	defer tools.Close()
 
 	start := time.Now()
@@ -277,7 +288,7 @@ func TestClaimWorkErrorsInsteadOfHangingWhenTheRelayIsNotRunning(t *testing.T) {
 }
 
 func TestReleaseAndWhoElseIsHereAlsoDontHangWithNoRelay(t *testing.T) {
-	tools := newTestTools("ws://127.0.0.1:1", "r1", "a1", "sara")
+	tools := newTestTools("ws://127.0.0.1:1", "", "r1", "a1", "sara")
 	defer tools.Close()
 
 	released := tools.Release(context.Background(), "src/db.py", strp("query"))
@@ -312,7 +323,7 @@ func TestExactlyFourToolsAreExposed(t *testing.T) {
 func TestDispatchRoutesToTheNamedTool(t *testing.T) {
 	url, _, stop := startScriptedRelay(t)
 	defer stop()
-	tools := newTestTools(url, "r1", "a1", "sara")
+	tools := newTestTools(url, "", "r1", "a1", "sara")
 	defer tools.Close()
 
 	result, err := Dispatch(context.Background(), tools, "claim_work", map[string]any{
@@ -328,7 +339,7 @@ func TestDispatchRoutesToTheNamedTool(t *testing.T) {
 }
 
 func TestDispatchRejectsAnUnknownTool(t *testing.T) {
-	tools := newTestTools("ws://127.0.0.1:1", "r1", "a1", "sara")
+	tools := newTestTools("ws://127.0.0.1:1", "", "r1", "a1", "sara")
 	defer tools.Close()
 
 	if _, err := Dispatch(context.Background(), tools, "delete_everything", nil); err == nil {
@@ -343,7 +354,7 @@ func TestDispatchRejectsAnUnknownTool(t *testing.T) {
 func TestDispatchRejectsAMissingRequiredArgument(t *testing.T) {
 	url, relay, stop := startScriptedRelay(t)
 	defer stop()
-	tools := newTestTools(url, "r1", "a1", "sara")
+	tools := newTestTools(url, "", "r1", "a1", "sara")
 	defer tools.Close()
 
 	cases := []struct {
@@ -370,7 +381,7 @@ func TestDispatchRejectsAMissingRequiredArgument(t *testing.T) {
 }
 
 func TestDispatchRejectsAWrongTypedRequiredArgument(t *testing.T) {
-	tools := newTestTools("ws://127.0.0.1:1", "r1", "a1", "sara")
+	tools := newTestTools("ws://127.0.0.1:1", "", "r1", "a1", "sara")
 	defer tools.Close()
 
 	_, err := Dispatch(context.Background(), tools, "claim_work", map[string]any{
@@ -390,7 +401,7 @@ func TestDispatchRejectsAWrongTypedRequiredArgument(t *testing.T) {
 func TestClaimViaOneToolsBlocksASecondIndependentConnection(t *testing.T) {
 	url, _, stop := startScriptedRelay(t)
 	defer stop()
-	tools := newTestTools(url, "r1", "a1", "sara")
+	tools := newTestTools(url, "", "r1", "a1", "sara")
 	defer tools.Close()
 
 	granted := tools.ClaimWork(context.Background(), "src/auth.py", strp("sign_in"), "refactor to JWT")
@@ -398,11 +409,63 @@ func TestClaimViaOneToolsBlocksASecondIndependentConnection(t *testing.T) {
 		t.Fatalf("setup claim failed: %+v", granted)
 	}
 
-	other := newTestTools(url, "r1", "a2", "dev")
+	other := newTestTools(url, "", "r1", "a2", "dev")
 	defer other.Close()
 	reply := other.ClaimWork(context.Background(), "src/auth.py", strp("sign_in"), "rename param")
 	if reply["granted"] != false || reply["held_by"] != "a1" || reply["intent"] != "refactor to JWT" {
 		t.Fatalf("second connection was not blocked: %+v", reply)
+	}
+}
+
+// -- region keys on the wire ---------------------------------------------
+//
+// The MCP server used to send whatever path a caller handed it straight to
+// the relay, unnormalized. Two checkouts of one repo never share an
+// absolute path, so the same file claimed from two clones landed under two
+// different keys and never collided with each other at all.
+
+func TestClaimWorkSendsARegionKeyRelativeToTheRepoRoot(t *testing.T) {
+	url, relay, stop := startScriptedRelay(t)
+	defer stop()
+	root := t.TempDir()
+	tools := newTestTools(url, root, "r1", "a1", "sara")
+	defer tools.Close()
+
+	abs := filepath.Join(root, "src", "db.py")
+	result := tools.ClaimWork(context.Background(), abs, strp("query"), "add index")
+	if result["granted"] != true {
+		t.Fatalf("got %+v", result)
+	}
+
+	relay.mu.Lock()
+	_, held := relay.held["src/db.py"]
+	relay.mu.Unlock()
+	if !held {
+		t.Fatalf("relay did not see a repo-relative region key; held=%+v", relay.held)
+	}
+}
+
+func TestClaimWorkFromOutsideTheRepoRootSendsACleanedAbsolutePath(t *testing.T) {
+	url, relay, stop := startScriptedRelay(t)
+	defer stop()
+	tools := newTestTools(url, t.TempDir(), "r1", "a1", "sara")
+	defer tools.Close()
+
+	// A path with no shared name against the tool's root — a different
+	// directory tree, with a redundant segment to prove Clean still runs.
+	outside := filepath.Join(t.TempDir(), "notes", "..", "scratch.md")
+	want := filepath.ToSlash(filepath.Clean(outside))
+
+	result := tools.ClaimWork(context.Background(), outside, nil, "jot something down")
+	if result["granted"] != true {
+		t.Fatalf("got %+v", result)
+	}
+
+	relay.mu.Lock()
+	_, held := relay.held[want]
+	relay.mu.Unlock()
+	if !held {
+		t.Fatalf("relay did not see the cleaned absolute path %q; held=%+v", want, relay.held)
 	}
 }
 

@@ -131,6 +131,47 @@ func TestTheRoomEnvVarOverridesTheGitRemote(t *testing.T) {
 	}
 }
 
+// TestRoomForAgreesWithPresencedsDiscoverRoom guards the fix for the two
+// Go binaries deriving a room two different ways and disagreeing: on a
+// checkout whose only remote was `upstream`, presenced (repo.DiscoverRoom)
+// sat offline while this package joined a room anyway — same machine, same
+// cwd, same env, two answers. Same cwd and env now have to produce the
+// same room from both entry points everywhere presenced would come online
+// at all. The no-remote case is the one place they're allowed to diverge,
+// by design: presenced treats "no room" as "stay offline", this package
+// treats it as "join a private room nobody else can reach".
+func TestRoomForAgreesWithPresencedsDiscoverRoom(t *testing.T) {
+	clearIdentityEnv(t)
+
+	origin := newRepo(t)
+	if got, want := RoomFor(origin), repo.DiscoverRoom("", origin); got != want || want == "" {
+		t.Fatalf("origin repo: RoomFor=%q repo.DiscoverRoom=%q", got, want)
+	}
+
+	upstream := filepath.Join(t.TempDir(), "forked")
+	if err := os.Mkdir(upstream, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	git(t, upstream, "init", "-q")
+	git(t, upstream, "remote", "add", "upstream", "https://github.com/acme/api.git")
+	if got, want := RoomFor(upstream), repo.DiscoverRoom("", upstream); got != want || want == "" {
+		t.Fatalf("upstream-only repo: RoomFor=%q repo.DiscoverRoom=%q", got, want)
+	}
+
+	noRemote := bareRepo(t)
+	if got := repo.DiscoverRoom("", noRemote); got != "" {
+		t.Fatalf("no-remote repo: repo.DiscoverRoom=%q, want presenced to stay offline", got)
+	}
+	if got := RoomFor(noRemote); len(got) < 6 || got[:6] != "local-" {
+		t.Fatalf("no-remote repo: RoomFor=%q, want a local- room", got)
+	}
+
+	os.Setenv(RoomEnv, "  padded  ")
+	if got, want := RoomFor(origin), repo.DiscoverRoom(os.Getenv(RoomEnv), origin); got != want || want != "padded" {
+		t.Fatalf("padded override: RoomFor=%q repo.DiscoverRoom=%q", got, want)
+	}
+}
+
 func TestADirectoryOutsideAnyRepoStillGetsARoom(t *testing.T) {
 	clearIdentityEnv(t)
 	outside := filepath.Join(t.TempDir(), "not-a-repo")
@@ -140,13 +181,6 @@ func TestADirectoryOutsideAnyRepoStillGetsARoom(t *testing.T) {
 	room := RoomFor(outside)
 	if len(room) < 6 || room[:6] != "local-" {
 		t.Fatalf("got %q, want a local- room", room)
-	}
-}
-
-func TestGitRemoteIsEmptyWhenThereIsNoRemote(t *testing.T) {
-	clearIdentityEnv(t)
-	if got := GitRemote(bareRepo(t)); got != "" {
-		t.Fatalf("got %q, want \"\"", got)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/mohsensc/sync/go/internal/metrics"
 )
 
 // Ported from python/tests/test_backpressure.py's clock-only tests (the
@@ -111,7 +112,7 @@ func waitUntil(t *testing.T, cond func() bool, what string) {
 func TestAFrameThatWillNotLeaveIsShedOnClockSeconds(t *testing.T) {
 	clock := NewVirtualClock(0)
 	ws := newFakeWs(true)
-	conn := NewWsConn(ws, clock)
+	conn := NewWsConn(ws, clock, metrics.New())
 	go conn.writeLoop()
 	defer conn.shutdown()
 
@@ -125,7 +126,7 @@ func TestAFrameThatWillNotLeaveIsShedOnClockSeconds(t *testing.T) {
 	// Real time passing here buys nothing, which is the point: the
 	// deadline is clock seconds.
 	time.Sleep(200 * time.Millisecond)
-	if why := conn.shedReason(); why != "" {
+	if _, why := conn.shedReason(); why != "" {
 		t.Fatalf("shed on wall time, not on the clock: %s", why)
 	}
 	if ws.getCloseCode() != 0 {
@@ -148,7 +149,7 @@ func TestAFrameThatWillNotLeaveIsShedOnClockSeconds(t *testing.T) {
 func TestTimeAloneShedsNobody(t *testing.T) {
 	clock := NewVirtualClock(0)
 	ws := newFakeWs(false)
-	conn := NewWsConn(ws, clock)
+	conn := NewWsConn(ws, clock, metrics.New())
 	go conn.writeLoop()
 	defer conn.shutdown()
 
@@ -159,7 +160,7 @@ func TestTimeAloneShedsNobody(t *testing.T) {
 
 	// A peer that keeps up is not on any deadline, however much time passes.
 	clock.Advance(SendStallS * 100)
-	if why := conn.shedReason(); why != "" {
+	if _, why := conn.shedReason(); why != "" {
 		t.Fatalf("expected no shed reason for a healthy peer, got %s", why)
 	}
 	conn.Send(presencePayload(99))
@@ -179,7 +180,7 @@ func TestAShedWriterLeavesNoSendBehind(t *testing.T) {
 	// drops, even once the connection it belonged to is long gone.
 	clock := NewVirtualClock(0)
 	ws := newFakeWs(true)
-	conn := NewWsConn(ws, clock)
+	conn := NewWsConn(ws, clock, metrics.New())
 	go conn.writeLoop()
 
 	conn.Send(presencePayload(0))
