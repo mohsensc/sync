@@ -31,12 +31,46 @@ function waitForEncounter(e) {
   })
 }
 
+// Region blame needs an actual line range in an actual file, or the whole
+// seed idea ("the lines an agent actually holds", not just the file) never
+// shows up outside a live relay session. office.html assigns each cast
+// member's `.gitPath` (see AGENT_CAST there); this is the same idea one
+// level down — a start/end pair well inside that same file, verified by
+// hand against `wc -l` while writing this so a stray line or two of drift
+// doesn't push a range past EOF. Not every cast member gets one: a1's file
+// (python/src/agent_presence/__init__.py) is an empty stub with zero lines,
+// which makes it the natural exercise of the "no usable range" fallback
+// path rather than a range I'd have to fake, and a5 (README.md) is left
+// whole-file on purpose so there's always at least one demo agent to A/B
+// the region view against the ownership-bar view.
+//   a2 cpp/hook/hook.cpp   (813 lines) -> 120-150, deep in the message pack loop
+//   a3 web/src/office/anim.js (1094 lines) -> 200-230, forearm-roll IK math
+//   a4 go/cmd/gorelay/main.go (100 lines) -> 15-40, import block + wiring
+// If this repo's history ever reshuffles these files enough to push a range
+// past EOF, blamecard.js's fallback (see gitapi.mjs's own bogus-range
+// handling) just shows the whole-file view instead — never an empty box.
+const REGIONS = {
+  a2: { start: 120, end: 150 },
+  a3: { start: 200, end: 230 },
+  a4: { start: 15, end: 40 },
+}
+
 export function runDemo(ctx) {
   const { agents, world, tortoise, scene, caption, focus, zoneUI, onBeat } = ctx
   const tok = { dead: false, timers: [], rejects: [] }
 
   // Cast. Named for what they do in the story, not for anything real.
   const [a1, a2, a3, a4, a5] = agents
+
+  // Stamp regions onto whichever agent objects actually carry each id —
+  // office.html builds AGENT_CAST and assigns `.gitPath` before runDemo()
+  // is ever called, so this only ever adds the two extra fields, never
+  // touches gitPath itself.
+  for (const a of agents) {
+    const r = REGIONS[a.id]
+    a.gitStart = r ? r.start : undefined
+    a.gitEnd = r ? r.end : undefined
+  }
 
   // --- the contested-symbol marker ---------------------------------------
   const lock = new THREE.Group()

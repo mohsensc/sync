@@ -1068,6 +1068,17 @@ export function crossfade(obj, name, duration = 0.35, opts = {}) {
 /** Advance one character's mixer. */
 export function update(obj, dt) { getMixer(obj).update(dt) }
 
+/** Nudge a cached action's timeScale without touching what's currently
+ *  playing or armed. Used by the churn signal (agent.js's setChurn) to make
+ *  typing read faster on a hot file — a normal crossfade would restart the
+ *  clip and reset the phase, this just turns the same action's dial. No-op
+ *  if the named action has never been created for this object yet. */
+export function setTimeScale(obj, name, timeScale) {
+  const r = RIGS.get(obj)
+  const a = r && r.actions.get(name)
+  if (a) a.timeScale = timeScale
+}
+
 /** Currently playing clip name, or null. */
 export function currentClip(obj) {
   const r = RIGS.get(obj)
