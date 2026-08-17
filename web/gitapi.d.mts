@@ -43,7 +43,7 @@ export interface LogEntry {
   subject: string
 }
 
-export function parseLog(text: string): LogEntry[]
+export function parseLog(text: string, canonicalNames?: Map<string, string>): LogEntry[]
 
 export interface RecentLogEntry {
   sha: string

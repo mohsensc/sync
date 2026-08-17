@@ -116,8 +116,8 @@ const CANNED_CANONICAL_NAMES = [
 ].join('\n') + '\n'
 
 const CANNED_LOG = [
-  ['abc1234', 'sara', '2 days ago', 'fix the thing'].join(US),
-  ['def5678', 'dev', '3 weeks ago', 'add the thing'].join(US),
+  ['abc1234', 'sara@example.com', 'sara', '2 days ago', 'fix the thing'].join(US),
+  ['def5678', 'dev@example.com', 'dev', '3 weeks ago', 'add the thing'].join(US),
 ].join('\n') + '\n'
 
 const CANNED_STAT_LOG = [
@@ -233,6 +233,12 @@ describe('parseLog', () => {
       { sha: 'abc1234', author: 'sara', when: '2 days ago', subject: 'fix the thing' },
       { sha: 'def5678', author: 'dev', when: '3 weeks ago', subject: 'add the thing' },
     ])
+  })
+
+  it('names each author from the canonical map when one is passed', () => {
+    const canonical = new Map([['dev@example.com', 'Dev New Name']])
+    expect(parseLog(CANNED_LOG, canonical).map((e) => e.author))
+      .toEqual(['sara', 'Dev New Name'])
   })
 
   it('returns an empty array for no history', () => {

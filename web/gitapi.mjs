@@ -170,12 +170,25 @@ export function parseRecentLog(text, now = Date.now(), canonicalNames = new Map(
   }))
 }
 
-// `git log --follow -n <n> --date=relative --format=%h<US>%an<US>%ad<US>%s`
-export function parseLog(text) {
+// `git log --follow -n <n> --date=relative
+//  --format=%h<US>%ae<US>%an<US>%ad<US>%s`
+//
+// canonicalNames names each commit's author the same way every other route
+// does. --follow prunes merges, and on this repo every commit under the
+// second spelling of its one author happens to be a merge — so the raw %an
+// looked consistent here by luck, not because it is. The blame card puts
+// this route's list directly under a header this map already resolves; two
+// spellings in one panel is one ordinary commit away.
+export function parseLog(text, canonicalNames = new Map()) {
   if (!text.trim()) return []
   return text.split('\n').filter(Boolean).map((line) => {
-    const [sha, author, when, ...rest] = line.split(US)
-    return { sha, author, when, subject: rest.join(US) }
+    const [sha, addr, author, when, ...rest] = line.split(US)
+    return {
+      sha,
+      author: (canonicalNames && canonicalNames.get(addr)) || author,
+      when,
+      subject: rest.join(US),
+    }
   })
 }
 
@@ -461,12 +474,16 @@ export function gitApiMiddleware(repoRoot) {
         const p = url.searchParams.get('path')
         const n = Math.max(1, Math.min(50, parseInt(url.searchParams.get('n') || '8', 10) || 8))
         if (!isTrackedPath(p, files)) return sendJson(res, { ok: false, reason: 'not a tracked path' })
-        const { stdout } = await execFileP(
-          'git',
-          ['log', '--follow', `-${n}`, '--date=relative', `--format=%h${US}%an${US}%ad${US}%s`, '--', p],
-          { cwd: repoRoot }
-        )
-        return sendJson(res, { ok: true, entries: parseLog(stdout) })
+        const [{ stdout }, canonicalNames] = await Promise.all([
+          execFileP(
+            'git',
+            ['log', '--follow', `-${n}`, '--date=relative',
+              `--format=%h${US}%ae${US}%an${US}%ad${US}%s`, '--', p],
+            { cwd: repoRoot }
+          ),
+          canonicalNamesFor(repoRoot),
+        ])
+        return sendJson(res, { ok: true, entries: parseLog(stdout, canonicalNames) })
       }
 
       if (route === 'recent') {
