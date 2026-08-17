@@ -451,9 +451,17 @@ export function gitApiMiddleware(repoRoot) {
         // param it never asked for.
         const count = Math.max(1, Math.min(30, parseInt(url.searchParams.get('count') || '8', 10) || 8))
         const [recentOut, namesOut] = await Promise.all([
+          // --no-merges: a merge commit has no numstat rows of its own, so it
+          // arrives as `files: 0` and the board renders "0 files" next to
+          // "Merge pull request #58". `-m` would fix the count by emitting one
+          // numstat section per parent, which double-counts instead. The board
+          // wants the commits somebody wrote, and the sibling `churn` and `log`
+          // routes already skip merges for free — a pathspec makes git prune
+          // merges that are TREESAME to a parent. This route has no pathspec,
+          // so it has to say so.
           execFileP(
             'git',
-            ['log', `-${count}`, `--format=%x01%h${US}%ae${US}%an${US}%at${US}%s`, '--numstat'],
+            ['log', `-${count}`, '--no-merges', `--format=%x01%h${US}%ae${US}%an${US}%at${US}%s`, '--numstat'],
             { cwd: repoRoot }
           ),
           execFileP('git', ['log', `--format=%ae${US}%an`], { cwd: repoRoot }),

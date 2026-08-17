@@ -279,6 +279,16 @@ describe('parseRecentLog', () => {
     expect(parseRecentLog('\n')).toEqual([])
   })
 
+  it('a header with no numstat rows counts zero files — the merge-commit shape', () => {
+    // What `git log --numstat` prints for a merge: the header, then nothing.
+    // Nothing here can invent a file count, which is why the `recent` route
+    // passes --no-merges rather than leaving this to the parser.
+    const text = '\x01ddd4444\x1fsara@example.com\x1fSara\x1f1700000000\x1fMerge pull request #58'
+    expect(parseRecentLog(text)).toEqual([
+      { sha: 'ddd4444', author: 'Sara', subject: 'Merge pull request #58', ageDays: expect.any(Number), files: 0 },
+    ])
+  })
+
   it('handles a single commit with no trailing blank line', () => {
     const text = '\x01aaa1111\x1fsara@example.com\x1fSara\x1f1700000000\x1fonly commit\n2\t0\tf.ts'
     expect(parseRecentLog(text)).toEqual([
@@ -526,6 +536,9 @@ describe('gitApiMiddleware against the real repo', () => {
       expect(typeof e.subject).toBe('string')
       expect(e.ageDays === null || typeof e.ageDays === 'number').toBe(true)
       expect(typeof e.files).toBe('number')
+      // Every commit the board shows touched at least one file. This is the
+      // merge-commit regression: `git log --numstat` prints no numstat rows for
+      // a merge, so before --no-merges every merge on HEAD came back as 0.
       expect(e.files).toBeGreaterThan(0)
     }
   })
