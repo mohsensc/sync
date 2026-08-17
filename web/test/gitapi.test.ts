@@ -539,7 +539,9 @@ describe('gitApiMiddleware against the real repo', () => {
 
   it('recent: dedups this repo\'s own split identity the same way shortlog does', async () => {
     const r: any = await callMiddleware(mw, '/api/git/recent?count=30')
-    const names = new Set(r.json.entries.map((e: any) => e.author))
+    // new Set(x) with x: any resolves to Set<unknown>, which makes `n` below
+    // unknown and .toLowerCase() a type error. The element type has to be said.
+    const names = new Set<string>(r.json.entries.map((e: any) => String(e.author)))
     expect([...names].filter((n) => n.toLowerCase().includes('mohsen')).length).toBeLessThanOrEqual(1)
   })
 
