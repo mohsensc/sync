@@ -197,11 +197,23 @@ jobs:
         working-directory: web
         # tsc --noEmit exits 0 just as happily on an include glob that matches
         # nothing. Every .ts in src/ and test/ has to show up in the file list.
+        #
+        # A subset check, not a count. Counting was equivalent right up until
+        # test/gitapi.test.ts imported ../gitapi.mjs and pulled in
+        # web/gitapi.d.mts — a file tsc legitimately reads and `find ... -name
+        # '*.ts'` can't see, so the counts read 55 of 54 and the job went red
+        # over a declaration file doing its job. What this step is defending is
+        # "no project source went unchecked", which is the comm -23 below;
+        # equal totals were only ever a proxy for it.
         run: |
           set -euo pipefail
-          on_disk=$(find src test -name '*.ts' | wc -l | tr -d ' ')
-          checked=$(./node_modules/.bin/tsc --noEmit --listFilesOnly | grep -cv node_modules | tr -d ' ')
-          echo "$checked of $on_disk project files typechecked"
-          [ "$checked" -eq "$on_disk" ] || {
-            echo "error: tsc read $checked files, $on_disk on disk; include globs are wrong"
+          find src test -name '*.ts' | sort > /tmp/ts-on-disk.txt
+          ./node_modules/.bin/tsc --noEmit --listFilesOnly |
+            grep -v node_modules | sed "s|^$PWD/||" | sort > /tmp/ts-checked.txt
+          echo "$(wc -l < /tmp/ts-checked.txt | tr -d ' ') files typechecked, \
+$(wc -l < /tmp/ts-on-disk.txt | tr -d ' ') project files on disk"
+          missing=$(comm -23 /tmp/ts-on-disk.txt /tmp/ts-checked.txt)
+          [ -z "$missing" ] || {
+            echo "error: tsc never read these; include globs are wrong:"
+            echo "$missing"
             exit 1; }
