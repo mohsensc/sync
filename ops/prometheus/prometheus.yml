@@ -1,0 +1,25 @@
+# Scrapes gorelay's /metrics. Nothing else in this system is scrapable —
+# presenced and agent-presence-mcp push a stats frame up the websocket they
+# already hold instead of exposing an endpoint, because a laptop behind NAT
+# can't be scraped and shouldn't grow a new network path just to be. See
+# docs/monitoring.md for why, and go/internal/metrics for the catalogue.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  # absolute, not "alerts.yml" — Prometheus resolves relative rule_files
+  # against the config file's own directory, which happens to work out the
+  # same here, but the container's failure mode for a path it can't find is
+  # refusing to start, not a warning, so this isn't where to bet on that.
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  - job_name: gorelay
+    static_configs:
+      # host.docker.internal so this reaches a relay running on the host
+      # (gorelay --metrics-addr=0.0.0.0:9830) from inside the compose
+      # network; point this at a real host:port if the relay runs
+      # somewhere else. 9830 is this repo's documented default — see
+      # docs/monitoring.md.
+      - targets: ["host.docker.internal:9830"]

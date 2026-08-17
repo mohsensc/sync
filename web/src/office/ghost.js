@@ -31,8 +31,10 @@
 //
 // office.html can't export makeCharacterRoot (it's a local function, not
 // a module) or skinnedClone (three/addons import), so both get passed in
-// here rather than duplicated — same for live.js's hairFor. See the
-// ghost-authors append block at the bottom of office.html for the wiring.
+// here rather than duplicated — same for live.js's hairFor. The wiring is
+// in office.html's setupCast(), next to attachGitSignals: poll() runs once
+// on attach, and anywhere earlier than that it would run against an empty
+// world.agents and a rig that hasn't loaded.
 
 import * as THREE from 'three'
 import * as ANIM from './anim.js'
@@ -41,6 +43,7 @@ import {
   handshakeMarks, spacingFor as handshakeSpacingFor,
   playHandshake, getClip as getHandshakeClip,
 } from './clips/handshake.js'
+import { makeAmbientThrottle } from './frame-throttle.js'
 
 // ---------------------------------------------------------------------
 // Pure decision logic. No DOM, no THREE, no fetch — fixture-tested
@@ -182,14 +185,16 @@ const ARGUE_ENCOUNTER_MS = 5_200   // how long a ghost-triggered argue runs befo
 /**
  * attachGhostAuthors({ world, scene, skinnedClone, makeCharacterRoot,
  *   hairFor, getGltf, fetchFn, intervalMs }) ->
- *   { setMode(m), mode, tick(), dispose() }
+ *   { setMode(m), mode, poll(), tick(dt), dispose() }
  *
- * Self-contained: runs its own poll loop (blame) and its own rAF loop
- * (fade + idle sway), same shape as zoneowner.js's attachZoneOwner and
- * gitsignals.js's attachGitSignals — three independent, all-cheap git
- * pollers is already documented as acceptable at this repo's size (see
- * STATE.md's "known duplication" note); this is a fourth of the same
- * shape, not a new kind of debt.
+ * Self-contained on the poll side: runs its own blame poll loop, same
+ * shape as zoneowner.js's attachZoneOwner and gitsignals.js's
+ * attachGitSignals — three independent, all-cheap git pollers is already
+ * documented as acceptable at this repo's size (see STATE.md's "known
+ * duplication" note); this is a fourth of the same shape, not a new kind
+ * of debt. The fade/sway used to run its own rAF loop for the same
+ * "no shared seam" reason; office.html now runs one frame loop for the
+ * whole page, so tick(dt) rides that instead of starting its own.
  */
 export function attachGhostAuthors(cfg = {}) {
   const {
@@ -290,6 +295,13 @@ export function attachGhostAuthors(cfg = {}) {
       for (const m of list) { m.transparent = true; m.depthWrite = false; m.opacity = 0; mats.push(m) }
     })
     ANIM.crossfade(figRoot, 'idle', 0)
+    // A mixer never applies a pose until update() actually runs — .play()
+    // alone leaves the skeleton in its bind pose. A ghost is meant to be
+    // parked, not animated (see the file header), so this is the only
+    // update() call it ever gets: one frame at dt=0 just evaluates and
+    // applies the clip's frame 0, then tick() below never touches the
+    // mixer again.
+    ANIM.update(figRoot, 0)
     root.add(figRoot)
     const plate = buildPlateSprite(decision.author, decision.ageDays, color)
     root.add(plate)
@@ -367,7 +379,10 @@ export function attachGhostAuthors(cfg = {}) {
 
   // -- poll -------------------------------------------------------------
 
-  async function tick() {
+  // Renamed from the generic `tick` to `poll` so it doesn't collide with
+  // the per-frame tick(dt) below — this one hits the network on a timer,
+  // that one runs off office.html's frame loop.
+  async function poll() {
     if (!world) return
     if (mode === 'off') { for (const id of [...states.keys()]) beginRemove(id); return }
 
@@ -405,37 +420,38 @@ export function attachGhostAuthors(cfg = {}) {
     }
   }
 
-  // -- per-frame: fade + idle sway ---------------------------------------
+  // -- per-frame: fade + idle sway -----------------------------------------
+  // A ghost's fade and sway are slow, ambient motion — not something
+  // that needs a full 60Hz step (see frame-throttle.js). No mixer update
+  // here: a ghost takes its idle pose once, in buildGhostState above, and
+  // holds it — the sway below is a root-transform write, which is nearly
+  // free, standing in for what would otherwise be a per-ghost skeleton
+  // update every frame for a figure that's meant to read as parked.
 
-  let raf = null
-  let lastFrame = now()
-  function frame() {
-    const t = now()
-    const dt = Math.min(0.05, Math.max(0, (t - lastFrame) / 1000))
-    lastFrame = t
+  const ambient = makeAmbientThrottle()
+  function tick(dt) {
+    const elapsed = ambient(dt)
+    if (!elapsed) return
     for (const [id, s] of states) {
       const target = s.removing ? 0 : 1
-      s.presence += (target - s.presence) * Math.min(1, dt / FADE_S)
+      s.presence += (target - s.presence) * Math.min(1, elapsed / FADE_S)
       if (s.figRoot) {
         const bodyOp = s.presence * GHOST_BODY_OPACITY
         for (const m of s.mats) m.opacity = bodyOp
-        s.swayPhase += dt * 0.7
+        s.swayPhase += elapsed * 0.7
         s.figRoot.position.y = Math.sin(s.swayPhase) * 0.012
         s.figRoot.rotation.z = Math.sin(s.swayPhase * 0.6) * 0.01
-        ANIM.update(s.figRoot, dt)
       }
       s.plate.material.opacity = s.presence * PLATE_OPACITY
       if (s.removing && s.presence < 0.01) { disposeState(s); states.delete(id) }
     }
-    raf = requestAnimationFrame(frame)
   }
-  raf = requestAnimationFrame(frame)
 
   // -- mode + key handling -------------------------------------------------
 
   function setMode(m) {
     mode = (m === 'plate' || m === 'off') ? m : 'ghost'
-    tick()
+    poll()
   }
 
   function onKeydown(e) {
@@ -447,14 +463,14 @@ export function attachGhostAuthors(cfg = {}) {
   if (typeof addEventListener === 'function') addEventListener('keydown', onKeydown)
 
   let timer = null
-  if (world) { tick(); timer = setInterval(tick, intervalMs) }
+  if (world) { poll(); timer = setInterval(poll, intervalMs) }
 
   return {
     setMode,
     get mode() { return mode },
+    poll,
     tick,
     dispose() {
-      if (raf != null) cancelAnimationFrame(raf)
       if (timer) clearInterval(timer)
       if (typeof removeEventListener === 'function') removeEventListener('keydown', onKeydown)
       for (const s of states.values()) disposeState(s)

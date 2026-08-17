@@ -43,6 +43,13 @@ export function ageDays(epochSeconds, now = Date.now()) {
 // caller, since a whole-file per-line dump isn't something the UI wants.
 export function parseBlamePorcelain(text, now = Date.now(), opts = {}) {
   const includeLines = !!opts.includeLines
+  // The same address -> display name map the recent and shortlog routes use.
+  // Without it this function still dedupes by address, but names the person
+  // from the newest line *in this file*, which is a different answer than the
+  // one the zone plaque gives for the same human — one office showing
+  // "mohsensc" on a blame card and "Mohsen Sarrafan Chaharsoughi" on a plaque,
+  // at once. Repo-wide is the only scope where every surface agrees.
+  const canonicalNames = opts.canonicalNames || null
   const lines = text.split('\n')
   const meta = new Map() // sha -> { author, mail, time }
   const perLine = [] // { sha, finalLine }
@@ -99,8 +106,11 @@ export function parseBlamePorcelain(text, now = Date.now(), opts = {}) {
     }
   }
 
+  const nameFor = (mail, fallback) =>
+    (canonicalNames && canonicalNames.get(mail)) || fallback
+
   const owners = [...byMail.entries()]
-    .map(([, v]) => ({ author: v.name, lines: v.lines, share: v.lines / total }))
+    .map(([mail, v]) => ({ author: nameFor(mail, v.name), lines: v.lines, share: v.lines / total }))
     .sort((a, b) => b.lines - a.lines)
 
   const result = {
@@ -115,7 +125,8 @@ export function parseBlamePorcelain(text, now = Date.now(), opts = {}) {
     result.lines = perLine.map(({ sha, finalLine }) => {
       const m = meta.get(sha) || {}
       const mail = m.mail || m.author || 'unknown'
-      return { n: finalLine, author: nameByMail.get(mail) || m.author || 'unknown', ageDays: ageDays(m.time, now) }
+      const own = nameByMail.get(mail) || m.author || 'unknown'
+      return { n: finalLine, author: nameFor(mail, own), ageDays: ageDays(m.time, now) }
     })
   }
 
@@ -159,12 +170,25 @@ export function parseRecentLog(text, now = Date.now(), canonicalNames = new Map(
   }))
 }
 
-// `git log --follow -n <n> --date=relative --format=%h<US>%an<US>%ad<US>%s`
-export function parseLog(text) {
+// `git log --follow -n <n> --date=relative
+//  --format=%h<US>%ae<US>%an<US>%ad<US>%s`
+//
+// canonicalNames names each commit's author the same way every other route
+// does. --follow prunes merges, and on this repo every commit under the
+// second spelling of its one author happens to be a merge — so the raw %an
+// looked consistent here by luck, not because it is. The blame card puts
+// this route's list directly under a header this map already resolves; two
+// spellings in one panel is one ordinary commit away.
+export function parseLog(text, canonicalNames = new Map()) {
   if (!text.trim()) return []
   return text.split('\n').filter(Boolean).map((line) => {
-    const [sha, author, when, ...rest] = line.split(US)
-    return { sha, author, when, subject: rest.join(US) }
+    const [sha, addr, author, when, ...rest] = line.split(US)
+    return {
+      sha,
+      author: (canonicalNames && canonicalNames.get(addr)) || author,
+      when,
+      subject: rest.join(US),
+    }
   })
 }
 
@@ -217,19 +241,22 @@ export function mergeAuthorsByEmail(rows, canonicalNames) {
 }
 
 // `git log --follow --format=%an<US>%at<US>%s` (newest first, no -n cap).
-export function parseStatLog(text, now = Date.now()) {
+export function parseStatLog(text, now = Date.now(), canonicalNames = new Map()) {
   const rows = text.split('\n').filter(Boolean).map((line) => {
-    const [author, at, ...rest] = line.split(US)
-    return { author, at: parseInt(at, 10), subject: rest.join(US) }
+    const [addr, author, at, ...rest] = line.split(US)
+    return { addr, author, at: parseInt(at, 10), subject: rest.join(US) }
   })
   if (rows.length === 0) return null
-  const authors = new Set(rows.map((r) => r.author))
+  // By address, not by name: one person committing as both `mohsensc` and
+  // `Mohsen Sarrafan Chaharsoughi` is one author, and "2 authors" on a file
+  // only they have ever touched is a wrong fact, not a cosmetic one.
+  const authors = new Set(rows.map((r) => r.addr || r.author))
   const newest = rows[0]
   const oldest = rows[rows.length - 1]
   return {
     commits: rows.length,
     authorCount: authors.size,
-    lastAuthor: newest.author,
+    lastAuthor: (canonicalNames && canonicalNames.get(newest.addr)) || newest.author,
     lastAgeDays: ageDays(newest.at, now),
     firstAgeDays: ageDays(oldest.at, now),
     lastSummary: newest.subject,
@@ -321,8 +348,40 @@ export function sliceSourceLines(text, startRaw, endRaw) {
 // ---------------------------------------------------------------------
 
 async function trackedFiles(repoRoot) {
-  const { stdout } = await execFileP('git', ['ls-files'], { cwd: repoRoot })
-  return stdout.split('\n').filter(Boolean)
+  // -z: NUL-separated, unquoted raw bytes. Plain `git ls-files` C-quotes any
+  // non-ASCII byte under git's default core.quotepath=true
+  // (`"unicode-caf\303\251.txt"`, literal backslash-octal) — that escaped
+  // form never string-equals the real UTF-8 path a route's allowlist check
+  // compares it against, so a genuinely tracked unicode filename read as
+  // untracked everywhere. -z sidesteps the quoting rule entirely.
+  const { stdout } = await execFileP('git', ['ls-files', '-z'], { cwd: repoRoot })
+  return stdout.split('\0').filter(Boolean)
+}
+
+// Node's execFile default maxBuffer is 1MB — fine for a scoped, path- or
+// count-limited git call, not for one that walks a repo's entire history
+// with nothing capping its output. Shared so every route asking for that
+// headroom asks for the same amount.
+const MAX_BUFFER = 8 * 1024 * 1024
+
+/** Repo-wide address -> display name, newest commit wins. Every route that
+ *  puts a person's name on screen resolves through this, so the blame card,
+ *  the zone plaque, the commit board and the ambient stats can't disagree
+ *  about what one human is called. Uncached, same as trackedFiles above —
+ *  this is a dev-server middleware and a `git log` on this repo is a few ms.
+ *
+ *  Repo-wide with no `-n`/path filter, so its output grows with the whole
+ *  repo's history — on a large enough repo it overflowed Node's default 1MB
+ *  maxBuffer, and the raw "stdout maxBuffer length exceeded" surfaced as
+ *  every caller's own error text instead of an honest ok:false. maxBuffer
+ *  is a parameter (not baked in as MAX_BUFFER directly) so a test can force
+ *  the same overflow on a two-commit scratch repo instead of needing a
+ *  45,000-commit fixture to prove the degrade path actually degrades. */
+async function canonicalNamesFor(repoRoot, maxBuffer = MAX_BUFFER) {
+  const { stdout } = await execFileP(
+    'git', ['log', `--format=%ae${US}%an`], { cwd: repoRoot, maxBuffer }
+  )
+  return parseCanonicalNames(stdout)
 }
 
 function isTrackedPath(p, files) {
@@ -346,7 +405,7 @@ function sendJson(res, body) {
 // Middleware
 // ---------------------------------------------------------------------
 
-export function gitApiMiddleware(repoRoot) {
+export function gitApiMiddleware(repoRoot, { maxBuffer = MAX_BUFFER } = {}) {
   return async function handler(req, res, next) {
     const url = new URL(req.url, 'http://localhost')
     if (!url.pathname.startsWith('/api/git/')) return next()
@@ -359,13 +418,24 @@ export function gitApiMiddleware(repoRoot) {
       if (route === 'stat') {
         const p = url.searchParams.get('path')
         if (!isTrackedPath(p, files)) return sendJson(res, { ok: false, reason: 'not a tracked path' })
-        const { stdout } = await execFileP(
-          'git', ['log', '--follow', `--format=%an${US}%at${US}%s`, '--', p],
-          { cwd: repoRoot }
-        )
-        const stat = parseStatLog(stdout)
-        if (!stat) return sendJson(res, { ok: false, reason: 'no history' })
-        return sendJson(res, { ok: true, ...stat })
+        try {
+          const [{ stdout }, canonicalNames] = await Promise.all([
+            execFileP(
+              'git', ['log', '--follow', `--format=%ae${US}%an${US}%at${US}%s`, '--', p],
+              { cwd: repoRoot }
+            ),
+            canonicalNamesFor(repoRoot, maxBuffer),
+          ])
+          const stat = parseStatLog(stdout, Date.now(), canonicalNames)
+          if (!stat) return sendJson(res, { ok: false, reason: 'no history' })
+          return sendJson(res, { ok: true, ...stat })
+        } catch {
+          // canonicalNamesFor runs repo-wide with no cap of its own — on a
+          // repo with enough history it can still overflow maxBuffer, same
+          // as blame's own git call already degrades for below. Same shape:
+          // the route's own honest failure, never Node's raw stderr text.
+          return sendJson(res, { ok: false, reason: 'stat unavailable' })
+        }
       }
 
       if (route === 'blame') {
@@ -381,10 +451,12 @@ export function gitApiMiddleware(repoRoot) {
         const wantLines = url.searchParams.get('lines') === '1'
           && rangeArgs.length > 0 && (end - start + 1) <= 150
         try {
-          const { stdout } = await execFileP(
-            'git', ['blame', '--porcelain', ...rangeArgs, '--', p], { cwd: repoRoot }
-          )
-          return sendJson(res, { ok: true, ...parseBlamePorcelain(stdout, Date.now(), { includeLines: wantLines }) })
+          const [{ stdout }, canonicalNames] = await Promise.all([
+            execFileP('git', ['blame', '--porcelain', ...rangeArgs, '--', p], { cwd: repoRoot }),
+            canonicalNamesFor(repoRoot, maxBuffer),
+          ])
+          return sendJson(res, { ok: true, ...parseBlamePorcelain(stdout, Date.now(),
+            { includeLines: wantLines, canonicalNames }) })
         } catch {
           // untracked, binary, or empty file — git blame exits non-zero for
           // all of these. Design for it, don't special-case it. A bogus
@@ -398,7 +470,7 @@ export function gitApiMiddleware(repoRoot) {
         if (!isTrackedPath(p, files)) return sendJson(res, { ok: false, reason: 'not a tracked path' })
         try {
           const { stdout } = await execFileP(
-            'git', ['show', `HEAD:${p}`], { cwd: repoRoot, maxBuffer: 8 * 1024 * 1024 }
+            'git', ['show', `HEAD:${p}`], { cwd: repoRoot, maxBuffer: MAX_BUFFER }
           )
           return sendJson(res, sliceSourceLines(stdout, url.searchParams.get('start'), url.searchParams.get('end')))
         } catch {
@@ -432,12 +504,20 @@ export function gitApiMiddleware(repoRoot) {
         const p = url.searchParams.get('path')
         const n = Math.max(1, Math.min(50, parseInt(url.searchParams.get('n') || '8', 10) || 8))
         if (!isTrackedPath(p, files)) return sendJson(res, { ok: false, reason: 'not a tracked path' })
-        const { stdout } = await execFileP(
-          'git',
-          ['log', '--follow', `-${n}`, '--date=relative', `--format=%h${US}%an${US}%ad${US}%s`, '--', p],
-          { cwd: repoRoot }
-        )
-        return sendJson(res, { ok: true, entries: parseLog(stdout) })
+        try {
+          const [{ stdout }, canonicalNames] = await Promise.all([
+            execFileP(
+              'git',
+              ['log', '--follow', `-${n}`, '--date=relative',
+                `--format=%h${US}%ae${US}%an${US}%ad${US}%s`, '--', p],
+              { cwd: repoRoot }
+            ),
+            canonicalNamesFor(repoRoot, maxBuffer),
+          ])
+          return sendJson(res, { ok: true, entries: parseLog(stdout, canonicalNames) })
+        } catch {
+          return sendJson(res, { ok: false, reason: 'log unavailable' })
+        }
       }
 
       if (route === 'recent') {
@@ -450,37 +530,58 @@ export function gitApiMiddleware(repoRoot) {
         // existing caller (blamecard.js's per-file commit list) for a
         // param it never asked for.
         const count = Math.max(1, Math.min(30, parseInt(url.searchParams.get('count') || '8', 10) || 8))
-        const [recentOut, namesOut] = await Promise.all([
-          execFileP(
-            'git',
-            ['log', `-${count}`, `--format=%x01%h${US}%ae${US}%an${US}%at${US}%s`, '--numstat'],
-            { cwd: repoRoot }
-          ),
-          execFileP('git', ['log', `--format=%ae${US}%an`], { cwd: repoRoot }),
-        ])
-        const canonicalNames = parseCanonicalNames(namesOut.stdout)
-        return sendJson(res, { ok: true, entries: parseRecentLog(recentOut.stdout, Date.now(), canonicalNames) })
+        try {
+          const [recentOut, canonicalNames] = await Promise.all([
+            // --no-merges: a merge commit has no numstat rows of its own, so it
+            // arrives as `files: 0` and the board renders "0 files" next to
+            // "Merge pull request #58". `-m` would fix the count by emitting one
+            // numstat section per parent, which double-counts instead. The board
+            // wants the commits somebody wrote, and the sibling `churn` and `log`
+            // routes already skip merges for free — a pathspec makes git prune
+            // merges that are TREESAME to a parent. This route has no pathspec,
+            // so it has to say so.
+            execFileP(
+              'git',
+              ['log', `-${count}`, '--no-merges', `--format=%x01%h${US}%ae${US}%an${US}%at${US}%s`, '--numstat'],
+              { cwd: repoRoot }
+            ),
+            canonicalNamesFor(repoRoot, maxBuffer),
+          ])
+          return sendJson(res, { ok: true, entries: parseRecentLog(recentOut.stdout, Date.now(), canonicalNames) })
+        } catch {
+          return sendJson(res, { ok: false, reason: 'recent history unavailable' })
+        }
       }
 
       if (route === 'shortlog') {
         const d = url.searchParams.get('dir') || ''
         if (!isTrackedDir(d, files)) return sendJson(res, { ok: false, reason: 'not a tracked dir' })
         const pathArgs = d === '' || d === '.' ? [] : ['--', d]
-        // Two calls: -sne for the counts, a plain log for canonical
-        // display names, so a split identity (same inbox, two name
-        // spellings) merges into one owner instead of two.
-        const [shortlogOut, namesOut] = await Promise.all([
-          execFileP('git', ['shortlog', '-sne', 'HEAD', ...pathArgs], { cwd: repoRoot }),
-          execFileP('git', ['log', `--format=%ae${US}%an`, 'HEAD', ...pathArgs], { cwd: repoRoot }),
-        ])
-        const rows = parseShortlog(shortlogOut.stdout)
-        const canonicalNames = parseCanonicalNames(namesOut.stdout)
-        const owners = mergeAuthorsByEmail(rows, canonicalNames)
-        const total = owners.reduce((sum, o) => sum + o.commits, 0)
-        return sendJson(res, {
-          ok: true,
-          owners: owners.map((o) => ({ ...o, share: total > 0 ? o.commits / total : 0 })),
-        })
+        // Two calls: -sne for the counts, canonicalNamesFor for the display
+        // names, so a split identity (one inbox, two name spellings) merges
+        // into one owner instead of two.
+        //
+        // The name map is repo-wide even though the counts are dir-scoped.
+        // Scoped, it answered "the spelling they last used in this folder",
+        // which is a different name than the same person gets on a blame card
+        // or the commit board — that mismatch was visible in one frame, a
+        // plaque reading "Mohsen Sarrafan Chaharsoughi" over a card reading
+        // "mohsensc".
+        try {
+          const [shortlogOut, canonicalNames] = await Promise.all([
+            execFileP('git', ['shortlog', '-sne', 'HEAD', ...pathArgs], { cwd: repoRoot }),
+            canonicalNamesFor(repoRoot, maxBuffer),
+          ])
+          const rows = parseShortlog(shortlogOut.stdout)
+          const owners = mergeAuthorsByEmail(rows, canonicalNames)
+          const total = owners.reduce((sum, o) => sum + o.commits, 0)
+          return sendJson(res, {
+            ok: true,
+            owners: owners.map((o) => ({ ...o, share: total > 0 ? o.commits / total : 0 })),
+          })
+        } catch {
+          return sendJson(res, { ok: false, reason: 'shortlog unavailable' })
+        }
       }
 
       return sendJson(res, { ok: false, reason: 'unknown endpoint' })

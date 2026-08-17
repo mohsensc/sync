@@ -82,8 +82,6 @@ def preflight() -> None:
     build_presenced()
     build_gorelay()
     build_hookbench()
-    subprocess.run("lsof -ti:8799 | xargs kill -9", shell=True,
-                   capture_output=True)
 
 
 SCENARIOS = {

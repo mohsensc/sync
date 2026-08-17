@@ -65,7 +65,11 @@ export interface AttachGitSignalsOptions {
 }
 
 export function attachGitSignals(opts: AttachGitSignalsOptions): {
-  tick(): Promise<void>
+  /** Poll every git endpoint now instead of waiting for the interval. */
+  poll(): Promise<void>
+  /** Per-frame step, driven by office.html's one shared frame loop —
+   *  throttled internally to ~20Hz, safe to call every frame. */
+  tick(dt: number): void
   stop(): void
   readonly churnMode: ChurnMode
   setChurnMode(mode: ChurnMode): void

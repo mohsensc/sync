@@ -46,7 +46,7 @@ func BenchmarkConflictConcurrentReads(b *testing.B) {
 		i := 0
 		for pb.Next() {
 			path := fmt.Sprintf("src/pkg%d/mod%d.py", i%40, i%25)
-			c.Conflict(path, "me", 0)
+			c.Conflict(path, []string{"me"}, 0)
 			i++
 		}
 	})

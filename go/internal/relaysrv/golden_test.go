@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"testing"
+
+	"github.com/mohsensc/sync/go/internal/metrics"
 )
 
 // recorder is the Go twin of golden_scenario.py's Recorder: a Conn that
@@ -49,7 +51,7 @@ func goldenRegion(path string, symbol string) map[string]any {
 // each of the two recorders received.
 func runGolden() map[string]any {
 	clock := NewVirtualClock(1000.0)
-	relay := NewRelay(clock, InertRoster())
+	relay := NewRelay(clock, InertRoster(), metrics.New())
 	a := &recorder{agent: "a1", human: "sara"}
 	b := &recorder{agent: "a2", human: "dev"}
 

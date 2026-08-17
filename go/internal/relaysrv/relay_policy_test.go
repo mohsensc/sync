@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/mohsensc/sync/go/internal/metrics"
 )
 
 // Ported from python/tests/test_relay_policy.py's org-floor-and-effect
@@ -19,7 +21,7 @@ func orgRelay(t *testing.T, contents string) (*Relay, string, *VirtualClock) {
 	}
 	t.Setenv("AGENT_PRESENCE_ORG_POLICY", path)
 	clock := NewVirtualClock(1000.0)
-	return NewRelay(clock, InertRoster()), path, clock
+	return NewRelay(clock, InertRoster(), metrics.New()), path, clock
 }
 
 func claimRegion(rel *Relay, conn Conn, path string) Frame {
@@ -92,7 +94,7 @@ func TestANotifyRungThreeAnswersAckInsteadOfNegotiate(t *testing.T) {
 
 func TestADefaultRungThreeStillNegotiates(t *testing.T) {
 	clock := NewVirtualClock(1000.0)
-	rel := NewRelay(clock, InertRoster())
+	rel := NewRelay(clock, InertRoster(), metrics.New())
 	a := &recorder{agent: "a1", human: "sara"}
 	b := &recorder{agent: "a2", human: "dev"}
 	rel.Join("r1", a)
@@ -182,7 +184,7 @@ func (f *fakeUnattendedConn) Unattended() bool { return true }
 func TestARelayWithNoOrgPolicySendsNoPolicyFrame(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("AGENT_PRESENCE_ORG_POLICY", filepath.Join(dir, "nope.toml"))
-	rel := NewRelay(NewVirtualClock(1000.0), InertRoster())
+	rel := NewRelay(NewVirtualClock(1000.0), InertRoster(), metrics.New())
 	conn := &recorder{agent: "a1", human: "sara"}
 	rel.Join("r1", conn)
 	if len(conn.sent) != 1 || conn.sent[0]["type"] != "leases" {
@@ -266,6 +268,44 @@ func TestABlanketOnlyOrgFloorPutsNothingExtraOnTheWire(t *testing.T) {
 	frame := conn.sent[len(conn.sent)-1]
 	if _, ok := frame["floors"]; ok {
 		t.Fatalf("expected no `floors` key for a blanket-only org floor, got %+v", frame)
+	}
+}
+
+// TestDeletingTheOrgFileRelaxesAlreadyJoinedDaemons is issue #2 of the
+// system-seams audit: deleting the org policy file made policyFrame return
+// nil, so publishPolicyChange latched the new (relaxed) digest and then had
+// nothing to broadcast — every daemon already holding the old, stricter
+// floor stayed on it forever with no error anywhere. The fix has
+// policyFrame fall back to the compiled-in builtin floor instead of nil, so
+// a real transition (something that was configured going away) always has
+// something to put on the wire.
+func TestDeletingTheOrgFileRelaxesAlreadyJoinedDaemons(t *testing.T) {
+	rel, path, clock := orgRelay(t, "[floor]\nrung3 = \"deny\"\n")
+	conn := &recorder{agent: "a1", human: "sara"}
+	rel.Join("r1", conn)
+	conn.sent = nil
+
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(2.0)
+	rel.Handle(conn, map[string]any{"type": "heartbeat", "region": goldenRegion("src/x.py", "")})
+
+	var pushed []Frame
+	for _, f := range conn.sent {
+		if f["type"] == "policy" {
+			pushed = append(pushed, f)
+		}
+	}
+	if len(pushed) != 1 {
+		t.Fatalf("expected exactly one relaxed policy frame once the org file disappeared, got %d: %+v", len(pushed), conn.sent)
+	}
+	floor := floorNames(pushed[0]["floor"])
+	if floor[3] != "notify" {
+		t.Fatalf("floor should drop back to the compiled-in default (rung3=notify), got %v", floor)
+	}
+	if pushed[0]["source"] != "builtin" {
+		t.Fatalf("got source %v, want builtin", pushed[0]["source"])
 	}
 }
 

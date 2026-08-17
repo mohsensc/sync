@@ -96,10 +96,25 @@ def test_both_halves_agree_on_where_the_compiled_cache_lives():
     """Python writes it and `go/cmd/presenced` reads it, and the only thing
     joining them is the filename. Rename it on one side and the daemon runs on
     the builtin table forever, correctly and silently, which is the worst way
-    for this to break."""
+    for this to break.
+
+    presenced no longer spells the whole name in one literal: it derives every
+    sibling file from its socket, so two daemons sharing a runtime dir stop
+    sharing one journal. The name it lands on is unchanged, and this rebuilds
+    it from the two literals main.go actually carries — which is what has to
+    keep matching."""
     main = (GO / "cmd" / "presenced" / "main.go").read_text()
-    assert RUNTIME_CACHE_NAME in main, (
-        f"cmd/presenced/main.go does not mention {RUNTIME_CACHE_NAME!r}"
+
+    sock = re.search(r'"AGENT_PRESENCE_SOCK",\s*runtime\+"/([^"]+)"', main)
+    assert sock is not None, "cmd/presenced/main.go's default socket name moved"
+    suffix = re.search(r'siblingPath\(sock, "(policy\.[^"]+)"\)', main)
+    assert suffix is not None, "cmd/presenced/main.go stopped deriving the policy cache path"
+
+    stem = sock.group(1).rsplit(".", 1)[0]
+    derived = f"{stem}.{suffix.group(1)}"
+    assert derived == RUNTIME_CACHE_NAME, (
+        f"presenced defaults its policy cache to {derived!r}, "
+        f"python writes {RUNTIME_CACHE_NAME!r}"
     )
     assert runtime_cache_path({"XDG_RUNTIME_DIR": "/run/u"}).name == RUNTIME_CACHE_NAME
 

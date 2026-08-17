@@ -24,7 +24,9 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/mohsensc/sync/go/internal/metrics"
 	"github.com/mohsensc/sync/go/internal/wire"
 )
 
@@ -64,6 +66,15 @@ type Config struct {
 
 	ConnectTimeout time.Duration
 	RequestTimeout time.Duration
+
+	// Metrics is where this session's connection state, reconnects and
+	// claim roundtrip go. Required: this package has the same "no
+	// endpoint, push over the connection already held" problem the
+	// daemon does, and it reports through the one registry the process
+	// holds rather than growing its own. The transport that drains this
+	// registry over the wire is not this package's job — see
+	// internal/metrics's package comment.
+	Metrics *metrics.Registry
 }
 
 func (c Config) withDefaults() Config {
@@ -115,9 +126,10 @@ type Conn struct {
 	// MCP session are effectively sequential (stdio delivers one at a
 	// time), but the mutex makes that a guarantee instead of an
 	// assumption.
-	mu      sync.Mutex
-	ws      *websocket.Conn
-	replies chan map[string]any
+	mu            sync.Mutex
+	ws            *websocket.Conn
+	replies       chan map[string]any
+	everConnected bool // guards Reconnects: the first join is not a "re"-connect
 
 	presenceMu  sync.Mutex
 	presence    map[string]presenceEntry
@@ -141,6 +153,7 @@ func (c *Conn) teardownLocked() {
 	if c.ws != nil {
 		c.ws.Close()
 		c.ws = nil
+		c.cfg.Metrics.DaemonConnected.Set(0)
 	}
 	// The old reply channel is simply abandoned, not closed: a reader
 	// goroutine still draining the connection that just died writes into
@@ -194,6 +207,16 @@ func (c *Conn) connectLocked(ctx context.Context) error {
 	replies := make(chan map[string]any, 1)
 	c.replies = replies
 	go c.readLoop(ws, replies)
+
+	// DaemonConnected is shared with the daemon's own use of it: 1 for as
+	// long as this session holds a live relay connection. Reconnects only
+	// fires the second time and later — the session's first join isn't a
+	// re-establishment of anything.
+	c.cfg.Metrics.DaemonConnected.Set(1)
+	if c.everConnected {
+		c.cfg.Metrics.Reconnects.Inc()
+	}
+	c.everConnected = true
 	return nil
 }
 
@@ -275,13 +298,20 @@ func (c *Conn) readLoop(ws *websocket.Conn, replies chan map[string]any) {
 
 // request sends a frame and waits for the one reply it provokes, tearing
 // the connection down on any failure so the next call starts clean.
-func (c *Conn) request(ctx context.Context, payload any) (map[string]any, error) {
+//
+// roundtrip, when not nil, is observed once — only on the branch where a
+// reply actually arrived. The clock starts after connectLocked returns,
+// not around the whole call: a lazy first dial+join is setup, not part of
+// "time from sending a claim to the relay's verdict", and a request that
+// timed out or was cancelled never got a verdict to time.
+func (c *Conn) request(ctx context.Context, payload any, roundtrip prometheus.Histogram) (map[string]any, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if err := c.connectLocked(ctx); err != nil {
 		return nil, err
 	}
+	start := time.Now()
 
 	if err := c.ws.SetWriteDeadline(time.Now().Add(c.cfg.RequestTimeout)); err != nil {
 		c.teardownLocked()
@@ -296,6 +326,9 @@ func (c *Conn) request(ctx context.Context, payload any) (map[string]any, error)
 	defer timer.Stop()
 	select {
 	case reply := <-c.replies:
+		if roundtrip != nil {
+			roundtrip.Observe(time.Since(start).Seconds())
+		}
 		return reply, nil
 	case <-timer.C:
 		c.teardownLocked()
@@ -309,13 +342,15 @@ func (c *Conn) request(ctx context.Context, payload any) (map[string]any, error)
 // Claim sends a "claim" frame and returns the "claim_result" reply, raw —
 // the caller (mcptools.Tools) reshapes it into the tool's answer.
 func (c *Conn) Claim(ctx context.Context, region wire.Region, intent string) (map[string]any, error) {
-	return c.request(ctx, wire.Claim{Type: "claim", Region: region, Intent: intent})
+	return c.request(ctx, wire.Claim{Type: "claim", Region: region, Intent: intent}, c.cfg.Metrics.ClaimRoundtrip)
 }
 
 // Move sends a "move" frame — a negotiation move — and returns the
-// "move_result" reply, raw.
+// "move_result" reply, raw. Not what ClaimRoundtrip measures — that
+// histogram's help text is specifically about a claim's verdict — so this
+// passes no histogram to observe.
 func (c *Conn) Move(ctx context.Context, region wire.Region, move, reason string) (map[string]any, error) {
-	return c.request(ctx, wire.MoveRequest{Type: "move", Region: region, Move: move, Reason: reason})
+	return c.request(ctx, wire.MoveRequest{Type: "move", Region: region, Move: move, Reason: reason}, nil)
 }
 
 // Release sends a "release" frame. No reply travels for one — the room

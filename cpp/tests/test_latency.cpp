@@ -17,8 +17,9 @@
 #include "tests/fake_daemon.hpp"
 
 // These assertions run on whatever machine happens to be free — a laptop
-// mid-build, a shared CI runner, a worktree next to other agents pounding the
-// same cores (#24). A raw wall-clock cutoff there is a coin flip: this file
+// mid-build, a shared box running several other agents' suites, a worktree
+// next to other agents pounding the same cores (#24). A raw wall-clock
+// cutoff there is a coin flip: this file
 // measured 17.98ms and 27ms p99 against a 2-5ms budget on a machine doing
 // nothing unusual, and every one of those failures got waved off as noise.
 // An assertion nobody believes is worse than no assertion, so nothing here

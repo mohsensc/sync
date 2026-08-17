@@ -3,6 +3,8 @@ package relaysrv
 import (
 	"sync"
 	"testing"
+
+	"github.com/mohsensc/sync/go/internal/metrics"
 )
 
 // fakePublisher records every frame published, for tests that need to
@@ -28,7 +30,7 @@ func (p *fakePublisher) PublishTo(room, agent string, frame Frame, actor Conn) {
 func newTestRegistry() (*VirtualClock, *Registry, *fakePublisher) {
 	clock := NewVirtualClock(0)
 	pub := &fakePublisher{}
-	return clock, NewRegistry(clock, pub), pub
+	return clock, NewRegistry(clock, pub, metrics.New()), pub
 }
 
 var authRegion = Region{Path: "src/auth.py", Symbol: strp("sign_in")}

@@ -35,7 +35,7 @@
 // bucket instead of rendering eight commits as one dot
 // (stackTimelinePositions, in history-viz.js).
 
-import { colorForAuthor, parseRelativeAge, stackTimelinePositions, formatAge, composeStory } from './history-viz.js'
+import { colorForAuthor, parseRelativeAge, stackTimelinePositions, formatAge, agePhrase, composeStory } from './history-viz.js'
 
 const CSS = `
 /* top:328px clears the #hud panel (office.html), which runs from 16px down
@@ -160,6 +160,17 @@ const CSS = `
   opacity:0;transform:translateY(3px);transition:opacity .35s ease,transform .35s ease}
 #bc .story-line.in{opacity:1;transform:translateY(0)}
 #bc .story-line:last-child{margin-bottom:0}
+
+/* This card slides in on select, then several bits inside it (ownership
+   bar, region strip, timeline dots, commit rows, story lines) transition
+   in a second time, staggered a few dozen ms apart by staggerReveal()
+   below. Same blanket "near-zero duration" pattern as office.html's #reel
+   block and replay-card.js's — the stagger ITSELF is also skipped under
+   reduced motion (see staggerReveal()), this just covers the transition
+   that would otherwise still ease each element to its final state. */
+@media (prefers-reduced-motion: reduce){
+  #bc, #bc *{transition-duration:.01ms!important}
+}
 `
 
 /** repo-relative path -> {blame, log} promise, so re-selecting the same agent
@@ -185,6 +196,26 @@ function loadFor(path, fetchFn) {
   ]).then(([blame, log, stat]) => ({ blame, log, stat }))
   cache.set(path, p)
   return p
+}
+
+/** guarded the same way this file guards every other browser-only global
+ *  (see the `location`/`addEventListener` checks elsewhere in office/*.js)
+ *  so a non-browser test importing this module doesn't throw. */
+function prefersReducedMotion() {
+  return typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches
+}
+
+/** Reveal `apply(el)` across `list` staggered `delayFor(i)` ms apart — the
+ *  shared shape behind every "grow the bar in" / "fade the row in" effect
+ *  below. Under reduced motion the stagger itself goes away, not just the
+ *  CSS easing (see the @media block in CSS above): every element jumps to
+ *  its final state on the same tick instead of arriving one by one. */
+function staggerReveal(list, delayFor, apply) {
+  const reduced = prefersReducedMotion()
+  list.forEach((el, i) => {
+    if (reduced) { apply(el); return }
+    setTimeout(() => apply(el), delayFor(i))
+  })
 }
 
 /** path + line range -> ranged blame promise. Separate cache from loadFor's
@@ -384,9 +415,8 @@ function renderOwnershipGraphic(host, blame, agent) {
   // actually plays instead of the browser coalescing it with the initial
   // 0% paint. Staggered slightly per segment, biggest owner leads.
   requestAnimationFrame(() => {
-    track.querySelectorAll('.tug-seg').forEach((seg, i) => {
-      setTimeout(() => { seg.style.width = seg.dataset.target + '%' }, i * 70)
-    })
+    staggerReveal(track.querySelectorAll('.tug-seg'), i => i * 70,
+      seg => { seg.style.width = seg.dataset.target + '%' })
   })
 }
 
@@ -441,7 +471,13 @@ function renderHistoryGraphic(host, log) {
       dot.appendChild(badge)
     }
     wrap.appendChild(dot)
-    setTimeout(() => dot.classList.add('in'), 120 + i * 55)
+    // Built and staggered inline per-dot rather than through
+    // staggerReveal() above — that helper wants an already-built list to
+    // reveal in a second pass; this loop builds each dot AND schedules its
+    // own reveal in the same iteration, so the reduced-motion check is
+    // just inlined here instead.
+    if (prefersReducedMotion()) dot.classList.add('in')
+    else setTimeout(() => dot.classList.add('in'), 120 + i * 55)
   })
 
   const axis = document.createElement('div')
@@ -476,7 +512,7 @@ function renderRegionStrip(host, regionBlame, agent, range) {
   const p = document.createElement('p')
   p.className = 'region-summary'
   const who = summary.multiAuthor ? `mostly <b>${summary.topAuthor}</b> (${summary.topPct}%)` : `<b>${summary.topAuthor}</b>`
-  const age = summary.ageLabel ? `, newest ${summary.ageLabel} old` : ''
+  const age = summary.ageLabel ? `, newest ${agePhrase(summary.ageLabel, 'old')}` : ''
   p.innerHTML = `these ${summary.total} lines: ${who}${age}`
 
   const track = document.createElement('div')
@@ -508,9 +544,8 @@ function renderRegionStrip(host, regionBlame, agent, range) {
   host.appendChild(note)
 
   requestAnimationFrame(() => {
-    track.querySelectorAll('.region-seg').forEach((seg, i) => {
-      setTimeout(() => { seg.style.width = seg.dataset.target + '%' }, i * 70)
-    })
+    staggerReveal(track.querySelectorAll('.region-seg'), i => i * 70,
+      seg => { seg.style.width = seg.dataset.target + '%' })
   })
 }
 
@@ -521,7 +556,7 @@ function renderRegionStrip(host, regionBlame, agent, range) {
 function renderOwnershipSingle(host, blame) {
   const s = singleOwnerSummary(blame)
   if (!s) { host.innerHTML = '<p class="empty">no history here yet</p>'; return }
-  const age = s.ageLabel ? `, newest ${s.ageLabel} old` : ''
+  const age = s.ageLabel ? `, newest ${agePhrase(s.ageLabel, 'old')}` : ''
   const p = document.createElement('p')
   p.className = 'solo-line'
   p.innerHTML = `<span class="swatch" style="background:${colorForAuthor(s.author)}"></span>` +
@@ -628,9 +663,8 @@ function renderOwnershipClassic(host, blame, agent) {
     ? `<p class="age">newest line ${blame.newestLineAgeDays}d old · oldest line ${blame.oldestLineAgeDays}d old</p>`
     : '')
   requestAnimationFrame(() => {
-    host.querySelectorAll('.bar-fill').forEach((el, i) => {
-      setTimeout(() => { el.style.width = el.dataset.target + '%' }, i * 60)
-    })
+    staggerReveal(host.querySelectorAll('.bar-fill'), i => i * 60,
+      el => { el.style.width = el.dataset.target + '%' })
   })
 }
 
@@ -649,7 +683,7 @@ function renderHistoryClassic(host, log) {
   host.innerHTML = ''
   host.appendChild(ul)
   requestAnimationFrame(() => {
-    ul.querySelectorAll('li').forEach((li, i) => setTimeout(() => li.classList.add('in'), i * 45))
+    staggerReveal(ul.querySelectorAll('li'), i => i * 45, li => li.classList.add('in'))
   })
 }
 
@@ -670,7 +704,8 @@ function renderStorySection(host, data) {
     p.className = 'story-line'
     p.textContent = line
     host.appendChild(p)
-    setTimeout(() => p.classList.add('in'), 60 + i * 90)
+    if (prefersReducedMotion()) p.classList.add('in')
+    else setTimeout(() => p.classList.add('in'), 60 + i * 90)
   })
 }
 

@@ -17,9 +17,10 @@
 import * as Z from './zones.js'
 
 export const RELAY_URL = 'ws://127.0.0.1:8799'
-// Matches python/src/agent_presence/leases.py's PRESENCE_TTL_S. A character
-// that has gone this long without a presence frame reads as "not here", the
-// same rule the capsule viewer's CharacterRegistry uses.
+// Matches PresenceTTLS in go/internal/relaysrv/leases.go (python/src/agent_presence/
+// leases.py, where this comment used to point, was deleted with the python relay).
+// A character that has gone this long without a presence frame reads as "not
+// here", the same rule the capsule viewer's CharacterRegistry uses.
 export const PRESENCE_TTL_MS = 30_000
 
 /**
@@ -90,6 +91,72 @@ export function connect({ room, human, url = RELAY_URL, onPresence, onDecision, 
   ws.onclose = () => { if (onClose) onClose() }
 
   return { close() { try { ws.close() } catch { /* already gone */ } } }
+}
+
+// Backoff for connectWithReconnect: doubles per miss, capped so a relay
+// that's down for an hour doesn't get hit at the same aggressive rate the
+// whole time — but the cap is on the *interval*, never on whether we try
+// again, so the office still checks back forever and climbs out of demo
+// mode on its own whenever the relay actually returns.
+export const RECONNECT_BASE_MS = 1_000
+export const RECONNECT_MAX_MS = 30_000
+
+export function reconnectDelayMs(attempt, base = RECONNECT_BASE_MS, cap = RECONNECT_MAX_MS) {
+  return Math.min(cap, base * 2 ** Math.max(0, attempt))
+}
+
+/**
+ * connect(), self-healing. Once the office can never climb back out of demo
+ * mode on its own (there was no reconnect anywhere in live.js or
+ * office.html), a relay restart went unnoticed forever — a brand new
+ * connect() to the same URL worked immediately, but nothing ever tried
+ * one. This wraps connect() in a loop that does.
+ *
+ * Every callback means exactly what it does for connect() — onClose still
+ * fires on every drop, so the caller's existing demo-fallback/badge logic
+ * runs unmodified — but a drop also schedules another attempt after
+ * reconnectDelayMs(attempt) instead of leaving the caller stuck. onOpen
+ * resets the attempt counter, so a connection that holds for a while and
+ * then drops again backs off from the base delay, not from wherever the
+ * last outage left off.
+ *
+ * close() stops the loop for good: tears down whatever connection is live
+ * (or pending) and cancels any scheduled retry, same contract as
+ * connect()'s own close().
+ *
+ * @param {Parameters<typeof connect>[0]} cfg
+ * @returns {{close():void}}
+ */
+export function connectWithReconnect(cfg) {
+  let attempt = 0
+  let stopped = false
+  let timer = null
+  let inner = { close() {} }
+
+  const open = () => {
+    inner = connect({
+      ...cfg,
+      onOpen: () => { attempt = 0; if (cfg.onOpen) cfg.onOpen() },
+      onClose: () => {
+        if (cfg.onClose) cfg.onClose()
+        // close() may itself have been called from inside the caller's own
+        // onClose — check the stop flag after invoking it, not before.
+        if (stopped) return
+        const delay = reconnectDelayMs(attempt)
+        attempt++
+        timer = setTimeout(open, delay)
+      },
+    })
+  }
+  open()
+
+  return {
+    close() {
+      stopped = true
+      if (timer != null) clearTimeout(timer)
+      inner.close()
+    },
+  }
 }
 
 function isPresence(m) {
@@ -325,8 +392,20 @@ export class LiveDirector {
     const zone = this.zoneFor(verb, path)
     const spawned = !this.records.has(id)
     const region = regionFromMsg(msg)
+    // relay.go stamps every presence frame with its own clock (Ts, unix
+    // seconds — see PresenceTTLS above) — including entries replayed in
+    // the join snapshot, which can already be stale by the time they reach
+    // us. Stamping those with local arrival (`now`) instead handed them a
+    // second, fresh TTL on top of whatever was left of the first one: up
+    // to 2x PRESENCE_TTL_MS before a stale character despawned. Clamped to
+    // `now` rather than trusted outright — a relay clock running ahead of
+    // the browser's must not read an entry as fresher than the moment it
+    // actually arrived.
+    const lastSeen = typeof msg.ts === 'number' && Number.isFinite(msg.ts)
+      ? Math.min(now, msg.ts * 1000)
+      : now
 
-    this.records.set(id, { human, verb, path, zone, rung, lastSeen: now, region })
+    this.records.set(id, { human, verb, path, zone, rung, lastSeen, region })
 
     let contestWith = null
     if (rung >= 3) {

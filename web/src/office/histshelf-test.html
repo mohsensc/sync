@@ -112,8 +112,18 @@ function resize() {
     renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix()
   }
 }
-function tick() { resize(); renderer.render(scene, camera); requestAnimationFrame(tick) }
-tick()
+// One frame loop here too, same shape as office.html: this harness drives
+// histshelf.js's tick(dt) rather than letting the module start its own.
+let last = performance.now()
+function tick(t) {
+  const dt = Math.min((t - last) / 1000, 0.1)
+  last = t
+  resize()
+  renderer.render(scene, camera)
+  shelf.tick(dt)
+  requestAnimationFrame(tick)
+}
+requestAnimationFrame(tick)
 
 // Canned /api/git/log bodies, same shape gitapi.mjs's real 'log' route
 // returns: { ok, entries: [{ sha, author, when, subject }] } newest first.

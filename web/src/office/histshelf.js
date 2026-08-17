@@ -258,12 +258,15 @@ function initialMode() {
 
 /**
  * attachHistShelf({ scene, camera, canvas, fetchFn }) ->
- *   { show(agent), hide(), setMode(m), mode, dispose() }
+ *   { show(agent), hide(), setMode(m), mode, tick(dt), dispose() }
  *
- * Self-contained: runs its own rAF loop to keep the DOM strip pinned over
- * a moving agent, rather than hooking into office.html's tick() — this
- * round's file-ownership split has office.html as a shared, append-only
- * file, so the wiring block at its end can attach this and nothing more.
+ * tick(dt) keeps the DOM strip pinned over a moving agent — office.html's
+ * one shared frame loop calls it, rather than this module starting a rAF
+ * of its own. Left unthrottled (unlike the ambient effects in interact.js/
+ * gitsignals.js/ghost.js): it's tracking a moving screen position through
+ * camera orbit and zoom flights, not breathing, and the underlying work
+ * (one project() call) is cheap enough that skipping frames would only
+ * trade a non-problem for visible lag.
  */
 export function attachHistShelf(cfg = {}) {
   const { scene = null, camera = null, canvas = null, fetchFn = (...a) => fetch(...a) } = cfg
@@ -354,24 +357,24 @@ export function attachHistShelf(cfg = {}) {
   }
   addEventListener('keydown', onKeydown)
 
-  let raf = 0
-  function frame() {
-    raf = requestAnimationFrame(frame)
+  // dt is unused — same tick(dt) signature as every other module's, for a
+  // uniform call site in office.html, but this one only needs to know
+  // where things are right now, not how much time passed.
+  function tick(dt) {
     if (!current || mode !== 'strip' || !camera || !canvas) return
     const [x, y, z] = shelfPosition(current.agent)
     const [sx, sy] = projectToScreen(camera, canvas, [x, y + 0.10, z])
     stripEl.style.left = sx + 'px'
     stripEl.style.top = sy + 'px'
   }
-  if (typeof requestAnimationFrame === 'function') frame()
 
   return {
     show,
     hide,
     setMode,
     get mode() { return mode },
+    tick,
     dispose() {
-      if (raf) cancelAnimationFrame(raf)
       removeEventListener('keydown', onKeydown)
       clearGroup3D()
       if (scene) scene.remove(group3D)

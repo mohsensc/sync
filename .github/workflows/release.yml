@@ -28,3 +28,4 @@ jobs:
           files: |
             dist/presenced-*
             dist/agent-presence-mcp-*
+            dist/gorelay-*

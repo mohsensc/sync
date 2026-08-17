@@ -25,6 +25,7 @@
 // below for the how; dressing.js's deskHeat/deskDust for the what.
 
 import { deskHeat, deskDust } from './dressing.js'
+import { makeAmbientThrottle } from './frame-throttle.js'
 
 const DEFAULT_INTERVAL_MS = 20_000
 const STAT_TTL_MS = 20_000
@@ -99,10 +100,12 @@ export function churnToIntensity(data) {
 //     cobweb that fade in once a file's last commit is genuinely old
 //     (staleToIntensity below). Deliberately inert — see dressing.js's
 //     header for why "hasn't been touched in a year" shouldn't move.
-// Self-contained (own keydown listener, own rAF loop) for the same
-// reason zoneowner.js and histshelf.js are: office.html's wiring block
-// isn't this round's file to edit, so there's no tick()/keydown seam to
-// hook a fourth signal into — see those two files' own notes.
+// Self-contained (own keydown listener) for the same reason zoneowner.js
+// and histshelf.js are. The heat glow used to run its own rAF loop for the
+// same reason — no tick()/keydown seam to hook a fourth signal into — but
+// office.html now runs one frame loop for the whole page and calls every
+// module's tick(dt); this file's per-frame work (the heat glow's breathe)
+// rides that instead. See attachGitSignals's own tick(dt) below.
 // ---------------------------------------------------------------------
 
 export const CHURN_MODES = ['stack', 'heat', 'cold']
@@ -285,15 +288,19 @@ export function attachGitSignals({ world, zones, ownership, fetchFn = fetch, int
     }
   }
 
-  async function tick() {
+  // Renamed from the generic `tick` to `poll` so it doesn't collide with
+  // the per-frame tick(dt) below — this one hits the network on a timer,
+  // that one runs off office.html's frame loop. Same "poll now" contract
+  // zoneowner.js's own tick() still has (it never grew a per-frame half).
+  async function poll() {
     const agents = (world && world.agents) || []
     await Promise.all(agents.map(a => pollAgent(a).catch(() => {})))
     await Promise.all(agents.map(a => pollChurn(a).catch(() => {})))
     await Promise.all(Object.entries(zoneDirs).map(([z, dir]) => pollZone(z, dir).catch(() => {})))
   }
 
-  tick()
-  const timer = setInterval(() => { tick() }, intervalMs)
+  poll()
+  const timer = setInterval(() => { poll() }, intervalMs)
 
   // 'C' cycles stack -> heat -> cold -> stack. Re-renders every known
   // agent immediately from its last-known numbers rather than waiting
@@ -313,25 +320,22 @@ export function attachGitSignals({ world, zones, ownership, fetchFn = fetch, int
   if (typeof addEventListener === 'function') addEventListener('keydown', onKeydown)
 
   // The heat treatment's glow/steam need per-frame motion; the poll loop
-  // above only runs every intervalMs. Own rAF loop for the same reason
-  // zoneowner.js and histshelf.js each have their own — office.html's
-  // tick() isn't a seam this round's file split leaves open.
-  let churnRaf = 0
-  let churnLastT = null
-  function churnFrame() {
-    churnRaf = requestAnimationFrame(churnFrame)
-    const now = performance.now()
-    const dt = churnLastT == null ? 0 : Math.min(0.1, (now - churnLastT) / 1000)
-    churnLastT = now
-    for (const fx of fxByAgent.values()) fx.heat.update(dt)
+  // above only runs every intervalMs. Driven from office.html's one shared
+  // frame loop now instead of its own rAF — the breathe is a slow ambient
+  // effect (see frame-throttle.js), so it only actually steps at ~20Hz,
+  // not every frame.
+  const ambient = makeAmbientThrottle()
+  function tick(dt) {
+    const elapsed = ambient(dt)
+    if (!elapsed) return
+    for (const fx of fxByAgent.values()) fx.heat.update(elapsed)
   }
-  if (typeof requestAnimationFrame === 'function') churnFrame()
 
   return {
+    poll,
     tick,
     stop: () => {
       clearInterval(timer)
-      if (churnRaf) cancelAnimationFrame(churnRaf)
       if (typeof removeEventListener === 'function') removeEventListener('keydown', onKeydown)
       for (const fx of fxByAgent.values()) { fx.heat.dispose(); fx.cold.dispose() }
       fxByAgent.clear()

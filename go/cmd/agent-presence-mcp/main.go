@@ -15,6 +15,7 @@ import (
 	"syscall"
 
 	"github.com/mohsensc/sync/go/internal/mcptools"
+	"github.com/mohsensc/sync/go/internal/metrics"
 )
 
 func main() {
@@ -68,7 +69,13 @@ func run(args []string) int {
 		workdir = wd
 	}
 
-	tools := mcptools.BuildTools(workdir, "")
+	// One registry for the whole process — see internal/metrics's package
+	// comment. Nothing here scrapes it: there's no relay connection open
+	// yet to push it over, and building that transport belongs wherever
+	// the daemon's own equivalent gets built, not duplicated here.
+	reg := metrics.New()
+
+	tools := mcptools.BuildTools(workdir, "", reg)
 	defer tools.Close()
 
 	log.Printf("serving mcp over stdio: room=%s agent=%s human=%s",

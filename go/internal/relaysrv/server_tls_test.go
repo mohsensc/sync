@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/mohsensc/sync/go/internal/metrics"
 )
 
 // selfSignedCert writes a one-off EC cert/key pair to t.TempDir(), the same
@@ -65,7 +66,7 @@ func selfSignedCert(t *testing.T) (certPath, keyPath string, certPEM []byte) {
 
 func startTLSServer(t *testing.T, certPath, keyPath string) string {
 	t.Helper()
-	relay := NewRelay(NewVirtualClock(0), InertRoster())
+	relay := NewRelay(NewVirtualClock(0), InertRoster(), metrics.New())
 	srv := &Server{Addr: "127.0.0.1:0", Relay: relay, TLSCert: certPath, TLSKey: keyPath}
 	addr, err := srv.Listen()
 	if err != nil {
@@ -145,7 +146,7 @@ func TestPlaintextRequestToATLSPortGetsNoUpgrade(t *testing.T) {
 // call every existing caller of Listen already makes — must still be
 // plain ws://, not silently upgraded or broken by TLS support existing.
 func TestPlainWsIsStillTheZeroConfigDefault(t *testing.T) {
-	relay := NewRelay(NewVirtualClock(0), InertRoster())
+	relay := NewRelay(NewVirtualClock(0), InertRoster(), metrics.New())
 	srv := &Server{Addr: "127.0.0.1:0", Relay: relay}
 	addr, err := srv.Listen()
 	if err != nil {

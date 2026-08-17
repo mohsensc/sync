@@ -22,6 +22,8 @@ import (
 	"os"
 	"sync/atomic"
 	"time"
+
+	"github.com/mohsensc/sync/go/internal/metrics"
 )
 
 // Records past this many trigger a trim on the next tick.
@@ -53,10 +55,11 @@ type Record struct {
 // Journal owns one goroutine, one file and one line/gate counter for the
 // life of the process. Never blocks a caller past the channel send.
 type Journal struct {
-	path string
-	recs chan Record
-	stop chan struct{}
-	done chan struct{}
+	path    string
+	recs    chan Record
+	stop    chan struct{}
+	done    chan struct{}
+	metrics *metrics.Registry // nil is valid; both call sites below check it
 
 	written atomic.Uint64
 	scans   atomic.Uint64
@@ -64,13 +67,17 @@ type Journal struct {
 
 // New starts the owning goroutine. Nothing is opened or created yet — same
 // as DecisionJournal's constructor — the file appears with the first
-// record worth writing.
-func New(path string) *Journal {
+// record worth writing. m may be nil: this package's own goroutine is the
+// only reader of it, off the decision path, so a nil check at the two call
+// sites costs nothing worth avoiding — see daemon.Options.Metrics's comment
+// for the one place in this system that reasoning didn't hold.
+func New(path string, m *metrics.Registry) *Journal {
 	j := &Journal{
-		path: path,
-		recs: make(chan Record, 4096), // a burst of decisions outruns one fsync; the buffer absorbs it
-		stop: make(chan struct{}),
-		done: make(chan struct{}),
+		path:    path,
+		recs:    make(chan Record, 4096), // a burst of decisions outruns one fsync; the buffer absorbs it
+		stop:    make(chan struct{}),
+		done:    make(chan struct{}),
+		metrics: m,
 	}
 	go j.run()
 	return j
@@ -146,6 +153,9 @@ func (j *Journal) run() {
 			if _, err := f.Write(line); err == nil {
 				lines++
 				j.written.Add(1)
+				if j.metrics != nil {
+					j.metrics.JournalWrites.Inc()
+				}
 			}
 		case <-tick.C:
 			lines, gate = j.maybeTrim(&f, lines, gate)
@@ -209,6 +219,13 @@ func (j *Journal) maybeTrim(f **os.File, lines, gate int) (int, int) {
 	if *f != nil {
 		(*f).Close()
 		*f = nil
+	}
+	// Counted here, on the rename that actually lands, not up at j.scans —
+	// scans also counts a read that then hits a write or rename failure and
+	// gets retried, and the help text promises "times the journal was
+	// trimmed," not "times a trim was attempted."
+	if j.metrics != nil {
+		j.metrics.JournalTrims.Inc()
 	}
 	return len(kept), MaxLines
 }

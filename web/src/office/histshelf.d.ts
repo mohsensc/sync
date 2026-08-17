@@ -66,6 +66,9 @@ export interface HistShelfHandle {
   hide(): void
   setMode(mode: 'strip' | '3d'): void
   readonly mode: 'strip' | '3d'
+  /** Per-frame step, driven by office.html's one shared frame loop — pins
+   *  the DOM strip over its agent's current screen position. */
+  tick(dt: number): void
   dispose(): void
 }
 

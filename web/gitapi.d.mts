@@ -29,6 +29,9 @@ export interface BlameResult {
 
 export interface ParseBlamePorcelainOpts {
   includeLines?: boolean
+  /** Repo-wide address -> display name, so a split identity is named the
+   *  same here as it is on the commit board and the zone plaque. */
+  canonicalNames?: Map<string, string>
 }
 
 export function parseBlamePorcelain(text: string, now?: number, opts?: ParseBlamePorcelainOpts): BlameResult
@@ -40,7 +43,7 @@ export interface LogEntry {
   subject: string
 }
 
-export function parseLog(text: string): LogEntry[]
+export function parseLog(text: string, canonicalNames?: Map<string, string>): LogEntry[]
 
 export interface RecentLogEntry {
   sha: string
@@ -85,7 +88,7 @@ export interface StatResult {
   lastSummary: string
 }
 
-export function parseStatLog(text: string, now?: number): StatResult | null
+export function parseStatLog(text: string, now?: number, canonicalNames?: Map<string, string>): StatResult | null
 
 export interface ChurnLogResult {
   commits: number
@@ -118,4 +121,12 @@ export function sliceSourceLines(
 
 export type GitApiHandler = (req: { url?: string }, res: unknown, next: () => void) => void | Promise<void>
 
-export function gitApiMiddleware(repoRoot: string): GitApiHandler
+export interface GitApiMiddlewareOptions {
+  /** Overrides every route's canonicalNamesFor stdout cap (default 8MB).
+   *  Exists as a seam for test/gitapi-scratch.test.ts, which forces a real
+   *  maxBuffer overflow on a small scratch repo instead of needing a
+   *  many-thousand-commit fixture to prove the degrade path degrades. */
+  maxBuffer?: number
+}
+
+export function gitApiMiddleware(repoRoot: string, opts?: GitApiMiddlewareOptions): GitApiHandler

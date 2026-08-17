@@ -1,9 +1,10 @@
 # Threat model: the relay off loopback
 
-**Date:** 2026-08-11
-**Status:** current as of TLS in #22. Supersedes §4.5 of `policy-design.md`,
-which described the pre-#11 relay (no join authentication of any kind), and
-this file's own pre-#22 version, which had no transport encryption at all.
+**Date:** 2026-08-11, rung-4 section corrected 2026-08-17.
+**Status:** current as of TLS in #22, plus the correction below. Supersedes
+§4.5 of `policy-design.md`, which described the pre-#11 relay (no join
+authentication of any kind), and this file's own pre-#22 version, which had
+no transport encryption at all.
 
 Scope: the relay's network surface only. Hooks talk to `presenced` over a
 unix socket on the same machine; that boundary is a filesystem permission,
@@ -202,14 +203,29 @@ This closes the two items #11 filed against transport encryption:
   difference that the traffic is still opaque to a passive observer who
   isn't on-path.
 
-## Rung 4's embedding backend: the one network surface outside the relay
+## Rung 4's embedding backend: an offline tool, not a relay-adjacent surface
 
 Everything above is scoped to the relay, on purpose (see the top of this
-file). `agent_presence.embedding_similarity` — rung 4's opt-in sentence-
-embedding backend, `AGENT_PRESENCE_SIMILARITY=embedding` — is a different
-kind of surface: a Python process on the same machine as the relay making an
-outbound HTTPS call, so it earns a note here rather than being covered by
-implication.
+file). This section used to describe `agent_presence.embedding_similarity` —
+rung 4's opt-in sentence-embedding backend, `AGENT_PRESENCE_SIMILARITY=embedding`
+— as "a Python process on the same machine as the relay making an outbound
+HTTPS call." That was true when the relay itself was that Python process.
+It no longer is: the relay is `gorelay` now (#40), rung 4's actual scorer on
+the relay's request path is `relaysrv/similarity.go` — a lexical port with no
+embedding backend and no outbound call of any kind — and `gorelay` never
+reads `AGENT_PRESENCE_SIMILARITY` and has no subprocess capability at all (a
+static Go binary; it doesn't shell out to anything, Python included). There
+is no live path left that reaches this code.
+
+What's left of `embedding_similarity.py` is reachable exactly one way:
+running `python/tools/tune_rung4.py --backend embedding` by hand, an offline
+corpus-scoring tool a developer runs to compare scorer backends while tuning
+rung 4's threshold (#15). It never sees a real room, a real agent, or a real
+declared intent — only the fixed tuning corpus in that file. Kept here
+because the network behavior itself (a one-time model-weight download,
+everything after that local) is still accurate and still worth a reader
+knowing about if they run that tool, not because it's a surface the relay or
+any live process exposes.
 
 - **What it sends off-machine, and when:** the model weights
   (`sentence-transformers/all-MiniLM-L6-v2`, ~90MB) download from Hugging
@@ -218,18 +234,18 @@ implication.
   further network call happens on the query path: every `score()` call
   after the first is local ONNX inference against the cached model, and the
   cache directory itself never leaves the machine.
-- **What never leaves the machine:** the actual content this backend
-  exists to compare — declared intent strings, which can contain anything an
-  agent's session prompt does. Scoring is local inference, not an API call;
-  this was a deliberate design choice, not the only option (see
+- **What never leaves the machine:** everything `tune_rung4.py` scores —
+  its own fixed tuning corpus, not a real declared intent from a real
+  session, since nothing on the relay's request path reaches this code any
+  more (see above). Scoring is local inference, not an API call; this was a
+  deliberate design choice, not the only option (see
   `embedding_similarity.py`'s docstring for the sentence-embedding backends
   that were evaluated, all local).
-- **Off by default, same as rung 4 itself:** this backend is inert unless
-  both `AGENT_PRESENCE_RUNG4=1` and `AGENT_PRESENCE_SIMILARITY=embedding` are
-  set. The default install doesn't even have `fastembed` on disk — it's an
-  optional extra (`pip install -e '.[embedding]'`) that
-  `similarity.py`'s `default_similarity()` only imports when that env var
-  asks for it.
+- **Not gated by an env var:** `tune_rung4.py --backend embedding` builds
+  `EmbeddingSimilarity()` directly from the CLI flag — `AGENT_PRESENCE_RUNG4`
+  and `AGENT_PRESENCE_SIMILARITY` don't come into it. The default install
+  doesn't have `fastembed` on disk either way — it's an optional extra
+  (`pip install -e '.[dev,embedding]'`) `tune_rung4.py` fails loudly without.
 - **What would change this note:** a hosted embedding backend (an API call
   per query instead of local inference) would send declared intent text to
   a third party on every score, which is a materially different posture —

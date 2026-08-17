@@ -129,6 +129,12 @@ def read_token(env: Mapping[str, str] | None = None) -> str:
 
 
 def unattended_flag(env: Mapping[str, str] | None = None) -> bool:
+    """Is nobody watching? Trimmed, lowercased, {1, true, yes, on}.
+
+    Kept byte-identical to go/internal/envflag's Truthy, the daemon's read of
+    the same variable — see that package's doc comment for why the two used
+    to disagree and what that cost when they did.
+    """
     env = os.environ if env is None else env
     return env.get(UNATTENDED_ENV, "").strip().lower() in (
         "1", "true", "yes", "on"

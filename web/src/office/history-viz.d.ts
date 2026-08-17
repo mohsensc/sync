@@ -20,6 +20,7 @@ export function stackTimelinePositions(
 ): TimelineSlot[]
 
 export function formatAge(days: number | null | undefined): string | null
+export function agePhrase(ageLabel: string | null | undefined, suffix: string): string | null
 
 export interface StoryResult {
   lines: string[]

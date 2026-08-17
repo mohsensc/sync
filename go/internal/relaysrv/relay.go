@@ -2,8 +2,12 @@ package relaysrv
 
 import (
 	"log"
+	"math"
+	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/mohsensc/sync/go/internal/metrics"
 )
 
 // Conn is one connection to the relay: a websocket in the running server,
@@ -60,6 +64,15 @@ type timedActivity struct {
 // buffer. Guarded by its own mutex, separate from the region shards, so
 // join/leave and fan-out never contend with claim traffic in the same
 // room.
+//
+// activity entries carry whichever agent/human onEvent resolved for them
+// (the event's own, or the connection's as a fallback — see onEvent), not
+// the owning connection, and one connection can produce several. That is
+// fine unmodified: every entry ages out purely on elapsed time (presence()/
+// presenceSnapshot()'s PresenceTTLS cutoff), with nothing keyed to whether
+// the connection that wrote it is still open — a session that stops
+// relaying just stops appearing, the same way a hook that stops firing
+// always has.
 type roomInfo struct {
 	mu        sync.Mutex
 	members   []Conn
@@ -77,6 +90,7 @@ type Relay struct {
 	registry   *Registry
 	negotiator *Negotiator
 	roster     Roster
+	metrics    *metrics.Registry
 
 	roomsMu sync.RWMutex
 	rooms   map[string]*roomInfo
@@ -84,6 +98,21 @@ type Relay struct {
 	identityMu sync.Mutex
 	identity   map[Conn]identityRecord
 	principal  map[Conn]principalRecord
+	// daemons is which live connections have identified themselves as a
+	// stats reporter (see onStats) — the relay side of DaemonsConnected.
+	// Keyed by Conn, guarded by identityMu alongside identity/principal:
+	// same lifetime, same "one map entry per live connection" shape, no
+	// reason for a lock of its own.
+	daemons map[Conn]bool
+
+	// statsMu/statsSeen is the last cumulative counters each live
+	// connection reported in a "stats" frame (stats.go) — process-local
+	// bookkeeping to fold a delta out of a cumulative report without a
+	// per-connection label on any metric (see stats.go's package doc).
+	// Its own lock: touched on every stats frame, which would otherwise
+	// contend with identityMu's join/leave traffic for no reason.
+	statsMu   sync.Mutex
+	statsSeen map[Conn]daemonBaseline
 
 	// Builtin plus org floor, and nothing else — see policy.go's package
 	// doc comment. policyMu guards policyDigest, which is read and
@@ -94,16 +123,18 @@ type Relay struct {
 	policyDigest string
 }
 
-func NewRelay(clock Clock, roster Roster) *Relay {
+func NewRelay(clock Clock, roster Roster, m *metrics.Registry) *Relay {
 	r := &Relay{
 		clock:     clock,
 		roster:    roster,
+		metrics:   m,
 		rooms:     make(map[string]*roomInfo),
 		identity:  make(map[Conn]identityRecord),
 		principal: make(map[Conn]principalRecord),
-		policy:    NewPolicyFileForRelay(clock),
+		daemons:   make(map[Conn]bool),
+		policy:    NewPolicyFileForRelay(clock, m),
 	}
-	r.registry = NewRegistry(clock, r)
+	r.registry = NewRegistry(clock, r, m)
 	r.negotiator = NewNegotiator(r.registry)
 	r.policyDigest = r.policy.Current().Digest
 	if roster.Present() {
@@ -114,25 +145,33 @@ func NewRelay(clock Clock, roster Roster) *Relay {
 	return r
 }
 
-// policyFrame is the org floor, as this relay currently reads it. Only the
+// policyFrame is the org floor, as policy currently reads it. Only the
 // floor travels — effects are the client's business, the relay cannot see
 // a client's repo/user/session layers — but a floor composes with
 // whatever the client resolved locally by taking the louder of the two.
-// nil when there is no org file to state: a relay with nothing configured
-// has nothing to say beyond the daemon's own compiled-in floor, and
-// test_golden_noop.py-equivalent coverage (golden_test.go) locks down
-// that this must not put a frame on the wire nobody configured. Mirrors
-// relay.py's _policy_frame.
-func (r *Relay) policyFrame() Frame {
-	policy := r.policy.Current()
+// The bool return is whether an org file is actually configured: false
+// means the frame carries the compiled-in builtin floor rather than
+// nothing, because a relay always has *a* floor to state even when nobody
+// wrote one down. That matters at the one seam this used to get wrong —
+// see publishPolicyChange: an org file that gets deleted while daemons are
+// joined has to relax them back to builtin, and there is no frame to do
+// that with if this returns nothing just because org is now absent. It is
+// the *caller's* job to decide whether "nothing configured" is worth a
+// frame at all — see Join, which stays silent on it, matching
+// test_golden_noop.py-equivalent coverage (golden_test.go /
+// TestARelayWithNoOrgPolicySendsNoPolicyFrame) that locks down that a
+// never-configured relay puts nothing extra on the wire. Mirrors relay.py's
+// _policy_frame, extended for the transition case above.
+func (r *Relay) policyFrame(policy Policy) (Frame, bool) {
 	org := policy.layer(layerOrg)
-	if org == nil {
-		return nil
+	source := "builtin"
+	if org != nil {
+		source = "org:" + org.source
 	}
 	frame := Frame{
 		"type":   "policy",
 		"floor":  policy.floorTable("").names(),
-		"source": "org:" + org.source,
+		"source": source,
 		"digest": policy.Digest,
 	}
 	if floors := policy.floorRules(); len(floors) > 0 {
@@ -142,31 +181,35 @@ func (r *Relay) policyFrame() Frame {
 		}
 		frame["floors"] = out
 	}
-	return frame
+	return frame, org != nil
 }
 
-// publishPolicyChange pushes a new org floor to every room, if there is
-// one. PolicyFile.Current gates its own stat to once a second, so this
-// costs a comparison per frame in the steady state. Mirrors relay.py's
+// publishPolicyChange pushes a new floor to every room whenever the
+// resolved policy actually moved, org file present or not — including the
+// transition where it just disappeared, which is the one this exists to
+// catch (issue #2 of the system-seams audit): policyFrame used to return
+// nil in that case, so this latched the new (relaxed) digest and then had
+// nothing to broadcast, and every daemon that had already latched the old,
+// stricter floor stayed on it forever with no error anywhere. One
+// r.policy.Current() call, reused for both the digest that gets latched
+// and the frame that gets built from it, so the two can never read two
+// different stats a second apart and disagree about what "current" meant.
+// PolicyFile.Current gates its own stat to once a second, so this costs a
+// comparison per frame in the steady state. Mirrors relay.py's
 // _publish_policy_change.
 func (r *Relay) publishPolicyChange() bool {
-	digest := r.policy.Current().Digest
+	policy := r.policy.Current()
 	r.policyMu.Lock()
-	changed := digest != r.policyDigest
+	changed := policy.Digest != r.policyDigest
 	if changed {
-		r.policyDigest = digest
+		r.policyDigest = policy.Digest
 	}
 	r.policyMu.Unlock()
 	if !changed {
 		return false
 	}
-	frame := r.policyFrame()
-	if frame == nil {
-		// The org file went away. The floor drops back to the compiled-in
-		// one, which every daemon already has, so there is nothing to send.
-		return false
-	}
-	log.Printf("org policy changed (%s); republishing the floor", shortDigest(digest))
+	frame, _ := r.policyFrame(policy)
+	log.Printf("org policy changed (%s); republishing the floor", shortDigest(policy.Digest))
 	r.roomsMu.RLock()
 	rooms := make([]string, 0, len(r.rooms))
 	for name := range r.rooms {
@@ -192,6 +235,33 @@ func (r *Relay) resolvePolicy(conn Conn, rung int, path string) Resolution {
 }
 
 func (r *Relay) Clock() Clock { return r.clock }
+
+// recordRegionShape is the live regression detector for the bug where a
+// region was named by its absolute filesystem path and two checkouts of
+// one repo therefore never collided (see metrics.RegionKey's doc
+// comment). Reads the region straight off the raw inbound value with
+// cleanRegionRaw — not CleanRegionDict — because CleanRegionDict hashes
+// the path when this relay's own opaque mode is on, and a hash never
+// looks absolute: classifying shape after that hashing would silently
+// report "relative" forever regardless of what a client actually sent.
+// If the region arrived already marked opaque (a client hashed it before
+// this relay ever saw it), shape means nothing either way, so that case
+// is skipped rather than misclassified as relative.
+func (r *Relay) recordRegionShape(raw any) {
+	d, ok := raw.(map[string]any)
+	if !ok || d[OpaqueMark] == true {
+		return
+	}
+	region, ok := cleanRegionRaw(raw)
+	if !ok {
+		return
+	}
+	shape := metrics.ShapeRelative
+	if filepath.IsAbs(region.Path) {
+		shape = metrics.ShapeAbsolute
+	}
+	r.metrics.RegionKey(shape)
+}
 
 func (r *Relay) roomOf(name string) *roomInfo {
 	r.roomsMu.RLock()
@@ -259,13 +329,7 @@ func (r *Relay) Join(room string, conn Conn) bool {
 	}
 
 	// One connection, one room membership.
-	r.roomsMu.RLock()
-	for _, ri := range r.rooms {
-		ri.mu.Lock()
-		ri.members = removeConn(ri.members, conn)
-		ri.mu.Unlock()
-	}
-	r.roomsMu.RUnlock()
+	r.leaveAllRooms(conn)
 
 	// Before the joiner is a member, so a change picked up here fans out
 	// to the room that already exists and the joiner gets its own copy
@@ -275,13 +339,17 @@ func (r *Relay) Join(room string, conn Conn) bool {
 	conn.SetRoom(room)
 	ri := r.roomOf(room)
 	ri.mu.Lock()
+	before := len(ri.members)
 	ri.members = append(ri.members, conn)
 	ri.mu.Unlock()
+	if before == 0 {
+		r.metrics.Rooms.Add(1)
+	}
 
 	r.sendLeaseSnapshot(conn, room)
 	// Only when there is an org policy to state — see policyFrame's doc
 	// comment on why a relay with nothing configured must stay silent.
-	if frame := r.policyFrame(); frame != nil {
+	if frame, configured := r.policyFrame(r.policy.Current()); configured {
 		conn.Send(EncodeFrame(frame))
 	}
 	return true
@@ -295,6 +363,39 @@ func removeConn(members []Conn, conn Conn) []Conn {
 		}
 	}
 	return out
+}
+
+// leaveAllRooms removes conn from whichever room currently holds it — at
+// most one, by the one-connection-one-room invariant Join enforces — and
+// decrements Rooms exactly when that removal leaves it with no members.
+// Shared by Join's own membership cleanup and Leave, so the gauge
+// transition is computed in exactly one place rather than at every call
+// site that happens to mutate membership. Naturally idempotent: calling
+// this again for a conn already removed from everywhere finds every
+// room's length unchanged and decrements nothing, which matters because
+// Leave itself can run twice for one connection (bindAgent's forced
+// eviction, then the session's own defer on the same conn).
+func (r *Relay) leaveAllRooms(conn Conn) {
+	// RLock held for the whole walk, not snapshotted-then-released: a
+	// snapshot here would reopen exactly the gap ReleaseEverywhere's own
+	// doc comment exists to close (see leases.go) — a room created by a
+	// concurrent Join after the snapshot but before this returns would
+	// never be checked, so a conn that Join just moved out of one room
+	// and into a brand new one could stay counted as a member of the old
+	// room's gauge forever. Blocking concurrent room *creation* for the
+	// duration is the same trade that fix already made and pays for.
+	r.roomsMu.RLock()
+	defer r.roomsMu.RUnlock()
+	for _, ri := range r.rooms {
+		ri.mu.Lock()
+		before := len(ri.members)
+		ri.members = removeConn(ri.members, conn)
+		after := len(ri.members)
+		ri.mu.Unlock()
+		if before > 0 && after == 0 {
+			r.metrics.Rooms.Add(-1)
+		}
+	}
 }
 
 func (r *Relay) refuse(conn Conn, room string, refusal Refusal) bool {
@@ -457,19 +558,23 @@ func (r *Relay) presenceSnapshot(room string) []any {
 // leases there. Mirrors relay.py's Relay.leave.
 func (r *Relay) Leave(conn Conn) {
 	room := conn.Room()
-	r.roomsMu.RLock()
-	for _, ri := range r.rooms {
-		ri.mu.Lock()
-		ri.members = removeConn(ri.members, conn)
-		ri.mu.Unlock()
-	}
-	r.roomsMu.RUnlock()
+	r.leaveAllRooms(conn)
 
 	r.identityMu.Lock()
 	identity, hadIdentity := r.identity[conn]
 	delete(r.identity, conn)
 	delete(r.principal, conn)
+	wasDaemon := r.daemons[conn]
+	delete(r.daemons, conn)
 	r.identityMu.Unlock()
+
+	// Idempotent the same way the room cleanup above is: a conn Leave has
+	// already run for is no longer in r.daemons, so a second call (forced
+	// eviction followed by the session's own defer) decrements nothing.
+	if wasDaemon {
+		r.metrics.DaemonsConnected.Add(-1)
+	}
+	r.forgetDaemonBaseline(conn)
 
 	if hadIdentity && room != "" {
 		r.registry.ReleaseAll(room, identity.agent, nil)
@@ -496,9 +601,15 @@ func (r *Relay) Broadcast(room string, payload Frame, exclude Conn) []Conn {
 	// Encoded once for every recipient in this call, not once per
 	// recipient — see EncodeFrame's doc comment.
 	encoded := EncodeFrame(payload)
-	for _, c := range targets {
-		c.Send(encoded)
-	}
+	// Timed past the empty-room return above on purpose: an empty fan-out
+	// isn't a fan-out, and counting it would flood this histogram with
+	// zeros from every quiet room, burying the rooms that actually have
+	// members to reach.
+	metrics.Observe(r.metrics.BroadcastFanout, func() {
+		for _, c := range targets {
+			c.Send(encoded)
+		}
+	})
 	return targets
 }
 
@@ -592,12 +703,21 @@ func (r *Relay) dispatch(conn Conn, msg map[string]any) Frame {
 	if kind == "event" {
 		return r.onEvent(room, conn, msg)
 	}
+	if kind == "stats" {
+		// No region, no rung — just a daemon's own counters folded into
+		// ours. The room=="" guard above already means a client that
+		// never joined never reaches here, which is what keeps this from
+		// being a way to post metrics without authenticating first.
+		r.onStats(conn, msg)
+		return nil
+	}
 	switch kind {
 	case "claim", "contend", "release", "heartbeat", "move":
 	default:
 		return nil
 	}
 
+	r.recordRegionShape(msg["region"])
 	region, ok := CleanRegionDict(msg["region"])
 	if !ok {
 		return nil
@@ -616,6 +736,7 @@ func (r *Relay) dispatch(conn Conn, msg map[string]any) Frame {
 		r.registry.Heartbeat(room, conn.Agent(), region, conn)
 		return nil
 	case "move":
+		r.recordRegionShape(msg["split_region"])
 		var splitScope *Region
 		if sc, ok := CleanRegionDict(msg["split_region"]); ok {
 			splitScope = &sc
@@ -632,8 +753,21 @@ func (r *Relay) dispatch(conn Conn, msg map[string]any) Frame {
 }
 
 func (r *Relay) onEvent(room string, conn Conn, msg map[string]any) Frame {
+	r.recordRegionShape(msg["region"])
 	clean := RedactEvent(msg)
 	now := r.clock.Now()
+
+	// ts is a client-declared timestamp, opted into by whichever daemon
+	// stamped this event before it reached us — not this relay's own, and
+	// not required. Lease TTL (90s) and presence TTL (30s) are both
+	// wall-clock with no clock discipline anywhere in this system, so this
+	// is the only place that would ever notice two hosts disagreeing about
+	// what time it is. math.Abs because every bucket boundary on this
+	// histogram is positive; a clock running fast and one running slow by
+	// the same amount should land in the same bucket.
+	if ts, ok := clean["ts"].(float64); ok && ts > 0 {
+		r.metrics.PeerClockSkew.Observe(math.Abs(now - ts))
+	}
 
 	ri := r.roomOf(room)
 	ri.mu.Lock()
@@ -651,7 +785,28 @@ func (r *Relay) onEvent(room string, conn Conn, msg map[string]any) Frame {
 	// kind can reach rung 4.
 	intent := CleanIntent(clean["intent"])
 
-	event := AgentEvent{Room: room, Human: conn.Human(), Agent: conn.Agent(), Kind: "touch",
+	// A daemon relays hook events for every session on the machine down one
+	// connection, joined once under its own identity — so an event's own
+	// agent/human, when it supplies one, is who actually did this, and the
+	// connection's joined identity is only the fallback for a hook (which
+	// never carries either) or a client too old to send them. This is the
+	// *display* identity only: presence storage, the live broadcast below,
+	// and Classify's collision detection all read it, because they are all
+	// the same presence surface, seen at different times. Claims, leases,
+	// negotiation and wait-die below this point stay on conn.Agent()/
+	// conn.Human() exactly as before — an event frame is not a credential,
+	// and letting a forged agent field move a lease would be a very
+	// different bug than the one this is fixing.
+	agent := cleanString(clean["agent"])
+	if agent == "" {
+		agent = conn.Agent()
+	}
+	human := cleanString(clean["human"])
+	if human == "" {
+		human = conn.Human()
+	}
+
+	event := AgentEvent{Room: room, Human: human, Agent: agent, Kind: "touch",
 		Source: ParseSource(cleanString(clean["source"])), Verb: verb, Region: region, Ts: now}
 
 	others := r.presence(room)
@@ -659,13 +814,13 @@ func (r *Relay) onEvent(room string, conn Conn, msg map[string]any) Frame {
 
 	ri.mu.Lock()
 	ri.activity = append(ri.activity, timedActivity{now, Activity{
-		Agent: conn.Agent(), Human: conn.Human(), Verb: verb, Region: region,
+		Agent: agent, Human: human, Verb: verb, Region: region,
 		Intent: intent, Source: event.Source,
 	}})
 	ri.mu.Unlock()
 
 	r.Broadcast(room, Frame{
-		"type": "presence", "agent": conn.Agent(), "human": conn.Human(),
+		"type": "presence", "agent": agent, "human": human,
 		"verb": verb, "region": clean["region"], "rung": rung, "ts": now,
 	}, conn)
 
@@ -675,6 +830,7 @@ func (r *Relay) onEvent(room string, conn Conn, msg map[string]any) Frame {
 	// effect turns out to be. Mirrors relay.py's _on_event.
 	resolution := r.resolvePolicy(conn, rung, region.Path)
 	effect := resolution.Effect
+	r.metrics.Decision(rung, string(effect))
 
 	// Rung 4 always asks the negotiator, whatever its effect says: the
 	// effect governs how loudly a *text match* is reported, not whether
@@ -687,6 +843,7 @@ func (r *Relay) onEvent(room string, conn Conn, msg map[string]any) Frame {
 	if brief == nil {
 		if rung == 4 && effect != EffectSilent {
 			if red := redundantPeer(event, others, intent); red != nil {
+				r.metrics.RedundantWork.Inc()
 				frame := Frame{
 					"type": "redundant_work", "rung": 4,
 					"effect": string(effect), "effect_source": string(resolution.WinningLayer),
@@ -710,13 +867,25 @@ func (r *Relay) onEvent(room string, conn Conn, msg map[string]any) Frame {
 		"holder_priority": PriorityName(brief.HolderPriority),
 	}
 	if brief.HandoverAt != nil {
-		frame["handover_in_ms"] = msRemaining(*brief.HandoverAt, now)
+		// HolderOf first (it prunes on the way in) so the clamp below reads
+		// the same ExpiresAt the pushed lease frame does, not a stale one —
+		// and so a claim that just expired under us leaves held nil rather
+		// than clamping against a lease that's already gone. Unclamped in
+		// that case: brief.HandoverAt is still the only number in hand, and
+		// a vanished lease and the region being genuinely free of contention
+		// are indistinguishable to a requester regardless of what this frame
+		// claims.
+		held := r.registry.HolderOf(room, region, conn)
+		handoverMs := msRemaining(*brief.HandoverAt, now)
+		if held != nil {
+			handoverMs = clampedHandoverMs(*brief.HandoverAt, held.ExpiresAt, now)
+		}
+		frame["handover_in_ms"] = handoverMs
 		frame["handover_to"] = brief.HandoverTo
 		if brief.HandoverTo == conn.Agent() {
 			frame["retry_in_ms"] = frame["handover_in_ms"]
 			frame["reserved_for_ms"] = int(ReservationS * 1000)
 		}
-		held := r.registry.HolderOf(room, region, conn)
 		if held != nil {
 			lf := leaseFrame(held, now)
 			lf["type"] = "lease"
@@ -801,8 +970,10 @@ func (r *Relay) onClaim(room string, conn Conn, msg map[string]any, region Regio
 		// declared this work, delivered while the agent is still
 		// deciding what to do. Same volume knob as the event path.
 		rung4Effect := r.resolvePolicy(conn, 4, region.Path).Effect
+		r.metrics.Decision(4, string(rung4Effect))
 		if rung4Effect != EffectSilent {
 			if red := r.checkRedundancy(room, conn.Agent(), conn.Human(), region, intent); red != nil {
+				r.metrics.RedundantWork.Inc()
 				granted["rung"] = 4
 				granted["redundant"] = redundancyPayload(*red)
 			}
@@ -821,6 +992,7 @@ func (r *Relay) onClaim(room string, conn Conn, msg map[string]any, region Regio
 	// own table is what blocks the edit — but it is what the MCP and web
 	// surfaces render, so it travels.
 	resolution := r.resolvePolicy(conn, 3, region.Path)
+	r.metrics.Decision(3, string(resolution.Effect))
 
 	reply := Frame{
 		"type": "claim_result", "granted": false,
@@ -856,15 +1028,15 @@ func (r *Relay) onClaim(room string, conn Conn, msg map[string]any, region Regio
 
 	winner := held.HandoverWinner()
 	if held.HandoverAt != nil && winner != nil {
-		handoverInMs := msRemaining(*held.HandoverAt, now)
-		reply["handover_in_ms"] = handoverInMs
+		handoverMs := clampedHandoverMs(*held.HandoverAt, held.ExpiresAt, now)
+		reply["handover_in_ms"] = handoverMs
 		reply["handover_at"] = *held.HandoverAt
 		reply["handover_to"] = winner.Agent
 		reply["handover_to_human"] = winner.Human
 		reply["handover_to_priority"] = PriorityName(winner.Priority)
 		reply["waiting"] = len(held.Contenders)
 		if winner.Agent == conn.Agent() {
-			reply["retry_in_ms"] = handoverInMs
+			reply["retry_in_ms"] = handoverMs
 			reply["reserved_for_ms"] = int(ReservationS * 1000)
 		}
 	}

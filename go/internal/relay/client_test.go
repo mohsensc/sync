@@ -1,19 +1,45 @@
 package relay
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
 
 	"github.com/mohsensc/sync/go/internal/leases"
+	"github.com/mohsensc/sync/go/internal/metrics"
 	"github.com/mohsensc/sync/go/internal/policy"
 	"github.com/mohsensc/sync/go/internal/wire"
 )
+
+// gaugeValue reads back one no-label gauge's current value straight from
+// the registry's own Gatherer — see metrics.Registry.Gatherer's doc
+// comment on why that method exists.
+func gaugeValue(t *testing.T, m *metrics.Registry, name string) float64 {
+	t.Helper()
+	families, err := m.Gatherer().Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	for _, fam := range families {
+		if fam.GetName() != name {
+			continue
+		}
+		for _, metric := range fam.GetMetric() {
+			return metric.GetGauge().GetValue()
+		}
+	}
+	return 0
+}
 
 // fakeRelay is just enough of serve.py + relay.py to drive Client through a
 // real join, a real leases snapshot and a real presence fan-out over an
@@ -140,7 +166,7 @@ func TestClientJoinsRoomAndReceivesFrames(t *testing.T) {
 	// hook decision see a conflict a moment after the daemon joins.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if _, _, ok := lc.Conflict("src/auth.py", "go-daemon-test", time.Now().UnixMilli()); ok {
+		if _, _, ok := lc.Conflict("src/auth.py", []string{"go-daemon-test"}, time.Now().UnixMilli()); ok {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -178,6 +204,94 @@ func TestClientReconnectsWithBackoff(t *testing.T) {
 	}
 }
 
+// syncBuf is bytes.Buffer plus the locking log.SetOutput needs: the log
+// package serializes its own writers, but nothing serializes a test
+// goroutine reading the buffer against the client's Run goroutine still
+// writing to it, and this file's tests run with -race.
+type syncBuf struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *syncBuf) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *syncBuf) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
+
+// TestClientLogsConnectStateTransitions is the fix for a relay SIGKILL,
+// backoff, restart and successful reconcile leaving presenced's log
+// completely empty — an operator had no way to tell "connected" from
+// "retrying forever". The first accepted connection is dropped right
+// after the handshake to force a real connect -> open -> lost -> backoff
+// -> reconnect cycle on one URL, not just the never-connects case
+// TestClientReconnectsWithBackoff already covers.
+func TestClientLogsConnectStateTransitions(t *testing.T) {
+	sb := &syncBuf{}
+	orig := log.Writer()
+	log.SetOutput(sb)
+	defer log.SetOutput(orig)
+
+	var accepted int32
+	upgrader := websocket.Upgrader{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		if atomic.AddInt32(&accepted, 1) == 1 {
+			conn.Close() // first connection: drop it, don't answer the join
+			return
+		}
+		defer conn.Close()
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer srv.Close()
+
+	lc := leases.New()
+	c := New(Config{
+		URL:        "ws://" + srv.Listener.Addr().String() + "/",
+		Room:       "test-room",
+		Agent:      "go-daemon-test",
+		BackoffMin: 10 * time.Millisecond,
+		BackoffMax: 40 * time.Millisecond,
+	}, lc)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	go c.Run(ctx)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !strings.Contains(sb.String(), "relay: reconnected to") {
+		if time.Now().After(deadline) {
+			t.Fatalf("never saw a reconnect log line; got:\n%s", sb.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	got := sb.String()
+	for _, want := range []string{
+		"relay: connecting to",
+		"relay: connection lost:",
+		"backing off",
+		"relay: reconnected to",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("log output missing %q; got:\n%s", want, got)
+		}
+	}
+}
+
 func TestMalformedLeasesFrameLeavesTableUntouched(t *testing.T) {
 	lc := leases.New()
 	lc.Upsert(leases.RegionKey("a.py", ""), leases.Lease{Agent: "other", ExpiresAtMs: 90_000})
@@ -194,7 +308,7 @@ func TestMalformedLeasesFrameLeavesTableUntouched(t *testing.T) {
 		if err := c.dispatch([]byte(frame)); err != nil {
 			t.Fatalf("dispatch(%s): %v", frame, err)
 		}
-		if _, _, ok := lc.Conflict("a.py", "me", 0); !ok {
+		if _, _, ok := lc.Conflict("a.py", []string{"me"}, 0); !ok {
 			t.Fatalf("frame %s wiped the lease table", frame)
 		}
 	}
@@ -203,8 +317,87 @@ func TestMalformedLeasesFrameLeavesTableUntouched(t *testing.T) {
 	if err := c.dispatch([]byte(`{"type":"leases","leases":[]}`)); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, ok := lc.Conflict("a.py", "me", 0); ok {
+	if _, _, ok := lc.Conflict("a.py", []string{"me"}, 0); ok {
 		t.Fatal("an empty leases array must clear the table")
+	}
+}
+
+// TestLeaseCacheDivergeCountsALiveLeaseTheSnapshotDrops is the case
+// ap_lease_cache_divergence exists to catch: this daemon still believes in
+// a lease, a fresh snapshot from the relay silently doesn't list it, and
+// nothing before this gauge would have told anyone a hook could now be
+// blocking on stale state.
+func TestLeaseCacheDivergeCountsALiveLeaseTheSnapshotDrops(t *testing.T) {
+	lc := leases.New()
+	m := metrics.New()
+	c := New(Config{URL: "ws://x", Room: "r", Agent: "me", Metrics: m}, lc)
+
+	if err := c.dispatch([]byte(
+		`{"type":"lease","agent":"other","region":{"path":"a.py"},"expires_in_ms":90000}`,
+	)); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.dispatch([]byte(`{"type":"leases","leases":[]}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := gaugeValue(t, m, "ap_lease_cache_divergence"); got != 1 {
+		t.Fatalf("ap_lease_cache_divergence = %v, want 1", got)
+	}
+}
+
+// TestLeaseCacheDivergeZeroWhenSnapshotAgrees is the other half: a
+// snapshot that lists exactly the lease this daemon already believed in
+// must not trip the gauge — divergence means disagreement, not "any
+// reconcile happened at all".
+func TestLeaseCacheDivergeZeroWhenSnapshotAgrees(t *testing.T) {
+	lc := leases.New()
+	m := metrics.New()
+	c := New(Config{URL: "ws://x", Room: "r", Agent: "me", Metrics: m}, lc)
+
+	if err := c.dispatch([]byte(
+		`{"type":"lease","agent":"other","region":{"path":"a.py"},"expires_in_ms":90000}`,
+	)); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.dispatch([]byte(
+		`{"type":"leases","leases":[{"agent":"other","region":{"path":"a.py"},"expires_in_ms":90000}]}`,
+	)); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := gaugeValue(t, m, "ap_lease_cache_divergence"); got != 0 {
+		t.Fatalf("ap_lease_cache_divergence = %v, want 0", got)
+	}
+}
+
+// TestLeaseCacheDivergeIgnoresAlreadyExpiredLeases is the fix for the
+// gauge's own false positive: after any outage long enough for a held
+// lease to age past its ExpiresAtMs, the relay's fresh snapshot legitimately
+// drops it too — Conflict already skips an expired entry and nobody is
+// blocking on it — so counting it would make the gauge loudest exactly
+// when nothing is wrong.
+func TestLeaseCacheDivergeIgnoresAlreadyExpiredLeases(t *testing.T) {
+	lc := leases.New()
+	m := metrics.New()
+	c := New(Config{URL: "ws://x", Room: "r", Agent: "me", Metrics: m}, lc)
+
+	// expires_in_ms of 0 is the earliest ExpiresAtMs toLease will ever
+	// produce (a negative ttl is clamped to zero); sleeping past it makes
+	// the entry genuinely expired by the time the snapshot arrives.
+	if err := c.dispatch([]byte(
+		`{"type":"lease","agent":"other","region":{"path":"a.py"},"expires_in_ms":0}`,
+	)); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(5 * time.Millisecond)
+
+	if err := c.dispatch([]byte(`{"type":"leases","leases":[]}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := gaugeValue(t, m, "ap_lease_cache_divergence"); got != 0 {
+		t.Fatalf("ap_lease_cache_divergence = %v, want 0 (an expired lease must not count)", got)
 	}
 }
 
@@ -252,7 +445,7 @@ func TestDispatchLeaseCarriesHandoverDeadlineOntoTheLease(t *testing.T) {
 	if err := c.dispatch(frame); err != nil {
 		t.Fatal(err)
 	}
-	held, _, ok := lc.Conflict("a.py", "me", 0)
+	held, _, ok := lc.Conflict("a.py", []string{"me"}, 0)
 	if !ok || !held.HasHandover || held.HandoverTo != "third" {
 		t.Fatalf("got %+v, ok=%v", held, ok)
 	}
@@ -273,7 +466,7 @@ func TestDispatchLeaseHandoverOfOwnRegionRecordsLostNote(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, _, ok := lc.Conflict("a.py", "someone-else", 0); ok {
+	if _, _, ok := lc.Conflict("a.py", []string{"someone-else"}, 0); ok {
 		t.Fatal("the erased lease must be gone")
 	}
 	note, ok := lc.HandoverNoteFor("a.py", 0, leases.HandoverNoteMs)

@@ -17,6 +17,7 @@
 
 import * as THREE from 'three'
 import * as Z from './zones.js'
+import { makeAmbientThrottle } from './frame-throttle.js'
 
 const P = { cream:0xF0ECE6, sand:0xE9E0CE, taupe:0xC3B39B, butter:0xF7DFAF,
             mustard:0xD6B45C, caramel:0xC0762A, terracotta:0xD9714F,
@@ -363,29 +364,13 @@ export function attachInteraction(cfg) {
 
   // Two treatments to compare, toggled with T: a steady low-alpha wash, or
   // a slow breathe between the agent's own hue and the neutral teammate hue
-  // — same "breathe" idea as the hover pulse above, just much slower and
+  // — same "breathe" idea as the hover pulse below, just much slower and
   // driven by ownership rather than mouse attention. `desk.ownership` (set
   // by scanDesks below) always carries BOTH ends of that gradient so this
-  // loop never has to re-derive them.
+  // loop never has to re-derive them. The step itself lives in tick(dt)
+  // below, alongside the hover pulse — see that function's own comment.
   let deskTintMode = 'steady'
   let breathePhase = 0
-  let pulseDeskT = performance.now()
-  function pulseDesks(t) {
-    const dt = Math.min(0.05, (t - pulseDeskT) / 1000)
-    pulseDeskT = t
-    if (deskTintMode === 'breathe') {
-      breathePhase += dt * 0.6                 // ~10s round trip — a mood, not a blink
-      const k = 0.5 + 0.5 * Math.sin(breathePhase)
-      for (const d of desks) {
-        if (!d.ownership) continue
-        if (hovered && hovered.kind === 'desk' && hovered.ref === d) continue // hover pulse owns this one
-        const hex = k > 0.5 ? d.ownership.hex : d.ownership.otherHex
-        tint(d.mats, hex, 0.14 + 0.14 * Math.abs(k - 0.5) * 2)
-      }
-    }
-    requestAnimationFrame(pulseDesks)
-  }
-  requestAnimationFrame(pulseDesks)
 
   /** Who's sitting at this desk right now, if anyone — same "seated and
    *  within reach of the seat mark" test office.html uses for its own
@@ -419,16 +404,34 @@ export function attachInteraction(cfg) {
   setInterval(scanDesks, DESK_SCAN_MS)
 
   // A flat hover tint reads as a UI state change; a pulsing one reads as
-  // something alive noticing you. Runs its own rAF rather than piggybacking
-  // office.html's render loop, since interact.js has no other hook into it.
-  let pulseT = performance.now()
+  // something alive noticing you. Driven by office.html's one shared frame
+  // loop via tick(dt) rather than a loop of its own.
   let hoverPhase = 0
-  function pulseHover(t) {
-    const dt = Math.min(0.05, (t - pulseT) / 1000)
-    pulseT = t
-    if (hovered && !(selected && hovered.kind === 'agent' && hovered.ref === selected)) {
-      hoverPhase += dt * 3.4
-      tint(matsOf(hovered), HOVER_TINT, 0.4 + 0.22 * (0.5 + 0.5 * Math.sin(hoverPhase)))
+
+  // Both breathing effects above (desk ownership + hover) are slow, ambient
+  // motion — throttled to ~20Hz rather than stepped every frame, one shared
+  // mechanism for both (see frame-throttle.js). The nameplate reposition
+  // below is NOT throttled: it tracks the camera in world space through
+  // zoom flights and orbit drags, so it has to run every frame or it lags
+  // visibly behind the head it's pinned to.
+  const ambient = makeAmbientThrottle()
+  function tick(dt) {
+    const elapsed = ambient(dt)
+    if (elapsed) {
+      if (deskTintMode === 'breathe') {
+        breathePhase += elapsed * 0.6            // ~10s round trip — a mood, not a blink
+        const k = 0.5 + 0.5 * Math.sin(breathePhase)
+        for (const d of desks) {
+          if (!d.ownership) continue
+          if (hovered && hovered.kind === 'desk' && hovered.ref === d) continue // hover pulse owns this one
+          const hex = k > 0.5 ? d.ownership.hex : d.ownership.otherHex
+          tint(d.mats, hex, 0.14 + 0.14 * Math.abs(k - 0.5) * 2)
+        }
+      }
+      if (hovered && !(selected && hovered.kind === 'agent' && hovered.ref === selected)) {
+        hoverPhase += elapsed * 3.4
+        tint(matsOf(hovered), HOVER_TINT, 0.4 + 0.22 * (0.5 + 0.5 * Math.sin(hoverPhase)))
+      }
     }
     // The nameplate lives in world space, not cursor space — it has to
     // track the camera every frame (zoom flight, orbit drag) rather than
@@ -437,9 +440,7 @@ export function attachInteraction(cfg) {
       const [x, y] = projectHead(hovered.ref)
       tip.style.left = x + 'px'; tip.style.top = y + 'px'
     }
-    requestAnimationFrame(pulseHover)
   }
-  requestAnimationFrame(pulseHover)
 
   let hoverToken = 0
   function renderTag(pick) {
@@ -648,7 +649,7 @@ export function attachInteraction(cfg) {
   })
   addEventListener('pointermove', e => {
     if (down) { moved = Math.max(moved, Math.hypot(e.clientX-dx0, e.clientY-dy0)); return }
-    // Nameplate positions itself off the head every frame (see pulseHover);
+    // Nameplate positions itself off the head every frame (see tick());
     // mouse-following here would fight that and jitter.
     if (hoverTreatment !== 'nameplate') { tip.style.left = e.clientX + 'px'; tip.style.top = e.clientY + 'px' }
     const now = performance.now()
@@ -659,7 +660,7 @@ export function attachInteraction(cfg) {
   })
 
   const api = {
-    pickAt, click, select, paint, pickable, desks,
+    pickAt, click, select, paint, tick, pickable, desks,
     get selected() { return selected },
     /** Force an ownership rescan now instead of waiting for the 3s poll —
      *  for scripted browser verification. */

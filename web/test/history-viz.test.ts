@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   hashString, hueForAuthor, colorForAuthor, parseRelativeAge, ageToX, stackTimelinePositions,
-  formatAge, composeStory,
+  formatAge, agePhrase, composeStory,
 } from '../src/office/history-viz.js'
 
 describe('hashString / hueForAuthor', () => {
@@ -129,6 +129,24 @@ describe('formatAge', () => {
   })
 })
 
+describe('agePhrase', () => {
+  it('leaves "today" alone — it already reads as a complete phrase', () => {
+    expect(agePhrase('today', 'ago')).toBe('today')
+    expect(agePhrase('today', 'old')).toBe('today')
+  })
+
+  it('appends the suffix for every other bucket', () => {
+    expect(agePhrase('1 day', 'ago')).toBe('1 day ago')
+    expect(agePhrase('5 days', 'old')).toBe('5 days old')
+    expect(agePhrase('2 months', 'ago')).toBe('2 months ago')
+  })
+
+  it('is null when there is no label to phrase', () => {
+    expect(agePhrase(null, 'ago')).toBeNull()
+    expect(agePhrase(undefined, 'ago')).toBeNull()
+  })
+})
+
 describe('composeStory', () => {
   it('composes a multi-author sentence plus a busiest-stretch line', () => {
     const stat = { ok: true, commits: 10, authorCount: 2, lastAuthor: 'mohsensc', lastAgeDays: 2, firstAgeDays: 42, lastSummary: 'fix thing' }
@@ -185,6 +203,26 @@ describe('composeStory', () => {
   it('degrades to a single "no history" line when everything is empty', () => {
     expect(composeStory({ ok: false }, { ok: false }, { ok: false })).toEqual({ lines: ['no history here yet'], commits: [] })
     expect(composeStory(null, null, null)).toEqual({ lines: ['no history here yet'], commits: [] })
+  })
+
+  it('phrases "last touched today" without a dangling "ago" — the single most common case', () => {
+    const stat = { ok: true, commits: 10, authorCount: 2, lastAuthor: 'mohsensc', lastAgeDays: 0, firstAgeDays: 42, lastSummary: 'fix thing' }
+    const blame = { ok: true, total: 200, owners: [
+      { author: 'mohsensc', lines: 140, share: 0.7 },
+      { author: 'agentai', lines: 60, share: 0.3 },
+    ] }
+    const log = { ok: true, entries: [{ sha: 'a', author: 'mohsensc', when: 'today', subject: 'x' }] }
+    const { lines } = composeStory(stat, log, blame)
+    expect(lines[0]).toContain('last touched today')
+    expect(lines[0]).not.toContain('today ago')
+  })
+
+  it('phrases the single-commit case as "today", not "today ago"', () => {
+    const stat = { ok: true, commits: 1, authorCount: 1, lastAuthor: 'mohsensc', lastAgeDays: 0, firstAgeDays: 0, lastSummary: 'first cut' }
+    const blame = { ok: true, total: 12, owners: [{ author: 'mohsensc', lines: 12, share: 1 }] }
+    const log = { ok: true, entries: [{ sha: 'a', author: 'mohsensc', when: 'today', subject: 'first cut' }] }
+    const { lines } = composeStory(stat, log, blame)
+    expect(lines).toEqual(['one commit, today, mohsensc.'])
   })
 
   it('never throws on missing fields inside otherwise-ok responses', () => {

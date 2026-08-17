@@ -7,7 +7,31 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/mohsensc/sync/go/internal/metrics"
 )
+
+// counterValue reads back one no-label counter's current value straight
+// from the registry's own Gatherer — the same forwarding path
+// metrics.Registry.Gatherer's doc comment describes, used here instead of
+// prometheus/client_golang/prometheus/testutil so this package's tests
+// don't reach for a dependency go.mod hasn't already resolved.
+func counterValue(t *testing.T, m *metrics.Registry, name string) float64 {
+	t.Helper()
+	families, err := m.Gatherer().Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	for _, fam := range families {
+		if fam.GetName() != name {
+			continue
+		}
+		for _, metric := range fam.GetMetric() {
+			return metric.GetCounter().GetValue()
+		}
+	}
+	return 0
+}
 
 func readLines(t *testing.T, path string) []Record {
 	t.Helper()
@@ -47,7 +71,7 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 
 func TestRecordWritesOnlyRungAboveZero(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "journal.jsonl")
-	j := New(path)
+	j := New(path, nil)
 	defer j.Stop()
 
 	j.Record(Record{Rung: 0, Path: "should-not-appear.py"})
@@ -64,7 +88,7 @@ func TestRecordWritesOnlyRungAboveZero(t *testing.T) {
 
 func TestRecordFieldsRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "journal.jsonl")
-	j := New(path)
+	j := New(path, nil)
 	defer j.Stop()
 
 	j.Record(Record{
@@ -89,7 +113,7 @@ func TestRecordFieldsRoundTrip(t *testing.T) {
 
 func TestTrimKeepsMostRecentAndRewritesFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "journal.jsonl")
-	j := New(path)
+	j := New(path, nil)
 	defer j.Stop()
 
 	total := MaxLines + 50
@@ -125,18 +149,45 @@ func TestTrimKeepsMostRecentAndRewritesFile(t *testing.T) {
 
 func TestStopClosesCleanly(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "journal.jsonl")
-	j := New(path)
+	j := New(path, nil)
 	j.Record(Record{Rung: 3, Path: "a.py"})
 	waitFor(t, 2*time.Second, func() bool { return j.Written() == 1 })
 	j.Stop() // must return, not hang
 }
 
 func TestEmptyPathNeverWrites(t *testing.T) {
-	j := New("")
+	j := New("", nil)
 	defer j.Stop()
 	j.Record(Record{Rung: 3, Path: "a.py"})
 	time.Sleep(50 * time.Millisecond)
 	if j.Written() != 0 {
 		t.Fatal("an empty path must never write")
 	}
+}
+
+// TestWritesAndTrimsReachTheRegistry is the wiring check for
+// ap_journal_writes_total and ap_journal_trims_total: not just that the
+// journal's own counters move (TestTrimKeepsMostRecentAndRewritesFile
+// already covers that), but that a caller-supplied Registry sees the same
+// events. Passing nil elsewhere in this file is what proves the nil case
+// costs nothing; this one proves the non-nil case actually reports.
+func TestWritesAndTrimsReachTheRegistry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "journal.jsonl")
+	m := metrics.New()
+	j := New(path, m)
+	defer j.Stop()
+
+	total := MaxLines + 50
+	for i := 0; i < total; i++ {
+		j.Record(Record{Rung: 3, Path: "a.py", AtMs: int64(i)})
+	}
+	waitFor(t, 5*time.Second, func() bool { return j.Written() == uint64(total) })
+	if got := counterValue(t, m, "ap_journal_writes_total"); got != float64(total) {
+		t.Fatalf("ap_journal_writes_total = %v, want %d", got, total)
+	}
+
+	// The write burst above is what TestTrimKeepsMostRecentAndRewritesFile
+	// uses to force a trim; wait for this registry to see the same thing
+	// rather than re-deriving the trigger.
+	waitFor(t, 5*time.Second, func() bool { return counterValue(t, m, "ap_journal_trims_total") > 0 })
 }

@@ -116,13 +116,20 @@ const CANNED_CANONICAL_NAMES = [
 ].join('\n') + '\n'
 
 const CANNED_LOG = [
-  ['abc1234', 'sara', '2 days ago', 'fix the thing'].join(US),
-  ['def5678', 'dev', '3 weeks ago', 'add the thing'].join(US),
+  ['abc1234', 'sara@example.com', 'sara', '2 days ago', 'fix the thing'].join(US),
+  ['def5678', 'dev@example.com', 'dev', '3 weeks ago', 'add the thing'].join(US),
 ].join('\n') + '\n'
 
 const CANNED_STAT_LOG = [
-  ['sara', '1750000000', 'fix the thing'].join(US),
-  ['dev', '1700000000', 'add the thing'].join(US),
+  ['sara@example.com', 'sara', '1750000000', 'fix the thing'].join(US),
+  ['dev@example.com', 'dev', '1700000000', 'add the thing'].join(US),
+].join('\n') + '\n'
+
+// One person, two name spellings, one inbox — this repo's own history in
+// miniature. Counting names says two authors; counting inboxes says one.
+const CANNED_STAT_LOG_SPLIT_IDENTITY = [
+  ['dev@example.com', 'Dev New Name', '1750000000', 'fix the thing'].join(US),
+  ['dev@example.com', 'dev', '1700000000', 'add the thing'].join(US),
 ].join('\n') + '\n'
 
 // shaped after real `git log --numstat --format=%H` output: sha line,
@@ -228,6 +235,12 @@ describe('parseLog', () => {
     ])
   })
 
+  it('names each author from the canonical map when one is passed', () => {
+    const canonical = new Map([['dev@example.com', 'Dev New Name']])
+    expect(parseLog(CANNED_LOG, canonical).map((e) => e.author))
+      .toEqual(['sara', 'Dev New Name'])
+  })
+
   it('returns an empty array for no history', () => {
     expect(parseLog('')).toEqual([])
     expect(parseLog('\n')).toEqual([])
@@ -277,6 +290,16 @@ describe('parseRecentLog', () => {
   it('returns an empty array for no history', () => {
     expect(parseRecentLog('')).toEqual([])
     expect(parseRecentLog('\n')).toEqual([])
+  })
+
+  it('a header with no numstat rows counts zero files — the merge-commit shape', () => {
+    // What `git log --numstat` prints for a merge: the header, then nothing.
+    // Nothing here can invent a file count, which is why the `recent` route
+    // passes --no-merges rather than leaving this to the parser.
+    const text = '\x01ddd4444\x1fsara@example.com\x1fSara\x1f1700000000\x1fMerge pull request #58'
+    expect(parseRecentLog(text)).toEqual([
+      { sha: 'ddd4444', author: 'Sara', subject: 'Merge pull request #58', ageDays: expect.any(Number), files: 0 },
+    ])
   })
 
   it('handles a single commit with no trailing blank line', () => {
@@ -351,6 +374,21 @@ describe('parseStatLog', () => {
       firstAgeDays: Math.floor((now - 1_700_000_000 * 1000) / 86400000),
       lastSummary: 'fix the thing',
     })
+  })
+
+  it('counts one author for one inbox under two name spellings', () => {
+    expect(parseStatLog(CANNED_STAT_LOG_SPLIT_IDENTITY)?.authorCount).toBe(1)
+  })
+
+  it('names the last author from the canonical map, not the commit line', () => {
+    const canonical = new Map([['dev@example.com', 'Dev New Name']])
+    expect(parseStatLog(CANNED_STAT_LOG, Date.now(), canonical)?.lastAuthor).toBe('sara')
+    expect(parseStatLog(CANNED_STAT_LOG_SPLIT_IDENTITY, Date.now(), canonical)?.lastAuthor)
+      .toBe('Dev New Name')
+  })
+
+  it('falls back to the commit line when no canonical map is passed', () => {
+    expect(parseStatLog(CANNED_STAT_LOG_SPLIT_IDENTITY)?.lastAuthor).toBe('Dev New Name')
   })
 
   it('returns null for a file with no history', () => {
@@ -526,6 +564,9 @@ describe('gitApiMiddleware against the real repo', () => {
       expect(typeof e.subject).toBe('string')
       expect(e.ageDays === null || typeof e.ageDays === 'number').toBe(true)
       expect(typeof e.files).toBe('number')
+      // Every commit the board shows touched at least one file. This is the
+      // merge-commit regression: `git log --numstat` prints no numstat rows for
+      // a merge, so before --no-merges every merge on HEAD came back as 0.
       expect(e.files).toBeGreaterThan(0)
     }
   })
@@ -539,7 +580,9 @@ describe('gitApiMiddleware against the real repo', () => {
 
   it('recent: dedups this repo\'s own split identity the same way shortlog does', async () => {
     const r: any = await callMiddleware(mw, '/api/git/recent?count=30')
-    const names = new Set(r.json.entries.map((e: any) => e.author))
+    // new Set(x) with x: any resolves to Set<unknown>, which makes `n` below
+    // unknown and .toLowerCase() a type error. The element type has to be said.
+    const names = new Set<string>(r.json.entries.map((e: any) => String(e.author)))
     expect([...names].filter((n) => n.toLowerCase().includes('mohsen')).length).toBeLessThanOrEqual(1)
   })
 

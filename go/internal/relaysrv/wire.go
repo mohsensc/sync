@@ -58,7 +58,7 @@ func leaseFrame(c *Claim, now float64) Frame {
 	}
 	winner := c.HandoverWinner()
 	if c.HandoverAt != nil && winner != nil {
-		f["handover_in_ms"] = msRemaining(*c.HandoverAt, now)
+		f["handover_in_ms"] = clampedHandoverMs(*c.HandoverAt, c.ExpiresAt, now)
 		f["handover_at"] = *c.HandoverAt
 		f["handover_to"] = winner.Agent
 		f["handover_to_human"] = winner.Human
@@ -74,6 +74,26 @@ func msRemaining(deadline, now float64) int {
 		return 0
 	}
 	return ms
+}
+
+// clampedHandoverMs is handover_in_ms as it goes on the wire: never later
+// than the lease's own remaining TTL. contendLocked sets HandoverAt from
+// the fair-share grace period (up to 900s) without regard to how much of
+// the lease's current TTL is actually left, so a lease due to expire in a
+// few seconds can carry a handover promised for fifteen minutes out. When
+// the contender that promise was made to loses the wait-die race (the
+// ordinary 'abort' case), the lease just expires on schedule and somebody
+// else takes the region — the promise was never one the relay could keep.
+// Clamping handover_at itself (or the stored Claim) would change *when a
+// handover actually fires and who gets the region*, a different and larger
+// decision than "don't lie about it on the wire" — this only touches the
+// number reported, at each of the three frames that report it.
+func clampedHandoverMs(handoverAt, expiresAt, now float64) int {
+	h := msRemaining(handoverAt, now)
+	if ttl := msRemaining(expiresAt, now); ttl < h {
+		return ttl
+	}
+	return h
 }
 
 // departureFrame is what a claim's departure produces, plain or upgraded

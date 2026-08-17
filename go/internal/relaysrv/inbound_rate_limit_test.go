@@ -1,6 +1,10 @@
 package relaysrv
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/mohsensc/sync/go/internal/metrics"
+)
 
 // Ported from python/tests/test_inbound_rate_limit.py — the inbound twin
 // of backpressure_test.go. admitInbound/inboundShedReason are pure
@@ -12,7 +16,7 @@ import "testing"
 
 func TestABurstAloneOnlyThrottlesNotDisconnects(t *testing.T) {
 	clock := NewVirtualClock(0)
-	conn := NewWsConn(newFakeWs(false), clock)
+	conn := NewWsConn(newFakeWs(false), clock, metrics.New())
 	conn.tokens = 3
 	conn.tokenTs = clock.Now()
 	conn.inSaturatedSince = nil
@@ -38,7 +42,7 @@ func TestABurstAloneOnlyThrottlesNotDisconnects(t *testing.T) {
 
 func TestSustainedAbusePastTheSaturationWindowIsShed(t *testing.T) {
 	clock := NewVirtualClock(0)
-	conn := NewWsConn(newFakeWs(false), clock)
+	conn := NewWsConn(newFakeWs(false), clock, metrics.New())
 	conn.tokens = 1
 	conn.tokenTs = clock.Now()
 
@@ -68,7 +72,7 @@ func TestSustainedAbusePastTheSaturationWindowIsShed(t *testing.T) {
 
 func TestRefillingTheBucketClearsTheSaturationClock(t *testing.T) {
 	clock := NewVirtualClock(0)
-	conn := NewWsConn(newFakeWs(false), clock)
+	conn := NewWsConn(newFakeWs(false), clock, metrics.New())
 	conn.tokens = 0
 	conn.tokenTs = clock.Now()
 
@@ -100,8 +104,8 @@ func TestRefillingTheBucketClearsTheSaturationClock(t *testing.T) {
 // in server.go) is exercised by the load harness's real-socket runs.
 func TestInboundBudgetGatesOneConnectionOnly(t *testing.T) {
 	clock := NewVirtualClock(0)
-	healthy := NewWsConn(newFakeWs(false), clock)
-	flooder := NewWsConn(newFakeWs(false), clock)
+	healthy := NewWsConn(newFakeWs(false), clock, metrics.New())
+	flooder := NewWsConn(newFakeWs(false), clock, metrics.New())
 	flooder.tokens = 1
 	flooder.tokenTs = clock.Now()
 

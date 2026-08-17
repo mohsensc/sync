@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/mohsensc/sync/go/internal/metrics"
 )
 
 var errTLSPairRequired = errors.New("TLSCert and TLSKey must be given together")
@@ -49,6 +50,18 @@ const (
 	ExpirySweepInterval = 1 * time.Second
 )
 
+// Frame-dropped reasons this connection can report, a fixed vocabulary
+// for metrics.FrameDropped's reason label — metrics.go doesn't export one
+// (see its package doc on why a label domain has to stay bounded no
+// matter what a call site happens to have lying around for a log line),
+// so this package defines its own and uses it consistently rather than
+// passing shedReason's human-readable sentences straight through.
+const (
+	dropReasonQueueFull = "queue_full"
+	dropReasonStall     = "stall"
+	dropReasonSaturated = "saturated"
+)
+
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
 	WriteBufferSize: 4096,
@@ -76,8 +89,9 @@ type wsWriter interface {
 // peer gets disconnected rather than allowed to grow the relay's memory
 // without bound.
 type WsConn struct {
-	ws    wsWriter
-	clock Clock
+	ws      wsWriter
+	clock   Clock
+	metrics *metrics.Registry
 
 	mu    sync.Mutex
 	agent string
@@ -103,11 +117,12 @@ type WsConn struct {
 	inMu             sync.Mutex
 }
 
-func NewWsConn(ws wsWriter, clock Clock) *WsConn {
+func NewWsConn(ws wsWriter, clock Clock, m *metrics.Registry) *WsConn {
 	now := clock.Now()
 	c := &WsConn{
 		ws:      ws,
 		clock:   clock,
+		metrics: m,
 		out:     make(chan []byte, SendQueueMax),
 		closed:  make(chan struct{}),
 		tokens:  InboundBurst,
@@ -167,6 +182,7 @@ func (c *WsConn) Send(payload []byte) {
 			c.saturatedSince = &now
 		}
 		c.mu.Unlock()
+		c.metrics.FrameDropped(dropReasonQueueFull)
 	default:
 	}
 	select {
@@ -175,22 +191,28 @@ func (c *WsConn) Send(payload []byte) {
 		// Lost a race with the writer goroutine draining concurrently;
 		// the queue had room again by the time we retried. Fine either
 		// way — payload is simply not queued this time, matching the
-		// spirit of drop-oldest under contention.
+		// spirit of drop-oldest under contention. Still a frame that
+		// didn't reach the queue, so it's still worth counting.
+		c.metrics.FrameDropped(dropReasonQueueFull)
 	}
 }
 
-func (c *WsConn) shedReason() string {
+// shedReason reports both a bounded reason code (for metrics.FrameDropped
+// — see the dropReason constants above) and the human-readable detail
+// shed's log line already carried, so adding the metric didn't mean
+// inventing a second way to describe the same two conditions.
+func (c *WsConn) shedReason() (reason, detail string) {
 	now := c.clock.Now()
 	c.mu.Lock()
 	sendingSince, saturatedSince := c.sendingSince, c.saturatedSince
 	c.mu.Unlock()
 	if sendingSince != nil && now-*sendingSince >= SendStallS {
-		return "one frame did not leave in the stall window"
+		return dropReasonStall, "one frame did not leave in the stall window"
 	}
 	if saturatedSince != nil && now-*saturatedSince >= SendSaturatedS {
-		return "send queue full for over the saturation window"
+		return dropReasonSaturated, "send queue full for over the saturation window"
 	}
-	return ""
+	return "", ""
 }
 
 // writeLoop drains the outbound channel to the socket. One per
@@ -252,13 +274,13 @@ func (c *WsConn) write(payload []byte) bool {
 				c.shutdown()
 				return false
 			}
-			if why := c.shedReason(); why != "" {
-				c.shed(why)
+			if reason, why := c.shedReason(); why != "" {
+				c.shed(reason, why)
 				return false
 			}
 			return true
 		case <-ticker.C:
-			if why := c.shedReason(); why == "" {
+			if reason, why := c.shedReason(); why == "" {
 				continue
 			} else {
 				c.mu.Lock()
@@ -271,7 +293,7 @@ func (c *WsConn) write(payload []byte) bool {
 				// (with an error nobody reads, since `done` is buffered
 				// 1): the goroutine still exits, it just does so once the
 				// close lands rather than on this call's own timeline.
-				c.shed(why)
+				c.shed(reason, why)
 				return false
 			}
 		}
@@ -283,9 +305,10 @@ func (c *WsConn) write(payload []byte) bool {
 // takes the transport down under it so a peer that will not even read a
 // close frame cannot keep this goroutine (or the one still blocked in
 // write's WriteMessage, if that's why shed was called) parked forever.
-func (c *WsConn) shed(why string) {
+func (c *WsConn) shed(reason, why string) {
 	log.Printf("dropping subscriber %q (room %q): %s, %d frames shed", c.Agent(), c.Room(), why, c.dropped)
 	c.shutdown()
+	c.metrics.FrameDropped(reason)
 	_ = c.ws.WriteControl(websocket.CloseMessage,
 		websocket.FormatCloseMessage(1013, "subscriber too slow"),
 		time.Now().Add(2*time.Second))
@@ -338,12 +361,18 @@ func (c *WsConn) inboundShedReason() string {
 
 // -- session ----------------------------------------------------------------
 
-func session(ws *websocket.Conn, relay *Relay) {
+func (s *Server) session(ws *websocket.Conn) {
+	relay := s.Relay
 	ws.SetReadLimit(MaxFrameBytes)
-	conn := NewWsConn(ws, relay.Clock())
+	conn := NewWsConn(ws, relay.Clock(), relay.metrics)
 	go conn.writeLoop()
 
+	relay.metrics.RelayConnections.Add(1)
+	s.trackConn(conn)
+
 	defer func() {
+		s.untrackConn(conn)
+		relay.metrics.RelayConnections.Add(-1)
 		relay.Leave(conn)
 		conn.shutdown()
 		// ReadMessage's default close handler already echoes a close
@@ -442,6 +471,49 @@ type Server struct {
 	TLSKey  string
 
 	ln net.Listener
+
+	// connsMu/conns is every WsConn currently accepted, tracked purely so
+	// the sweep ticker in Serve can sample SendQueueDepth as the max
+	// queue length live in the process — one shared gauge, not a
+	// per-connection one (see the metrics package doc comment on why
+	// there's deliberately no per-daemon label). Added/removed at the
+	// same two points RelayConnections is, in session.
+	connsMu sync.Mutex
+	conns   map[*WsConn]struct{}
+}
+
+func (s *Server) trackConn(c *WsConn) {
+	s.connsMu.Lock()
+	if s.conns == nil {
+		s.conns = make(map[*WsConn]struct{})
+	}
+	s.conns[c] = struct{}{}
+	s.connsMu.Unlock()
+}
+
+func (s *Server) untrackConn(c *WsConn) {
+	s.connsMu.Lock()
+	delete(s.conns, c)
+	s.connsMu.Unlock()
+}
+
+// sampleSendQueueDepth sets SendQueueDepth to the deepest outbound queue
+// any live connection is carrying right now, zero when nobody is. A
+// prometheus Gauge has no compare-and-swap, so "the slowest consumer" has
+// to be computed here, over every connection, rather than each one
+// Set-ing its own length and clobbering its neighbours' — len() on a
+// channel is a lock-free read, safe to call from this goroutine while
+// writeLoop drains the same channel from its own.
+func (s *Server) sampleSendQueueDepth() {
+	s.connsMu.Lock()
+	deepest := 0
+	for c := range s.conns {
+		if n := len(c.out); n > deepest {
+			deepest = n
+		}
+	}
+	s.connsMu.Unlock()
+	s.Relay.metrics.SendQueueDepth.Set(float64(deepest))
 }
 
 // Listen binds the socket and returns the bound address; call Serve to
@@ -483,7 +555,7 @@ func (s *Server) Serve(ctx context.Context) error {
 		if err != nil {
 			return
 		}
-		go session(ws, s.Relay)
+		go s.session(ws)
 	})
 	srv := &http.Server{Handler: mux}
 	errCh := make(chan error, 1)
@@ -498,6 +570,7 @@ func (s *Server) Serve(ctx context.Context) error {
 				return
 			case <-sweep.C:
 				s.Relay.registry.SweepAll()
+				s.sampleSendQueueDepth()
 			}
 		}
 	}()
@@ -508,5 +581,35 @@ func (s *Server) Serve(ctx context.Context) error {
 		return nil
 	case err := <-errCh:
 		return err
+	}
+}
+
+// MetricsServer builds the /metrics scrape endpoint, unstarted — call
+// ListenAndServe (or ListenAndServeTLS) on it. Returns nil when addr is
+// empty: there is deliberately no default address (see metrics.Registry.
+// Handler's doc comment) — an endpoint that shows up on a well-known port
+// without anyone asking is a way to leak a room's shape to whoever shares
+// the network, so serving it at all is an operator's explicit choice, not
+// a fallback this package reaches for on its own.
+//
+// Registers only "/metrics" on its own ServeMux, never Server's own "/"
+// websocket handler, and gives it read/write/idle timeouts a plain
+// &http.Server{} doesn't have by default — a scrape client that opens the
+// connection and never finishes the request is otherwise a way to wedge
+// a listener open indefinitely, on an endpoint whose only job is to
+// answer fast.
+func MetricsServer(addr string, reg *metrics.Registry) *http.Server {
+	if addr == "" {
+		return nil
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", reg.Handler())
+	return &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadTimeout:       5 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       30 * time.Second,
 	}
 }

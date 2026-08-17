@@ -5,9 +5,11 @@ package decide
 
 import (
 	"encoding/json"
+	"unicode/utf8"
 
 	"github.com/mohsensc/sync/go/internal/leases"
 	"github.com/mohsensc/sync/go/internal/policy"
+	"github.com/mohsensc/sync/go/internal/repo"
 	"github.com/mohsensc/sync/go/internal/wire"
 )
 
@@ -62,6 +64,60 @@ type Response struct {
 	LostMsAgo      *int64 `json:"lost_ms_ago,omitempty"`
 }
 
+// Free-text caps enforced on every Response before it is marshalled. See
+// hook.cpp's kMaxReply (8192 bytes): read_line treats a reply that hits
+// that cap without finding a newline as no answer at all, and the hook is
+// fail-open by design, so an over-long line turns a real deny into a
+// silent allow. Nothing on the wire bounds what a peer puts in an intent,
+// a human name or a handover target — they ride in on a lease anybody in
+// the room can claim — so the daemon is the one place that has to cap them
+// before they reach that budget.
+//
+// maxIntentBytes is generous for a one-line "what I'm doing"; the rest are
+// identifiers and short words (session ids, names, priority tiers) that
+// never legitimately run long. Even at 6 bytes of JSON per byte of input
+// (the worst case: a control character with no short escape, \u00XX) the
+// whole envelope stays a few thousand bytes under the cap.
+const (
+	maxIntentBytes = 300
+	maxNameBytes   = 64
+)
+
+// truncateUTF8 returns the longest prefix of s that fits within max bytes
+// without splitting a multi-byte rune. Go's own encoder tolerates a broken
+// trailing rune (it substitutes U+FFFD rather than erroring), but this
+// reply also has to survive the C++ hook's and the Python relay's own JSON
+// readers, and a cut that lands mid-rune is not worth trusting to agree on.
+func truncateUTF8(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	b := s[:max]
+	for !utf8.ValidString(b) && len(b) > 0 {
+		b = b[:len(b)-1]
+	}
+	return b
+}
+
+// boundResponse truncates every free-text field on r. Called last, after
+// HandoverToMe has already been computed from the untruncated lease data —
+// the hook's own handover_to_me fallback (hook.cpp:558) compares the
+// wire's handover_to against its own session id, and a field truncated
+// before that comparison could break a match that was otherwise exact.
+func boundResponse(r Response) Response {
+	r.Holder = truncateUTF8(r.Holder, maxNameBytes)
+	r.Human = truncateUTF8(r.Human, maxNameBytes)
+	r.Intent = truncateUTF8(r.Intent, maxIntentBytes)
+	r.HolderPriority = truncateUTF8(r.HolderPriority, maxNameBytes)
+	r.HandoverTo = truncateUTF8(r.HandoverTo, maxNameBytes)
+	r.HandoverToHuman = truncateUTF8(r.HandoverToHuman, maxNameBytes)
+	r.HandoverToPriority = truncateUTF8(r.HandoverToPriority, maxNameBytes)
+	r.LostTo = truncateUTF8(r.LostTo, maxNameBytes)
+	r.LostToAgent = truncateUTF8(r.LostToAgent, maxNameBytes)
+	r.LostToPriority = truncateUTF8(r.LostToPriority, maxNameBytes)
+	return r
+}
+
 func leftMs(atMs, nowMs int64) int64 {
 	if atMs > nowMs {
 		return atMs - nowMs
@@ -102,11 +158,17 @@ func appendLost(r *Response, lost leases.HandoverNote, nowMs int64) {
 
 // ambientResponse is decide.cpp's ambient_response: the two things a
 // non-blocked agent may still need to hear — that a region it holds has a
-// deadline, and that a region it held has gone.
-func ambientResponse(cache *leases.Cache, pol *policy.Cache, path, agent string, nowMs int64) Response {
-	r := openResponse(0, pol.EffectFor(0))
+// deadline, and that a region it held has gone. path is already a region
+// key by the time it gets here — Decide normalizes once, before either of
+// its cache lookups.
+func ambientResponse(cache *leases.Cache, pol *policy.Cache, path string, myAgents []string, nowMs int64) Response {
+	// EffectForPath, not the path-less EffectFor: path is a real region key
+	// here (see the doc comment above), so a [[path]] rule for it has to be
+	// able to fire even on the no-conflict, ambient reply — the whole point
+	// of EffectForPath was answers like this one, not just the conflict path.
+	r := openResponse(0, pol.EffectForPath(0, path))
 
-	if mine, ok := cache.OwnHandover(path, agent, nowMs); ok {
+	if mine, ok := cache.OwnHandover(path, myAgents, nowMs); ok {
 		r.HandoverInMs = msPtr(leftMs(mine.HandoverAtMs, nowMs))
 		r.HandoverTo = mine.HandoverTo
 		r.HandoverToHuman = mine.HandoverToHuman
@@ -114,22 +176,28 @@ func ambientResponse(cache *leases.Cache, pol *policy.Cache, path, agent string,
 		if mine.Waiting > 0 {
 			r.Waiting = mine.Waiting
 		}
-		return r
+		return boundResponse(r)
 	}
 
 	if lost, ok := cache.HandoverNoteFor(path, nowMs, leases.HandoverNoteMs); ok {
 		appendLost(&r, lost, nowMs)
 	}
-	return r
+	return boundResponse(r)
 }
 
 // Decide is decide_response: a live lease on the file held by somebody else
 // is rung 2 or rung 3 — same symbol (or no evidence either way) is 3,
 // proven-disjoint symbols is 2; anything else is rung 0, with the ambient
 // handover/lost-region notes folded in. selfAgent is the id this daemon
-// joined the room under; empty means no room is configured and the
-// request's own agent (the hook's session id) is used instead — see
-// decide.hpp's note on why those are different namespaces.
+// joined the room under; empty means no room is configured. root is the
+// repo root this daemon resolved at startup — see repo.RegionKey — and is
+// used once, here, to turn whatever path the hook sent (often absolute)
+// into the same region key every checkout of this repo uses.
+//
+// Both selfAgent and req.Agent are checked against every lease: the MCP
+// surface claims a region under the hook session's id, while this daemon's
+// own relay identity is a different string for the same requester, so a
+// lease is "mine" if it matches either — see leases.Cache.Conflict.
 //
 // Rung 1 ("A editing, B reading") never comes out of here: it only exists
 // when the *incoming* action is a read, and a read never asks for a
@@ -137,22 +205,40 @@ func ambientResponse(cache *leases.Cache, pol *policy.Cache, path, agent string,
 // for a PreToolUse edit. Rung 1 is computed from the presence table
 // instead (see presence.Table.Peers), which is the ambient, no-interrupt
 // surface that rung was always meant to reach.
-func Decide(req Request, cache *leases.Cache, pol *policy.Cache, nowMs int64, selfAgent string) Response {
-	agent := selfAgent
-	if agent == "" {
-		agent = req.Agent
-	}
+func Decide(req Request, cache *leases.Cache, pol *policy.Cache, nowMs int64, selfAgent string, root string) Response {
+	// One agent, two names. The id this daemon joined the room under, and
+	// the session id the hook sent. A lease taken through the MCP surface is
+	// filed under the session id; one this daemon took is filed under its
+	// relay identity. Either is me, so both travel together to every question
+	// below that asks whose a region is — the bug this fixes was a single
+	// collapsed identity answering "not mine" about the caller's own lease.
+	myAgents := []string{selfAgent, req.Agent}
 
 	if req.Path == "" || req.Verb != "edit" {
+		// EffectFor(0), not EffectForPath: when req.Path == "" there is no
+		// region key to give it. When it's non-empty but the verb isn't
+		// "edit", there would be — but this branch is the cheap early-out
+		// that has to fit inside the hook's decision budget for requests
+		// that were never going to contend a region (WantsDecision only
+		// fires for a PreToolUse edit; see the doc comment below), and
+		// RegionKeyResolved's stat/symlink resolution is not free. Anything
+		// that can reach this branch with a real path and still wants
+		// path-scoped policy has to go through the event/journal path
+		// instead, where the path is normalized anyway.
 		return openResponse(0, pol.EffectFor(0))
 	}
+	path := repo.RegionKeyResolved(root, req.Path)
 
-	held, rung, ok := cache.Conflict(req.Path, agent, nowMs)
+	held, rung, ok := cache.Conflict(path, myAgents, nowMs)
 	if !ok {
-		return ambientResponse(cache, pol, req.Path, agent, nowMs)
+		return ambientResponse(cache, pol, path, myAgents, nowMs)
 	}
 
-	r := openResponse(rung, pol.EffectFor(rung))
+	// EffectForPath: this is the branch a `[[path]]` rule most needs to
+	// reach — a rung 2/3 deny an operator wants softened (or hardened) for
+	// one glob, not the whole repo. Path is already the normalized region
+	// key cache.Conflict just matched against.
+	r := openResponse(rung, pol.EffectForPath(rung, path))
 	r.Holder = held.Agent
 	r.Human = held.Human
 	r.Intent = held.Intent
@@ -162,7 +248,9 @@ func Decide(req Request, cache *leases.Cache, pol *policy.Cache, nowMs int64, se
 	if held.HasHandover {
 		r.HandoverInMs = msPtr(leftMs(held.HandoverAtMs, nowMs))
 		r.HandoverTo = held.HandoverTo
-		if agent != "" && held.HandoverTo == agent {
+		r.HandoverToHuman = held.HandoverToHuman
+		r.HandoverToPriority = held.HandoverToPriority
+		if leases.IsMine(held.HandoverTo, myAgents) {
 			r.HandoverToMe = true
 		}
 		if held.Waiting > 0 {
@@ -170,10 +258,10 @@ func Decide(req Request, cache *leases.Cache, pol *policy.Cache, nowMs int64, se
 		}
 	}
 
-	if lost, ok := cache.HandoverNoteFor(req.Path, nowMs, leases.HandoverNoteMs); ok {
+	if lost, ok := cache.HandoverNoteFor(path, nowMs, leases.HandoverNoteMs); ok {
 		appendLost(&r, lost, nowMs)
 	}
-	return r
+	return boundResponse(r)
 }
 
 // BlockedByLease mirrors decide.cpp's blocked_by_lease: rung 3, regardless
@@ -193,8 +281,12 @@ func ParseRequest(line []byte) Request {
 // EventFrame turns an admitted hook line into the frame the relay
 // dispatches on. Mirrors relay_client.hpp's relay_event_frame: empty verb or
 // path means the relay would only drop the frame anyway, so the caller gets
-// an empty slice and pushes nothing.
-func EventFrame(req Request) []byte {
+// an empty slice and pushes nothing. root normalizes the path through
+// repo.RegionKey before it goes out — this is the one place an outbound
+// event frame is built, so it is the one place that has to do it: two
+// checkouts of the same repo send the same region key, or the room they
+// share is worthless.
+func EventFrame(req Request, root string) []byte {
 	if req.Verb == "" || req.Path == "" {
 		return nil
 	}
@@ -204,16 +296,19 @@ func EventFrame(req Request) []byte {
 		Verb:   req.Verb,
 		Agent:  req.Agent,
 		Human:  req.Human,
-		Region: wire.Region{Path: req.Path},
+		Region: wire.Region{Path: repo.RegionKeyResolved(root, req.Path)},
 	}
 	return wire.Marshal(ev)
 }
 
 // ContendFrame mirrors relay_client.hpp's relay_contend_frame: a whole-file
-// region, which is what the hook asked about.
-func ContendFrame(path string) []byte {
+// region, which is what the hook asked about. Normalized the same way
+// EventFrame's region is — a contend frame with the raw path would start
+// the handover clock under a name the matching lease was never filed
+// under, and the wait would never resolve.
+func ContendFrame(path string, root string) []byte {
 	if path == "" {
 		return nil
 	}
-	return wire.Marshal(wire.Contend{Type: "contend", Region: wire.Region{Path: path}})
+	return wire.Marshal(wire.Contend{Type: "contend", Region: wire.Region{Path: repo.RegionKeyResolved(root, path)}})
 }

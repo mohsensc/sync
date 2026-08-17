@@ -1,8 +1,20 @@
 # Go relay: what's ported, what isn't, and the numbers
 
 **Date:** 2026-08-11
-**Status:** ships opt-in. `AGENT_PRESENCE_RELAY_IMPL=go` (or `agent-presence-relay --impl go`)
-runs it; the default is still the Python relay. See "the call" at the bottom.
+**Status, as of this PR:** ships opt-in. `AGENT_PRESENCE_RELAY_IMPL=go` (or
+`agent-presence-relay --impl go`) runs it; the default is still the Python
+relay. See "the call" at the bottom for the reasoning.
+
+**Superseded — read this first:** the opt-in this doc argues for shipped,
+and then the decision it was arguing *against* happened anyway: the Python
+relay was deleted outright (#40), `gorelay` is the only relay unconditionally,
+and `AGENT_PRESENCE_RELAY_IMPL`/`--impl` don't exist in the code any more —
+there's nothing left to select between. Everything below is the evidence and
+reasoning from the PR that made the Go relay trustworthy enough to opt into
+in the first place; it's kept because the numbers and the bugs it found are
+still real, not because the "opt-in" conclusion still holds. For the current
+state, see `docs/languages.md`'s relay row and STATUS.md's "Go relay only,
+Python relay deleted" section.
 
 **A note on timing:** this branch was built against an older `main`, before
 PRs #31, #37, #38, #39 and #41 merged into it. Those bring the Python relay

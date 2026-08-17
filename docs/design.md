@@ -272,7 +272,7 @@ Almost none of this requires real agents.
 - **Property tests** over random claim/release schedules asserting the two invariants that matter: no deadlock is reachable, and every lease eventually expires.
 - **Table-driven unit tests** for pure functions: room-key normalization (ssh/https/`.git`/case matrix), region overlap, rung classification, wait-die ordering.
 - **Chaos tests**: kill the daemon mid-lease, partition the relay, skew clocks, stall a client mid-line against the daemon socket — asserting the fail-open table above, wedge row included. The wedge test runs `poll_once` on a helper thread with a hard deadline, because a wedged daemon never returns and the suite has to report a failure rather than hang.
-- **Latency regression test** in CI asserting hook p99 under 5ms.
+- **Latency regression test** in `scripts/ci-local.sh` asserting hook p99 under 5ms.
 - **One end-to-end integration test** with two real Claude Code sessions and a scripted task, asserting the second agent's injected context contains the first's intent and that no double-edit occurs. Exactly one — it proves the product works but is too slow and flaky to base a suite on.
 
 ## Deferred decisions

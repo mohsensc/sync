@@ -29,41 +29,7 @@
     box-shadow:0 8px 30px #4a1f3d33;opacity:0;transition:opacity .35s;pointer-events:none}
   #caption.on{opacity:1}
 
-  /* ---- replay versus card -------------------------------------------
-     Off by default (see replay-card.js — createReplayCard returns a
-     no-op unless ?vcard=split|strip is set), so nothing here changes the
-     look of a plain checkout. Two variants, one shared box: 'split' is a
-     wide lower-third that slides its two halves in from the edges,
-     'strip' is one dense line, both replacing the plain #caption text
-     for the duration of a reel replay (see office.html's replayEvent). */
-  .rcard{position:fixed;left:50%;bottom:34px;transform:translateX(-50%) translateY(14px);
-    max-width:min(720px,90vw);opacity:0;pointer-events:none;
-    transition:opacity .3s,transform .3s;font:14px ui-sans-serif,sans-serif;color:#F0ECE6}
-  .rcard.on{opacity:1;transform:translateX(-50%) translateY(0)}
-  .rcard-badge{font:700 10px ui-monospace,monospace;text-transform:uppercase;
-    letter-spacing:.04em;border-radius:999px;padding:2px 8px}
-  .rcard.split{display:flex;align-items:stretch;gap:0;
-    background:#35455Cf2;border-radius:12px;box-shadow:0 8px 30px #4a1f3d33;overflow:hidden}
-  .rcard.split .rcard-side{flex:1 1 0;padding:12px 18px;display:flex;flex-direction:column;
-    gap:2px;min-width:0;transition:transform .4s cubic-bezier(.2,.8,.2,1)}
-  .rcard.split .rcard-side b{font-size:14px;letter-spacing:-.01em}
-  .rcard.split .rcard-side span{font:11px ui-monospace,monospace;color:#C7CDD8;
-    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .rcard.split .rcard-a{text-align:right;align-items:flex-end;
-    border-right:1px solid #ffffff22}
-  .rcard.split .rcard-b{text-align:left;align-items:flex-start}
-  .rcard.split:not(.on) .rcard-a{transform:translateX(-24px)}
-  .rcard.split:not(.on) .rcard-b{transform:translateX(24px)}
-  .rcard.split .rcard-mid{flex:0 0 auto;padding:10px 16px;display:flex;
-    flex-direction:column;align-items:center;gap:5px;justify-content:center}
-  .rcard.split .rcard-verdict{font-size:12px;color:#F0ECE6;text-align:center;max-width:180px}
-  .rcard.strip{background:#35455Cf2;border-radius:999px;padding:8px 16px;
-    box-shadow:0 6px 20px #4a1f3d33;display:flex;align-items:center;gap:8px;
-    font:12px ui-monospace,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   #caption.declutter{opacity:0}
-  #beat{position:fixed;right:18px;top:16px;background:#fffdfaee;border:1px solid #C3B39B;
-    border-radius:10px;padding:9px 12px;font:11px ui-monospace,monospace;color:#6b5f56}
-  #beat b{color:#35455C}
   #mode{position:fixed;left:50%;top:16px;transform:translateX(-50%);
     background:#35455Cf2;color:#F0ECE6;border-radius:999px;padding:6px 16px;
     font:600 11px ui-monospace,monospace;letter-spacing:.04em;text-transform:uppercase;
@@ -323,6 +289,17 @@
   .reel-skin-ticker .reel-badge[data-rung="2"]{color:#E4BD5C;background:#241D10}
   .reel-skin-ticker .reel-badge[data-rung="3"]{color:#E08A4C;background:#26180E}
   .reel-skin-ticker .reel-badge[data-rung="4"]{color:#E06860;background:#26120F}
+
+  /* reel-pulse (above) already only runs under no-preference. Everything
+     else in #reel is a one-shot transition or entrance animation (row
+     arrival, detail expand/collapse) rather than a repeating one, but
+     "one-shot" still means motion — kill durations under reduce rather
+     than picking through each rule by hand. Standard blanket snippet:
+     near-zero rather than exactly zero, the usual hedge against a rule
+     that would otherwise depend on the transition actually firing. */
+  @media (prefers-reduced-motion: reduce){
+    #reel, #reel *{animation-duration:.01ms!important;transition-duration:.01ms!important}
+  }
 </style>
 </head>
 <body>
@@ -362,6 +339,7 @@ import * as ANIM from './anim.js'
 import * as Z from './zones.js'
 import { createAgent, World } from './agent.js'
 import { attachInteraction } from './interact.js'
+import { attachGhostAuthors } from './ghost.js'
 import { attachBlameCard } from './blamecard.js'
 import { runDemo } from './demo.js'
 import { buildDressing } from './dressing.js'
@@ -576,12 +554,10 @@ const PLAN = [
   { url:'/glb/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[ 3.4,0, 1.4], rot:Math.PI, desk:'desk 6', slot:Z.ZONES.desks.slots[5] },
   { url:'/glb/desk-tripo-12k.glb', h:0.95, pos:[-6.9,0, 1.0], rot:Math.PI/2, sx:1.45,
     desk:'reception', slot:Z.ZONES.reception.slots[0] },
-  // Cups were 0.14 m and read as specks. Up to 0.20 and cut from four to three,
-  // placed at the desks that actually have someone at them plus reception, near
-  // the front edge where they catch the key light.
-  { url:'/glb/coffee-cup-v2.glb', h:0.20, pos:[ 0.95,DESK_TOP,-2.05], rot:1.1 },
-  { url:'/glb/coffee-cup-v2.glb', h:0.20, pos:[ 0.95,DESK_TOP, 1.05], rot:2.2 },
-  { url:'/glb/coffee-cup-v2.glb', h:0.20, pos:[-6.55,0.95, 1.55], rot:0.2 },
+  // Three coffee cups used to sit here (#59): coffee-cup-v2.glb was never
+  // committed, so all three 404'd on every load and the loader warned three
+  // times about parsing an HTML error page as a GLB. Nothing rendered either
+  // way. Gone until the asset exists — the positions are in the issue.
 ]
 
 const loader = new GLTFLoader()
@@ -801,6 +777,29 @@ function setupCast() {
   })
   window.__interact = interaction
   window.__gitSignals = attachGitSignals({ world, zones: zoneUI })
+  // Ghost authors: who wrote the code each agent is standing in. ghost.js
+  // landed as a module plus tests and nothing ever called it, so the feature
+  // was in the repo and not in the room.
+  //
+  // Here rather than in an append block at the bottom (which is where the
+  // module's own header says to put it): attachGhostAuthors() polls once on
+  // attach and then every 18s, and at the bottom of this file that first
+  // poll runs against an empty world.agents and a null charGLTF, so the room
+  // stays ghostless for the first poll interval. attachGitSignals is here for
+  // the same reason.
+  //
+  // makeCharacterRoot and skinnedClone are local to this file — a function
+  // declaration and an addons import, neither reachable from a module — which
+  // is why they get passed in rather than imported over there.
+  window.__ghostAuthors = attachGhostAuthors({
+    world, scene, skinnedClone, makeCharacterRoot,
+    getGltf: () => charGLTF,
+    // Live.hairFor answers 0xRRGGBB. THREE.Color takes that; canvas
+    // strokeStyle silently rejects it and keeps the previous value, so the
+    // nameplate border would come out black. Convert in one place, here,
+    // rather than teach either side about the other's format.
+    hairFor: human => '#' + Live.hairFor(human).toString(16).padStart(6, '0'),
+  })
   window.__ready = true
   initLive()
 }
@@ -856,7 +855,7 @@ function focus([x, z], d = 1, y = null, targetY = 1.15) {
 // (see the `phase === 'done'` check by the camera lines below) so the
 // release fires the instant World.replay()'s whole chain finishes, not on
 // a fixed timer that could clip a longer or shorter beat.
-let camReturn = null   // { target, dist, yaw } to ease back to, or null
+let camReturn = null   // { target, dist, yaw, pitch } to ease back to, or null
 let replayEnc = null   // encounter camera framing is currently following
 
 /** Ease in on the midpoint between two agents, tight enough that a two-
@@ -864,14 +863,30 @@ let replayEnc = null   // encounter camera framing is currently following
  *  already centres the pair regardless of orbit angle, and the arc is
  *  clamped to angles that stay inside the room anyway (see YAW_MIN/MAX). */
 function focusPair(a, b, enc) {
-  if (!camReturn) camReturn = { target: target.clone(), dist, yaw }
+  // Cancel a head-zoom flight first. tick()'s flight branch outranks
+  // goal.active and, on its last frame, copies target/dist/yaw straight into
+  // `goal` — so a flight still in the air when a reel row is clicked would
+  // land and overwrite the framing focus() is about to set here. Every other
+  // "the camera is mine now" path in this file (pointerdown, wheel, __setCam)
+  // drops the flight the same way.
+  flight = null
+  // Pitch belongs in here even though focus() can't drive it: the flight
+  // system can, and it's the only thing that moves pitch. Without it, a
+  // replay started while a head zoom held the camera at HEAD_PITCH could
+  // never get the room's own pitch back.
+  if (!camReturn) camReturn = { target: target.clone(), dist, yaw, pitch }
   replayEnc = enc
   const mx = (a.pos.x + b.pos.x) / 2, mz = (a.pos.z + b.pos.z) / 2
   focus([mx, mz], 0.35)
 }
 
 function releaseCameraFocus() {
-  if (camReturn) focus([camReturn.target.x, camReturn.target.z], camReturn.dist, camReturn.yaw)
+  // Back out through a flight, not focus(): same reason zoomRestore() does,
+  // it's the one path that carries pitch along with target/dist/yaw.
+  if (camReturn) {
+    const c = camReturn
+    startFlight([c.target.x, c.target.z], c.dist, c.yaw, c.target.y, c.pitch)
+  }
   camReturn = null
   replayEnc = null
 }
@@ -892,7 +907,6 @@ function beginReplayOutro() {
     setTimeout(() => {
       releaseCameraFocus()
       zoneUI.setVisible(zonesOn)
-      if (typeof world.clearFocusDim === 'function') world.clearFocusDim()
       // Write '' before releasing the hold — release() alone only frees the
       // priority slot, it doesn't touch the DOM, so without this the last
       // replay caption (or the empty string standing in for the versus
@@ -1123,6 +1137,11 @@ const liveMeshes = new Map()     // agent id -> meshes pushed into the shared `m
 let liveMode = false
 let liveConn = null
 let fallbackTimer = null
+// Has the office ever actually joined a room? Distinguishes "never found a
+// relay" (the badge's original reason) from "had one, lost it" once
+// connectWithReconnect starts retrying below — onClose fires on every miss
+// either way, but the two deserve different badge text.
+let everConnected = false
 
 function setMode(kind, text) { modeEl.className = kind; modeEl.textContent = text }
 
@@ -1372,17 +1391,17 @@ function replayEvent(e) {
   const variant = pickReplayVariant(kind, e.id)
   const isBaseVariant = variant === null ||
     (kind === 'share' && variant === 'highfive') || (kind === 'abort' && variant === 'shove')
-  // Preferred path: world.replay(a, b, kind, variant) splices the variant's
-  // contact clip in as the resolution act after the existing clash stage,
-  // normalizing the abort family's winner-first arg order internally — see
-  // the comment below on why the fallback path has to do that swap itself.
-  // Only take that 4-arg path once it's actually landed (arity check, not a
-  // feature flag) so this file works whether or not agent.js's replay() has
-  // grown the param yet.
+  // world.replay(a, b, kind) chains the clash and its base resolution. A
+  // non-base variant has no chained form, so it goes straight to the
+  // standalone World method.
+  //
+  // There used to be a `world.replay.length >= 4` branch here waiting on a
+  // 4-arg replay(a, b, kind, variant) that would splice the variant's clip
+  // in as the resolution act. That agent.js change never landed on main (it
+  // is still an uncommitted stash on feat/highlight-reel), so the branch was
+  // permanently dead and its two live siblings did all the work.
   let enc
-  if (world.replay.length >= 4) {
-    enc = world.replay(a, b, kind, isBaseVariant ? undefined : variant)
-  } else if (isBaseVariant) {
+  if (isBaseVariant) {
     enc = world.replay(a, b, kind)
   } else {
     // A direct (non-chained) variant call skips world.replay()'s own arg
@@ -1417,7 +1436,6 @@ function replayEvent(e) {
   // sign hanging over the pair mid-beat was one of the round review's
   // complaints); restored to whatever the toggle says once the outro ends.
   zoneUI.setVisible(false)
-  if (typeof world.setFocusDim === 'function') world.setFocusDim(a, b)
   focusPair(a, b, enc)
 }
 
@@ -1446,8 +1464,18 @@ function onLiveReelFrame(msg) {
     const enc = world.encounters.find(e => e.kind === 'contest' &&
       (e.a === winner || e.b === winner || e.a === loser || e.b === loser))
     if (enc) world.resolveContest(enc)
-    if (res.kind === 'wait') world.handshake(winner, loser)
-    else world.shove(winner, loser)
+    if (res.kind === 'wait') {
+      world.handshake(winner, loser)
+    } else {
+      // A live abort varies the same way a reel replay of one does — shove,
+      // waveoff or slap — instead of always playing the literal shove. The
+      // pick is live.js's (pure, so it's the same answer everywhere and
+      // testable on its own); whether the method exists this session is
+      // this file's to know, same guard shape pickReplayVariant uses.
+      const variant = Live.pickLiveVariant(res.kind, res.winnerId, res.loserId)
+      const beat = variant && typeof world[variant] === 'function' ? variant : 'shove'
+      world[beat](winner, loser)
+    }
   } else if (partner) {
     // One side isn't a live character right now (despawned mid-contest, or
     // this viewer's own presence view never spawned it) — nothing to play
@@ -1465,22 +1493,53 @@ function expireLive(now) {
 function goLive() {
   liveMode = true
   setMode('live', `live · room ${new URLSearchParams(location.search).get('room') || '(default)'}`)
+  // A demo that started because the relay was down (or during a retry) has
+  // no business still acting out its own script once real presence is
+  // back — "live" badge, five agents running a fiction underneath it is
+  // the badge lying by omission. Null it out, not just cancel: a later
+  // drop needs startDemo() to see "no demo running" and start a fresh one,
+  // not find a stale cancelled handle and skip it (see goDemoFallback).
+  if (demo) { demo.cancel(); demo = null }
 }
 
 function goDemoFallback(reason) {
   liveMode = false
   setMode('demo', `demo — ${reason}`)
-  startDemo()
+  // Only the first fallback (or the first after a reconnect) needs to
+  // start the story — connectWithReconnect's onClose fires again on every
+  // failed retry, and restarting the script from beat one on every miss
+  // would reset the cast each backoff tick instead of leaving it running.
+  if (!demo) startDemo()
 }
 
 function initLive() {
   const room = new URLSearchParams(location.search).get('room') ?? ''
   const human = new URLSearchParams(location.search).get('human') ?? ''
+  // No room, no live. relaysrv/server.go's join handler `continue`s on an
+  // empty room, so the socket opens, onOpen fires, goLive() paints the LIVE
+  // badge — and the connection is in no room at all, so not one frame ever
+  // arrives. An empty office insisting it's connected is worse than the demo.
+  //
+  // There's nothing to default to: a room id is a hash of the checkout's
+  // origin remote (go/internal/repo, python's room_key.py), which this page
+  // has no way to derive. Whoever opens it has to say which room.
+  if (!room) { goDemoFallback('no ?room= to join'); return }
   fallbackTimer = setTimeout(() => goDemoFallback(`no relay at ${Live.RELAY_URL}`), LIVE_TIMEOUT_MS)
-  liveConn = Live.connect({
+  // connectWithReconnect, not connect(): a relay that drops (or never
+  // showed up in the first place) gets retried with backoff instead of
+  // leaving the office stuck in demo mode until someone reloads the page.
+  liveConn = Live.connectWithReconnect({
     room, human,
-    onOpen: () => { clearTimeout(fallbackTimer); goLive() },
-    onClose: () => { clearTimeout(fallbackTimer); goDemoFallback('relay unreachable') },
+    onOpen: () => { clearTimeout(fallbackTimer); everConnected = true; goLive() },
+    onClose: () => {
+      clearTimeout(fallbackTimer)
+      // Same badge class either way (still demo mode), different text: a
+      // connection that never once succeeded reads as "no relay here",
+      // one that dropped after being live reads as "lost it, retrying" —
+      // repeating the first message forever while a retry is already
+      // under way would be the badge lying about which state it's in.
+      goDemoFallback(everConnected ? 'relay dropped, reconnecting…' : `no relay at ${Live.RELAY_URL}`)
+    },
     onPresence: onLivePresence,
     onDecision: onLiveReelFrame,
     onRedundant: onLiveReelFrame,
@@ -1594,9 +1653,23 @@ function tick(){
   updateChairs(dt)
   expireLive(Date.now())
   if (demo) demo.update(dt)
-  if (interaction) interaction.paint()
+  if (interaction) { interaction.paint(); interaction.tick(dt) }
   zoneUI.updateCamera(camera)
   if (window.__zoneOwner) window.__zoneOwner.updateCamera(camera)
+
+  // One frame loop for the whole page. Each of these used to run its own
+  // rAF loop; they now expose tick(dt) and this is the only place any of
+  // them gets called from. Read through window.__x rather than a bare
+  // identifier on purpose: gitSignals/ghostAuthors/histShelf are all
+  // assigned later in this file (after loads resolve, or further down the
+  // module), and this tick() function runs for the first time before any
+  // of those assignments happen — a bare identifier declared with const
+  // below this point would throw on that first call (temporal dead zone),
+  // where a property read on an object that doesn't have the key yet just
+  // reads undefined. window.__zoneOwner above already relies on this.
+  if (window.__gitSignals) window.__gitSignals.tick(dt)
+  if (window.__ghostAuthors) window.__ghostAuthors.tick(dt)
+  if (window.__histShelf) window.__histShelf.tick(dt)
 
   // A replay's whole chain (clash, then resolution) can be one stage or
   // two, so this watches the encounter itself rather than a fixed timer —

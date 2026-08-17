@@ -6,14 +6,17 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
 	"syscall"
 
+	"github.com/mohsensc/sync/go/internal/metrics"
 	"github.com/mohsensc/sync/go/internal/relaysrv"
 )
 
@@ -47,6 +50,14 @@ func main() {
 			"docs/tls-dev-cert.md for a self-signed dev cert.")
 	tlsKey := flag.String("tls-key", os.Getenv("AGENT_PRESENCE_TLS_KEY"),
 		"private key matching --tls-cert (env AGENT_PRESENCE_TLS_KEY)")
+	metricsAddr := flag.String("metrics-addr", os.Getenv("AGENT_PRESENCE_METRICS_ADDR"),
+		"address to serve /metrics on (env AGENT_PRESENCE_METRICS_ADDR), e.g. "+
+			"127.0.0.1:9090. Unset by default: presenced and agent-presence-mcp "+
+			"run on developer laptops Prometheus cannot reach, so this relay is "+
+			"the one place their counters (pushed up the connection they already "+
+			"hold — see internal/metrics's package doc) become scrapeable, and an "+
+			"endpoint that shows up on a well-known port without anyone asking is "+
+			"a way to leak a room's shape to whoever shares the network.")
 	flag.Parse()
 
 	if (*tlsCert == "") != (*tlsKey == "") {
@@ -60,7 +71,8 @@ func main() {
 	}
 
 	roster := relaysrv.DiscoverRoster()
-	relay := relaysrv.NewRelay(relaysrv.RealClock{}, roster)
+	reg := metrics.New()
+	relay := relaysrv.NewRelay(relaysrv.RealClock{}, roster, reg)
 
 	srv := &relaysrv.Server{
 		Addr: fmt.Sprintf("%s:%d", *host, *port), Relay: relay,
@@ -77,6 +89,20 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	if ms := relaysrv.MetricsServer(*metricsAddr, reg); ms != nil {
+		go func() {
+			<-ctx.Done()
+			_ = ms.Close()
+		}()
+		go func() {
+			log.Printf("metrics listening on %s", *metricsAddr)
+			if err := ms.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Printf("metrics server stopped: %s", err)
+			}
+		}()
+	}
+
 	if err := srv.Serve(ctx); err != nil {
 		log.Fatalf("relay stopped: %s", err)
 	}
