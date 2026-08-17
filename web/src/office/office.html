@@ -880,7 +880,7 @@ function focus([x, z], d = 1, y = null, targetY = 1.15) {
 // (see the `phase === 'done'` check by the camera lines below) so the
 // release fires the instant World.replay()'s whole chain finishes, not on
 // a fixed timer that could clip a longer or shorter beat.
-let camReturn = null   // { target, dist, yaw } to ease back to, or null
+let camReturn = null   // { target, dist, yaw, pitch } to ease back to, or null
 let replayEnc = null   // encounter camera framing is currently following
 
 /** Ease in on the midpoint between two agents, tight enough that a two-
@@ -888,14 +888,30 @@ let replayEnc = null   // encounter camera framing is currently following
  *  already centres the pair regardless of orbit angle, and the arc is
  *  clamped to angles that stay inside the room anyway (see YAW_MIN/MAX). */
 function focusPair(a, b, enc) {
-  if (!camReturn) camReturn = { target: target.clone(), dist, yaw }
+  // Cancel a head-zoom flight first. tick()'s flight branch outranks
+  // goal.active and, on its last frame, copies target/dist/yaw straight into
+  // `goal` — so a flight still in the air when a reel row is clicked would
+  // land and overwrite the framing focus() is about to set here. Every other
+  // "the camera is mine now" path in this file (pointerdown, wheel, __setCam)
+  // drops the flight the same way.
+  flight = null
+  // Pitch belongs in here even though focus() can't drive it: the flight
+  // system can, and it's the only thing that moves pitch. Without it, a
+  // replay started while a head zoom held the camera at HEAD_PITCH could
+  // never get the room's own pitch back.
+  if (!camReturn) camReturn = { target: target.clone(), dist, yaw, pitch }
   replayEnc = enc
   const mx = (a.pos.x + b.pos.x) / 2, mz = (a.pos.z + b.pos.z) / 2
   focus([mx, mz], 0.35)
 }
 
 function releaseCameraFocus() {
-  if (camReturn) focus([camReturn.target.x, camReturn.target.z], camReturn.dist, camReturn.yaw)
+  // Back out through a flight, not focus(): same reason zoomRestore() does,
+  // it's the one path that carries pitch along with target/dist/yaw.
+  if (camReturn) {
+    const c = camReturn
+    startFlight([c.target.x, c.target.z], c.dist, c.yaw, c.target.y, c.pitch)
+  }
   camReturn = null
   replayEnc = null
 }
