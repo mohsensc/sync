@@ -149,21 +149,84 @@ func GitOriginURL(root string) string {
 	return strings.TrimRight(string(out), "\r\n")
 }
 
+// GitRemoteURL is the remote a room is derived from: origin when there is
+// one, otherwise the first remote `git remote` lists.
+//
+// The fallback exists because the two Go binaries disagreed without it. On
+// a checkout whose only remote is `upstream`, presenced refused to derive a
+// room at all and sat offline while agent-presence-mcp hashed upstream and
+// joined one — same machine, same directory, same env, two answers. A fork
+// with no origin is an ordinary way to work, and both should treat it the
+// same way.
+//
+// `git remote` sorts its output, so "the first one" is the same string on
+// every machine with the same remotes. That determinism is the whole
+// requirement: teammates have to agree, and they cannot compare notes.
+func GitRemoteURL(root string) string {
+	if u := GitOriginURL(root); u != "" {
+		return u
+	}
+	out, err := exec.Command("git", "-C", root, "remote").Output()
+	if err != nil {
+		return ""
+	}
+	for _, name := range strings.Split(string(out), "\n") {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		u, err := exec.Command("git", "-C", root, "remote", "get-url", name).Output()
+		if err != nil {
+			return ""
+		}
+		return strings.TrimRight(string(u), "\r\n")
+	}
+	return ""
+}
+
 // DiscoverRoom is main.cpp's discover_room: AGENT_PRESENCE_ROOM overrides
 // everything; otherwise the room is derived from the checkout's origin
 // remote. Empty means no relay connection — joining a made-up room would
 // put every unkeyed machine on the planet in the same one.
 func DiscoverRoom(forced string, cwd string) string {
-	if forced != "" {
-		return forced
+	// Trimmed, because the override arrives from a shell export or a .env
+	// file and a trailing space is an ordinary accident. Untrimmed, one
+	// binary joined room "   " while the other trimmed to empty and stayed
+	// offline — same env, two answers.
+	if f := trimASCIISpace(forced); f != "" {
+		return f
 	}
 	root, ok := FindRepoRoot(cwd)
 	if !ok {
 		return ""
 	}
-	remote := GitOriginURL(root)
+	remote := GitRemoteURL(root)
 	if remote == "" {
 		return ""
 	}
 	return RoomIDFromRemote(remote)
+}
+
+// DiscoverRoomOrLocal is DiscoverRoom for a caller that would rather have a
+// room nobody else can be in than no room at all — the MCP server, whose
+// tool surface has to answer even for a checkout with no remote.
+//
+// The local room is a hash of the checkout's own path, so it is real,
+// stable, and private by construction. That is the opposite of the failure
+// DiscoverRoom's empty return guards against: a made-up shared constant
+// would put every unkeyed machine on the planet in one room.
+func DiscoverRoomOrLocal(forced string, cwd string) string {
+	if room := DiscoverRoom(forced, cwd); room != "" {
+		return room
+	}
+	root, ok := FindRepoRoot(cwd)
+	if !ok {
+		if abs, err := filepath.Abs(cwd); err == nil {
+			root = abs
+		} else {
+			root = cwd
+		}
+	}
+	sum := sha256.Sum256([]byte(root))
+	return "local-" + hex.EncodeToString(sum[:])[:16]
 }
