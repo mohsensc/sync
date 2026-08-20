@@ -27,6 +27,7 @@ from _lib import (
     TLS_ENABLED,
     Client,
     DaemonProc,
+    HarnessSendError,
     Latency,
     RelayProc,
     cpu_seconds,
@@ -45,6 +46,7 @@ class Result:
     name: str
     metrics: dict = field(default_factory=dict)
     findings: list[str] = field(default_factory=list)
+    harness_errors: list[str] = field(default_factory=list)
     skipped: str = ""
 
     @property
@@ -53,6 +55,13 @@ class Result:
 
     def bad(self, msg: str) -> None:
         self.findings.append(msg)
+
+    def harness_error(self, msg: str) -> None:
+        """Something in the harness itself failed to exercise the product —
+        a stalled send, a socket the harness couldn't open. Kept separate
+        from findings so a harness hiccup never gets read as a thing the
+        product did wrong."""
+        self.harness_errors.append(msg)
 
 
 # -- helpers ------------------------------------------------------------------
@@ -444,8 +453,11 @@ async def relay_restart(daemons: int) -> Result:
             n = 0
             while time.time() < end:
                 for p in procs:
-                    p.send_lines([event_line(f"sess-{p.name}", "read",
-                                             f"src/{tag}/{p.name}-{n}.py")])
+                    try:
+                        p.send_lines([event_line(f"sess-{p.name}", "read",
+                                                 f"src/{tag}/{p.name}-{n}.py")])
+                    except HarnessSendError as exc:
+                        r.harness_error(f"observe({tag}) send to {p.name}: {exc}")
                 n += 1
                 await asyncio.sleep(0.25)
             await asyncio.sleep(1.5)
@@ -481,7 +493,10 @@ async def relay_restart(daemons: int) -> Result:
         outage_paths = [f"src/outage/{i}.py" for i in range(6)]
         for i, path in enumerate(outage_paths):
             for p in procs:
-                p.send_lines([event_line(f"sess-{p.name}", "edit", path)])
+                try:
+                    p.send_lines([event_line(f"sess-{p.name}", "edit", path)])
+                except HarnessSendError as exc:
+                    r.harness_error(f"outage send to {p.name}: {exc}")
             await asyncio.sleep(0.25)
 
         crashed = [p.name for p in procs if not p.alive()]
