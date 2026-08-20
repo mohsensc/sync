@@ -477,13 +477,20 @@ export function attachZoneOwner(cfg = {}) {
     return p
   }
 
+  // Same guard as histshelf.js's show(): a slow git call can make an
+  // earlier tick's fetch land after a later one's, and wall-clock order
+  // isn't poll order. Bail before applying if a newer tick already started.
+  let reqId = 0
   async function tick() {
+    const myReq = ++reqId
     dirCache.clear()
     await Promise.all(Object.entries(zoneDirs).map(async ([zoneName, dir]) => {
       try {
         const data = await loadDir(dir)
+        if (myReq !== reqId) return   // a later tick() beat this one home
         setZoneOwnership(zoneName, data)
       } catch {
+        if (myReq !== reqId) return
         // a blip clears this zone's dressing rather than showing stale props
         setZoneOwnership(zoneName, null)
       }
