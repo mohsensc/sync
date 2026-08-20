@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -91,13 +92,21 @@ func main() {
 	defer stop()
 
 	if ms := relaysrv.MetricsServer(*metricsAddr, reg); ms != nil {
+		// Bind before logging success, same as the relay listener above: a
+		// taken --metrics-addr must not read as a healthy relay with a quiet
+		// /metrics — docs/monitoring.md's up==0 check only catches that if
+		// the process is actually dead, not limping along unscraped.
+		mln, err := net.Listen("tcp", *metricsAddr)
+		if err != nil {
+			log.Fatalf("cannot bind metrics %s — %s", *metricsAddr, err)
+		}
+		log.Printf("metrics listening on %s", mln.Addr())
 		go func() {
 			<-ctx.Done()
 			_ = ms.Close()
 		}()
 		go func() {
-			log.Printf("metrics listening on %s", *metricsAddr)
-			if err := ms.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			if err := ms.Serve(mln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Printf("metrics server stopped: %s", err)
 			}
 		}()
