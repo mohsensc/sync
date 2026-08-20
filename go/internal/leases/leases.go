@@ -74,6 +74,13 @@ type Cache struct {
 	mu       sync.RWMutex
 	byRegion map[string]Lease
 	lost     map[string]HandoverNote // keyed on path, not region — see NoteHandover
+
+	// lastSweepMs is when the pruneFloor sweep last ran, so Upsert can gate
+	// on sweepCooldownMs below instead of re-scanning the whole table on
+	// every single write once the table is big. Zero value means "never
+	// swept," which is correct: it makes the first write past the floor
+	// sweep immediately rather than waiting out a cooldown against nothing.
+	lastSweepMs int64
 }
 
 func New() *Cache {
@@ -89,14 +96,67 @@ func (c *Cache) Replace(entries map[string]Lease) {
 	c.mu.Unlock()
 }
 
+// pruneFloor is how big byRegion has to get before Upsert bothers sweeping
+// it. A live room's region count is small — a handful of files times a
+// handful of agents — so below this a sweep is pure write-lock hold time
+// with nothing to collect; BenchmarkConflictConcurrentReads (#20 territory,
+// Conflict runs under the same lock a sweep would hold) measured a real hit
+// to reader p50 at the benchmark's 1,000-entry table with no floor. Above
+// it, byRegion is no longer "a live room's leases" but "however much
+// garbage backpressure-dropped departure frames left behind," which is
+// exactly the unbounded growth #89 is about — worth the lock hold.
+const pruneFloor = 2048
+
+// sweepCooldownMs floors the gap between two pruneFloor sweeps. Once a busy
+// room's table sits above pruneFloor for good (garbage arriving as fast as
+// it's collected — the #89 case), the floor check alone degenerates into a
+// full O(n) scan under the write lock on *every* Upsert: benchmarked at
+// ~17.3µs/op sustained, against ~122ns/op below the floor, a 142x hit that
+// lands on the same write lock Conflict's readers queue behind. The
+// cooldown caps how often that scan actually runs instead of gating whether
+// it ever does.
+//
+// This bounds staleness, not just cost: an entry that expires can sit in
+// byRegion for up to sweepCooldownMs past the write that would otherwise
+// have swept it — Conflict already treats an expired entry as invisible
+// (see its "stale-but-harmless" comment), so this never blocks anything
+// on a stale lease, it only delays reclaiming the memory. 1s is nowhere
+// near LeaseTTLS's 90s default, so the delay a caller could ever observe
+// in memory pressure terms is two orders of magnitude under the TTL the
+// rest of the system already budgets for.
+const sweepCooldownMs = 1000
+
 // Upsert sets or renews one entry. Called for a single "lease" or
 // "claim_result" frame.
-func (c *Cache) Upsert(key string, l Lease) {
+//
+// nowMs also drives a prune sweep once the table passes pruneFloor:
+// byRegion entries otherwise only ever leave via Replace (a snapshot) or
+// EraseIfHeldBy (an explicit departure frame), and departure frames are
+// droppable under backpressure (WsConn.Send sheds the oldest queued frame
+// once a connection falls behind) — a shed frame means nothing ever tells
+// this cache the region is free. Same prune-on-write shape as NoteHandover
+// uses for the lost map, gated so the common small-table case doesn't pay
+// for a sweep it doesn't need, and cooled down by sweepCooldownMs so a
+// table that stays above the floor doesn't pay for a sweep on every write.
+func (c *Cache) Upsert(key string, l Lease, nowMs int64) {
 	c.mu.Lock()
 	if c.byRegion == nil {
 		c.byRegion = make(map[string]Lease)
 	}
 	c.byRegion[key] = l
+	// nowMs is wall clock (time.Now().UnixMilli()), not monotonic, so a
+	// backwards NTP step makes nowMs-c.lastSweepMs negative — the cooldown
+	// gate would then never fire for the rest of that window, reopening the
+	// #89 unbounded-growth shape it exists to close. Treat a clock that's
+	// gone backwards as an elapsed cooldown rather than an unmet one.
+	if len(c.byRegion) > pruneFloor && (nowMs < c.lastSweepMs || nowMs-c.lastSweepMs >= sweepCooldownMs) {
+		for k, existing := range c.byRegion {
+			if existing.ExpiresAtMs <= nowMs {
+				delete(c.byRegion, k)
+			}
+		}
+		c.lastSweepMs = nowMs
+	}
 	c.mu.Unlock()
 }
 
@@ -204,7 +264,11 @@ func (c *Cache) Conflict(path string, myAgents []string, nowMs int64) (held Leas
 			continue
 		}
 		if l.ExpiresAtMs <= nowMs {
-			continue // stale-but-harmless: never blocks, ages out on its own
+			// Stale-but-harmless: never blocks. It doesn't remove itself —
+			// nothing does, until the next Upsert's prune sweep or a fresh
+			// Replace catches it; skipping it here just keeps a lookup that
+			// happens to land between sweeps honest.
+			continue
 		}
 		r := 2
 		if symbolsConflict(l.Symbol, mine) {
