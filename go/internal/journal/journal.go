@@ -152,26 +152,43 @@ func (j *Journal) run() {
 		return err == nil
 	}
 
+	writeRecord := func(r Record) {
+		if !openFile() {
+			return // fail open: no journal is not a reason to stall anything
+		}
+		line, err := json.Marshal(r)
+		if err != nil {
+			return
+		}
+		line = append(line, '\n')
+		if _, err := f.Write(line); err == nil {
+			lines++
+			j.written.Add(1)
+			if j.metrics != nil {
+				j.metrics.JournalWrites.Inc()
+			}
+		}
+	}
+
 	for {
 		select {
 		case <-j.stop:
-			return
-		case r := <-j.recs:
-			if !openFile() {
-				continue // fail open: no journal is not a reason to stall anything
-			}
-			line, err := json.Marshal(r)
-			if err != nil {
-				continue
-			}
-			line = append(line, '\n')
-			if _, err := f.Write(line); err == nil {
-				lines++
-				j.written.Add(1)
-				if j.metrics != nil {
-					j.metrics.JournalWrites.Inc()
+			// select gives j.stop and j.recs equal priority, so stop can win
+			// a race against records Record() already accepted into the
+			// channel — drain what's buffered before returning instead of
+			// dropping it. Non-blocking: nobody sends into j.recs once this
+			// goroutine stops reading it, so the channel's current length is
+			// everything there is to write.
+			for {
+				select {
+				case r := <-j.recs:
+					writeRecord(r)
+				default:
+					return
 				}
 			}
+		case r := <-j.recs:
+			writeRecord(r)
 		case <-tick.C:
 			lines, gate = j.maybeTrim(&f, lines, gate)
 		}

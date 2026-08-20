@@ -232,6 +232,42 @@ func TestStopClosesCleanly(t *testing.T) {
 	j.Stop() // must return, not hang
 }
 
+// TestStopDrainsBufferedRecords is #115: run()'s select gives j.stop and
+// j.recs equal priority, so Stop() could return with records Record() had
+// already accepted still sitting unwritten in the channel. Built by hand
+// rather than through New so every record is queued before the owning
+// goroutine's first select — the same race the bug needs, forced instead of
+// hoped for — and Stop is called immediately after starting it, before the
+// goroutine has any chance to drain on its own.
+func TestStopDrainsBufferedRecords(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "journal.jsonl")
+
+	j := &Journal{
+		path: path,
+		recs: make(chan Record, 4096),
+		stop: make(chan struct{}),
+		done: make(chan struct{}),
+	}
+
+	const n = 50
+	for i := 0; i < n; i++ {
+		j.recs <- Record{Rung: 3, Path: "a.py", AtMs: int64(i)}
+	}
+
+	go j.run()
+	j.Stop()
+
+	lines := readLines(t, path)
+	if len(lines) != n {
+		t.Fatalf("got %d lines after Stop, want %d (buffered records dropped on stop)", len(lines), n)
+	}
+	for i, r := range lines {
+		if r.AtMs != int64(i) {
+			t.Fatalf("record %d has AtMs %d, want %d (drain order)", i, r.AtMs, i)
+		}
+	}
+}
+
 func TestEmptyPathNeverWrites(t *testing.T) {
 	j := New("", nil)
 	defer j.Stop()
