@@ -22,8 +22,12 @@ func TestParsePriorityUnknownNameNamesTheValidTiers(t *testing.T) {
 	}
 }
 
-func TestParsePriorityOutOfRangeNamesTheValidTiers(t *testing.T) {
-	_, err := ParsePriority("7")
+// The out-of-range message lives behind ParsePriorityInt now — an unquoted
+// principals.toml integer like `attended = 7` is the only thing that still
+// reaches it. Asserted byte-for-byte so this stays the same message the
+// old Atoi fallback produced; only the entry point moved.
+func TestParsePriorityIntOutOfRangeNamesTheValidTiers(t *testing.T) {
+	_, err := ParsePriorityInt(7)
 	if err == nil {
 		t.Fatal("expected an error for an out-of-range priority")
 	}
@@ -62,38 +66,59 @@ func TestPyRepr(t *testing.T) {
 	}
 }
 
-// ParsePriority intentionally accepts a numeric string ("1", "7") as well
-// as a tier name — its own doc comment says "a name or a number" — because
-// principals.go's parsePriorityAny reuses it for TOML int values too, by
-// formatting an int64/int back to a string before calling in (its `case
-// int64`/`case int` branches). That reuse is where the second divergence
-// review leftover #3 asked about actually lives: `priority = "1"`, a
-// genuinely string-typed TOML value, decodes to a Go string identical to
-// what `priority = 1` produces after formatting, so this function cannot
-// tell a real TOML string from a reformatted TOML int and accepts both.
+// #95: ParsePriority used to fall back to strconv.Atoi, so a quoted
+// numeral in principals.toml (attended = "3") parsed as a tier here and
+// as unknown in python's parse_priority — the same roster line meant
+// "critical" to one relay and "default" to the other. Names are the
+// documented interface (docs/policy-design.md §4 has no numeral example);
+// a bare TOML integer is still a tier, but only through ParsePriorityInt,
+// which parsePriorityAny now reaches directly instead of via
+// fmt.Sprintf into this function.
 //
-// python's parse_priority can tell them apart, because it dispatches on
-// the python type *before* touching the value as text (priority.py's
-// isinstance checks, in order: bool, int, str) — its str branch only ever
-// checks PRIORITY_NAMES and never attempts int(value). So a quoted
-// `priority = "1"` in principals.toml is accepted here as PriorityNormal
-// and rejected by the python relay as `unknown priority tier '1'`; a
-// quoted `priority = "7"` is rejected by both, but through different
-// branches — Go's out-of-range numeric error, python's unknown-tier error
-// — which was the review's original framing, but "Go accepts a roster
-// python rejects" (the "1" case) is the sharper version of the same bug.
-//
-// This function is not where that gets fixed: the type information that
-// would let a caller ask for "names only" is already gone by the time a
-// string reaches here, and ParsePriority's numeric-string acceptance is
-// exactly what its int64/int callers rely on. The fix belongs in
-// principals.go's parsePriorityAny (not owned by this review pass): its
-// `case string` would need to check priorityValues directly instead of
-// delegating to ParsePriority, the same way its own `case bool` already
-// bypasses it rather than routing through a shared string parser.
-func TestParsePriorityAcceptsNumericStringsWhichIsWhereThePythonDivergenceLives(t *testing.T) {
-	got, err := ParsePriority("1")
-	if err != nil || got != PriorityNormal {
-		t.Fatalf("got (%d, %v), want (%d, <nil>)", got, err, PriorityNormal)
+// This case list is mirrored exactly in
+// python/tests/test_priority.py::test_parse_priority_parity — same
+// inputs, same order — so a change to one side that silently drifts from
+// the other fails a diff, not just a test.
+func TestParsePriorityParity(t *testing.T) {
+	cases := []struct {
+		name    string
+		input   string
+		want    int
+		wantErr string
+	}{
+		{"background", "background", PriorityBackground, ""},
+		{"normal", "normal", PriorityNormal, ""},
+		{"elevated", "elevated", PriorityElevated, ""},
+		{"critical", "critical", PriorityCritical, ""},
+		{"mixed case and whitespace", " Critical ", PriorityCritical, ""},
+		{"uppercase", "NORMAL", PriorityNormal, ""},
+		{"numeral in range is not a name", "1",
+			0, `unknown priority tier '1'; expected one of background, normal, elevated, critical`},
+		{"numeral out of range is still just an unknown name", "7",
+			0, `unknown priority tier '7'; expected one of background, normal, elevated, critical`},
+		{"junk", "elevatd",
+			0, `unknown priority tier 'elevatd'; expected one of background, normal, elevated, critical`},
+		{"empty", "",
+			0, `unknown priority tier ''; expected one of background, normal, elevated, critical`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ParsePriority(tc.input)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("got error %v, want (%d, <nil>)", err, tc.want)
+				}
+				if got != tc.want {
+					t.Fatalf("got %d, want %d", got, tc.want)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("got (%d, <nil>), want error %q", got, tc.wantErr)
+			}
+			if err.Error() != tc.wantErr {
+				t.Fatalf("got error %q, want %q", err.Error(), tc.wantErr)
+			}
+		})
 	}
 }
