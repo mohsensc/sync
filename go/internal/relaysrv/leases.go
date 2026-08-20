@@ -349,9 +349,9 @@ func (r *Registry) pruneExpired(room string, s *shard, now float64, actor Conn) 
 // handOver is called with s.mu held, for a claim that just left the table
 // (expired here, or released/replaced by the caller). If its renewal
 // deadline is what ended it, reserve the region for the contender it was
-// capped for. Mirrors leases.py's _hand_over exactly, including the carry
-// bookkeeping that stops a holder dodging its deadline by releasing and
-// re-taking a region a second before it fires.
+// capped for. The carry bookkeeping here is what stops a holder dodging
+// its deadline by releasing and re-taking a region a second before it
+// fires.
 func (r *Registry) handOver(s *shard, c *Claim, now float64) *Reservation {
 	winner := c.handoverWinner()
 	if winner == nil {
