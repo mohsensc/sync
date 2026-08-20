@@ -478,7 +478,7 @@ func (d *Daemon) onRequest(line []byte) []byte {
 		// function of the request and the two caches. Both callers — the
 		// event socket's compat path and the decision socket — go through
 		// this handler, so both feed the queue.
-		d.contend.Note(req.Path)
+		d.contend.Note(req.Path, repo.RegionKeyResolved(d.opts.Root, req.Path))
 	}
 	if d.journal != nil {
 		d.journal.Record(journalRecord(req, resp, d.policy))

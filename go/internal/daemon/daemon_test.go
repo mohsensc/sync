@@ -589,6 +589,66 @@ func TestTickWritesSnapshot(t *testing.T) {
 	}
 }
 
+// TestContendQueueDedupsPathSpellings is #177: contend.Note used to key on
+// the raw hook path while ContendFrame (and the region key everything else
+// compares against) normalizes through repo.RegionKeyResolved, so "./a.go"
+// and "a.go" enqueued as two pending contends instead of collapsing into
+// one. Blocked on the same held lease from two spellings, the queue must
+// hold exactly one entry.
+func TestContendQueueDedupsPathSpellings(t *testing.T) {
+	fr := &fakeRelay{joined: make(chan wire.Join, 4), leasePath: "src/orders.py"}
+	srv := httptest.NewServer(http.HandlerFunc(fr.handler))
+	defer srv.Close()
+
+	sock := filepath.Join(t.TempDir(), "s")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	d, err := New(ctx, Options{
+		Sock:     sock,
+		RelayURL: "ws://" + srv.Listener.Addr().String() + "/",
+		Room:     "test-room",
+		Agent:    "go-daemon-test",
+		Human:    "mohsen",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	select {
+	case <-fr.joined:
+	case <-time.After(5 * time.Second):
+		t.Fatal("daemon never joined the room")
+	}
+
+	blocked := func(path string) bool {
+		req := []byte(`{"verb":"edit","path":"` + path + `","agent":"sess1","want":"decision"}`)
+		var out map[string]any
+		if err := json.Unmarshal(d.onRequest(req), &out); err != nil {
+			t.Fatalf("reply not JSON: %v", err)
+		}
+		return out["rung"] == float64(3)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for !blocked("src/orders.py") {
+		if time.Now().After(deadline) {
+			t.Fatal("hook socket never saw the lease from the join")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Second spelling of the same file — clean()s to the same region key
+	// as the first, so this must not add a second pending entry.
+	if !blocked("./src/orders.py") {
+		t.Fatal("second spelling of the held path should also be blocked")
+	}
+
+	if got := d.contend.Drain(); len(got) != 1 {
+		t.Fatalf("contend queue has %v, want exactly one pending entry for the shared region", got)
+	}
+}
+
 // BenchmarkOnRequestDecide is the decide path with and without metrics —
 // the comparison Options.Metrics's nil case exists to keep cheap. Run with
 // -benchmem: allocs/op is what "no allocation on that path" claims, not
