@@ -435,7 +435,31 @@ void append_field(std::string& out, const char* key, const std::string& value) {
     out += '"';
 }
 
+/// True for a variable that actually has a value. `std::getenv` returns
+/// non-null for `FOO=""`, and that used to read as "set" here while every
+/// other reader in the repo — presenced's envOr, the statusline segment's
+/// `${VAR:-fallback}` — falls through on an empty value. This is that same
+/// rule, applied at the one holdout.
+bool env_set(const char* v) { return v != nullptr && v[0] != '\0'; }
+
+std::string join_path(std::string dir, const char* leaf) {
+    if (!dir.empty() && dir.back() == '/') dir.pop_back();
+    dir += '/';
+    dir += leaf;
+    return dir;
+}
+
 }  // namespace
+
+std::string resolve_sock_path(EnvLookup lookup) {
+    const char* sock = lookup("AGENT_PRESENCE_SOCK");
+    if (env_set(sock)) return sock;
+    const char* rt = lookup("XDG_RUNTIME_DIR");
+    if (env_set(rt)) return join_path(rt, "agent-presence.sock");
+    const char* tmp = lookup("TMPDIR");
+    if (env_set(tmp)) return join_path(tmp, "agent-presence.sock");
+    return "/tmp/agent-presence.sock";
+}
 
 std::string build_event(const std::string& hook_json) {
     const std::string tool = field(hook_json, "tool_name");
