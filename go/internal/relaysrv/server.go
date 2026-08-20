@@ -60,6 +60,7 @@ const (
 	dropReasonQueueFull = "queue_full"
 	dropReasonStall     = "stall"
 	dropReasonSaturated = "saturated"
+	dropReasonInbound   = "inbound_rate"
 )
 
 var upgrader = websocket.Upgrader{
@@ -306,7 +307,10 @@ func (c *WsConn) write(payload []byte) bool {
 // close frame cannot keep this goroutine (or the one still blocked in
 // write's WriteMessage, if that's why shed was called) parked forever.
 func (c *WsConn) shed(reason, why string) {
-	log.Printf("dropping subscriber %q (room %q): %s, %d frames shed", c.Agent(), c.Room(), why, c.dropped)
+	c.mu.Lock()
+	dropped := c.dropped
+	c.mu.Unlock()
+	log.Printf("dropping subscriber %q (room %q): %s, %d frames shed", c.Agent(), c.Room(), why, dropped)
 	c.shutdown()
 	c.metrics.FrameDropped(reason)
 	_ = c.ws.WriteControl(websocket.CloseMessage,
@@ -340,6 +344,7 @@ func (c *WsConn) admitInbound() bool {
 			t := now
 			c.inSaturatedSince = &t
 		}
+		c.metrics.FrameDropped(dropReasonInbound)
 		return false
 	}
 	c.tokens -= 1.0

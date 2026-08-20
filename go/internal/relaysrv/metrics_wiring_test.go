@@ -52,6 +52,31 @@ func counterValue(t *testing.T, reg *metrics.Registry, name string) float64 {
 	return 0
 }
 
+// labeledCounterValue is counterValue's twin for a CounterVec, reading
+// the one series matching a single label name/value pair — what
+// framesDropped (labeled by "reason") needs and counterValue's
+// first-metric-wins shortcut can't give it.
+func labeledCounterValue(t *testing.T, reg *metrics.Registry, name, labelName, labelValue string) float64 {
+	t.Helper()
+	families, err := reg.Gatherer().Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	for _, fam := range families {
+		if fam.GetName() != name {
+			continue
+		}
+		for _, m := range fam.GetMetric() {
+			for _, lp := range m.GetLabel() {
+				if lp.GetName() == labelName && lp.GetValue() == labelValue {
+					return m.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	return 0
+}
+
 // -- the metrics endpoint ------------------------------------------------
 
 func TestMetricsServerNotServedWhenAddrUnset(t *testing.T) {
