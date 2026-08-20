@@ -1241,11 +1241,12 @@ def cmd_principals_add(ctx: Context) -> int:
         f"token_sha256 = {json.dumps(hash_token(token))}\n"
     )
     try:
-        if not path.exists():
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(ROSTER_HEADER, encoding="utf-8")
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(block)
+        existing = path.read_text(encoding="utf-8") if path.exists() else ROSTER_HEADER
+        # Whole new content, written temp-then-rename: a crash or ENOSPC
+        # mid-append used to leave a torn TOML file, and Roster.parse treats
+        # any decode error as "everyone is normal" — one bad write silently
+        # flattened priority for the whole room. See policy_edit.atomic_write.
+        policy_edit.atomic_write(path, existing + block)
     except OSError as exc:
         out.error(f"cannot write {path}: {exc}")
         return PROBLEM
