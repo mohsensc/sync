@@ -135,6 +135,40 @@ def test_an_unparseable_roster_is_inert_and_loud(caplog):
     assert "unparseable" in caplog.text.lower() or "toml" in caplog.text.lower()
 
 
+def test_a_torn_append_demotes_everyone_not_just_the_new_row(caplog):
+    """This is the failure `ap principals add` used to risk: a crash or
+    ENOSPC partway through an `open(path, "a")` append leaves the file
+    cut off mid block, not just missing the new principal. Roster.parse
+    can't tell "torn" from "garbage" -- any decode error is inert, so the
+    existing critical-priority principal is gone too, silently, with one
+    log line. That's the bug atomic_write in cli.py now closes."""
+    whole = f"""
+version = 1
+default_tier = "normal"
+
+[[principal]]
+id           = "release-bot"
+attended     = "critical"
+unattended   = "critical"
+token_sha256 = "{hash_token('bot-token')}"
+"""
+    # A write interrupted mid-append: the new block starts but never
+    # finishes -- no closing quote, no value at all for the last key.
+    torn = whole + '\n[[principal]]\nid           = "sara"\ndisplay      = "S'
+
+    with caplog.at_level(logging.ERROR):
+        parsed = Roster.parse(torn, source="<test>")
+
+    assert parsed.degraded
+    assert parsed.principals() == []
+    # release-bot was fully written and valid on its own, but the torn
+    # file is unparseable as a whole, so it is gone too.
+    assert parsed.authenticate("release-bot", "bot-token").priority(
+        unattended=True
+    ) == PRIORITY_NORMAL
+    assert "unparseable" in caplog.text.lower() or "toml" in caplog.text.lower()
+
+
 def test_an_inverted_band_drops_that_principal_to_the_default(caplog):
     text = f"""
 version = 1
