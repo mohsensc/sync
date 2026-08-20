@@ -322,6 +322,23 @@ func (c *WsConn) shutdown() {
 	c.closeOnce.Do(func() { close(c.closed) })
 }
 
+// Close sends a close frame with the given code/reason and then takes the
+// transport down — the graceful counterpart to shed's too-slow hangup,
+// used for a server-initiated shutdown (see Server.closeConns) rather
+// than a saturated peer. Safe to call from outside the writer goroutine
+// while writeLoop/write may still be mid-WriteMessage on the same
+// connection: WriteControl and Close are the two *websocket.Conn methods
+// gorilla documents as callable concurrently with any other method, so
+// this doesn't need to route through the outbound channel the way a data
+// frame would.
+func (c *WsConn) Close(code int, reason string) {
+	c.shutdown()
+	_ = c.ws.WriteControl(websocket.CloseMessage,
+		websocket.FormatCloseMessage(code, reason),
+		time.Now().Add(closeDeadline))
+	_ = c.ws.Close()
+}
+
 // -- inbound rate limiting -------------------------------------------------
 
 func (c *WsConn) admitInbound() bool {
@@ -486,6 +503,19 @@ type Server struct {
 	conns   map[*WsConn]struct{}
 }
 
+// closeDeadline bounds one connection's close handshake: how long
+// WriteControl gets to land the close frame before Close gives up and
+// takes the socket down anyway. Mirrors shed's own control-frame deadline.
+const closeDeadline = 2 * time.Second
+
+// shutdownDeadline bounds Serve's whole shutdown path. closeConns fans the
+// per-connection close handshake out to every tracked session
+// concurrently, so one stuck peer only ever costs closeDeadline — this is
+// the backstop for everything else (many sessions, a wedged goroutine)
+// that could otherwise push a relay restart past what an operator is
+// willing to wait.
+const shutdownDeadline = 5 * time.Second
+
 func (s *Server) trackConn(c *WsConn) {
 	s.connsMu.Lock()
 	if s.conns == nil {
@@ -518,6 +548,39 @@ func (s *Server) sampleSendQueueDepth() {
 	}
 	s.connsMu.Unlock()
 	s.Relay.metrics.SendQueueDepth.Set(float64(deepest))
+}
+
+// closeConns sends every currently-tracked session a 1001 (going away)
+// close frame and takes its transport down, so a relay restart reads to
+// every connected daemon as a clean disconnect instead of the RST an
+// unclosed hijacked connection gets when the process exits underneath it
+// — see issue #97. One goroutine per connection so a peer that never
+// reads its close frame only costs closeDeadline, and the wait for all of
+// them is itself capped at shutdownDeadline so a pile of stuck peers
+// can't hang a restart either.
+func (s *Server) closeConns() {
+	s.connsMu.Lock()
+	conns := make([]*WsConn, 0, len(s.conns))
+	for c := range s.conns {
+		conns = append(conns, c)
+	}
+	s.connsMu.Unlock()
+
+	var wg sync.WaitGroup
+	wg.Add(len(conns))
+	for _, c := range conns {
+		go func(c *WsConn) {
+			defer wg.Done()
+			c.Close(websocket.CloseGoingAway, "relay shutting down")
+		}(c)
+	}
+
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(shutdownDeadline):
+	}
 }
 
 // Listen binds the socket and returns the bound address; call Serve to
@@ -581,7 +644,14 @@ func (s *Server) Serve(ctx context.Context) error {
 
 	select {
 	case <-ctx.Done():
+		// srv.Close() first: it stops the listener immediately and, by
+		// contract, never touches an already-hijacked connection. Doing
+		// closeConns() first left the listener open for up to
+		// shutdownDeadline while it drained sessions, so a client dialing
+		// in that window wasn't in the snapshot closeConns fanned out to
+		// and got the raw RST this whole fix exists to remove.
 		_ = srv.Close()
+		s.closeConns()
 		return nil
 	case err := <-errCh:
 		return err
