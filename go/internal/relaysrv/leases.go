@@ -747,6 +747,33 @@ func (r *Registry) Release(room, agent string, scope Region, actor Conn) {
 // session actually ending, use ReleaseAllSessionEnd instead: reusing this
 // one there would let an agent's age survive disconnect/reconnect forever.
 func (r *Registry) ReleaseAll(room, agent string, actor Conn) {
+	r.releaseAllInRoom(room, agent, actor, false)
+}
+
+// ReleaseAllSessionEnd is ReleaseAll's counterpart for a connection's
+// session actually ending (relay.go's Leave). Unlike an abort, there's no
+// retry on the way — the identity is leaving with the socket — so once
+// every lease is dropped the same way ReleaseAll drops them, the agent's
+// wait-die entry is cleared outright instead of preserved: a rejoin under
+// the same agent id starts fresh, exactly like a genuinely new agent
+// would. It also prunes agent's contender entry from every other claim
+// still standing in the room (issue #174): see releaseAllInRoom's doc for
+// why that pruning belongs here and not in ReleaseAll.
+func (r *Registry) ReleaseAllSessionEnd(room, agent string, actor Conn) {
+	r.releaseAllInRoom(room, agent, actor, true)
+	r.agentSessionEnded(agent)
+}
+
+// releaseAllInRoom is ReleaseAll's body, shared with ReleaseAllSessionEnd.
+// pruneAsks additionally walks every claim left in the room after agent's
+// own are gone and removes agent from their contender sets — only correct
+// when the agent is actually leaving (ReleaseAllSessionEnd), never for a
+// plain wait-die abort or lazy expiry: those mean the agent lost *this*
+// claim, not that it disconnected, and it may still be legitimately
+// contending elsewhere. That's why this is a parameter here rather than
+// unconditional behaviour of ReleaseAll itself, which relay.go's onClaim
+// also calls on abort.
+func (r *Registry) releaseAllInRoom(room, agent string, actor Conn, pruneAsks bool) {
 	rs := r.roomOf(room)
 	now := r.clock.Now()
 	for _, s := range rs.shards {
@@ -763,20 +790,25 @@ func (r *Registry) ReleaseAll(room, agent string, actor Conn) {
 			frame := departureFrame(c.Room, c.Human, c.Agent, c.Scope, now, "released", winner, reservation)
 			r.pub.Publish(room, frame, actor)
 		}
+		if pruneAsks {
+			r.pruneContendersLocked(room, s, agent, now, actor)
+		}
 		s.mu.Unlock()
 	}
 }
 
-// ReleaseAllSessionEnd is ReleaseAll's counterpart for a connection's
-// session actually ending (relay.go's Leave). Unlike an abort, there's no
-// retry on the way — the identity is leaving with the socket — so once
-// every lease is dropped the same way ReleaseAll drops them, the agent's
-// wait-die entry is cleared outright instead of preserved: a rejoin under
-// the same agent id starts fresh, exactly like a genuinely new agent
-// would.
-func (r *Registry) ReleaseAllSessionEnd(room, agent string, actor Conn) {
-	r.ReleaseAll(room, agent, actor)
-	r.agentSessionEnded(agent)
+// pruneContendersLocked removes agent's contender entry from every claim
+// left in s (its own claims are already gone from s.claims by the time
+// this runs). Caller holds s.mu — same shard, no additional locking, same
+// discipline every other shard-local helper in this file uses.
+func (r *Registry) pruneContendersLocked(room string, s *shard, agent string, now float64, actor Conn) {
+	for _, c := range s.claims {
+		before := snapshotOf(c)
+		if !c.removeContender(agent) {
+			continue
+		}
+		r.emitChange(room, c, before, now, actor)
+	}
 }
 
 // ReleaseEverywhere drops every lease this agent id holds, in every room —
@@ -809,6 +841,10 @@ func (r *Registry) ReleaseEverywhere(agent string, actor Conn) {
 				frame := departureFrame(c.Room, c.Human, c.Agent, c.Scope, now, "released", winner, reservation)
 				r.pub.Publish(room, frame, actor)
 			}
+			// The identity is being reclaimed by whoever binds next, same as
+			// a session ending — see releaseAllInRoom's doc for why abort/
+			// expiry never do this and session-shaped departures always do.
+			r.pruneContendersLocked(room, s, agent, now, actor)
 			s.mu.Unlock()
 		}
 	}

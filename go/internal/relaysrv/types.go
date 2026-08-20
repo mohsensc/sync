@@ -103,6 +103,27 @@ func (c *Claim) NoteContender(contender Contender) {
 	}
 }
 
+// removeContender deletes agent's ask against this claim, if any, and
+// invalidates the cached winner so the next handoverWinner call rescans
+// instead of returning a pointer whose backing map entry is gone. If that
+// was the last contender, the HandoverAt cap it (or an earlier contender)
+// set is dropped too: with nobody left to hand the region over to, the
+// holder's next renewal should reach its natural TTL again rather than
+// staying capped at a deadline set by an ask that no longer exists.
+// Reports whether there was anything to remove, so callers only pay for a
+// snapshot+fan-out when something actually changed.
+func (c *Claim) removeContender(agent string) bool {
+	if _, ok := c.Contenders[agent]; !ok {
+		return false
+	}
+	delete(c.Contenders, agent)
+	c.winnerStale = true
+	if len(c.Contenders) == 0 {
+		c.HandoverAt = nil
+	}
+	return true
+}
+
 // handoverWinner is the contender this region goes to when the lease ends.
 //
 // Caller must hold the owning shard's mutex: the lazy rescan below *writes*
