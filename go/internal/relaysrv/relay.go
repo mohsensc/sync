@@ -577,7 +577,9 @@ func (r *Relay) Leave(conn Conn) {
 	r.forgetDaemonBaseline(conn)
 
 	if hadIdentity && room != "" {
-		r.registry.ReleaseAll(room, identity.agent, nil)
+		// Session end, not an abort: the connection is gone, so the age it
+		// accrued shouldn't outlive it either (issue #163).
+		r.registry.ReleaseAllSessionEnd(room, identity.agent, nil)
 	}
 	conn.SetRoom("")
 }
