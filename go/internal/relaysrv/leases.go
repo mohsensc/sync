@@ -342,9 +342,21 @@ func (r *Registry) agentIdentityReset(agent string) {
 // comment) from turning into "the first agent to ever connect outranks
 // the room forever" — that failure only shows up if session end reuses
 // the abort/expiry path instead of clearing outright.
+//
+// But it must not clear out from under a claim this same agent id still
+// holds somewhere else — a second connection sharing the id (bindAgent
+// permits that for a matching principal/tier), or a room this session
+// left without releasing (should no longer happen after Join's own fix,
+// but this is the entry's last line of defense either way). liveCount is
+// already the global, cross-room count agentClaimAdded/Removed maintain
+// for exactly this reason (issue #173): only a session ending with
+// nothing left live anywhere should erase the identity.
 func (r *Registry) agentSessionEnded(agent string) {
 	r.agentMu.Lock()
 	defer r.agentMu.Unlock()
+	if e := r.agents[agent]; e != nil && e.liveCount > 0 {
+		return
+	}
 	delete(r.agents, agent)
 }
 

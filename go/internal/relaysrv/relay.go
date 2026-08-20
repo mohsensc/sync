@@ -328,6 +328,19 @@ func (r *Relay) Join(room string, conn Conn) bool {
 		return r.refuse(conn, room, *refusal)
 	}
 
+	// A room switch on a live connection is allowed (unlike an identity
+	// change, refused above) but must not strand the old room's claims:
+	// leaveAllRooms only drops membership, and Leave's own release only
+	// ever runs for conn.Room() at session end, so the old room's claims
+	// would otherwise sit there un-heartbeatable while the agent index
+	// still (correctly, post-#173) shows the agent as live elsewhere.
+	// ReleaseAll, not ReleaseAllSessionEnd: the identity isn't leaving,
+	// just the room, so its wait-die age is preserved the same way an
+	// abort preserves it, not reset like a voluntary release would.
+	if oldRoom := conn.Room(); oldRoom != "" && oldRoom != room {
+		r.registry.ReleaseAll(oldRoom, conn.Agent(), conn)
+	}
+
 	// One connection, one room membership.
 	r.leaveAllRooms(conn)
 
