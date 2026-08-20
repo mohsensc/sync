@@ -68,6 +68,14 @@ fi
 # There is no download step here: on a machine with neither `dist/`
 # populated nor a Go toolchain, this fails for good reason — see the
 # message below and the README for what to do about it.
+#
+# A dist/ binary older than the source tree is a developer's own build
+# going stale after an edit, not a release problem — release consumers
+# never have go/ checked out with newer mtimes than the artifact someone
+# shipped them. So: stale dist/ + go on PATH means rebuild, silently
+# correct, over installing something the edit already invalidated. Stale
+# dist/ with no go on PATH means there's nothing better to do than say so
+# loudly and install it anyway.
 RELEASE_DIR="$ROOT/dist"
 GOOS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 GOARCH="$(uname -m)"
@@ -76,13 +84,43 @@ case "$GOARCH" in
   arm64|aarch64) GOARCH=arm64 ;;
 esac
 
+# stale_source <release_bin> — cheapest honest freshness check: does any
+# .go file in the module have an mtime newer than the binary? Not a source
+# of truth: a fresh `git clone` stamps every file with checkout time
+# regardless of commit history (so a just-cloned repo with an old dist/
+# binary reads as stale even if nothing changed since it was built), and
+# `touch`ing a file without editing it triggers it too. It's a proxy for
+# "did source move since dist/ was built", cheap enough to run per binary
+# with no git dependency and no hashing, and it catches the case this
+# exists for: dist/ populated once, then a source edit nobody rebuilt for.
+stale_source() {
+  local release_bin="$1"
+  [[ -n "$(find "$ROOT/go" -name '*.go' -newer "$release_bin" -print -quit 2>/dev/null)" ]]
+}
+
 install_go_binary() {
   local name="$1" release_bin="$RELEASE_DIR/$1-$GOOS-$GOARCH"
+  local have_go=0
+  command -v go >/dev/null 2>&1 && have_go=1
+
   if [[ -x "$release_bin" ]]; then
+    if stale_source "$release_bin"; then
+      if [[ "$have_go" -eq 1 ]]; then
+        echo "$name: dist/$1-$GOOS-$GOARCH is older than go/ source, building from source instead"
+        ( cd "$ROOT/go" && CGO_ENABLED=0 go build -o "$BIN/$name" "./cmd/$name" ) && chmod +x "$BIN/$name"
+        return
+      fi
+      echo "WARNING: $name: dist/$1-$GOOS-$GOARCH looks older than go/ source and" \
+           "there's no go on PATH to rebuild it — installing it anyway, it may be stale" >&2
+    else
+      echo "$name: installing prebuilt dist/$1-$GOOS-$GOARCH"
+    fi
     cp "$release_bin" "$BIN/$name" && chmod +x "$BIN/$name"
     return
   fi
-  if command -v go >/dev/null 2>&1; then
+
+  if [[ "$have_go" -eq 1 ]]; then
+    echo "$name: building from source"
     ( cd "$ROOT/go" && CGO_ENABLED=0 go build -o "$BIN/$name" "./cmd/$name" ) && chmod +x "$BIN/$name"
     return
   fi
