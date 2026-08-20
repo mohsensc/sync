@@ -94,11 +94,15 @@ func TestRefillingTheBucketClearsTheSaturationClock(t *testing.T) {
 	}
 }
 
-// TestAdmitInboundEmitsFrameDroppedMetric closes the gap issue #94
-// reported: admitInbound was bumping inboundDropped without ever
-// telling metrics.FrameDropped, so a rate-limited agent was invisible
-// in ap_frames_dropped_total — only the log line saw it.
-func TestAdmitInboundEmitsFrameDroppedMetric(t *testing.T) {
+// TestAdmitInboundEmitsFrameRejectedInboundMetric closes the gap issue #94
+// reported: admitInbound was bumping inboundDropped without telling the
+// metrics package anything, so a rate-limited agent was invisible on
+// /metrics — only the log line saw it. It counts against its own
+// ap_frames_rejected_inbound_total, not ap_frames_dropped_total: a
+// token-bucket rejection never reached delivery in the first place, which
+// is a different failure than the one DroppedFramesRising and
+// docs/monitoring.md describe for that counter.
+func TestAdmitInboundEmitsFrameRejectedInboundMetric(t *testing.T) {
 	clock := NewVirtualClock(0)
 	reg := metrics.New()
 	conn := NewWsConn(newFakeWs(false), clock, reg)
@@ -108,15 +112,18 @@ func TestAdmitInboundEmitsFrameDroppedMetric(t *testing.T) {
 	if !conn.admitInbound() {
 		t.Fatalf("expected the first token to admit")
 	}
-	if got := labeledCounterValue(t, reg, "ap_frames_dropped_total", "reason", dropReasonInbound); got != 0 {
-		t.Fatalf("an admitted frame must not count as dropped, got %v", got)
+	if got := counterValue(t, reg, "ap_frames_rejected_inbound_total"); got != 0 {
+		t.Fatalf("an admitted frame must not count as rejected, got %v", got)
 	}
 
 	if conn.admitInbound() {
 		t.Fatalf("expected the empty bucket to refuse")
 	}
-	if got := labeledCounterValue(t, reg, "ap_frames_dropped_total", "reason", dropReasonInbound); got != 1 {
-		t.Fatalf("ap_frames_dropped_total{reason=%q} = %v, want 1", dropReasonInbound, got)
+	if got := counterValue(t, reg, "ap_frames_rejected_inbound_total"); got != 1 {
+		t.Fatalf("ap_frames_rejected_inbound_total = %v, want 1", got)
+	}
+	if got := counterValue(t, reg, "ap_frames_dropped_total"); got != 0 {
+		t.Fatalf("an inbound rejection must not also count as a drop, got %v", got)
 	}
 }
 

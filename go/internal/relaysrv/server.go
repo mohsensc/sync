@@ -60,7 +60,6 @@ const (
 	dropReasonQueueFull = "queue_full"
 	dropReasonStall     = "stall"
 	dropReasonSaturated = "saturated"
-	dropReasonInbound   = "inbound_rate"
 )
 
 var upgrader = websocket.Upgrader{
@@ -344,7 +343,7 @@ func (c *WsConn) admitInbound() bool {
 			t := now
 			c.inSaturatedSince = &t
 		}
-		c.metrics.FrameDropped(dropReasonInbound)
+		c.metrics.FrameRejectedInbound()
 		return false
 	}
 	c.tokens -= 1.0
