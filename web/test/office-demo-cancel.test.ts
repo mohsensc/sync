@@ -116,24 +116,20 @@ describe('demo.js cancellation core', () => {
     expect(onBeat).not.toHaveBeenCalled()
   })
 
-  it('a bare wait() (not raced) never settles once cancel() clears its timer', async () => {
-    // Pins the actual current contract, not the intuitive one: wait(700, tok)
-    // at the top of script() is never wrapped in race(). cancel() clears its
-    // setTimeout before it can fire, so its only settle path (the timeout
-    // callback) never runs — the promise, and script() suspended on it,
-    // just hang. This is the exact shape #152 warns about: an await that
-    // misses tok.rejects doesn't get cleaned up by cancel(), it's just left
-    // dangling instead of actively misbehaving.
+  it('cancel() before the initial reset wait ever fires still settles the demo', async () => {
+    // #160: wait(700, tok) at the top of script() used to be a bare wait(),
+    // not wrapped in race(). cancel() clears its setTimeout before it can
+    // fire, so its only settle path (the timeout callback) never ran — the
+    // promise, and script() suspended on it, just hung. Now every wait()
+    // goes through race(_, tok) same as the rest of script(), so cancel()
+    // rejects it via tok.rejects like anything else.
     stubDocument()
     vi.useFakeTimers()
     const { ctx } = makeCtx()
     const demo = runDemo(ctx)
     demo.cancel() // cancel before the initial 700ms reset wait ever fires
 
-    let settled = false
-    demo.promise.then(() => { settled = true }, () => { settled = true })
-    await vi.advanceTimersByTimeAsync(60_000)
-    expect(settled).toBe(false)
+    await expect(demo.promise).resolves.toBe('cancelled')
   })
 
   it('double cancel is safe', async () => {
