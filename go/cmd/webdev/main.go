@@ -30,6 +30,17 @@ const (
 	// Comfortably under leaseTTL so two or three missed beats (a slow
 	// arbiter, a GC pause) don't cost the lease before the next one lands.
 	heartbeatEvery = 20 * time.Second
+	// Used only once this process is itself serving :5173 — those are
+	// loopback calls to ourselves, effectively free. Shortening this is
+	// half of closing the --force takeover gap: a forced-out arbiter
+	// notices its own refusal and exits within one tick of this instead
+	// of heartbeatEvery. The other half is the forcer racing to rebind —
+	// see ensureArbiterAfterForce.
+	arbiterHeartbeatEvery = 2 * time.Second
+	// Bounds on the forcer's post-takeover rebind race, see
+	// ensureArbiterAfterForce.
+	forceTakeoverRetryEvery = 100 * time.Millisecond
+	forceTakeoverRetryFor   = 5 * time.Second
 )
 
 func main() {
@@ -39,15 +50,15 @@ func main() {
 	flag.Parse()
 
 	pid := os.Getpid()
+	vitePort := pickPort()
 
-	arbiterAddr, becameArbiter := claimPublicPort()
+	arbiterAddr, becameArbiter := claimPublicPort(*owner, *worktree, pid, vitePort)
 	if becameArbiter {
 		log.Printf("webdev: no arbiter on %s, this process is now the arbiter", publicAddr)
 	}
 
 	client := devproxy.NewClient("http://" + arbiterAddr)
 
-	vitePort := pickPort()
 	holder, err := client.Claim(*owner, *worktree, pid, vitePort, *force)
 	if err != nil {
 		if refused, ok := err.(*devproxy.ErrRefused); ok {
@@ -63,6 +74,16 @@ func main() {
 	}
 	log.Printf("webdev: lease granted to %s (worktree %s), vite on 127.0.0.1:%d behind %s",
 		holder.Owner, holder.Worktree, vitePort, publicAddr)
+
+	if *force && !becameArbiter {
+		// We just broke someone else's lease over HTTP, which means we
+		// didn't win the :5173 bind ourselves — the process we forced out
+		// might have been the arbiter. If so its own heartbeat refuses and
+		// it exits (see arbiterHeartbeatEvery), and :5173 sits unbound
+		// until someone rebinds it. Race for it now instead of waiting for
+		// our own next heartbeat tick to notice "arbiter unreachable".
+		go ensureArbiterAfterForce(*owner, *worktree, pid, vitePort)
+	}
 
 	vite := exec.Command("pnpm", "exec", "vite",
 		"--port", strconv.Itoa(vitePort), "--strictPort")
@@ -91,7 +112,11 @@ func main() {
 	// silently-wrong-content shape #61 and #62 complain about.
 	heartbeatDone := make(chan struct{})
 	lostLease := make(chan devproxy.Holder, 1)
-	go heartbeat(client, *owner, *worktree, pid, vitePort, heartbeatDone, lostLease)
+	interval := heartbeatEvery
+	if becameArbiter {
+		interval = arbiterHeartbeatEvery
+	}
+	go heartbeat(client, *owner, *worktree, pid, vitePort, interval, heartbeatDone, lostLease)
 
 	viteDone := make(chan error, 1)
 	go func() { viteDone <- vite.Wait() }()
@@ -140,13 +165,13 @@ func main() {
 // normal path (another webdev already races and won, possibly moments
 // ago), not an error — the loser just proceeds to claim a lease from
 // whoever's listening.
-func claimPublicPort() (addr string, becameArbiter bool) {
+func claimPublicPort(owner, worktree string, pid, port int) (addr string, becameArbiter bool) {
 	ln, err := net.Listen("tcp", publicAddr)
 	if err != nil {
 		return publicAddr, false
 	}
 
-	lock := devproxy.NewLock(leaseTTL)
+	lock := newArbiterLock(owner, worktree, pid, port)
 	srv := &http.Server{Handler: devproxy.Handler(lock)}
 	go func() {
 		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
@@ -154,6 +179,37 @@ func claimPublicPort() (addr string, becameArbiter bool) {
 		}
 	}()
 	return publicAddr, true
+}
+
+// newArbiterLock builds the Lock a freshly-won arbiter role will serve,
+// pre-seeded with our own claim before a single request is handled. Without
+// this, there's a window between binding :5173 and this process's first
+// claim RPC to itself where the lock is empty — long enough for a third,
+// unrelated `pnpm dev` to see it, self-claim, and refuse us right back even
+// though we're the one who just won the bind.
+func newArbiterLock(owner, worktree string, pid, port int) *devproxy.Lock {
+	lock := devproxy.NewLock(leaseTTL)
+	lock.Claim(owner, worktree, pid, port, false)
+	return lock
+}
+
+// ensureArbiterAfterForce is the forcer's half of closing the --force
+// takeover gap (the other half is arbiterHeartbeatEvery, which makes a
+// forced-out arbiter notice and exit fast). It retries the :5173 bind on a
+// short, bounded schedule instead of waiting for a heartbeat tick, so the
+// window a third plain `pnpm dev` could land in and win an empty lock stays
+// small. If the process we forced the lease from wasn't the arbiter, every
+// attempt here just fails fast (address already in use) and this exits
+// once the bound retry window elapses — cheap, and harmless either way.
+func ensureArbiterAfterForce(owner, worktree string, pid, port int) {
+	deadline := time.Now().Add(forceTakeoverRetryFor)
+	for time.Now().Before(deadline) {
+		if _, became := claimPublicPort(owner, worktree, pid, port); became {
+			log.Printf("webdev: took over arbiter on %s after --force", publicAddr)
+			return
+		}
+		time.Sleep(forceTakeoverRetryEvery)
+	}
 }
 
 // pickPort asks the OS for a free port instead of parsing it back out of
@@ -171,15 +227,18 @@ func pickPort() int {
 	return ln.Addr().(*net.TCPAddr).Port
 }
 
-// heartbeat renews the lease well inside its TTL. If the arbiter itself
-// died (not just this holder's vite — the arbiter process), the renewal
-// fails with a connection error; the fix is to race the bind again, same
-// as startup, so exactly one surviving holder becomes the new arbiter. If
-// the arbiter is up but refuses — someone else (or --force) holds the
-// lease now — that's reported on lostLease and this loop stops; main is
-// the one that decides what dying loudly means (kill vite, exit 1).
-func heartbeat(client *devproxy.Client, owner, worktree string, pid, vitePort int, done <-chan struct{}, lostLease chan<- devproxy.Holder) {
-	ticker := time.NewTicker(heartbeatEvery)
+// heartbeat renews the lease well inside its TTL, at interval — callers
+// pass arbiterHeartbeatEvery instead of heartbeatEvery once this process is
+// itself serving :5173, so it notices a --force takeover of its own lease
+// fast rather than on the next slow tick. If the arbiter itself died (not
+// just this holder's vite — the arbiter process), the renewal fails with a
+// connection error; the fix is to race the bind again, same as startup, so
+// exactly one surviving holder becomes the new arbiter. If the arbiter is
+// up but refuses — someone else (or --force) holds the lease now — that's
+// reported on lostLease and this loop stops; main is the one that decides
+// what dying loudly means (kill vite, exit 1).
+func heartbeat(client *devproxy.Client, owner, worktree string, pid, vitePort int, interval time.Duration, done <-chan struct{}, lostLease chan<- devproxy.Holder) {
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -192,24 +251,32 @@ func heartbeat(client *devproxy.Client, owner, worktree string, pid, vitePort in
 					return
 				}
 				log.Printf("webdev: arbiter unreachable (%v), re-electing", err)
-				reelect(client, owner, worktree, pid, vitePort)
+				if reelect(client, owner, worktree, pid, vitePort) {
+					// We're the arbiter now — watch our own lease at the
+					// fast interval so a future --force takeover is
+					// noticed promptly, same as if we'd won at startup.
+					ticker.Reset(arbiterHeartbeatEvery)
+				}
 			}
 		}
 	}
 }
 
 // reelect is the "arbiter dies while holders live" recovery: race the
-// bind again. Whoever wins starts a fresh arbiter (fresh Lock — the old
-// one's state died with the old process) and immediately re-registers
-// itself as the holder; everyone else's next heartbeat just claims from
-// the new arbiter like any other renewal.
-func reelect(client *devproxy.Client, owner, worktree string, pid, vitePort int) {
-	if _, became := claimPublicPort(); became {
+// bind again. Whoever wins starts a fresh arbiter, seeded with its own
+// claim before serving (see newArbiterLock — the old arbiter's Lock state
+// died with the old process, and a bare fresh one would be an empty lock a
+// third process could win); everyone else's next heartbeat just claims
+// from the new arbiter like any other renewal.
+func reelect(client *devproxy.Client, owner, worktree string, pid, vitePort int) (becameArbiter bool) {
+	if _, became := claimPublicPort(owner, worktree, pid, vitePort); became {
 		log.Printf("webdev: re-elected as arbiter on %s", publicAddr)
+		becameArbiter = true
 	}
 	if _, err := client.Claim(owner, worktree, pid, vitePort, false); err != nil {
 		log.Printf("webdev: re-claim after re-election: %v", err)
 	}
+	return becameArbiter
 }
 
 func mustGetwd() string {
