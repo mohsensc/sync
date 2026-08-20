@@ -72,18 +72,35 @@ func (s *Server) OnRequest(h RequestHandler) { s.respond = h }
 // unlinking it. Nothing answers, the file (if any) is a stale leftover from
 // a crash and is safe to remove before binding.
 //
-// This narrows the race, it doesn't close it: two cold starts probing the
-// same stale path at the same instant can both see "nothing answers" and
-// both proceed to ListenUnix, where the OS's own bind semantics (one
-// listener per path) settle it — the loser gets a bind error, not a stolen
-// socket. What this guards against is the case that bind alone can't catch:
-// a *live* listener's socket file, unlinked out from under it by whoever
-// probes and finds the stale-looking gap.
+// probe → remove → bind is three steps, and none of the OS's own guarantees
+// cover the gap between them: two cold starts against the same stale path
+// can both probe and see "nothing answers", and the second one to run
+// os.Remove isn't removing a stale file anymore — it's removing the live
+// socket the first one just bound, orphaning that listener with no error
+// raised anywhere (ListenUnix creates a fresh inode; unlinking the path
+// doesn't touch the fd already holding it open). Bind semantics never even
+// get a chance to settle it, because by the time the second Start calls
+// ListenUnix the path is simply empty again, not contended. So the whole
+// sequence runs under startLock, a flock'd sidecar <path>.lock: whoever
+// gets the lock first runs probe → remove → bind to completion before the
+// second Start's probe is allowed to happen, and that second probe now sees
+// the first Start's live socket and correctly errors "already running"
+// instead of racing to unlink it. The lock is held until Start returns;
+// past the bind, the OS's own one-listener-per-path semantics cover it
+// anyway, so nothing is lost by not releasing any earlier.
 func (s *Server) Start() error {
+	unlock, err := startLock(s.path)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
 	if probeListening(s.path) {
 		return fmt.Errorf("hooksock: already running at %s", s.path)
 	}
-	_ = os.Remove(s.path)
+	if err := os.Remove(s.path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
 
 	addr, err := net.ResolveUnixAddr("unix", s.path)
 	if err != nil {
@@ -106,6 +123,32 @@ func (s *Server) Start() error {
 
 	go s.acceptLoop(ln)
 	return nil
+}
+
+// startLock serializes Start's probe → remove → bind sequence, across
+// goroutines and across processes — two separate presenced invocations
+// racing the same crash-restart go through the same sidecar lockfile, not
+// just two calls in one binary. The acquire blocks rather than
+// fail-fast-and-retry: the loser simply waits out the winner's critical
+// section, then runs its own probe against whatever the winner left behind
+// (a live socket, almost always), which is what turns the loser's outcome
+// into the ordinary "already running" error instead of a race. The lockfile
+// itself is never removed — deleting it would just reopen the same
+// unlink-out-from-under-someone gap one level down, and leaving it behind
+// costs nothing.
+func startLock(sockPath string) (unlock func(), err error) {
+	lf, err := os.OpenFile(sockPath+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("hooksock: open lockfile: %w", err)
+	}
+	if err := flockExclusive(lf); err != nil {
+		_ = lf.Close()
+		return nil, fmt.Errorf("hooksock: lock %s: %w", lf.Name(), err)
+	}
+	return func() {
+		_ = flockUnlock(lf)
+		_ = lf.Close()
+	}, nil
 }
 
 // probeListening reports whether something is already accepting

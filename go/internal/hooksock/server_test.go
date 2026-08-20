@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -242,6 +244,65 @@ func TestStopAfterLoss(t *testing.T) {
 	conn, err := net.Dial("unix", p)
 	if err != nil {
 		t.Fatalf("live server's socket gone after loser.Stop(): %v", err)
+	}
+	conn.Close()
+}
+
+// TestConcurrentStartExactlyOneWins is the adversarial-review follow-up to
+// #88: probe → remove → bind used to be three unsynchronized steps, so two
+// Start calls could each probe and see nothing, then the second one's
+// os.Remove would delete the *live* socket the first one had just bound
+// (not a stale file — the exact case the probe exists to protect), leaving
+// the first an orphaned listener nobody can reach and nobody errors about.
+// startLock's flock closes that gap. This races N Start calls against one
+// path and checks the property that matters: exactly one binds, and
+// whichever one does is still answering dials after every other goroutine
+// has finished — never orphaned, never stolen from underneath.
+func TestConcurrentStartExactlyOneWins(t *testing.T) {
+	p := sockPath(t)
+	const n = 16
+
+	var wg sync.WaitGroup
+	var wins int64
+	servers := make([]*Server, n)
+	errs := make([]error, n)
+
+	for i := 0; i < n; i++ {
+		s := New(p)
+		servers[i] = s
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if err := s.Start(); err != nil {
+				errs[i] = err
+				return
+			}
+			atomic.AddInt64(&wins, 1)
+		}(i)
+	}
+	wg.Wait()
+
+	if wins != 1 {
+		t.Fatalf("wins = %d, want exactly 1", wins)
+	}
+
+	var winner *Server
+	for i, s := range servers {
+		if errs[i] == nil {
+			winner = s
+			continue
+		}
+		if !strings.Contains(errs[i].Error(), "already running") {
+			t.Fatalf("loser %d error = %q, want an already-running error", i, errs[i])
+		}
+	}
+	defer winner.Stop()
+
+	// Losers are done (wg.Wait already returned); the winner's socket must
+	// still answer, proving no loser unlinked it out from under the winner.
+	conn, err := net.Dial("unix", p)
+	if err != nil {
+		t.Fatalf("winner unreachable after all losers finished: %v", err)
 	}
 	conn.Close()
 }
