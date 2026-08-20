@@ -13,7 +13,7 @@ import (
 // enough to cover the agent noticing and coming back to the file, short
 // enough that it is news rather than history. Also the horizon Cache prunes
 // on, so the lost-region map is bounded by the last half hour rather than
-// by uptime. Matches lease_cache.hpp's kHandoverNoteMs.
+// by uptime.
 //
 // decide.go sends lost_ms_ago derived from this unclamped; the hook reads it
 // through int_field, which saturates at kIntFieldCeiling in cpp/hook/hook.cpp.
@@ -23,15 +23,19 @@ const HandoverNoteMs = 30 * 60 * 1000
 
 // Lease is the Go shape of cpp/daemon/lease_cache.hpp's CachedLease.
 type Lease struct {
-	Agent       string
-	Human       string
-	Intent      string
-	Priority    string
-	ExpiresAtMs int64 // monotonic instant, this process's clock
+	Agent    string
+	Human    string
+	Intent   string
+	Priority string
+	// ExpiresAtMs is wall-clock ms (time.Now().UnixMilli()), not a monotonic
+	// instant — see docs/go-daemon.md's clock-source note for the known gap
+	// this leaves against a system clock step.
+	ExpiresAtMs int64
 	Waiting     int
 
 	// Symbol is the scope this lease was claimed at — "" for a whole-file
-	// claim, same sentinel same_region() in types.py gives a nil symbol.
+	// claim, the same sentinel a nil symbol gets everywhere else in this
+	// package (see symbolsConflict below).
 	// It duplicates the second half of the map key it lives under
 	// (RegionKey encodes "path|symbol"), because Conflict needs to read it
 	// back out once a region has already been found by path alone. See
@@ -225,8 +229,8 @@ func IsMine(agent string, myAgents []string) bool {
 //
 // Region keys are "path|symbol", so the path match is a prefix match — a
 // live claim on "path|sign_in" contends with a plain edit on "path" even
-// though the hook names no symbol. See same_region() in types.py, which is
-// the authority both this and the relay's own classifier answer to.
+// though the hook names no symbol. See symbolsConflict below for the exact
+// rule this and the relay's own classifier both implement.
 //
 // "What myAgents is known to be touching" is never the incoming edit
 // itself — a hook-observed Edit/Write carries no symbol at all, only a
