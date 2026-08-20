@@ -294,7 +294,7 @@ func TestClientLogsConnectStateTransitions(t *testing.T) {
 
 func TestMalformedLeasesFrameLeavesTableUntouched(t *testing.T) {
 	lc := leases.New()
-	lc.Upsert(leases.RegionKey("a.py", ""), leases.Lease{Agent: "other", ExpiresAtMs: 90_000})
+	lc.Upsert(leases.RegionKey("a.py", ""), leases.Lease{Agent: "other", ExpiresAtMs: 90_000}, 0)
 
 	c := New(Config{URL: "ws://127.0.0.1:1", Room: "r", Agent: "a"}, lc)
 
@@ -455,7 +455,7 @@ func TestDispatchLeaseHandoverOfOwnRegionRecordsLostNote(t *testing.T) {
 	lc := leases.New()
 	c := New(Config{URL: "ws://x", Room: "r", Agent: "me"}, lc)
 	// This agent held the region first.
-	lc.Upsert(leases.RegionKey("a.py", ""), leases.Lease{Agent: "me", ExpiresAtMs: 10_000})
+	lc.Upsert(leases.RegionKey("a.py", ""), leases.Lease{Agent: "me", ExpiresAtMs: 10_000}, 0)
 
 	frame, _ := json.Marshal(map[string]any{
 		"type": "lease", "state": "handover", "agent": "me",

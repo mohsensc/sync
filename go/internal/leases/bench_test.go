@@ -35,7 +35,7 @@ func BenchmarkConflictConcurrentReads(b *testing.B) {
 				return
 			default:
 				path := fmt.Sprintf("src/pkg%d/mod%d.py", i%40, i%25)
-				c.Upsert(RegionKey(path, ""), Lease{Agent: "writer", ExpiresAtMs: 9_000_000_000_000})
+				c.Upsert(RegionKey(path, ""), Lease{Agent: "writer", ExpiresAtMs: 9_000_000_000_000}, 0)
 				i++
 			}
 		}

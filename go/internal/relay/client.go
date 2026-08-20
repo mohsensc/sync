@@ -695,7 +695,7 @@ func (c *Client) applyLease(e wire.LeaseFrame) {
 	if !ok {
 		return
 	}
-	c.leases.Upsert(k, lease)
+	c.leases.Upsert(k, lease, nowMs())
 	c.believedMu.Lock()
 	c.believed[k] = lease
 	c.believedMu.Unlock()
@@ -719,7 +719,7 @@ func (c *Client) applyClaimResult(e wire.LeaseFrame) {
 	if !ok {
 		return
 	}
-	c.leases.Upsert(k, lease)
+	c.leases.Upsert(k, lease, nowMs())
 	c.believedMu.Lock()
 	c.believed[k] = lease
 	c.believedMu.Unlock()
@@ -730,10 +730,10 @@ func (c *Client) applyClaimResult(e wire.LeaseFrame) {
 // that the snapshot does not list — the reconcile point named in the
 // gauge's help text. Only unexpired entries count: after a long outage
 // every held lease has aged past its own ExpiresAtMs, the relay's snapshot
-// legitimately drops them the same way, and Conflict already skips them
-// (see leases.Cache.Conflict's "ages out on its own" comment) — counting
-// those would fire the gauge loudest exactly when nothing is blocking on
-// anything.
+// legitimately drops them the same way, and Conflict already skips them on
+// expiry even before a prune sweep removes them (see leases.Cache.Conflict's
+// stale-but-harmless check) — counting those would fire the gauge loudest
+// exactly when nothing is blocking on anything.
 func (c *Client) recordDivergence(fresh map[string]leases.Lease) {
 	if c.metrics == nil {
 		return
