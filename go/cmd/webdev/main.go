@@ -41,6 +41,9 @@ const (
 	// ensureArbiterAfterForce.
 	forceTakeoverRetryEvery = 100 * time.Millisecond
 	forceTakeoverRetryFor   = 5 * time.Second
+	// A hung vite must not hold the lease out to the full TTL just
+	// because it ignores SIGTERM.
+	shutdownGrace = 5 * time.Second
 )
 
 func main() {
@@ -126,12 +129,10 @@ func main() {
 	select {
 	case exitErr = <-viteDone:
 	case <-stop:
-		_ = vite.Process.Signal(syscall.SIGTERM)
-		exitErr = <-viteDone
+		exitErr = stopVite(vite, viteDone, shutdownGrace)
 	case holder := <-lostLease:
 		leaseLost = true
-		_ = vite.Process.Signal(syscall.SIGTERM)
-		<-viteDone
+		_ = stopVite(vite, viteDone, shutdownGrace)
 		fmt.Fprintf(os.Stderr,
 			"webdev: lease lost to %s (worktree %s, pid %d) — stopping vite rather "+
 				"than leave it running unreachable behind a proxy pointed elsewhere.\n",
@@ -209,6 +210,22 @@ func ensureArbiterAfterForce(owner, worktree string, pid, port int) {
 			return
 		}
 		time.Sleep(forceTakeoverRetryEvery)
+	}
+}
+
+// stopVite asks vite to exit and waits, escalating to SIGKILL if it hasn't
+// within grace. Without this, a hung vite that ignores SIGTERM would block
+// here indefinitely — holding the lease out to the full TTL even though
+// this process wants to shut down cleanly right now.
+func stopVite(vite *exec.Cmd, viteDone <-chan error, grace time.Duration) error {
+	_ = vite.Process.Signal(syscall.SIGTERM)
+	select {
+	case err := <-viteDone:
+		return err
+	case <-time.After(grace):
+		log.Printf("webdev: vite still running %s after SIGTERM, sending SIGKILL", grace)
+		_ = vite.Process.Signal(syscall.SIGKILL)
+		return <-viteDone
 	}
 }
 

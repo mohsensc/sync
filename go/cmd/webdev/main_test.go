@@ -4,6 +4,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"testing"
 	"time"
 
@@ -78,5 +79,52 @@ func TestHeartbeatDetectsForcedEvictionPromptly(t *testing.T) {
 		}
 	case <-time.After(20 * fastInterval):
 		t.Fatal("forced-out holder did not notice eviction within a few ticks of interval")
+	}
+}
+
+// TestStopViteEscalatesToSigkill proves the shutdown path is bounded: a
+// child that ignores SIGTERM must still be gone (and the lease-release
+// path unblocked) within grace, not the full 90s TTL.
+func TestStopViteEscalatesToSigkill(t *testing.T) {
+	vite := exec.Command("sh", "-c", "trap '' TERM; sleep 30")
+	if err := vite.Start(); err != nil {
+		t.Fatalf("start stub: %v", err)
+	}
+
+	viteDone := make(chan error, 1)
+	go func() { viteDone <- vite.Wait() }()
+
+	start := time.Now()
+	const grace = 200 * time.Millisecond
+	err := stopVite(vite, viteDone, grace)
+	elapsed := time.Since(start)
+
+	if elapsed > 2*grace {
+		t.Fatalf("stopVite took %s, want bounded near grace (%s) via SIGKILL escalation", elapsed, grace)
+	}
+	if err == nil {
+		t.Fatal("want a non-nil error: the child was killed, not a clean exit")
+	}
+}
+
+// TestStopViteReturnsCleanlyOnSigterm proves the escalation path doesn't
+// fire when the child exits promptly on SIGTERM — no gratuitous SIGKILL,
+// no waiting out the full grace window either.
+func TestStopViteReturnsCleanlyOnSigterm(t *testing.T) {
+	vite := exec.Command("sleep", "30")
+	if err := vite.Start(); err != nil {
+		t.Fatalf("start stub: %v", err)
+	}
+
+	viteDone := make(chan error, 1)
+	go func() { viteDone <- vite.Wait() }()
+
+	start := time.Now()
+	const grace = 2 * time.Second
+	_ = stopVite(vite, viteDone, grace)
+	elapsed := time.Since(start)
+
+	if elapsed >= grace {
+		t.Fatalf("stopVite waited %s, a SIGTERM-honoring child should exit well before grace (%s)", elapsed, grace)
 	}
 }
