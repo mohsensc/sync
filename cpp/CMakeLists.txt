@@ -8,10 +8,16 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 enable_testing()
 
 # The hook, and only the hook — see docs/gohook-spike.md for why it stays
-# C++ while the daemon (go/) does not. No OpenSSL, no Threads: the hook's
-# only dependencies were ever the ones the daemon needed.
+# C++ while the daemon (go/) does not. No OpenSSL: the hook's only other
+# dependencies were ever the ones the daemon needed. It does call
+# pthread_sigmask/sigwait (SigPipeGuard), so Threads is linked below —
+# on AppleClang and glibc >= 2.34 that's folded into libc already, but
+# older glibc (Ubuntu 20.04, Debian 11) needs it linked explicitly.
+find_package(Threads REQUIRED)
+
 add_library(ap_hook_lib hook/hook.cpp)
 target_include_directories(ap_hook_lib PUBLIC .)
+target_link_libraries(ap_hook_lib PUBLIC Threads::Threads)
 
 add_executable(ap-hook hook/main.cpp)
 target_link_libraries(ap-hook PRIVATE ap_hook_lib)
