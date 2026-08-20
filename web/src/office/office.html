@@ -1135,6 +1135,9 @@ function despawnLive(id) {
   // geometry) before the traverse below, so it doesn't see meshes that
   // are already detached from a.root — see gitsignals.js's forget().
   if (window.__gitSignals) window.__gitSignals.forget(a)
+  // Same story for the ghost-author state parked beside this desk — see
+  // ghost.js's forget().
+  if (window.__ghostAuthors) window.__ghostAuthors.forget(a)
   scene.remove(a.root)
   a.root.traverse(n => {
     if (!n.isMesh && !n.isSkinnedMesh) return

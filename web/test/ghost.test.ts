@@ -158,3 +158,25 @@ describe('ghost pose — mixer update happens once, at build, not per frame', ()
     expect(ghostSrc).not.toMatch(/ANIM\.update\([^)]*,\s*dt\)/)
   })
 })
+
+// -- forget: the per-agent counterpart to dispose(), see office.html's
+// despawnLive. attachGhostAuthors() itself isn't exercised anywhere in
+// this file (buildGhostState/buildPlateSprite hit `document.createElement
+// ('canvas')` for the nameplate texture, and this suite runs under
+// vitest's default node environment with no DOM — see gitsignals.test.ts
+// for the stub pattern this would follow if it had one). So, same shape
+// as the mixer check above: a static source scan that fails against the
+// old file (no forget, states/lastEncounterAt entries live forever past
+// despawn) and passes against the new one.
+describe('ghost forget — despawn cleanup', () => {
+  it('exports forget, keyed by agent.id, off both leak-prone maps', () => {
+    expect(ghostSrc).toContain('function forget(agent)')
+    expect(ghostSrc).toMatch(/states\.delete\(agent\.id\)/)
+    expect(ghostSrc).toMatch(/lastEncounterAt\.delete\(agent\.id\)/)
+  })
+
+  it('disposes the existing state before dropping it, and is wired into the returned handle', () => {
+    expect(ghostSrc).toMatch(/if \(s\) disposeState\(s\)/)
+    expect(ghostSrc).toMatch(/forget,\s*\n\s*dispose\(\)/)
+  })
+})
