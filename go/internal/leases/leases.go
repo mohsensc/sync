@@ -74,6 +74,13 @@ type Cache struct {
 	mu       sync.RWMutex
 	byRegion map[string]Lease
 	lost     map[string]HandoverNote // keyed on path, not region — see NoteHandover
+
+	// lastSweepMs is when the pruneFloor sweep last ran, so Upsert can gate
+	// on sweepCooldownMs below instead of re-scanning the whole table on
+	// every single write once the table is big. Zero value means "never
+	// swept," which is correct: it makes the first write past the floor
+	// sweep immediately rather than waiting out a cooldown against nothing.
+	lastSweepMs int64
 }
 
 func New() *Cache {
@@ -100,6 +107,25 @@ func (c *Cache) Replace(entries map[string]Lease) {
 // exactly the unbounded growth #89 is about — worth the lock hold.
 const pruneFloor = 2048
 
+// sweepCooldownMs floors the gap between two pruneFloor sweeps. Once a busy
+// room's table sits above pruneFloor for good (garbage arriving as fast as
+// it's collected — the #89 case), the floor check alone degenerates into a
+// full O(n) scan under the write lock on *every* Upsert: benchmarked at
+// ~17.3µs/op sustained, against ~122ns/op below the floor, a 142x hit that
+// lands on the same write lock Conflict's readers queue behind. The
+// cooldown caps how often that scan actually runs instead of gating whether
+// it ever does.
+//
+// This bounds staleness, not just cost: an entry that expires can sit in
+// byRegion for up to sweepCooldownMs past the write that would otherwise
+// have swept it — Conflict already treats an expired entry as invisible
+// (see its "stale-but-harmless" comment), so this never blocks anything
+// on a stale lease, it only delays reclaiming the memory. 1s is nowhere
+// near LeaseTTLS's 90s default, so the delay a caller could ever observe
+// in memory pressure terms is two orders of magnitude under the TTL the
+// rest of the system already budgets for.
+const sweepCooldownMs = 1000
+
 // Upsert sets or renews one entry. Called for a single "lease" or
 // "claim_result" frame.
 //
@@ -110,19 +136,21 @@ const pruneFloor = 2048
 // once a connection falls behind) — a shed frame means nothing ever tells
 // this cache the region is free. Same prune-on-write shape as NoteHandover
 // uses for the lost map, gated so the common small-table case doesn't pay
-// for a sweep it doesn't need.
+// for a sweep it doesn't need, and cooled down by sweepCooldownMs so a
+// table that stays above the floor doesn't pay for a sweep on every write.
 func (c *Cache) Upsert(key string, l Lease, nowMs int64) {
 	c.mu.Lock()
 	if c.byRegion == nil {
 		c.byRegion = make(map[string]Lease)
 	}
 	c.byRegion[key] = l
-	if len(c.byRegion) > pruneFloor {
+	if len(c.byRegion) > pruneFloor && nowMs-c.lastSweepMs >= sweepCooldownMs {
 		for k, existing := range c.byRegion {
 			if existing.ExpiresAtMs <= nowMs {
 				delete(c.byRegion, k)
 			}
 		}
+		c.lastSweepMs = nowMs
 	}
 	c.mu.Unlock()
 }
