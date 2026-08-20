@@ -347,6 +347,32 @@ func TestUpsertBelowTheFloorDoesNotSweep(t *testing.T) {
 	}
 }
 
+func TestUpsertSweepsWhenTheWallClockStepsBackwards(t *testing.T) {
+	c := New()
+
+	// Pad past pruneFloor at nowMs=100_000 so this Upsert sweeps and sets
+	// lastSweepMs=100_000.
+	for i := 0; i < pruneFloor+1; i++ {
+		c.Upsert(RegionKey(fmt.Sprintf("pad/%d.py", i), ""), Lease{Agent: "pad", ExpiresAtMs: 200_000}, 100_000)
+	}
+
+	// Add an expired entry right after, still within the cooldown window
+	// (nowMs-lastSweepMs=0 < sweepCooldownMs), so it isn't swept yet.
+	c.Upsert(RegionKey("gone.py", ""), Lease{Agent: "other", ExpiresAtMs: 1_000}, 100_000)
+
+	// Now simulate an NTP step backwards: the next Upsert's nowMs is earlier
+	// than lastSweepMs, so nowMs-lastSweepMs is negative and would never
+	// clear a plain >= cooldown check. It must still sweep.
+	c.Upsert(RegionKey("pad/0.py", ""), Lease{Agent: "pad", ExpiresAtMs: 200_000}, 50_000)
+
+	c.mu.RLock()
+	_, stillThere := c.byRegion[RegionKey("gone.py", "")]
+	c.mu.RUnlock()
+	if stillThere {
+		t.Fatal("a backwards clock step must not suppress the sweep for the rest of the cooldown window")
+	}
+}
+
 func TestUpsertDoesNotPruneALeaseThatHasNotExpiredYet(t *testing.T) {
 	c := New()
 	c.Upsert(RegionKey("stays.py", ""), Lease{Agent: "other", ExpiresAtMs: 10_000}, 0)

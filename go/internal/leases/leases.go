@@ -144,7 +144,12 @@ func (c *Cache) Upsert(key string, l Lease, nowMs int64) {
 		c.byRegion = make(map[string]Lease)
 	}
 	c.byRegion[key] = l
-	if len(c.byRegion) > pruneFloor && nowMs-c.lastSweepMs >= sweepCooldownMs {
+	// nowMs is wall clock (time.Now().UnixMilli()), not monotonic, so a
+	// backwards NTP step makes nowMs-c.lastSweepMs negative — the cooldown
+	// gate would then never fire for the rest of that window, reopening the
+	// #89 unbounded-growth shape it exists to close. Treat a clock that's
+	// gone backwards as an elapsed cooldown rather than an unmet one.
+	if len(c.byRegion) > pruneFloor && (nowMs < c.lastSweepMs || nowMs-c.lastSweepMs >= sweepCooldownMs) {
 		for k, existing := range c.byRegion {
 			if existing.ExpiresAtMs <= nowMs {
 				delete(c.byRegion, k)
