@@ -436,6 +436,41 @@ func TestOnLineRecordsRegionKeyShape(t *testing.T) {
 	}
 }
 
+// TestTickWritesSnapshot covers the tick loop's write path, which nothing
+// else here touches — it does not exercise the Store(false)-before-Peers()
+// ordering fix itself (both orderings converge on the same file within one
+// snapshotTickMs rewrite, so no black-box test can discriminate them); it
+// just proves a Touch reaches the snapshot file at all.
+func TestTickWritesSnapshot(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "s")
+	if p := sock + ".decide"; len(p) > 100 {
+		t.Fatalf("socket path too long for AF_UNIX: %q (%d bytes)", p, len(p))
+	}
+	snap := filepath.Join(t.TempDir(), "snapshot")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	d, err := New(ctx, Options{Sock: sock, Snapshot: snap})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	d.onLine([]byte(`{"verb":"edit","path":"src/auth.py","agent":"sess1","human":"mohsen"}`))
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		data, err := os.ReadFile(snap)
+		if err == nil && bytes.Contains(data, []byte(`"human":"mohsen"`)) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("snapshot never picked up the touch; last read: %q, err: %v", data, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // BenchmarkOnRequestDecide is the decide path with and without metrics —
 // the comparison Options.Metrics's nil case exists to keep cheap. Run with
 // -benchmem: allocs/op is what "no allocation on that path" claims, not

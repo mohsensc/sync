@@ -303,9 +303,13 @@ func (d *Daemon) tick(ctx context.Context) {
 			}
 
 			if d.opts.Snapshot != "" && (d.dirty.Load() || t-lastWrite >= snapshotTickMs) {
+				// Cleared before the read, not after: a Touch or OnPeer
+				// landing between Peers() and the clear would be wiped out
+				// here. A redundant write next tick costs nothing; a missed
+				// one is silent staleness until the next tick catches up.
+				d.dirty.Store(false)
 				_ = presence.WriteSnapshot(d.opts.Snapshot, d.presence.Peers(), lastProblem)
 				lastWrite = t
-				d.dirty.Store(false)
 			}
 
 			if t-lastStats >= statsTickMs {
