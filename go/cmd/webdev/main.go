@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"strconv"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -33,16 +34,21 @@ const (
 	// Used only once this process is itself serving :5173 — those are
 	// loopback calls to ourselves, effectively free. Shortening this is
 	// half of closing the --force takeover gap: a forced-out arbiter
-	// notices its own refusal and exits within one tick of this instead
-	// of heartbeatEvery. The other half is the forcer racing to rebind —
-	// see ensureArbiterAfterForce.
+	// notices its own refusal within one tick of this and closes its
+	// :5173 listener immediately (see closeArbiterListener) rather than
+	// waiting for vite to die first — a hung vite ignoring SIGTERM can't
+	// hold the port past this tick. The other half is the forcer racing
+	// to rebind — see ensureArbiterAfterForce.
 	arbiterHeartbeatEvery = 2 * time.Second
 	// Bounds on the forcer's post-takeover rebind race, see
-	// ensureArbiterAfterForce.
+	// ensureArbiterAfterForce. Only needs to comfortably clear
+	// arbiterHeartbeatEvery plus rebind latency — the port frees via
+	// closeArbiterListener, not on however long vite takes to die.
 	forceTakeoverRetryEvery = 100 * time.Millisecond
 	forceTakeoverRetryFor   = 5 * time.Second
 	// A hung vite must not hold the lease out to the full TTL just
-	// because it ignores SIGTERM.
+	// because it ignores SIGTERM. Separate from the --force window above:
+	// closeArbiterListener frees :5173 before this grace even starts.
 	shutdownGrace = 5 * time.Second
 )
 
@@ -55,8 +61,14 @@ func main() {
 	pid := os.Getpid()
 	vitePort := pickPort()
 
-	arbiterAddr, becameArbiter := claimPublicPort(*owner, *worktree, pid, vitePort)
+	// Tracks the *http.Server for our own :5173 bind, if any — set here on
+	// winning at startup, and again from the heartbeat goroutine on
+	// re-election. Read on the lease-lost path so it can be closed
+	// immediately instead of waiting on vite; see closeArbiterListener.
+	var arbiterSrv atomic.Pointer[http.Server]
+	arbiterAddr, becameArbiter, srv := claimPublicPort(*owner, *worktree, pid, vitePort)
 	if becameArbiter {
+		arbiterSrv.Store(srv)
 		log.Printf("webdev: no arbiter on %s, this process is now the arbiter", publicAddr)
 	}
 
@@ -85,7 +97,7 @@ func main() {
 		// it exits (see arbiterHeartbeatEvery), and :5173 sits unbound
 		// until someone rebinds it. Race for it now instead of waiting for
 		// our own next heartbeat tick to notice "arbiter unreachable".
-		go ensureArbiterAfterForce(*owner, *worktree, pid, vitePort)
+		go ensureArbiterAfterForce(*owner, *worktree, pid, vitePort, &arbiterSrv)
 	}
 
 	vite := exec.Command("pnpm", "exec", "vite",
@@ -119,7 +131,7 @@ func main() {
 	if becameArbiter {
 		interval = arbiterHeartbeatEvery
 	}
-	go heartbeat(client, *owner, *worktree, pid, vitePort, interval, heartbeatDone, lostLease)
+	go heartbeat(client, *owner, *worktree, pid, vitePort, interval, heartbeatDone, lostLease, &arbiterSrv)
 
 	viteDone := make(chan error, 1)
 	go func() { viteDone <- vite.Wait() }()
@@ -132,6 +144,12 @@ func main() {
 		exitErr = stopVite(vite, viteDone, shutdownGrace)
 	case holder := <-lostLease:
 		leaseLost = true
+		// Close our own :5173 bind before touching vite at all — if this
+		// process is the arbiter, that's what actually bounds the
+		// takeover window to ~arbiterHeartbeatEvery. Waiting for stopVite
+		// first would tie the window to shutdownGrace against a vite that
+		// might be ignoring SIGTERM entirely.
+		closeArbiterListener(&arbiterSrv)
 		_ = stopVite(vite, viteDone, shutdownGrace)
 		fmt.Fprintf(os.Stderr,
 			"webdev: lease lost to %s (worktree %s, pid %d) — stopping vite rather "+
@@ -166,20 +184,31 @@ func main() {
 // normal path (another webdev already races and won, possibly moments
 // ago), not an error — the loser just proceeds to claim a lease from
 // whoever's listening.
-func claimPublicPort(owner, worktree string, pid, port int) (addr string, becameArbiter bool) {
+func claimPublicPort(owner, worktree string, pid, port int) (addr string, becameArbiter bool, srv *http.Server) {
 	ln, err := net.Listen("tcp", publicAddr)
 	if err != nil {
-		return publicAddr, false
+		return publicAddr, false, nil
 	}
 
 	lock := newArbiterLock(owner, worktree, pid, port)
-	srv := &http.Server{Handler: devproxy.Handler(lock)}
+	srv = &http.Server{Handler: devproxy.Handler(lock)}
 	go func() {
 		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			log.Printf("webdev: arbiter server: %v", err)
 		}
 	}()
-	return publicAddr, true
+	return publicAddr, true, srv
+}
+
+// closeArbiterListener closes this process's own :5173 bind immediately, if
+// it has one — no-op if this process never won the bind. Called on the
+// lease-lost path so the port frees within one arbiterHeartbeatEvery tick
+// regardless of how long vite takes to die, instead of only at process exit
+// after stopVite finishes (see arbiterHeartbeatEvery, forceTakeoverRetryFor).
+func closeArbiterListener(arbiterSrv *atomic.Pointer[http.Server]) {
+	if srv := arbiterSrv.Load(); srv != nil {
+		_ = srv.Close()
+	}
 }
 
 // newArbiterLock builds the Lock a freshly-won arbiter role will serve,
@@ -202,10 +231,11 @@ func newArbiterLock(owner, worktree string, pid, port int) *devproxy.Lock {
 // small. If the process we forced the lease from wasn't the arbiter, every
 // attempt here just fails fast (address already in use) and this exits
 // once the bound retry window elapses — cheap, and harmless either way.
-func ensureArbiterAfterForce(owner, worktree string, pid, port int) {
+func ensureArbiterAfterForce(owner, worktree string, pid, port int, arbiterSrv *atomic.Pointer[http.Server]) {
 	deadline := time.Now().Add(forceTakeoverRetryFor)
 	for time.Now().Before(deadline) {
-		if _, became := claimPublicPort(owner, worktree, pid, port); became {
+		if _, became, srv := claimPublicPort(owner, worktree, pid, port); became {
+			arbiterSrv.Store(srv)
 			log.Printf("webdev: took over arbiter on %s after --force", publicAddr)
 			return
 		}
@@ -254,7 +284,7 @@ func pickPort() int {
 // up but refuses — someone else (or --force) holds the lease now — that's
 // reported on lostLease and this loop stops; main is the one that decides
 // what dying loudly means (kill vite, exit 1).
-func heartbeat(client *devproxy.Client, owner, worktree string, pid, vitePort int, interval time.Duration, done <-chan struct{}, lostLease chan<- devproxy.Holder) {
+func heartbeat(client *devproxy.Client, owner, worktree string, pid, vitePort int, interval time.Duration, done <-chan struct{}, lostLease chan<- devproxy.Holder, arbiterSrv *atomic.Pointer[http.Server]) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -268,7 +298,7 @@ func heartbeat(client *devproxy.Client, owner, worktree string, pid, vitePort in
 					return
 				}
 				log.Printf("webdev: arbiter unreachable (%v), re-electing", err)
-				if reelect(client, owner, worktree, pid, vitePort) {
+				if reelect(client, owner, worktree, pid, vitePort, arbiterSrv) {
 					// We're the arbiter now — watch our own lease at the
 					// fast interval so a future --force takeover is
 					// noticed promptly, same as if we'd won at startup.
@@ -285,8 +315,9 @@ func heartbeat(client *devproxy.Client, owner, worktree string, pid, vitePort in
 // died with the old process, and a bare fresh one would be an empty lock a
 // third process could win); everyone else's next heartbeat just claims
 // from the new arbiter like any other renewal.
-func reelect(client *devproxy.Client, owner, worktree string, pid, vitePort int) (becameArbiter bool) {
-	if _, became := claimPublicPort(owner, worktree, pid, vitePort); became {
+func reelect(client *devproxy.Client, owner, worktree string, pid, vitePort int, arbiterSrv *atomic.Pointer[http.Server]) (becameArbiter bool) {
+	if _, became, srv := claimPublicPort(owner, worktree, pid, vitePort); became {
+		arbiterSrv.Store(srv)
 		log.Printf("webdev: re-elected as arbiter on %s", publicAddr)
 		becameArbiter = true
 	}

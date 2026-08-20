@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -64,7 +65,8 @@ func TestHeartbeatDetectsForcedEvictionPromptly(t *testing.T) {
 	done := make(chan struct{})
 	lost := make(chan devproxy.Holder, 1)
 	fastInterval := 30 * time.Millisecond
-	go heartbeat(client, "victim", "featA", 111, 4001, fastInterval, done, lost)
+	var arbiterSrv atomic.Pointer[http.Server]
+	go heartbeat(client, "victim", "featA", 111, 4001, fastInterval, done, lost, &arbiterSrv)
 	defer close(done)
 
 	time.Sleep(fastInterval / 2)
@@ -127,4 +129,46 @@ func TestStopViteReturnsCleanlyOnSigterm(t *testing.T) {
 	if elapsed >= grace {
 		t.Fatalf("stopVite waited %s, a SIGTERM-honoring child should exit well before grace (%s)", elapsed, grace)
 	}
+}
+
+// TestCloseArbiterListenerFreesPortBeforeViteStops is the regression test
+// for the lease-lost gap the prior two fix-ups left open: closing the
+// arbiter's own :5173 bind must not wait on vite at all, so a hung child
+// ignoring SIGTERM can't hold the port out to shutdownGrace (or worse).
+func TestCloseArbiterListenerFreesPortBeforeViteStops(t *testing.T) {
+	lock := devproxy.NewLock(90 * time.Second)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := &http.Server{Handler: devproxy.Handler(lock)}
+	go srv.Serve(ln)
+
+	var arbiterSrv atomic.Pointer[http.Server]
+	arbiterSrv.Store(srv)
+
+	// Stand-in for a hung vite: ignores SIGTERM, only dies to SIGKILL.
+	vite := exec.Command("sh", "-c", "trap '' TERM; sleep 30")
+	if err := vite.Start(); err != nil {
+		t.Fatalf("start stub: %v", err)
+	}
+	viteDone := make(chan error, 1)
+	go func() { viteDone <- vite.Wait() }()
+
+	addr := ln.Addr().String()
+	start := time.Now()
+	closeArbiterListener(&arbiterSrv)
+	elapsed := time.Since(start)
+	if elapsed > 200*time.Millisecond {
+		t.Fatalf("closeArbiterListener took %s, want near-immediate", elapsed)
+	}
+	if _, err := net.DialTimeout("tcp", addr, 100*time.Millisecond); err == nil {
+		t.Fatal("port still accepting connections after closeArbiterListener")
+	}
+
+	// stopVite still has to grind through its own grace against the hung
+	// child — proving the port freed independent of, and well before,
+	// however long that takes.
+	const grace = 300 * time.Millisecond
+	_ = stopVite(vite, viteDone, grace)
 }
