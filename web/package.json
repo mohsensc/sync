@@ -6,7 +6,7 @@
     "verify-toolchain": "bash scripts/verify-toolchain.sh",
     "test": "bash scripts/verify-toolchain.sh && vitest run",
     "typecheck": "bash scripts/verify-toolchain.sh && tsc --noEmit",
-    "dev": "vite"
+    "dev": "go -C ../go run ./cmd/webdev --worktree \"$PWD\""
   },
   "dependencies": { "three": "^0.170.0" },
   "devDependencies": {
