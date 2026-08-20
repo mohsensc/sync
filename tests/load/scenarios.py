@@ -930,6 +930,8 @@ class DeafSubscriber:
 
 
 async def slow_subscriber(busy_agents: int, seconds: float) -> Result:
+    import threading
+
     r = Result("slow-subscriber")
     relay = RelayProc()
     relay.start()
@@ -964,12 +966,21 @@ async def slow_subscriber(busy_agents: int, seconds: float) -> Result:
         rss_track = [rss_kb(relay.pid)]
         stop_at = time.perf_counter() + seconds
 
-        async def sample_rss() -> None:
-            while time.perf_counter() < stop_at:
-                rss_track.append(rss_kb(relay.pid))
-                await asyncio.sleep(0.25)
+        # A real thread, not an asyncio task: rss_kb() blocks on a `ps`
+        # subprocess, and a task that parks the event loop every 250ms would
+        # sit on top of exactly the claim latency this arm is measuring —
+        # contaminating this arm's p99 against a baseline that has no
+        # sampler at all. flood() (:719) already samples this way for the
+        # same reason.
+        stop_sampling = threading.Event()
 
-        sampler = asyncio.create_task(sample_rss())
+        def sample_rss() -> None:
+            while not stop_sampling.is_set():
+                rss_track.append(rss_kb(relay.pid))
+                time.sleep(0.25)
+
+        sampler = threading.Thread(target=sample_rss, daemon=True)
+        sampler.start()
         try:
             deaf_ops = sum(await asyncio.wait_for(asyncio.gather(
                 *(churn(c, i, lat_deaf, stop_at)
@@ -978,9 +989,8 @@ async def slow_subscriber(busy_agents: int, seconds: float) -> Result:
             deaf_ops = 0
             r.bad("INGEST STALLED: a subscriber that never reads stopped the "
                   "other agents from making progress")
-        sampler.cancel()
-        with contextlib.suppress(BaseException):
-            await sampler
+        stop_sampling.set()
+        sampler.join(timeout=2)
 
         rss_peak = max(rss_track)
         growth = rss_peak - rss_base
