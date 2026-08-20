@@ -887,7 +887,7 @@ func (r *Relay) onEvent(room string, conn Conn, msg map[string]any) Frame {
 			frame["reserved_for_ms"] = int(ReservationS * 1000)
 		}
 		if held != nil {
-			lf := leaseFrame(held, now)
+			lf := leaseFrame(*held, now)
 			lf["type"] = "lease"
 			lf["state"] = "held"
 			conn.Send(EncodeFrame(lf))
@@ -945,11 +945,11 @@ func regionFromPayload(d Frame) Region {
 }
 
 func (r *Relay) onContend(room string, conn Conn, region Region) {
-	held := r.registry.Contend(room, region, conn.Agent(), conn.Human(), r.priorityOf(conn), nil, conn)
+	held, _ := r.registry.Contend(room, region, conn.Agent(), conn.Human(), r.priorityOf(conn), nil, conn)
 	if held == nil {
 		return
 	}
-	f := leaseFrame(held, r.clock.Now())
+	f := leaseFrame(*held, r.clock.Now())
 	f["type"] = "lease"
 	f["state"] = "held"
 	conn.Send(EncodeFrame(f))
@@ -962,7 +962,7 @@ func (r *Relay) onClaim(room string, conn Conn, msg map[string]any, region Regio
 
 	if result.Ok {
 		granted := Frame{"type": "claim_result", "granted": true}
-		for k, v := range leaseFrame(result.Claim, now) {
+		for k, v := range leaseFrame(*result.Claim, now) {
 			granted[k] = v
 		}
 		// The lease is granted either way. Rung 4 is not contention — the
@@ -1026,7 +1026,7 @@ func (r *Relay) onClaim(room string, conn Conn, msg map[string]any, region Regio
 	reply["expires_in_ms"] = msRemaining(held.ExpiresAt, now)
 	reply["expires_at"] = held.ExpiresAt
 
-	winner := held.HandoverWinner()
+	winner := held.Winner
 	if held.HandoverAt != nil && winner != nil {
 		handoverMs := clampedHandoverMs(*held.HandoverAt, held.ExpiresAt, now)
 		reply["handover_in_ms"] = handoverMs
@@ -1034,7 +1034,7 @@ func (r *Relay) onClaim(room string, conn Conn, msg map[string]any, region Regio
 		reply["handover_to"] = winner.Agent
 		reply["handover_to_human"] = winner.Human
 		reply["handover_to_priority"] = PriorityName(winner.Priority)
-		reply["waiting"] = len(held.Contenders)
+		reply["waiting"] = held.Waiting
 		if winner.Agent == conn.Agent() {
 			reply["retry_in_ms"] = handoverMs
 			reply["reserved_for_ms"] = int(ReservationS * 1000)

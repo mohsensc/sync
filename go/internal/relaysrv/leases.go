@@ -54,11 +54,12 @@ type Reservation struct {
 	FromHuman string
 }
 
-// AcquireResult mirrors python's leases.AcquireResult.
+// AcquireResult mirrors python's leases.AcquireResult. Claim and HeldBy are
+// views, not the live claims: see claimView.
 type AcquireResult struct {
 	Ok         bool
-	Claim      *Claim
-	HeldBy     *Claim
+	Claim      *claimView
+	HeldBy     *claimView
 	Decision   waitDieDecision
 	ReservedBy *Reservation
 	HandoverAt *float64
@@ -345,7 +346,7 @@ func (r *Registry) pruneExpired(room string, s *shard, now float64, actor Conn) 
 		if c.ExpiresAt > now {
 			continue
 		}
-		winner := c.HandoverWinner()
+		winner := c.handoverWinner()
 		delete(s.claims, key)
 		r.agentClaimRemoved(c.Agent, now)
 		reservation := r.handOver(s, c, now)
@@ -368,7 +369,7 @@ func (r *Registry) pruneExpired(room string, s *shard, now float64, actor Conn) 
 // bookkeeping that stops a holder dodging its deadline by releasing and
 // re-taking a region a second before it fires.
 func (r *Registry) handOver(s *shard, c *Claim, now float64) *Reservation {
-	winner := c.HandoverWinner()
+	winner := c.handoverWinner()
 	if winner == nil {
 		return nil
 	}
@@ -508,13 +509,13 @@ func contendLocked(held *Claim, agent, human string, tier int, decision waitDieD
 
 // -- public, room-scoped operations --------------------------------------
 
-func (r *Registry) HolderOf(room string, region Region, actor Conn) *Claim {
+func (r *Registry) HolderOf(room string, region Region, actor Conn) *claimView {
 	s := r.shardFor(room, region.Path)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := r.clock.Now()
 	r.pruneExpired(room, s, now, actor)
-	return holderOfLocked(s, region)
+	return viewPtr(holderOfLocked(s, region))
 }
 
 func (r *Registry) ReservationFor(room string, region Region, actor Conn) *Reservation {
@@ -529,15 +530,15 @@ func (r *Registry) ReservationFor(room string, region Region, actor Conn) *Reser
 // ActiveClaims is every live claim in a room. Only called at join
 // (snapshot) and in tests: it walks every shard, which is fine off the hot
 // path but would not be if it ran per claim.
-func (r *Registry) ActiveClaims(room string, actor Conn) []*Claim {
+func (r *Registry) ActiveClaims(room string, actor Conn) []claimView {
 	rs := r.roomOf(room)
 	now := r.clock.Now()
-	var out []*Claim
+	var out []claimView
 	for _, s := range rs.shards {
 		s.mu.Lock()
 		r.pruneExpired(room, s, now, actor)
 		for _, c := range s.claims {
-			out = append(out, c)
+			out = append(out, viewOf(c))
 		}
 		s.mu.Unlock()
 	}
@@ -580,7 +581,12 @@ func (r *Registry) SweepAll() {
 
 // Contend registers an ask for a region somebody else holds, without
 // taking it. Mirrors leases.py's contend.
-func (r *Registry) Contend(room string, scope Region, agent, human string, tier int, requesterAcquiredAt *float64, actor Conn) *Claim {
+//
+// The wait-die decision comes back with the view because it is resolved
+// here, under the lock, against the same holder contendLocked then caps —
+// the caller re-resolving it off the lock (negotiation.Open used to) reads
+// a claim that may already have moved on.
+func (r *Registry) Contend(room string, scope Region, agent, human string, tier int, requesterAcquiredAt *float64, actor Conn) (*claimView, waitDieDecision) {
 	s := r.shardFor(room, scope.Path)
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -589,7 +595,7 @@ func (r *Registry) Contend(room string, scope Region, agent, human string, tier 
 
 	held := holderOfLocked(s, scope)
 	if held == nil || held.Agent == agent {
-		return nil
+		return nil, ""
 	}
 	before := snapshotOf(held)
 	age := requesterAcquiredAt
@@ -602,7 +608,7 @@ func (r *Registry) Contend(room string, scope Region, agent, human string, tier 
 	decision := resolveWaitDie(agent, ageVal, held, tier)
 	contendLocked(held, agent, human, tier, decision, now)
 	r.emitChange(room, held, before, now, actor)
-	return held
+	return viewPtr(held), decision
 }
 
 // Acquire is the whole decision tree: grant, renew, refuse-with-wait,
@@ -631,7 +637,7 @@ func (r *Registry) Acquire(room, human, agent string, scope Region, intent strin
 		before := snapshotOf(held)
 		contendLocked(held, agent, human, tier, decision, now)
 		r.emitChange(room, held, before, now, actor)
-		ha := held.HandoverAt
+		view := viewPtr(held)
 		// wait and abort are peers in the outcome vocabulary, not one
 		// outcome refining the other — a losing requester is refused
 		// either way, but only wait-die's abort branch is "abort".
@@ -640,7 +646,7 @@ func (r *Registry) Acquire(room, human, agent string, scope Region, intent strin
 		} else {
 			r.metrics.Lease(metrics.OutcomeRefused)
 		}
-		return AcquireResult{Ok: false, HeldBy: held, Decision: decision, HandoverAt: ha}
+		return AcquireResult{Ok: false, HeldBy: view, Decision: decision, HandoverAt: view.HandoverAt}
 	}
 
 	if held != nil {
@@ -648,7 +654,7 @@ func (r *Registry) Acquire(room, human, agent string, scope Region, intent strin
 		held.ExpiresAt = renewTo(held, now)
 		r.emitChange(room, held, before, now, actor)
 		r.metrics.Lease(metrics.OutcomeGranted)
-		return AcquireResult{Ok: true, Claim: held}
+		return AcquireResult{Ok: true, Claim: viewPtr(held)}
 	}
 
 	reserved := reservationForLocked(s, scope, now)
@@ -668,7 +674,7 @@ func (r *Registry) Acquire(room, human, agent string, scope Region, intent strin
 	r.agentClaimAdded(agent, claim.AcquiredAt, tier)
 	r.emitNew(room, claim, now, actor)
 	r.metrics.Lease(metrics.OutcomeGranted)
-	return AcquireResult{Ok: true, Claim: claim, Inherited: inherited}
+	return AcquireResult{Ok: true, Claim: viewPtr(claim), Inherited: inherited}
 }
 
 func (r *Registry) Heartbeat(room, agent string, scope Region, actor Conn) bool {
@@ -698,7 +704,7 @@ func (r *Registry) Release(room, agent string, scope Region, actor Conn) {
 	if !ok || c.Agent != agent {
 		return
 	}
-	winner := c.HandoverWinner()
+	winner := c.handoverWinner()
 	delete(s.claims, key)
 	r.agentClaimRemovedByRelease(c.Agent, now)
 	reservation := r.handOver(s, c, now)
@@ -718,7 +724,7 @@ func (r *Registry) ReleaseAll(room, agent string, actor Conn) {
 			if c.Agent != agent {
 				continue
 			}
-			winner := c.HandoverWinner()
+			winner := c.handoverWinner()
 			delete(s.claims, key)
 			r.agentClaimRemoved(c.Agent, now)
 			reservation := r.handOver(s, c, now)
@@ -752,7 +758,7 @@ func (r *Registry) ReleaseEverywhere(agent string, actor Conn) {
 				if c.Agent != agent {
 					continue
 				}
-				winner := c.HandoverWinner()
+				winner := c.handoverWinner()
 				delete(s.claims, key)
 				r.agentClaimRemoved(c.Agent, now)
 				reservation := r.handOver(s, c, now)
@@ -777,7 +783,7 @@ type claimSnapshot struct {
 func snapshotOf(c *Claim) claimSnapshot {
 	return claimSnapshot{
 		room: c.Room, human: c.Human, intent: c.Intent, expiresAt: c.ExpiresAt,
-		handoverAt: c.HandoverAt, winner: c.HandoverWinner(),
+		handoverAt: c.HandoverAt, winner: c.handoverWinner(),
 	}
 }
 
@@ -819,7 +825,7 @@ func (r *Registry) emitChange(room string, c *Claim, before claimSnapshot, now f
 	if snapshotsEqual(before, after) {
 		return
 	}
-	frame := leaseFrame(c, now)
+	frame := leaseFrame(viewOf(c), now)
 	frame["type"] = "lease"
 	frame["state"] = "held"
 	if sameShared(before, after) {
@@ -830,7 +836,7 @@ func (r *Registry) emitChange(room string, c *Claim, before claimSnapshot, now f
 }
 
 func (r *Registry) emitNew(room string, c *Claim, now float64, actor Conn) {
-	frame := leaseFrame(c, now)
+	frame := leaseFrame(viewOf(c), now)
 	frame["type"] = "lease"
 	frame["state"] = "held"
 	r.pub.Publish(room, frame, actor)
