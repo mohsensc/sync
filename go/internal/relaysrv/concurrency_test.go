@@ -146,3 +146,106 @@ func TestReleaseEverywhereSeesRoomsCreatedDuringItsOwnSweep(t *testing.T) {
 		}
 	}
 }
+
+// lockedConn is a Conn safe to drive from several goroutines at once. The
+// recorder in golden_test.go appends to a plain slice, which would race on
+// its own and drown out whatever the test is actually about.
+type lockedConn struct {
+	mu                 sync.Mutex
+	agent, human, room string
+	frames             int
+}
+
+func (c *lockedConn) Agent() string { c.mu.Lock(); defer c.mu.Unlock(); return c.agent }
+func (c *lockedConn) SetAgent(a string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.agent = a
+}
+func (c *lockedConn) Human() string { c.mu.Lock(); defer c.mu.Unlock(); return c.human }
+func (c *lockedConn) SetHuman(h string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.human = h
+}
+func (c *lockedConn) Room() string { c.mu.Lock(); defer c.mu.Unlock(); return c.room }
+func (c *lockedConn) SetRoom(rm string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.room = rm
+}
+func (c *lockedConn) Principal() string { return "" }
+func (c *lockedConn) Token() string     { return "" }
+func (c *lockedConn) Unattended() bool  { return false }
+func (c *lockedConn) Send(b []byte) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.frames++
+}
+
+// TestConcurrentClaimAndContendOnOneRegion is the regression test for issue
+// #86: the registry used to hand live *Claim pointers back past the shard
+// lock, and the connection goroutine then read and wrote them. One agent
+// re-claiming a region it already holds runs the renewal branch, whose
+// reply goes through leaseFrame — which called HandoverWinner (a write to
+// c.winner/c.winnerStale) and len(c.Contenders) off the lock. Several other
+// agents contending the same region run NoteContender on the same claim
+// under the lock. Before the claimView fix that pair is a concurrent map
+// read/write: a fatal runtime error, not a panic session()'s recover can
+// catch, so it takes the whole relay down rather than one session.
+//
+// Everything here goes through the public Relay API (Join/Handle) on
+// RealClock, one goroutine per connection, the way real sessions arrive.
+// Nothing is asserted about the frames — -race is the assertion.
+func TestConcurrentClaimAndContendOnOneRegion(t *testing.T) {
+	rel := NewRelay(RealClock{}, InertRoster(), metrics.New())
+	const room = "r1"
+	const path = "src/pay.py"
+	region := func() map[string]any { return goldenRegion(path, "") }
+
+	holder := &lockedConn{agent: "holder", human: "sara"}
+	if !rel.Join(room, holder) {
+		t.Fatal("holder join refused")
+	}
+	if got := rel.Handle(holder, map[string]any{"type": "claim", "region": region(), "intent": "pay"}); got["granted"] != true {
+		t.Fatalf("holder's first claim must be granted, got %+v", got)
+	}
+
+	const contenders = 6
+	const opsEach = 300
+	var wg sync.WaitGroup
+
+	// The holder keeps re-claiming what it already holds: Acquire's renewal
+	// branch, so the reply is built by leaseFrame from the live claim.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < opsEach; i++ {
+			rel.Handle(holder, map[string]any{"type": "claim", "region": region(), "intent": "pay"})
+		}
+	}()
+
+	// Distinct agent ids: two connections sharing one id trips the
+	// identity-reclaim path and drops the holder's lease mid-test.
+	for g := 0; g < contenders; g++ {
+		conn := &lockedConn{agent: fmt.Sprintf("contender-%d", g), human: "dev"}
+		if !rel.Join(room, conn) {
+			t.Fatalf("contender %d join refused", g)
+		}
+		wg.Add(1)
+		go func(conn *lockedConn) {
+			defer wg.Done()
+			for i := 0; i < opsEach; i++ {
+				// contend writes the contender map; claim reads the winner
+				// and the waiting count back out on the refused path.
+				rel.Handle(conn, map[string]any{"type": "contend", "region": region()})
+				rel.Handle(conn, map[string]any{"type": "claim", "region": region(), "intent": "also pay"})
+			}
+		}(conn)
+	}
+	wg.Wait()
+
+	if held := rel.registry.HolderOf(room, Region{Path: path}, nil); held == nil || held.Agent != "holder" {
+		t.Fatalf("holder should still hold the region, got %+v", held)
+	}
+}

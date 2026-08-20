@@ -62,16 +62,18 @@ func (n *Negotiator) Open(room, requester string, requesterAcquiredAt float64, s
 	}
 	age := requesterAcquiredAt
 	// Contend re-resolves the holder itself under its own shard lock and
-	// hands it back mutated; used instead of the `held` read above, which
-	// could in principle have gone stale between that unlocked read and
-	// this call (the claim expiring, released concurrently by its owner).
-	held = n.registry.Contend(room, scope, requester, human, tier, &age, actor)
+	// hands back a view of it plus the wait-die decision it actually
+	// applied; used instead of the `held` read above, which could in
+	// principle have gone stale between that unlocked read and this call
+	// (the claim expiring, released concurrently by its owner). The
+	// decision comes from there rather than being recomputed here so the
+	// brief can't disagree with the grace period contendLocked set.
+	held, decision := n.registry.Contend(room, scope, requester, human, tier, &age, actor)
 	if held == nil {
 		return nil
 	}
-	decision := resolveWaitDie(requester, requesterAcquiredAt, held, tier)
 	var handoverTo string
-	if w := held.HandoverWinner(); w != nil {
+	if w := held.Winner; w != nil {
 		handoverTo = w.Agent
 	}
 	return &Brief{
