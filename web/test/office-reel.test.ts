@@ -35,6 +35,65 @@ describe('ReelStore ordering', () => {
     const s = new ReelStore([ev({ id: 'a', ts: 1 }), ev({ id: 'b', ts: 5 })])
     expect(s.visible().map(e => e.id)).toEqual(['b', 'a'])
   })
+
+  it('inserts an out-of-order ts into the middle, not just the front', () => {
+    const s = new ReelStore()
+    s.add(ev({ id: 'a', ts: 100 }))
+    s.add(ev({ id: 'b', ts: 50 }))
+    s.add(ev({ id: 'c', ts: 75 })) // older than a, newer than b — belongs between them
+    expect(s.visible().map(e => e.id)).toEqual(['a', 'c', 'b'])
+  })
+
+  it('an event older than everything lands at the tail', () => {
+    const s = new ReelStore()
+    s.add(ev({ id: 'a', ts: 100 }))
+    s.add(ev({ id: 'b', ts: 200 }))
+    s.add(ev({ id: 'c', ts: 1 }))
+    expect(s.visible().map(e => e.id)).toEqual(['b', 'a', 'c'])
+  })
+
+  it('same-ts inserts keep insertion order (stable, newest-batch-last)', () => {
+    const s = new ReelStore()
+    s.add(ev({ id: 'first', ts: 10 }))
+    s.add(ev({ id: 'second', ts: 10 }))
+    s.add(ev({ id: 'third', ts: 10 }))
+    expect(s.visible().map(e => e.id)).toEqual(['first', 'second', 'third'])
+  })
+})
+
+describe('ReelStore event cap', () => {
+  it('does not grow past MAX_EVENTS', () => {
+    const s = new ReelStore()
+    for (let i = 0; i < 1200; i++) s.add(ev({ id: `e${i}`, ts: i }))
+    expect(s.size).toBe(1000)
+  })
+
+  it('drops the oldest events once past the cap, keeping the newest', () => {
+    const s = new ReelStore()
+    for (let i = 0; i < 1200; i++) s.add(ev({ id: `e${i}`, ts: i }))
+    const ids = s.all().map(e => e.id)
+    expect(ids[0]).toBe('e1199') // newest survives
+    expect(ids[ids.length - 1]).toBe('e200') // events 0..199 aged out
+    expect(ids).not.toContain('e0')
+  })
+
+  it('a very old out-of-order event past a full store is dropped, not kept', () => {
+    const s = new ReelStore()
+    for (let i = 0; i < 1000; i++) s.add(ev({ id: `e${i}`, ts: i + 1000 }))
+    s.add(ev({ id: 'ancient', ts: 1 })) // older than every existing entry
+    expect(s.size).toBe(1000)
+    expect(s.all().map(e => e.id)).not.toContain('ancient')
+  })
+
+  it('drawn subset (page().shown) for the common under-cap path is unchanged', () => {
+    const s = new ReelStore()
+    for (let i = 0; i < 55; i++) s.add(ev({ id: `e${i}`, ts: i }))
+    const { shown } = s.page()
+    expect(shown.length).toBe(40)
+    expect(shown.map(e => e.id)).toEqual(
+      Array.from({ length: 40 }, (_, i) => `e${54 - i}`)
+    )
+  })
 })
 
 describe('ReelStore filtering', () => {
