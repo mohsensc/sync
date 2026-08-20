@@ -2,7 +2,6 @@ package relaysrv
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 )
 
@@ -83,28 +82,44 @@ func pyRepr(s string) string {
 	return b.String()
 }
 
-// ParsePriority reads a tier from a name or a number. Only called against
-// the roster the operator wrote (principals.toml), where a typo should be
-// reported loudly at load time.
+// ParsePriority reads a tier from a name. Only called against the roster
+// the operator wrote (principals.toml), where a typo should be reported
+// loudly at load time.
 //
-// Both error branches name the four valid tiers, matching python's
-// parse_priority word for word and order for order — an operator comparing
-// the Go and Python relays' logs against the same malformed principals.toml
-// should see the same complaint, not have to wonder if they hit two
-// different bugs. The unknown-tier branch also has to match python's
-// quoting, not just its wording — python's f"{value!r}" is single-quoted
-// (pyRepr), where Go's %q would have printed double quotes.
+// Names only, deliberately: a quoted numeral like attended = "3" is not a
+// documented spelling of a tier (see docs/policy-design.md §4 — every
+// example is a name) and used to fall back to strconv.Atoi here, which let
+// the Go relay accept a roster line python's parse_priority rejected as
+// unknown. See ParsePriorityInt for the one place a bare integer is still
+// a tier: an actual unquoted TOML integer, which mirrors python's
+// isinstance(value, int) branch rather than this string one.
+//
+// The error names the four valid tiers, matching python's parse_priority
+// word for word and order for order — an operator comparing the Go and
+// Python relays' logs against the same malformed principals.toml should
+// see the same complaint, not have to wonder if they hit two different
+// bugs. It also has to match python's quoting, not just its wording —
+// python's f"{value!r}" is single-quoted (pyRepr), where Go's %q would
+// have printed double quotes, and it quotes the original value, not the
+// lowered/trimmed name, same as python quoting its own untouched value.
 func ParsePriority(value string) (int, error) {
 	name := strings.ToLower(strings.TrimSpace(value))
 	if v, ok := priorityValues[name]; ok {
 		return v, nil
 	}
-	if n, err := strconv.Atoi(name); err == nil {
-		if n < PriorityMin || n > PriorityMax {
-			return 0, fmt.Errorf("priority %d is out of range; expected %d..%d or one of %s",
-				n, PriorityMin, PriorityMax, strings.Join(priorityOrder, ", "))
-		}
-		return n, nil
-	}
 	return 0, fmt.Errorf("unknown priority tier %s; expected one of %s", pyRepr(value), strings.Join(priorityOrder, ", "))
+}
+
+// ParsePriorityInt reads a tier from a bare integer — an unquoted
+// principals.toml value like `attended = 3`, not a string that merely
+// looks numeric. Mirrors python parse_priority's isinstance(value, int)
+// branch: only an actual integer gets numeral treatment, so callers must
+// reach this from a real TOML int (see principals.go's parsePriorityAny),
+// never by formatting a string first the way this used to work.
+func ParsePriorityInt(n int) (int, error) {
+	if n < PriorityMin || n > PriorityMax {
+		return 0, fmt.Errorf("priority %d is out of range; expected %d..%d or one of %s",
+			n, PriorityMin, PriorityMax, strings.Join(priorityOrder, ", "))
+	}
+	return n, nil
 }
