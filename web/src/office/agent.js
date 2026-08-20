@@ -48,6 +48,7 @@ import { fistbumpMarks, spacingFor as fistbumpSpacingFor, registry as FISTBUMP_C
 // clips/waveoff.js / clips/slap.js headers.
 import { waveoffMarks, spacingFor as waveoffSpacingFor, registry as WAVEOFF_CLIPS } from './clips/waveoff.js'
 import { slapMarks, spacingFor as slapSpacingFor, registry as SLAP_CLIPS } from './clips/slap.js'
+import * as Z from './zones.js'
 
 // Fold the paired-action clips into anim.js's own table, once, at import
 // time — before any agent has crossfaded into anything and cached the clip
@@ -658,6 +659,143 @@ const STAGE_MARKS = {
   slap:       (pa, pb, h) => slapMarks(pa, pb, slapSpacingFor(h)),
 }
 
+// ---------------------------------------------------------------------------
+// Clearance: keep a chain's stage marks off the desk cluster and off
+// bystanders. #65 describes a toOpenFloor() desk-block nudge from "round 4"
+// as already shipped and just missing the live-agent check — it isn't
+// shipped anywhere, no branch, no commit. clearMarks() below is both checks
+// built from scratch: desk cluster AND live agents in the same pass.
+// ---------------------------------------------------------------------------
+
+/** How close a stage mark is allowed to sit to another agent's current spot
+ *  before that agent counts as an obstacle. Rough shoulder room, not a hard
+ *  hitbox — this is a staging nudge, not physics. */
+const AGENT_CLEARANCE = 0.7
+
+/** Radius around each desk slot a stage mark has to clear. ZONES.desks.r
+ *  (4.0) is the zone's LABEL RING — what the floor disc and zoneAt() use —
+ *  not the furniture footprint; treating it as the obstacle would exclude
+ *  most of the floor, not just the desk cluster. The slots (desk-tripo-
+ *  12k.glb x6, see zones.js) are the actual cluster, so each slot is its
+ *  own small obstacle instead. */
+const DESK_CLEARANCE = 0.9
+
+/** clearMarks() gives up nudging after this many pushes and accepts wherever
+ *  it landed. A crowded floor (desk cluster plus a knot of idle agents) is a
+ *  real state the demo can be in, not a bug to chase with an unbounded loop.
+ *  8 left a realistic mid-cluster corner case one push short of fully
+ *  clearing the six-slot desk block; 12 clears it with room to spare and
+ *  this runs once per stage, not per frame, so the extra tries cost nothing
+ *  worth measuring. */
+const MAX_CLEAR_TRIES = 12
+
+/** Margin on top of an obstacle's own radius so a cleared mark stops just
+ *  outside it rather than exactly tangent, which still reads as touching. */
+const CLEAR_MARGIN = 0.15
+
+const _clearMid = new THREE.Vector3()
+const _clearAxis = new THREE.Vector3()
+const _clearPush = new THREE.Vector3()
+
+/** The worst (largest-overlap) obstacle the pair's disc at `mid` is
+ *  currently inside, or null if it's clear of all of them. Picking the
+ *  worst rather than the nearest means each push in clearMarks's loop makes
+ *  real progress instead of ping-ponging between two mild overlaps. */
+function worstOverlap(mid, half, obstacles, margin) {
+  let worst = null
+  for (const o of obstacles) {
+    const need = o.r + half + margin
+    const overlap = need - Math.hypot(mid.x - o.x, mid.z - o.z)
+    if (overlap > 0 && (!worst || overlap > worst.overlap)) worst = { x: o.x, z: o.z, overlap }
+  }
+  return worst
+}
+
+/**
+ * Push a pair's stage marks (as returned by one of STAGE_MARKS's functions)
+ * clear of `obstacles`, displacing the pair as a RIGID UNIT: the midpoint
+ * slides, `marks.spacing` and each mark's facing do not change. Moving one
+ * mark on its own would desync it from the other — every *Marks() helper
+ * (highfiveMarks etc.) derives both spacing and facing from the same
+ * midpoint/axis pair, so this only ever translates that pair, never rotates
+ * or restretches it.
+ *
+ * `obstacles` is a flat list of circles: `{x, z, r}`. Caller decides what's
+ * in it — the desk cluster, other agents, both.
+ *
+ * Mutates and returns `marks`, so callers can chain off STAGE_MARKS[kind]()
+ * directly: `clearMarks(STAGE_MARKS[k](pa, pb, h), obstacles)`.
+ */
+export function clearMarks(marks, obstacles, opts = {}) {
+  // No early return on an empty obstacle list: the BOUNDS clamp below is
+  // part of this fix too (#startChain never clamped before), and marks can
+  // land outside BOUNDS with zero obstacles in play just as easily as with
+  // some.
+  obstacles = obstacles || []
+  const margin = opts.margin ?? CLEAR_MARGIN
+  const maxTries = opts.maxTries ?? MAX_CLEAR_TRIES
+  const half = marks.spacing * 0.5
+
+  _clearAxis.subVectors(marks.b.pos, marks.a.pos)
+  _clearAxis.y = 0
+  // Degenerate spacing shouldn't happen (every *Marks() enforces a floor on
+  // it) but a zero axis here would make the exactly-on-midpoint fallback
+  // below point nowhere in particular rather than merely go unused.
+  if (_clearAxis.lengthSq() < 1e-8) _clearAxis.set(0, 0, 1)
+  _clearAxis.normalize()
+
+  _clearMid.addVectors(marks.a.pos, marks.b.pos).multiplyScalar(0.5)
+
+  // The escape direction is picked ONCE, off whichever obstacle is worst
+  // first, then held fixed for the rest of this call — only the push
+  // DISTANCE is recomputed each try, from whatever's worst now. Two
+  // obstacles facing each other closer than 2x the clearance (the desk
+  // cluster's own aisle is exactly this: two rows of slots close enough
+  // that clearing one lands inside the other) turn "always push away from
+  // the current worst obstacle" into a dead sandwich — clearing one side's
+  // boundary lands squarely inside the other's, so recomputing the
+  // direction aims the very next push squarely back where it came from.
+  // Committing to one heading and walking further along it instead clears
+  // both sides in a handful of steps.
+  let heading = null
+  for (let tries = 0; tries < maxTries; tries++) {
+    const worst = worstOverlap(_clearMid, half, obstacles, margin)
+    if (!worst) break
+    if (!heading) {
+      _clearPush.set(_clearMid.x - worst.x, 0, _clearMid.z - worst.z)
+      // Obstacle sits exactly on the midpoint: no direction is "away" from
+      // it, but the choice still has to be deterministic — same input,
+      // same output, not whichever way float noise happens to lean. Off
+      // to the side of the pair's own line (perpendicular to the a-b
+      // axis) clears the obstacle without pushing either mark through the
+      // other.
+      if (_clearPush.lengthSq() < 1e-8) _clearPush.set(-_clearAxis.z, 0, _clearAxis.x)
+      _clearPush.normalize()
+      heading = _clearPush.clone()
+    }
+    _clearMid.addScaledVector(heading, worst.overlap + 1e-4)
+  }
+
+  // #startChain never clamped its marks, so a stage that lands near a wall
+  // could already put a character outside BOUNDS before this fix — that's
+  // the bug, and clamping the raw midpoint wouldn't fix it: a mark sits
+  // `half` further out than the midpoint along the pair's own axis, so the
+  // midpoint could pass Z.clampToFloor with a mark still past the wall.
+  // Inset the clamp first, THEN run it through Z.clampToFloor, so both
+  // marks land inside BOUNDS whatever the axis. The inset is the mark's
+  // actual per-axis offset (|axis.x|*half, |axis.z|*half), not `half` on
+  // both — a pair squared up along one axis has zero offset on the other
+  // and shouldn't get pulled in off a wall it was never going to touch.
+  const insetX = Math.min(Math.abs(_clearAxis.x) * half, (Z.BOUNDS.maxX - Z.BOUNDS.minX) / 2)
+  const insetZ = Math.min(Math.abs(_clearAxis.z) * half, (Z.BOUNDS.maxZ - Z.BOUNDS.minZ) / 2)
+  const midX = Math.max(Z.BOUNDS.minX + insetX, Math.min(Z.BOUNDS.maxX - insetX, _clearMid.x))
+  const midZ = Math.max(Z.BOUNDS.minZ + insetZ, Math.min(Z.BOUNDS.maxZ - insetZ, _clearMid.z))
+  const [cx, cz] = Z.clampToFloor(midX, midZ)
+  marks.a.pos.set(cx - _clearAxis.x * half, 0, cz - _clearAxis.z * half)
+  marks.b.pos.set(cx + _clearAxis.x * half, 0, cz + _clearAxis.z * half)
+  return marks
+}
+
 /**
  * kind -> (a, b) -> stage list. Each stage is
  *   { kind, clipName: string|null, holdSec: number|null, start(): void }
@@ -1052,12 +1190,34 @@ export class World {
     return this.#startChain(a, b, build(a, b))
   }
 
+  /** Desk cluster plus every OTHER live agent, as circles clearMarks() can
+   *  push stage marks off. Built fresh at each call site — a bystander who
+   *  walked up (or wandered off) since the chain started is picked up next
+   *  time this runs, not baked in at #startChain and stale by #advanceChain. */
+  #clearanceObstacles(a, b) {
+    const obstacles = Z.ZONES.desks.slots.map(([x, z]) => ({ x, z, r: DESK_CLEARANCE }))
+    for (const other of this.agents) {
+      if (other === a || other === b) continue
+      obstacles.push({ x: other.pos.x, z: other.pos.z, r: AGENT_CLEARANCE })
+    }
+    return obstacles
+  }
+
   #startChain(a, b, stages) {
     const [stage, ...rest] = stages
     const height = (a.height + b.height) / 2
-    const marks = STAGE_MARKS[stage.kind](
-      new THREE.Vector3(a.pos.x, 0, a.pos.z),
-      new THREE.Vector3(b.pos.x, 0, b.pos.z), height)
+    // Anchor is the pair's geometry at the moment the chain opens — every
+    // *Marks() helper only ever reads aPos/bPos to derive a midpoint and
+    // axis, so caching these two vectors is enough. #advanceChain reuses
+    // them for every later stage instead of re-reading e.a.pos/e.b.pos,
+    // which is what let position error compound stage over stage (#78).
+    const anchor = {
+      a: new THREE.Vector3(a.pos.x, 0, a.pos.z),
+      b: new THREE.Vector3(b.pos.x, 0, b.pos.z),
+    }
+    const marks = clearMarks(
+      STAGE_MARKS[stage.kind](anchor.a, anchor.b, height),
+      this.#clearanceObstacles(a, b))
     const ax = marks.a.pos.x, az = marks.a.pos.z
     const bx = marks.b.pos.x, bz = marks.b.pos.z
 
@@ -1069,7 +1229,7 @@ export class World {
     const e = {
       a, b, kind: stage.kind, phase: 'approach', t: 0,
       marks: { a: [ax, az], b: [bx, bz] },
-      isChain: true, stage, chain: rest,
+      isChain: true, stage, chain: rest, anchor,
     }
     this.encounters.push(e)
     return e
@@ -1085,9 +1245,14 @@ export class World {
     e.kind = stage.kind
     e.chain = rest
     const height = (e.a.height + e.b.height) / 2
-    const marks = STAGE_MARKS[stage.kind](
-      new THREE.Vector3(e.a.pos.x, 0, e.a.pos.z),
-      new THREE.Vector3(e.b.pos.x, 0, e.b.pos.z), height)
+    // Marks come from the anchor captured once at #startChain, not the
+    // pair's live post-settle positions — that's what kept small per-stage
+    // position error from compounding across the chain (#78). Clearance
+    // still runs fresh per stage: a bystander can walk into the spot
+    // mid-chain, and that's a per-stage concern, not part of the anchor.
+    const marks = clearMarks(
+      STAGE_MARKS[stage.kind](e.anchor.a, e.anchor.b, height),
+      this.#clearanceObstacles(e.a, e.b))
     e.marks = { a: [marks.a.pos.x, marks.a.pos.z], b: [marks.b.pos.x, marks.b.pos.z] }
     e.from = { a: [e.a.pos.x, e.a.pos.z], b: [e.b.pos.x, e.b.pos.z] }
     e.phase = 'settle'
@@ -1098,7 +1263,13 @@ export class World {
     const { a, b } = e
     e.t += dt
     if (e.phase === 'approach') {
-      if (e.t > 14) return this.#end(e)                 // never hang forever
+      if (e.t > 14) {                                    // never hang forever
+        // Silent on the happy path elsewhere — but a pair stuck here never
+        // reached their marks, and that looks identical to a clean replay
+        // once #end clears busy. Say so.
+        console.warn(`replay approach timeout: ${e.a.name} + ${e.b.name} (${e.kind})`)
+        return this.#end(e)
+      }
       if (!a.moving && !b.moving && !a._turn && !b._turn && !a.seated && !b.seated) {
         // Arrival has a tolerance, so each of them can stop up to 10cm short.
         // Two of those and the pair stands 20cm too far apart, which is enough

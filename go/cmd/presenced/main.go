@@ -154,10 +154,12 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if _, err := daemon.New(ctx, opts); err != nil {
+	d, err := daemon.New(ctx, opts)
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "presenced: failed to start:", err)
 		os.Exit(1)
 	}
+	defer d.Close()
 
 	<-ctx.Done()
 }
@@ -166,10 +168,15 @@ func main() {
 // in the runtime dir.
 //
 // Two daemons sharing an XDG_RUNTIME_DIR — the normal way to run one per
-// repo — kept their sockets apart, because a taken unix socket fails loudly
-// on bind, and then silently shared one journal, one snapshot and one policy
-// cache. 1,200 decisions from each landed as 2,400 interleaved lines in one
-// file, past the trim.
+// repo — need their sockets kept apart. hooksock.Start probes the path
+// before binding and takes a flock on a sidecar lockfile around that probe,
+// so a second Start against the same path can't unlink a live one out from
+// under it (see #88); that part is covered at the socket layer. What's left
+// is everything derived from the socket path, which used to fall back to
+// one fixed filename regardless of which daemon it belonged to and
+// silently shared one journal, one snapshot and one policy cache. 1,200
+// decisions from each landed as 2,400 interleaved lines in one file, past
+// the trim.
 //
 // The socket is the knob an operator already turns to run a second daemon,
 // so deriving the rest from it needs no new derivation and no new agreement

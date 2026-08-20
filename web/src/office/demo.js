@@ -137,7 +137,7 @@ export function runDemo(ctx) {
     const park = [[-7.7, -3.4], [-7.7, -2.2], [-7.7, -1.0], [7.5, -0.4], [7.5, 1.4]]
     agents.forEach((a, i) => { a.pos.x = park[i][0]; a.pos.z = park[i][1]; a.yaw = Math.PI / 2 })
     focus([0.4, -0.5], 1.0, 0.75)
-    await wait(700, tok)
+    await race(wait(700, tok), tok)
 
     // ---------------------------------------------------------------- 1
     // Rung 0: two agents, same file, same desk. Nothing interrupts.
@@ -156,7 +156,7 @@ export function runDemo(ctx) {
       a2.goTo(s2.pos[0] + 0.10, s2.pos[1] + 0.28, { yaw: s2.yaw, label: 'desk 1' }),
     ]), tok)
     a1.act('reading'); a2.act('reading')
-    await wait(3600, tok)
+    await race(wait(3600, tok), tok)
 
     // ---------------------------------------------------------------- 2
     say('A third agent touches auth, so it goes to the vault. That work is alone by design.')
@@ -168,7 +168,7 @@ export function runDemo(ctx) {
     a3.setState('working')
     await race(a3.goTo(sv.pos[0], sv.pos[1] + 0.5, { yaw: sv.yaw, label: 'vault' }), tok)
     a3.act('reading')
-    await wait(2600, tok)
+    await race(wait(2600, tok), tok)
 
     // ---------------------------------------------------------------- 3
     // Rung 3: same symbol. The second one gets blocked.
@@ -187,7 +187,7 @@ export function runDemo(ctx) {
 
     // a4 goes straight to the seat. a5 sets off a beat later and runs into it.
     const arrive4 = race(a4.goTo(p4[0], p4[1], { yaw: seat[2], label: 'desk 3' }), tok)
-    await wait(900, tok)
+    await race(wait(900, tok), tok)
     const arrive5 = race(a5.goTo(p5[0], p5[1], { yaw: Math.PI, label: 'desk 3' }), tok)
     await race(Promise.all([arrive4, arrive5]), tok)
 
@@ -203,7 +203,7 @@ export function runDemo(ctx) {
     ]), tok)
     a5.act('idle')
     a4.act('idle')
-    await wait(4000, tok)
+    await race(wait(4000, tok), tok)
 
     // ---------------------------------------------------------------- 4
     say('They split it. One keeps the symbol, the other takes the caller and moves.')
@@ -220,7 +220,7 @@ export function runDemo(ctx) {
     const s5 = Z.claimSlot('desks', a5.id)
     await race(a5.goTo(s5.pos[0], s5.pos[1], { yaw: s5.yaw, label: 'another desk' }), tok)
     a5.act('reading')
-    await wait(1500, tok)
+    await race(wait(1500, tok), tok)
 
     // ---------------------------------------------------------------- 5
     say('A long job starts. The tortoise carries it across the floor until it finishes.')
@@ -236,13 +236,13 @@ export function runDemo(ctx) {
     tortoise.rotation.y = Math.PI / 2
     plod = { from: [1.4, 6.15], to: [6.9, 6.15], dur: 8.2, t: 0 }
     tortoise.position.set(1.4, 0, 6.15)
-    await wait(8600, tok)
+    await race(wait(8600, tok), tok)
 
     say('That is the whole loop: co-locate when it is safe, block when it is not, then resolve.')
     zoneUI.highlight(null)
     focus([0.4, -0.5], 1.0, 0.75)
     agents.forEach(a => a.say(''))
-    await wait(2500, tok)
+    await race(wait(2500, tok), tok)
     caption('')
     return 'done'
   }
@@ -260,6 +260,12 @@ export function runDemo(ctx) {
       lock.visible = false
       plod = null
       scene.remove(lock)
+      // Nothing here is shared past this runDemo() call, so it's all safe
+      // to dispose: geometry, materials, and the sprite's canvas texture.
+      lockRing.geometry.dispose()
+      lockRing.material.dispose()
+      lockSprite.material.map.dispose()
+      lockSprite.material.dispose()
     },
   }
 }

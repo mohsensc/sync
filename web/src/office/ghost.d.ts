@@ -41,6 +41,13 @@ export interface GhostAuthorsHandle {
   /** Per-frame step (fade + sway), driven by office.html's one shared
    *  frame loop — throttled internally, safe to call every frame. */
   tick(dt: number): void
+  /** Disposes one agent's ghost/plate state (figure clone + materials,
+   *  nameplate CanvasTexture) and drops it from the internal maps. Call
+   *  from despawnLive — poll() alone only visits ids still in
+   *  world.agents, so a despawned agent would otherwise never be
+   *  revisited. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  forget(agent: any): void
   dispose(): void
 }
 

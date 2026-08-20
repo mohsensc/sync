@@ -223,6 +223,124 @@ func TestDecideSocket(t *testing.T) {
 	}
 }
 
+// TestCloseWaitsForJournalDrain is #144: main.go used to return the moment
+// ctx was cancelled, racing the goroutine that stops the sockets and the
+// journal — so PR #124's journal stop-drain (#115) never actually ran on
+// the production shutdown path, only in journal's own test, which builds a
+// Journal by hand. Close is what main.go now blocks on instead, so this
+// drives the daemon exactly the way main.go does — cancel ctx, then call
+// Close — and checks the records queued right before shutdown are still on
+// disk after Close returns, not just eventually.
+func TestCloseWaitsForJournalDrain(t *testing.T) {
+	// onRequest only ever queues a record for rung > 0 (journal.Record's
+	// "rung 0 is every clean edit" rule) — so a decision that actually
+	// lands in the journal needs a real conflict, not just an ambient
+	// answer. A held lease is what gets rung 3, and the only way to seed
+	// one here is the same fake relay's leases-snapshot the end-to-end
+	// tests use.
+	fr := &fakeRelay{joined: make(chan wire.Join, 4), leasePath: "src/journaled.py"}
+	srv := httptest.NewServer(http.HandlerFunc(fr.handler))
+	defer srv.Close()
+
+	sock := filepath.Join(t.TempDir(), "s")
+	journalPath := filepath.Join(t.TempDir(), "journal.jsonl")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	d, err := New(ctx, Options{
+		Sock:     sock,
+		Journal:  journalPath,
+		RelayURL: "ws://" + srv.Listener.Addr().String() + "/",
+		Room:     "test-room",
+		Agent:    "go-daemon-test",
+		Human:    "mohsen",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	select {
+	case <-fr.joined:
+	case <-time.After(5 * time.Second):
+		t.Fatal("daemon never joined the room")
+	}
+
+	const n = 25
+	deadline := time.Now().Add(5 * time.Second)
+	sent := 0
+	for sent < n {
+		resp := decideOverSocket(t, sock,
+			`{"verb":"edit","path":"src/journaled.py","agent":"sess1","want":"decision"}`)
+		if resp["rung"] == float64(3) {
+			sent++
+			continue
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("lease from the join never showed up in decisions; last response: %+v", resp)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// No sleep here on purpose: onRequest queues the journal record
+	// synchronously on the decide path (see daemon.go's onRequest), but the
+	// journal's own goroutine writes it asynchronously — cancelling right
+	// away is what forces Close to actually wait, rather than happening to
+	// find nothing left to drain.
+	cancel()
+	d.Close()
+
+	f, err := os.Open(journalPath)
+	if err != nil {
+		t.Fatalf("journal never written: %v", err)
+	}
+	defer f.Close()
+	var got int
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		var r struct {
+			Path string `json:"path"`
+		}
+		if err := json.Unmarshal(sc.Bytes(), &r); err != nil {
+			t.Fatalf("torn or invalid journal line: %q: %v", sc.Text(), err)
+		}
+		got++
+	}
+	if got != n {
+		t.Fatalf("Close returned with %d of %d records drained to disk", got, n)
+	}
+}
+
+// TestCloseIsIdempotent is the double-Stop guard: main.go's own goroutine
+// (ctx.Done) and its deferred Close both funnel through shutdown, and
+// calling Close a second time — directly, the way a test or a caller not
+// going through ctx might — must not panic on a second Stop() or block
+// forever on a channel already closed.
+func TestCloseIsIdempotent(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "s")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	d, err := New(ctx, Options{Sock: sock})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		d.Close()
+		d.Close()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("double Close hung")
+	}
+}
+
 func decideOverSocket(t *testing.T, sock, line string) map[string]any {
 	t.Helper()
 	conn, err := net.Dial("unix", sock)
@@ -433,6 +551,101 @@ func TestOnLineRecordsRegionKeyShape(t *testing.T) {
 			t.Fatalf("ap_region_keys_total{shape=\"absolute\"} never reached 1")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestTickWritesSnapshot covers the tick loop's write path, which nothing
+// else here touches — it does not exercise the Store(false)-before-Peers()
+// ordering fix itself (both orderings converge on the same file within one
+// snapshotTickMs rewrite, so no black-box test can discriminate them); it
+// just proves a Touch reaches the snapshot file at all.
+func TestTickWritesSnapshot(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "s")
+	if p := sock + ".decide"; len(p) > 100 {
+		t.Fatalf("socket path too long for AF_UNIX: %q (%d bytes)", p, len(p))
+	}
+	snap := filepath.Join(t.TempDir(), "snapshot")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	d, err := New(ctx, Options{Sock: sock, Snapshot: snap})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	d.onLine([]byte(`{"verb":"edit","path":"src/auth.py","agent":"sess1","human":"mohsen"}`))
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		data, err := os.ReadFile(snap)
+		if err == nil && bytes.Contains(data, []byte(`"human":"mohsen"`)) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("snapshot never picked up the touch; last read: %q, err: %v", data, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestContendQueueDedupsPathSpellings is #177: contend.Note used to key on
+// the raw hook path while ContendFrame (and the region key everything else
+// compares against) normalizes through repo.RegionKeyResolved, so "./a.go"
+// and "a.go" enqueued as two pending contends instead of collapsing into
+// one. Blocked on the same held lease from two spellings, the queue must
+// hold exactly one entry.
+func TestContendQueueDedupsPathSpellings(t *testing.T) {
+	fr := &fakeRelay{joined: make(chan wire.Join, 4), leasePath: "src/orders.py"}
+	srv := httptest.NewServer(http.HandlerFunc(fr.handler))
+	defer srv.Close()
+
+	sock := filepath.Join(t.TempDir(), "s")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	d, err := New(ctx, Options{
+		Sock:     sock,
+		RelayURL: "ws://" + srv.Listener.Addr().String() + "/",
+		Room:     "test-room",
+		Agent:    "go-daemon-test",
+		Human:    "mohsen",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	select {
+	case <-fr.joined:
+	case <-time.After(5 * time.Second):
+		t.Fatal("daemon never joined the room")
+	}
+
+	blocked := func(path string) bool {
+		req := []byte(`{"verb":"edit","path":"` + path + `","agent":"sess1","want":"decision"}`)
+		var out map[string]any
+		if err := json.Unmarshal(d.onRequest(req), &out); err != nil {
+			t.Fatalf("reply not JSON: %v", err)
+		}
+		return out["rung"] == float64(3)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for !blocked("src/orders.py") {
+		if time.Now().After(deadline) {
+			t.Fatal("hook socket never saw the lease from the join")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Second spelling of the same file — clean()s to the same region key
+	// as the first, so this must not add a second pending entry.
+	if !blocked("./src/orders.py") {
+		t.Fatal("second spelling of the held path should also be blocked")
+	}
+
+	if got := d.contend.Drain(); len(got) != 1 {
+		t.Fatalf("contend queue has %v, want exactly one pending entry for the shared region", got)
 	}
 }
 

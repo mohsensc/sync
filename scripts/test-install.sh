@@ -92,7 +92,12 @@ BROKEN_ROOT=""
 BROKEN_BIN=""
 NOHOOK_ROOT=""
 NOHOOK_BIN=""
-trap 'rm -rf "$HAPPY_ROOT" "$HAPPY_BIN" "$BROKEN_ROOT" "$BROKEN_BIN" "$NOHOOK_ROOT" "$NOHOOK_BIN"' EXIT
+STALE_ROOT=""
+STALE_BIN=""
+STALE_NOGO_ROOT=""
+STALE_NOGO_BIN=""
+NOGO_SHIM=""
+trap 'rm -rf "$HAPPY_ROOT" "$HAPPY_BIN" "$BROKEN_ROOT" "$BROKEN_BIN" "$NOHOOK_ROOT" "$NOHOOK_BIN" "$STALE_ROOT" "$STALE_BIN" "$STALE_NOGO_ROOT" "$STALE_NOGO_BIN" "$NOGO_SHIM"' EXIT
 fake_root "$HAPPY_ROOT" good
 OUT="$(AGENT_PRESENCE_BIN="$HAPPY_BIN" bash "$HAPPY_ROOT/install.sh" 2>&1)"
 RC=$?
@@ -146,6 +151,95 @@ assert_contains "still prints settings JSON on partial failure" "$OUT" '"PreTool
 # summary line the reader has already scrolled past.
 assert_contains "warns ap-hook is missing, next to the settings JSON" "$OUT" \
   "WARNING: ap-hook failed to install"
+
+# stale_dist_root <dir> — a "good" fake_root plus a dist/gorelay stub
+# that's older than go/cmd/gorelay/main.go and a dist/presenced stub
+# that's newer, standing in for #96: dist/ built once, then a source edit
+# nobody rebuilt for, alongside a binary nothing touched since. presenced
+# stays fresh so "installing prebuilt" gets covered in the same run;
+# agent-presence-mcp is left with no dist/ entry at all, same as
+# fake_root's other modes, so all three log lines this fix adds show up
+# from one install.sh invocation.
+GOOS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+GOARCH="$(uname -m)"
+case "$GOARCH" in
+  x86_64) GOARCH=amd64 ;;
+  arm64|aarch64) GOARCH=arm64 ;;
+esac
+GORELAY_DIST="gorelay-$GOOS-$GOARCH"
+PRESENCED_DIST="presenced-$GOOS-$GOARCH"
+
+stale_dist_root() {
+  local dir="$1"
+  fake_root "$dir" good
+  mkdir -p "$dir/dist"
+  printf '#!/bin/sh\necho stale-stub\n' > "$dir/dist/$GORELAY_DIST"
+  chmod +x "$dir/dist/$GORELAY_DIST"
+  printf '#!/bin/sh\necho fresh-stub\n' > "$dir/dist/$PRESENCED_DIST"
+  chmod +x "$dir/dist/$PRESENCED_DIST"
+  # Backdate the gorelay stub, then touch its source strictly after it —
+  # mtime ordering is what install.sh's stale_source() actually checks.
+  # Postdate the presenced stub instead, since its source (from fake_root)
+  # was already written at "now": no source file will ever be newer.
+  touch -t 202001010000 "$dir/dist/$GORELAY_DIST"
+  touch -t 203001010000 "$dir/dist/$PRESENCED_DIST"
+  touch "$dir/go/cmd/gorelay/main.go"
+}
+
+# nogo_path <dir> — symlinks only the coreutils install.sh and this
+# fixture need into <dir>, resolved from the real PATH rather than
+# guessed at a fixed location. A distro-packaged go can sit at /usr/bin/go
+# (Debian, Fedora), so hardcoding something like PATH=/usr/bin:/bin would
+# put go right back on the path this case is specifically about not
+# having; symlinking named tools can't accidentally pull go in with them.
+nogo_path() {
+  local dir="$1" t p
+  mkdir -p "$dir"
+  # printf is a bash builtin, so `command -v` returns a bare name, not a
+  # path — nothing to symlink, and the shimmed bash below has the same
+  # builtin anyway.
+  for t in bash cp chmod mkdir cat dirname uname tr find; do
+    p="$(command -v "$t")" && [[ "$p" == /* ]] && ln -sf "$p" "$dir/$t"
+  done
+}
+
+echo "=== stale dist: go on PATH rebuilds instead of installing it ==="
+STALE_ROOT="$(mktemp -d)"
+STALE_BIN="$(mktemp -d)"
+stale_dist_root "$STALE_ROOT"
+OUT="$(AGENT_PRESENCE_BIN="$STALE_BIN" bash "$STALE_ROOT/install.sh" 2>&1)"
+RC=$?
+assert "exits 0" "$RC" "0"
+assert_contains "says it's building gorelay from source over stale dist/" "$OUT" \
+  "gorelay: dist/$GORELAY_DIST is older than go/ source, building from source instead"
+assert "gorelay installed" "$([[ -x "$STALE_BIN/gorelay" ]] && echo yes || echo no)" "yes"
+assert_not_contains "did not install the stale stub" "$(cat "$STALE_BIN/gorelay" 2>/dev/null)" \
+  "stale-stub"
+assert_contains "names the prebuilt path for a fresh dist/ binary" "$OUT" \
+  "presenced: installing prebuilt dist/$PRESENCED_DIST"
+assert_contains "names the source path when there's no dist/ binary at all" "$OUT" \
+  "agent-presence-mcp: building from source"
+
+echo "=== stale dist: no go on PATH warns and installs it anyway ==="
+STALE_NOGO_ROOT="$(mktemp -d)"
+STALE_NOGO_BIN="$(mktemp -d)"
+NOGO_SHIM="$(mktemp -d)"
+stale_dist_root "$STALE_NOGO_ROOT"
+nogo_path "$NOGO_SHIM"
+# AGENT_PRESENCE_BIN goes after env -i, not before it — env -i clears the
+# environment env itself inherits, so a plain prefix assignment never
+# reaches the child and install.sh silently falls back to its own
+# $HOME/.local/bin default. bash is invoked by its shimmed path so env -i
+# resolves the command against $NOGO_SHIM, not whatever PATH this test
+# script is already running under.
+OUT="$(env -i PATH="$NOGO_SHIM" HOME="$HOME" AGENT_PRESENCE_BIN="$STALE_NOGO_BIN" \
+  "$NOGO_SHIM/bash" "$STALE_NOGO_ROOT/install.sh" 2>&1)"
+assert_contains "warns dist/ is stale with no go to rebuild it" "$OUT" \
+  "WARNING: gorelay: dist/$GORELAY_DIST looks older than go/ source"
+assert "installs the stale binary anyway, nothing better to do" \
+  "$([[ -x "$STALE_NOGO_BIN/gorelay" ]] && echo yes || echo no)" "yes"
+assert_contains "installed binary is the stale stub" \
+  "$(cat "$STALE_NOGO_BIN/gorelay" 2>/dev/null)" "stale-stub"
 
 echo
 if [[ "$FAILS" -eq 0 ]]; then

@@ -70,6 +70,10 @@ export function attachGitSignals(opts: AttachGitSignalsOptions): {
   /** Per-frame step, driven by office.html's one shared frame loop —
    *  throttled internally to ~20Hz, safe to call every frame. */
   tick(dt: number): void
+  /** Disposes one agent's desk-fx (heat/cold groups + their own geometry)
+   *  and drops it from the internal map. Call from despawnLive — stop()
+   *  alone only tears the whole room down. */
+  forget(a: AttachGitSignalsOptions['world']['agents'][number]): void
   stop(): void
   readonly churnMode: ChurnMode
   setChurnMode(mode: ChurnMode): void

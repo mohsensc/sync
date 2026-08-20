@@ -6,6 +6,13 @@
 authentication of any kind), and this file's own pre-#22 version, which had
 no transport encryption at all.
 
+**Superseded — read this first:** the relay this file describes was Python
+(`relay.py`, `serve.py`). It's been rewritten in Go and the Python relay is
+deleted, along with the test files this doc cites. See `docs/go-daemon.md`
+for the current architecture. The properties below still hold — they were
+ported deliberately, not dropped — but the file names and test names are
+gone; see the inline `now:` notes on the specific citations.
+
 Scope: the relay's network surface only. Hooks talk to `presenced` over a
 unix socket on the same machine; that boundary is a filesystem permission,
 not a network one, and is out of scope here.
@@ -26,7 +33,8 @@ Both are still true after #11 in one sense and different in another:
   connection object itself — not to anything the client can rewrite — and
   refuses a second `join` frame that tries to change any of them
   (`Relay._latch_grant`, `Relay._bind_agent`, `python/tests/test_agent_id_binding.py`,
-  `test_connection_identity.py`). A connection cannot act as a principal it
+  `test_connection_identity.py` — now: `latchGrant`/`bindAgent` in
+  `go/internal/relaysrv/relay.go`). A connection cannot act as a principal it
   did not authenticate as, and it cannot launder a dead connection's tier
   onto a fresh one under the same agent id either — `_bind_agent` closes
   that specifically (see its docstring for the incident it's named for).
@@ -67,7 +75,8 @@ A clone of the repo gives you, with no further credential:
   `unattended` — and `Grant.priority()` clamps it to stay inside the band
   the roster already gave that principal. There's no field on the wire that
   raises a tier; `priority_of` never reads anything from the message body
-  (`relay.py`, `priority_of`'s own docstring is explicit about this).
+  (`relay.py`, `priority_of`'s own docstring is explicit about this — now:
+  `priorityOf` in `go/internal/relaysrv/relay.go`).
 - **Someone else's live connection.** Even with a stolen token, joining as
   `sara` from a second connection doesn't touch the first one's leases,
   because the lease table and the fan-out are both keyed off the
@@ -99,9 +108,17 @@ Concretely, once the relay is reachable from outside one machine:
   `no-token` path) and can submit real `event`, `claim`, `heartbeat` and
   `move` frames at that tier. It cannot outrank a rostered principal, and it
   cannot preempt anyone's lease mid-edit — the wait-die ordering and the
-  no-preemption invariant apply regardless of who's asking — but it can
-  contend for regions, occupy the low end of the priority order, and consume
-  a connection's worth of resources.
+  no-preemption invariant apply regardless of who's asking. It *can* contend
+  for a region a rostered principal holds, including a CRITICAL one: one
+  `contend` frame starts the fair-share clock (`handoverAt = now +
+  FairShareGraceS`, 900s) on the holder's lease, and heartbeats don't stop
+  it — at the deadline the region is reserved for the anonymous contender
+  and the holder's next acquire is refused. That's not the mid-edit
+  preemption ruled out above; it's the ask-deadline giving 900s notice
+  before the handoff, the same anti-starvation mechanism a legitimate
+  contender gets (`policy-design.md` §5.2). The gap is that it fires the
+  same way for an unauthenticated peer, per region, in parallel from a
+  single frame, and consumes a connection's worth of resources doing it.
 - It is *not* equivalent to being a teammate with push access to the repo.
   Room membership and roster membership are different gates, and only the
   second one is currently authenticated. **This is still true after #22.**
@@ -120,8 +137,9 @@ Concretely, once the relay is reachable from outside one machine:
 Outbound was already bounded before #11: a per-connection queue with a hard
 cap, and a peer whose socket stops draining gets shed rather than allowed to
 grow the relay's memory without limit (`serve.py`, `WsConn`,
-`test_backpressure.py`). #11 adds the inbound half: a token bucket per
-connection (`WsConn.admit_inbound`) that drops frames over budget without
+`test_backpressure.py` — now: `WsConn` and `backpressure_test.go` in
+`go/internal/relaysrv/server.go`). #11 adds the inbound half: a token bucket
+per connection (`WsConn.admit_inbound`) that drops frames over budget without
 processing them, and disconnects a connection whose budget stays exhausted
 for `INBOUND_SATURATED_S` straight rather than a connection that's merely
 bursty. It exists to keep one connection's ingest cost from crowding out
@@ -202,6 +220,8 @@ This closes the two items #11 filed against transport encryption:
   put itself back at pre-#22 exposure to an on-path attacker, with the one
   difference that the traffic is still opaque to a passive observer who
   isn't on-path.
+- **Whether fair-share contends should require an authenticated principal**
+  is an open design question, not just the exposure noted above — see #167.
 
 ## Rung 4's embedding backend: an offline tool, not a relay-adjacent surface
 

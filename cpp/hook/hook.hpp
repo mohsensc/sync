@@ -1,10 +1,24 @@
 #pragma once
 #include <cstddef>
+#include <cstdlib>
 #include <string>
 
 #include "hook/protocol.hpp"
 
 namespace ap {
+
+/// Signature of `std::getenv` — which returns `char*`, not `const char*`, even
+/// though it must never be written through — so `resolve_sock_path` can be
+/// handed a fake one in tests instead of mutating real process environment.
+using EnvLookup = char* (*)(const char*);
+
+/// Where the hook dials: `AGENT_PRESENCE_SOCK`, then `XDG_RUNTIME_DIR` joined
+/// with `agent-presence.sock`, then `TMPDIR` the same way, then
+/// `/tmp/agent-presence.sock`. A variable that is set but empty is treated the
+/// same as unset and falls through to the next candidate — the same rule
+/// go/cmd/presenced's envOr and scripts/statusline-presence.sh's `${VAR:-...}`
+/// already apply, so all four readers agree on what "unset" means.
+std::string resolve_sock_path(EnvLookup lookup = std::getenv);
 
 // ===========================================================================
 // The hook <-> daemon socket protocol

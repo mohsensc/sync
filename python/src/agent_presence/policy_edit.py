@@ -136,14 +136,22 @@ def _section_names(is_floor: bool, path_rule: bool) -> tuple[str, bool]:
     return ("floor" if is_floor else "effects"), False
 
 
-def _atomic_write(path: Path, text: str) -> None:
+def atomic_write(path: Path, text: str) -> None:
+    """Write via temp-file-then-rename so a reader never sees a torn file.
+
+    Not module-private any more: cli.py's `principals add` reuses this for
+    the same reason policy edits need it — a crash mid-write must never
+    leave a half-written TOML file behind. Preserves an existing file's
+    mode; a brand new file gets 0o644.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
+    mode = path.stat().st_mode & 0o777 if path.exists() else 0o644
     tmp = path.with_name(path.name + ".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(text)
         f.flush()
         os.fsync(f.fileno())
-    os.chmod(tmp, 0o644)
+    os.chmod(tmp, mode)
     os.replace(tmp, path)
 
 
@@ -180,16 +188,16 @@ def set_effect(
         at = _find_key(lines, sec, key)
         if at is not None:
             if _key_of(lines[at]) and _unquote(_key_of(lines[at])[1]) == effect:
-                _atomic_write(p, "".join(lines))
+                atomic_write(p, "".join(lines))
                 return "unchanged"
             lines[at] = _replace_value(lines[at], value)
-            _atomic_write(p, "".join(lines))
+            atomic_write(p, "".join(lines))
             return "changed"
         insert = sec.end
         while insert > sec.start and not lines[insert - 1].strip():
             insert -= 1
         lines.insert(insert, f"{key} = {value}\n")
-        _atomic_write(p, "".join(lines))
+        atomic_write(p, "".join(lines))
         return "added"
 
     block: list[str] = []
@@ -200,7 +208,7 @@ def set_effect(
         block.append(f"match = {json.dumps(match)}\n")
     block.append(f"{key} = {value}\n")
     lines.extend(block)
-    _atomic_write(p, "".join(lines))
+    atomic_write(p, "".join(lines))
     return "created" if not existed else "added"
 
 
@@ -233,7 +241,7 @@ def unset_effect(
     del lines[at]
     sec = _find_section(lines, name, array=array, match=match)
     if sec is None:  # pragma: no cover - the section cannot vanish here
-        _atomic_write(p, "".join(lines))
+        atomic_write(p, "".join(lines))
         return True
 
     remaining = [k for k in _body_keys(lines, sec) if k != "match"]
@@ -244,7 +252,7 @@ def unset_effect(
             start -= 1
         del lines[start : sec.end]
 
-    _atomic_write(p, "".join(lines))
+    atomic_write(p, "".join(lines))
     return True
 
 
@@ -260,11 +268,11 @@ def set_mode(path: Path | str, mode: str) -> str:
     value = json.dumps(mode)
     if at is not None:
         lines[at] = _replace_value(lines[at], value)
-        _atomic_write(p, "".join(lines))
+        atomic_write(p, "".join(lines))
         return "changed"
     insert = root.end
     while insert > root.start and not lines[insert - 1].strip():
         insert -= 1
     lines.insert(insert, f"mode = {value}\n")
-    _atomic_write(p, "".join(lines))
+    atomic_write(p, "".join(lines))
     return "created" if not existed else "added"

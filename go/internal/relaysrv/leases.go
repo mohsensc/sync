@@ -3,7 +3,6 @@ package relaysrv
 import (
 	"os"
 	"strconv"
-	"strings"
 	"sync"
 
 	"github.com/mohsensc/sync/go/internal/metrics"
@@ -54,11 +53,12 @@ type Reservation struct {
 	FromHuman string
 }
 
-// AcquireResult mirrors python's leases.AcquireResult.
+// AcquireResult mirrors python's leases.AcquireResult. Claim and HeldBy are
+// views, not the live claims: see claimView.
 type AcquireResult struct {
 	Ok         bool
-	Claim      *Claim
-	HeldBy     *Claim
+	Claim      *claimView
+	HeldBy     *claimView
 	Decision   waitDieDecision
 	ReservedBy *Reservation
 	HandoverAt *float64
@@ -78,29 +78,14 @@ type Publisher interface {
 }
 
 // carryKey identifies a claim's identity for the dodge-the-deadline check
-// in handOver/resumeCarry. Mirrors leases.py's `_carry` dict key exactly:
-// python keys on the full frozen Region (path, symbol *and* lines), not
-// same_region()'s coarser path+symbol contention unit — same_region()
-// deliberately ignores lines for conflict detection, but the carry dict is
-// a different question ("is this the literal same claim reappearing"),
-// and python answers it with plain dataclass equality. Dropping lines
-// here would make Go's carry match in cases Python's wouldn't (a release
-// and re-claim of the same symbol with a different line range would
-// still reattach the remembered deadline in Go but not Python) — a real,
-// if narrow, wire-behavior divergence, not just an internal difference.
+// in handOver/resumeCarry. Keyed on room, path, symbol and agent — same
+// unit same_region() contends on, and the same fields claimKey below uses.
+// Lines is display-only, never region identity (see types.go), so it can't
+// be part of this key: a holder that releases and re-claims with a
+// different (or absent) line range is still the literal same claim
+// reappearing, and must inherit the deadline it's trying to dodge.
 type carryKey struct {
-	room, path, symbol, lines, agent string
-}
-
-func linesKey(r Region) string {
-	if len(r.Lines) == 0 {
-		return ""
-	}
-	parts := make([]string, len(r.Lines))
-	for i, v := range r.Lines {
-		parts[i] = strconv.Itoa(v)
-	}
-	return strings.Join(parts, ",")
+	room, path, symbol, agent string
 }
 
 type carryEntry struct {
@@ -120,6 +105,15 @@ type shard struct {
 	claims       map[string]*Claim // key: path + "\x00" + symbolKey
 	reservations []*Reservation
 	carry        map[carryKey]carryEntry
+	// dead is set, under mu, by reapRoomLocked once it has verified (also
+	// under mu, across every shard of the room at once) that the room is
+	// genuinely empty and removed it from Registry.rooms. A caller that
+	// fetched this shard's *roomShards before the reap and is only now
+	// getting mu sees dead and must not write here — the room is gone from
+	// the map, so nothing will ever sweep or read this shard again. It
+	// re-resolves through roomOf instead, which recreates the room fresh.
+	// See lockLiveShard.
+	dead bool
 }
 
 func newShard() *shard {
@@ -149,6 +143,18 @@ type agentEntry struct {
 	// between claims is not brand new, so its age latches to the first
 	// moment it was seen holding nothing rather than resetting to "now"
 	// every time.
+	//
+	// Three endings write here, and they mean three different things
+	// (issue #163): a voluntary release (agentClaimRemovedByRelease) clears
+	// firstSeenSet and lets ageOf re-latch to "now" on its next call — the
+	// transaction concluded on its own terms, so there's nothing to
+	// preserve. An involuntary one that isn't the agent's choice — lazy
+	// expiry or a wait-die abort (agentClaimRemoved) — latches firstSeen to
+	// the age the agent already had, so an abort-retry keeps the priority
+	// it earned instead of reading as brand new. A session ending
+	// (agentSessionEnded) deletes the entry outright: the identity itself
+	// is going away with the connection, so nothing should be there to
+	// latch onto when it reconnects.
 	firstSeen    float64
 	firstSeenSet bool
 }
@@ -222,6 +228,40 @@ func (r *Registry) shardFor(room, path string) *shard {
 	return rs.shards[fnv32(path)%shardsPerRoom]
 }
 
+// lockLiveShard resolves room/path to a shard and returns it locked,
+// guaranteed live at the instant it's handed back. Every room-scoped,
+// shard-locking operation in this file goes through it rather than raw
+// shardFor+Lock — only Acquire can actually put a *new* claim into a shard
+// that had none (every other operation only touches claims already there,
+// and a room SweepAll judged empty enough to reap can't contain one of
+// those), but making that the *only* path that resolves-and-locks a shard
+// means the invariant is structural, not a convention five other call
+// sites have to remember to honor. A future call site added here gets the
+// same safety for free instead of a chance to reintroduce the race.
+//
+// The race this closes: a caller's shardFor(room, path) can return a
+// *roomShards that a concurrent SweepAll reaps — deletes from
+// Registry.rooms — in the window between that lookup and the caller taking
+// the shard's own mu. Without a check, a write there lands in a shard
+// nothing will ever sweep or read again: the same "claim survives, room
+// the map remembers doesn't" bug #100 already paid for. reapRoomLocked
+// only ever sets dead while holding every shard's mu at once, so a shard
+// is never marked dead out from under a caller that already holds its
+// lock — a caller either gets mu before the reap (and, if it writes, that
+// makes the shard non-empty, so the reap aborts) or after it (and sees
+// dead, and retries through roomOf, which recreates the room if it's
+// really gone).
+func (r *Registry) lockLiveShard(room, path string) *shard {
+	for {
+		s := r.shardFor(room, path)
+		s.mu.Lock()
+		if !s.dead {
+			return s
+		}
+		s.mu.Unlock()
+	}
+}
+
 // -- agent index --------------------------------------------------------
 
 // ageOf is the agent's wait-die age. Mutates on first sight of an
@@ -281,13 +321,16 @@ func (r *Registry) agentClaimAdded(agent string, acquiredAt float64, tier int) {
 	e.firstSeenSet = false
 }
 
-// agentClaimRemoved decrements liveCount and nothing else. Used by lazy
-// expiry and by ReleaseAll (session end / a wait-die abort) — neither is a
-// transaction concluding on its own terms, so neither touches firstSeen.
-// Losing this distinction either way breaks something: an abort-retry that
-// got reset here never gets old enough to be told wait (see ageOf), and a
-// version that never resets anywhere means the first agent to ever connect
-// outranks the room forever. See leases.py's release_all docstring (PR #37).
+// agentClaimRemoved decrements liveCount and, if that leaves the agent
+// holding nothing, latches firstSeen to the age it already had. Used by
+// lazy expiry and by ReleaseAll's wait-die-abort caller (relay.go's
+// onClaim) — neither is a transaction the agent concluded on its own
+// terms, so both preserve the age rather than letting ageOf re-latch to
+// "now": an abort-retry that got reset here never gets old enough to be
+// told wait (see ageOf). Do NOT call this for a session ending — that's
+// agentSessionEnded, which clears the entry instead of preserving it, or
+// an agent's priority would survive a disconnect/reconnect forever. See
+// agentEntry's doc comment for the full three-way split.
 func (r *Registry) agentClaimRemoved(agent string, now float64) {
 	r.agentMu.Lock()
 	defer r.agentMu.Unlock()
@@ -297,6 +340,10 @@ func (r *Registry) agentClaimRemoved(agent string, now float64) {
 	}
 	if e.liveCount > 0 {
 		e.liveCount--
+	}
+	if e.liveCount == 0 {
+		e.firstSeen = e.claimAge
+		e.firstSeenSet = true
 	}
 }
 
@@ -331,6 +378,31 @@ func (r *Registry) agentIdentityReset(agent string) {
 	delete(r.agents, agent)
 }
 
+// agentSessionEnded is ReleaseAllSessionEnd's other half, shaped exactly
+// like agentIdentityReset: the connection is gone, not merely between
+// claims, so there's no retry coming that should inherit the age it had.
+// This is what keeps agentClaimRemoved's preserved age (see its doc
+// comment) from turning into "the first agent to ever connect outranks
+// the room forever" — that failure only shows up if session end reuses
+// the abort/expiry path instead of clearing outright.
+//
+// But it must not clear out from under a claim this same agent id still
+// holds somewhere else — a second connection sharing the id (bindAgent
+// permits that for a matching principal/tier), or a room this session
+// left without releasing (should no longer happen after Join's own fix,
+// but this is the entry's last line of defense either way). liveCount is
+// already the global, cross-room count agentClaimAdded/Removed maintain
+// for exactly this reason (issue #173): only a session ending with
+// nothing left live anywhere should erase the identity.
+func (r *Registry) agentSessionEnded(agent string) {
+	r.agentMu.Lock()
+	defer r.agentMu.Unlock()
+	if e := r.agents[agent]; e != nil && e.liveCount > 0 {
+		return
+	}
+	delete(r.agents, agent)
+}
+
 // -- shard-local helpers, caller holds s.mu ------------------------------
 
 // pruneExpired removes expired claims from this shard, hands each one over
@@ -345,7 +417,7 @@ func (r *Registry) pruneExpired(room string, s *shard, now float64, actor Conn) 
 		if c.ExpiresAt > now {
 			continue
 		}
-		winner := c.HandoverWinner()
+		winner := c.handoverWinner()
 		delete(s.claims, key)
 		r.agentClaimRemoved(c.Agent, now)
 		reservation := r.handOver(s, c, now)
@@ -364,16 +436,16 @@ func (r *Registry) pruneExpired(room string, s *shard, now float64, actor Conn) 
 // handOver is called with s.mu held, for a claim that just left the table
 // (expired here, or released/replaced by the caller). If its renewal
 // deadline is what ended it, reserve the region for the contender it was
-// capped for. Mirrors leases.py's _hand_over exactly, including the carry
-// bookkeeping that stops a holder dodging its deadline by releasing and
-// re-taking a region a second before it fires.
+// capped for. The carry bookkeeping here is what stops a holder dodging
+// its deadline by releasing and re-taking a region a second before it
+// fires.
 func (r *Registry) handOver(s *shard, c *Claim, now float64) *Reservation {
-	winner := c.HandoverWinner()
+	winner := c.handoverWinner()
 	if winner == nil {
 		return nil
 	}
 	if c.HandoverAt == nil || *c.HandoverAt > now {
-		key := carryKey{c.Room, c.Scope.Path, symbolKey(c.Scope), linesKey(c.Scope), c.Agent}
+		key := carryKey{c.Room, c.Scope.Path, symbolKey(c.Scope), c.Agent}
 		s.carry[key] = carryEntry{winner: *winner, deadline: c.HandoverAt}
 		if len(s.carry) > carryMax {
 			for k, v := range s.carry {
@@ -403,7 +475,7 @@ func (r *Registry) resumeCarry(s *shard, c *Claim, now float64) {
 	if len(s.carry) == 0 {
 		return
 	}
-	key := carryKey{c.Room, c.Scope.Path, symbolKey(c.Scope), linesKey(c.Scope), c.Agent}
+	key := carryKey{c.Room, c.Scope.Path, symbolKey(c.Scope), c.Agent}
 	carried, ok := s.carry[key]
 	if !ok {
 		return
@@ -508,18 +580,16 @@ func contendLocked(held *Claim, agent, human string, tier int, decision waitDieD
 
 // -- public, room-scoped operations --------------------------------------
 
-func (r *Registry) HolderOf(room string, region Region, actor Conn) *Claim {
-	s := r.shardFor(room, region.Path)
-	s.mu.Lock()
+func (r *Registry) HolderOf(room string, region Region, actor Conn) *claimView {
+	s := r.lockLiveShard(room, region.Path)
 	defer s.mu.Unlock()
 	now := r.clock.Now()
 	r.pruneExpired(room, s, now, actor)
-	return holderOfLocked(s, region)
+	return viewPtr(holderOfLocked(s, region))
 }
 
 func (r *Registry) ReservationFor(room string, region Region, actor Conn) *Reservation {
-	s := r.shardFor(room, region.Path)
-	s.mu.Lock()
+	s := r.lockLiveShard(room, region.Path)
 	defer s.mu.Unlock()
 	now := r.clock.Now()
 	r.pruneExpired(room, s, now, actor)
@@ -529,15 +599,15 @@ func (r *Registry) ReservationFor(room string, region Region, actor Conn) *Reser
 // ActiveClaims is every live claim in a room. Only called at join
 // (snapshot) and in tests: it walks every shard, which is fine off the hot
 // path but would not be if it ran per claim.
-func (r *Registry) ActiveClaims(room string, actor Conn) []*Claim {
+func (r *Registry) ActiveClaims(room string, actor Conn) []claimView {
 	rs := r.roomOf(room)
 	now := r.clock.Now()
-	var out []*Claim
+	var out []claimView
 	for _, s := range rs.shards {
 		s.mu.Lock()
 		r.pruneExpired(room, s, now, actor)
 		for _, c := range s.claims {
-			out = append(out, c)
+			out = append(out, viewOf(c))
 		}
 		s.mu.Unlock()
 	}
@@ -569,27 +639,91 @@ func (r *Registry) SweepAll() {
 	r.roomsMu.RUnlock()
 
 	now := r.clock.Now()
+	// A loose, sequential (lock-one-shard-at-a-time) pass: cheap, and the
+	// existing per-request cost of pruning. It also tells us which rooms
+	// are worth the strict double-check below — a room this pass finds
+	// non-empty cannot have become reapable by the time we get to it, so
+	// there is no point paying for one.
+	var candidates []string
 	for room, rs := range rooms {
+		empty := true
 		for _, s := range rs.shards {
 			s.mu.Lock()
 			r.pruneExpired(room, s, now, nil)
+			if len(s.claims) != 0 || len(s.carry) != 0 || len(liveReservations(s, now)) != 0 {
+				empty = false
+			}
 			s.mu.Unlock()
 		}
+		if empty {
+			candidates = append(candidates, room)
+		}
+	}
+
+	// The strict pass, one candidate room at a time: re-verify emptiness
+	// with every one of the room's shards locked simultaneously (not
+	// sequentially — a sequential re-check would leave the exact same gap
+	// between "shard 0 looked empty" and "shard 15 looked empty" that the
+	// loose pass above already has) and only then delete. roomsMu.Lock()
+	// is taken per room, not once for the whole batch, so an ordinary
+	// Join/roomOf for an unrelated room is never blocked for longer than
+	// one room's worth of reaping.
+	for _, room := range candidates {
+		r.roomsMu.Lock()
+		if rs, ok := r.rooms[room]; ok {
+			r.reapRoomLocked(room, rs, now)
+		}
+		r.roomsMu.Unlock()
+	}
+}
+
+// reapRoomLocked deletes room from r.rooms if it is genuinely empty across
+// every shard at once. Caller holds r.roomsMu (write); this additionally
+// takes every shard's own mu for the duration of the check, which is what
+// makes the check-then-delete atomic with respect to Acquire — see
+// lockLiveShard's doc comment for the race this closes and why marking
+// dead here, under the same mu a straggling Acquire is about to wait on,
+// is the part that actually matters (roomsMu alone is not enough: a caller
+// that already resolved this *roomShards before we got roomsMu is not
+// looking at the map again, so removing the map entry doesn't stop it).
+func (r *Registry) reapRoomLocked(room string, rs *roomShards, now float64) {
+	for _, s := range rs.shards {
+		s.mu.Lock()
+	}
+	empty := true
+	for _, s := range rs.shards {
+		if len(s.claims) != 0 || len(s.carry) != 0 || len(liveReservations(s, now)) != 0 {
+			empty = false
+			break
+		}
+	}
+	if empty {
+		delete(r.rooms, room)
+		for _, s := range rs.shards {
+			s.dead = true
+		}
+	}
+	for _, s := range rs.shards {
+		s.mu.Unlock()
 	}
 }
 
 // Contend registers an ask for a region somebody else holds, without
 // taking it. Mirrors leases.py's contend.
-func (r *Registry) Contend(room string, scope Region, agent, human string, tier int, requesterAcquiredAt *float64, actor Conn) *Claim {
-	s := r.shardFor(room, scope.Path)
-	s.mu.Lock()
+//
+// The wait-die decision comes back with the view because it is resolved
+// here, under the lock, against the same holder contendLocked then caps —
+// the caller re-resolving it off the lock (negotiation.Open used to) reads
+// a claim that may already have moved on.
+func (r *Registry) Contend(room string, scope Region, agent, human string, tier int, requesterAcquiredAt *float64, actor Conn) (*claimView, waitDieDecision) {
+	s := r.lockLiveShard(room, scope.Path)
 	defer s.mu.Unlock()
 	now := r.clock.Now()
 	r.pruneExpired(room, s, now, actor)
 
 	held := holderOfLocked(s, scope)
 	if held == nil || held.Agent == agent {
-		return nil
+		return nil, ""
 	}
 	before := snapshotOf(held)
 	age := requesterAcquiredAt
@@ -602,7 +736,7 @@ func (r *Registry) Contend(room string, scope Region, agent, human string, tier 
 	decision := resolveWaitDie(agent, ageVal, held, tier)
 	contendLocked(held, agent, human, tier, decision, now)
 	r.emitChange(room, held, before, now, actor)
-	return held
+	return viewPtr(held), decision
 }
 
 // Acquire is the whole decision tree: grant, renew, refuse-with-wait,
@@ -614,8 +748,7 @@ func (r *Registry) Acquire(room, human, agent string, scope Region, intent strin
 	tier := r.priorityOf(agent, priority)
 	now := r.clock.Now()
 
-	s := r.shardFor(room, scope.Path)
-	s.mu.Lock()
+	s := r.lockLiveShard(room, scope.Path)
 	defer s.mu.Unlock()
 	r.pruneExpired(room, s, now, actor)
 
@@ -631,7 +764,7 @@ func (r *Registry) Acquire(room, human, agent string, scope Region, intent strin
 		before := snapshotOf(held)
 		contendLocked(held, agent, human, tier, decision, now)
 		r.emitChange(room, held, before, now, actor)
-		ha := held.HandoverAt
+		view := viewPtr(held)
 		// wait and abort are peers in the outcome vocabulary, not one
 		// outcome refining the other — a losing requester is refused
 		// either way, but only wait-die's abort branch is "abort".
@@ -640,7 +773,7 @@ func (r *Registry) Acquire(room, human, agent string, scope Region, intent strin
 		} else {
 			r.metrics.Lease(metrics.OutcomeRefused)
 		}
-		return AcquireResult{Ok: false, HeldBy: held, Decision: decision, HandoverAt: ha}
+		return AcquireResult{Ok: false, HeldBy: view, Decision: decision, HandoverAt: view.HandoverAt}
 	}
 
 	if held != nil {
@@ -648,7 +781,7 @@ func (r *Registry) Acquire(room, human, agent string, scope Region, intent strin
 		held.ExpiresAt = renewTo(held, now)
 		r.emitChange(room, held, before, now, actor)
 		r.metrics.Lease(metrics.OutcomeGranted)
-		return AcquireResult{Ok: true, Claim: held}
+		return AcquireResult{Ok: true, Claim: viewPtr(held)}
 	}
 
 	reserved := reservationForLocked(s, scope, now)
@@ -668,12 +801,11 @@ func (r *Registry) Acquire(room, human, agent string, scope Region, intent strin
 	r.agentClaimAdded(agent, claim.AcquiredAt, tier)
 	r.emitNew(room, claim, now, actor)
 	r.metrics.Lease(metrics.OutcomeGranted)
-	return AcquireResult{Ok: true, Claim: claim, Inherited: inherited}
+	return AcquireResult{Ok: true, Claim: viewPtr(claim), Inherited: inherited}
 }
 
 func (r *Registry) Heartbeat(room, agent string, scope Region, actor Conn) bool {
-	s := r.shardFor(room, scope.Path)
-	s.mu.Lock()
+	s := r.lockLiveShard(room, scope.Path)
 	defer s.mu.Unlock()
 	now := r.clock.Now()
 	r.pruneExpired(room, s, now, actor)
@@ -688,8 +820,7 @@ func (r *Registry) Heartbeat(room, agent string, scope Region, actor Conn) bool 
 }
 
 func (r *Registry) Release(room, agent string, scope Region, actor Conn) {
-	s := r.shardFor(room, scope.Path)
-	s.mu.Lock()
+	s := r.lockLiveShard(room, scope.Path)
 	defer s.mu.Unlock()
 	now := r.clock.Now()
 	r.pruneExpired(room, s, now, actor)
@@ -698,7 +829,7 @@ func (r *Registry) Release(room, agent string, scope Region, actor Conn) {
 	if !ok || c.Agent != agent {
 		return
 	}
-	winner := c.HandoverWinner()
+	winner := c.handoverWinner()
 	delete(s.claims, key)
 	r.agentClaimRemovedByRelease(c.Agent, now)
 	reservation := r.handOver(s, c, now)
@@ -706,9 +837,40 @@ func (r *Registry) Release(room, agent string, scope Region, actor Conn) {
 	r.pub.Publish(room, frame, actor)
 }
 
-// ReleaseAll drops every lease an agent holds in one room. Used on session
-// end and on a wait-die abort.
+// ReleaseAll drops every lease an agent holds in one room, preserving its
+// wait-die age (agentClaimRemoved). This is the wait-die-abort path
+// (relay.go's onClaim, on decisionAbort) — the agent didn't choose to let
+// go, so a retry should keep the priority it earned. For a connection's
+// session actually ending, use ReleaseAllSessionEnd instead: reusing this
+// one there would let an agent's age survive disconnect/reconnect forever.
 func (r *Registry) ReleaseAll(room, agent string, actor Conn) {
+	r.releaseAllInRoom(room, agent, actor, false)
+}
+
+// ReleaseAllSessionEnd is ReleaseAll's counterpart for a connection's
+// session actually ending (relay.go's Leave). Unlike an abort, there's no
+// retry on the way — the identity is leaving with the socket — so once
+// every lease is dropped the same way ReleaseAll drops them, the agent's
+// wait-die entry is cleared outright instead of preserved: a rejoin under
+// the same agent id starts fresh, exactly like a genuinely new agent
+// would. It also prunes agent's contender entry from every other claim
+// still standing in the room (issue #174): see releaseAllInRoom's doc for
+// why that pruning belongs here and not in ReleaseAll.
+func (r *Registry) ReleaseAllSessionEnd(room, agent string, actor Conn) {
+	r.releaseAllInRoom(room, agent, actor, true)
+	r.agentSessionEnded(agent)
+}
+
+// releaseAllInRoom is ReleaseAll's body, shared with ReleaseAllSessionEnd.
+// pruneAsks additionally walks every claim left in the room after agent's
+// own are gone and removes agent from their contender sets — only correct
+// when the agent is actually leaving (ReleaseAllSessionEnd), never for a
+// plain wait-die abort or lazy expiry: those mean the agent lost *this*
+// claim, not that it disconnected, and it may still be legitimately
+// contending elsewhere. That's why this is a parameter here rather than
+// unconditional behaviour of ReleaseAll itself, which relay.go's onClaim
+// also calls on abort.
+func (r *Registry) releaseAllInRoom(room, agent string, actor Conn, pruneAsks bool) {
 	rs := r.roomOf(room)
 	now := r.clock.Now()
 	for _, s := range rs.shards {
@@ -718,14 +880,31 @@ func (r *Registry) ReleaseAll(room, agent string, actor Conn) {
 			if c.Agent != agent {
 				continue
 			}
-			winner := c.HandoverWinner()
+			winner := c.handoverWinner()
 			delete(s.claims, key)
 			r.agentClaimRemoved(c.Agent, now)
 			reservation := r.handOver(s, c, now)
 			frame := departureFrame(c.Room, c.Human, c.Agent, c.Scope, now, "released", winner, reservation)
 			r.pub.Publish(room, frame, actor)
 		}
+		if pruneAsks {
+			r.pruneContendersLocked(room, s, agent, now, actor)
+		}
 		s.mu.Unlock()
+	}
+}
+
+// pruneContendersLocked removes agent's contender entry from every claim
+// left in s (its own claims are already gone from s.claims by the time
+// this runs). Caller holds s.mu — same shard, no additional locking, same
+// discipline every other shard-local helper in this file uses.
+func (r *Registry) pruneContendersLocked(room string, s *shard, agent string, now float64, actor Conn) {
+	for _, c := range s.claims {
+		before := snapshotOf(c)
+		if !c.removeContender(agent) {
+			continue
+		}
+		r.emitChange(room, c, before, now, actor)
 	}
 }
 
@@ -752,13 +931,17 @@ func (r *Registry) ReleaseEverywhere(agent string, actor Conn) {
 				if c.Agent != agent {
 					continue
 				}
-				winner := c.HandoverWinner()
+				winner := c.handoverWinner()
 				delete(s.claims, key)
 				r.agentClaimRemoved(c.Agent, now)
 				reservation := r.handOver(s, c, now)
 				frame := departureFrame(c.Room, c.Human, c.Agent, c.Scope, now, "released", winner, reservation)
 				r.pub.Publish(room, frame, actor)
 			}
+			// The identity is being reclaimed by whoever binds next, same as
+			// a session ending — see releaseAllInRoom's doc for why abort/
+			// expiry never do this and session-shaped departures always do.
+			r.pruneContendersLocked(room, s, agent, now, actor)
 			s.mu.Unlock()
 		}
 	}
@@ -777,7 +960,7 @@ type claimSnapshot struct {
 func snapshotOf(c *Claim) claimSnapshot {
 	return claimSnapshot{
 		room: c.Room, human: c.Human, intent: c.Intent, expiresAt: c.ExpiresAt,
-		handoverAt: c.HandoverAt, winner: c.HandoverWinner(),
+		handoverAt: c.HandoverAt, winner: c.handoverWinner(),
 	}
 }
 
@@ -819,7 +1002,7 @@ func (r *Registry) emitChange(room string, c *Claim, before claimSnapshot, now f
 	if snapshotsEqual(before, after) {
 		return
 	}
-	frame := leaseFrame(c, now)
+	frame := leaseFrame(viewOf(c), now)
 	frame["type"] = "lease"
 	frame["state"] = "held"
 	if sameShared(before, after) {
@@ -830,7 +1013,7 @@ func (r *Registry) emitChange(room string, c *Claim, before claimSnapshot, now f
 }
 
 func (r *Registry) emitNew(room string, c *Claim, now float64, actor Conn) {
-	frame := leaseFrame(c, now)
+	frame := leaseFrame(viewOf(c), now)
 	frame["type"] = "lease"
 	frame["state"] = "held"
 	r.pub.Publish(room, frame, actor)

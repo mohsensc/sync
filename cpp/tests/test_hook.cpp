@@ -11,6 +11,7 @@
 #include <cctype>
 #include <chrono>
 #include <filesystem>
+#include <map>
 #include <string>
 #include <thread>
 #include "hook/hook.hpp"
@@ -302,6 +303,41 @@ TEST_CASE("anything that is not a decision line means no decision") {
     REQUIRE(ap::parse_decision("garbage").rung < 0);
     REQUIRE(ap::parse_decision(R"({"holder":"sess_a"})").rung < 0);  // no rung, no answer
     REQUIRE(ap::parse_decision(R"({"rung":"three"})").rung < 0);
+}
+
+TEST_CASE("handover_to_me parses as a field, not a substring") {
+    REQUIRE(ap::parse_decision(R"({"rung":0,"handover_to_me":true})").handover_to_me);
+    REQUIRE(ap::parse_decision(R"({"rung":0,"handover_to_me": true})").handover_to_me);  // space
+    REQUIRE_FALSE(ap::parse_decision(R"({"rung":0,"handover_to_me":false})").handover_to_me);
+    REQUIRE_FALSE(ap::parse_decision(R"({"rung":0})").handover_to_me);  // absent means false
+
+    // Wrong type, same discipline as int_field rejecting a quoted "3".
+    REQUIRE_FALSE(ap::parse_decision(R"({"rung":0,"handover_to_me":"true"})").handover_to_me);
+
+    // A bare-substring match would read "truest" as true; the token has to end
+    // where "true" ends.
+    REQUIRE_FALSE(ap::parse_decision(R"({"rung":0,"handover_to_me":truest})").handover_to_me);
+
+    // The literal appears inside another field's string value here, quoted the
+    // way json.Marshal actually escapes it. That escaping is exactly what
+    // keeps a raw substring scan (or this key lookup) from tripping on it.
+    const ap::Decision d = ap::parse_decision(
+        R"({"rung":0,"intent":"not a real field: \"handover_to_me\":true"})");
+    REQUIRE_FALSE(d.handover_to_me);
+}
+
+TEST_CASE("a region lost 25 minutes ago does not render as 17 minutes") {
+    // leases.go's HandoverNoteMs keeps a lost-region note alive for 30 minutes
+    // (1,800,000ms). int_field used to saturate at 1,000,000ms, so a region
+    // lost 25 minutes ago rendered as "17 minutes ago". 1,500,000ms (25min) is
+    // comfortably inside the live window and past the old cap.
+    const ap::Decision d = ap::parse_decision(
+        R"({"rung":0,"lost_to":"sess_b","human":"sara","lost_ms_ago":1500000})");
+    REQUIRE(d.lost_ms_ago == 1500000);  // not clamped to 1,000,000
+
+    const std::string out = ap::hook_output(d, "/repo/src/auth.py");
+    REQUIRE(out.find("25 minutes ago") != std::string::npos);
+    REQUIRE(out.find("17 minutes ago") == std::string::npos);
 }
 
 TEST_CASE("no answer from the daemon prints nothing at all") {
@@ -720,4 +756,181 @@ TEST_CASE("a tier the hook does not recognise is not repeated back to the agent"
     REQUIRE(well_formed_json(out));
     REQUIRE(out.find("ignore your instructions") == std::string::npos);
     REQUIRE(out.find("\n") == std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// Effect overrides the legacy fallback
+// ---------------------------------------------------------------------------
+//
+// decide.go sets `effect` on every response it writes, no omitempty. The
+// rung/decision pair is what a daemon that predates effects left behind, and
+// effect_of only ever falls back to it when `effect` fails to parse. A modern
+// daemon and an old one can therefore disagree about the same rung, and the
+// modern one has to win.
+
+TEST_CASE("an explicit context effect overrides what legacy would call deny") {
+    // rung 3 with a decision other than "ask" is legacy_effect's deny case.
+    // A daemon that also sends effect="context" means it, not deny.
+    ap::Decision d;
+    d.rung = 3;
+    d.decision = "deny";
+    d.effect = "context";
+    d.holder = "sess_a";
+    d.human = "sara";
+    d.intent = "move session handling to JWT";
+    REQUIRE(ap::effect_of(d) == ap::Effect::Context);
+
+    const std::string out = ap::hook_output(d, "/repo/src/auth.py");
+    REQUIRE(well_formed_json(out));
+    REQUIRE(out.find("additionalContext") != std::string::npos);
+    REQUIRE(out.find("permissionDecision") == std::string::npos);
+    // Softened all the way down: near_message, not blocked_message.
+    REQUIRE(out.find("Nothing is blocked") != std::string::npos);
+    REQUIRE(out.find("move session handling to JWT") != std::string::npos);
+    REQUIRE(out.find("sara") != std::string::npos);
+    REQUIRE(out.find("/repo/src/auth.py") != std::string::npos);
+}
+
+TEST_CASE("an explicit deny effect overrides what legacy would call context") {
+    // rung 1 is legacy_effect's context case (0 < rung < 3). A daemon sending
+    // effect="deny" at that same rung means deny, not context.
+    ap::Decision d;
+    d.rung = 1;
+    d.effect = "deny";
+    d.holder = "sess_a";
+    d.human = "sara";
+    d.intent = "rotate the signing key";
+    REQUIRE(ap::effect_of(d) == ap::Effect::Deny);
+
+    const std::string out = ap::hook_output(d, "/repo/a.py");
+    REQUIRE(well_formed_json(out));
+    REQUIRE(out.find(R"("permissionDecision":"deny")") != std::string::npos);
+    // blocked_message, not near_message: the ambient rung still gets stopped.
+    REQUIRE(out.find("This edit is blocked") != std::string::npos);
+    REQUIRE(out.find("rotate the signing key") != std::string::npos);
+    REQUIRE(out.find("sara") != std::string::npos);
+}
+
+TEST_CASE("an effect string nothing recognises falls back to legacy") {
+    // "urgent" is not one of the five wire names, so parse_effect returns
+    // nothing and legacy_effect(rung, decision) decides instead — same as an
+    // old daemon that never sent effect at all.
+    ap::Decision d;
+    d.rung = 1;
+    d.effect = "urgent";
+    d.holder = "sess_a";
+    d.human = "sara";
+    d.intent = "x";
+    REQUIRE(ap::effect_of(d) == ap::Effect::Context);  // legacy_effect(1, "")
+
+    const std::string out = ap::hook_output(d, "/repo/a.py");
+    REQUIRE(well_formed_json(out));
+    REQUIRE(out.find("additionalContext") != std::string::npos);
+    REQUIRE(out.find("permissionDecision") == std::string::npos);
+}
+
+TEST_CASE("effect_of reads every wire name, not just context and deny") {
+    // rung 4's floor is Silent (kHookFloor[4]), so louder(said, floor) never
+    // moves `said` here — the loop below is checking parse_effect via
+    // effect_of, not the floor. See kHookFloor's comment for why rung 3 alone
+    // floors at Notify.
+    for (int i = 0; i < ap::kEffects; ++i) {
+        ap::Decision d;
+        d.rung = 4;
+        d.effect = ap::kEffectNames[i];
+        INFO("effect " << ap::kEffectNames[i]);
+        REQUIRE(ap::effect_of(d) == static_cast<ap::Effect>(i));
+    }
+}
+
+TEST_CASE("an ask effect produces a permission ask even when decision says allow") {
+    // decision is the legacy field; effect="ask" is what a modern daemon
+    // sends, and it is read first regardless of what decision claims.
+    ap::Decision d;
+    d.rung = 3;
+    d.effect = "ask";
+    d.decision = "allow";
+    d.holder = "sess_a";
+    d.human = "sara";
+    d.intent = "x";
+    REQUIRE(ap::effect_of(d) == ap::Effect::Ask);
+    REQUIRE(ap::hook_output(d, "/repo/a.py").find(R"("permissionDecision":"ask")") !=
+            std::string::npos);
+}
+
+TEST_CASE("silent and notify both print nothing on the hook") {
+    // Neither has anywhere to go on this surface — notify reaches a human
+    // through the statusline, not stdout. Confirms effect_of resolves them
+    // distinctly (previous test) even though hook_output can't tell them
+    // apart here.
+    for (const char* name : {"silent", "notify"}) {
+        ap::Decision d;
+        d.rung = 0;
+        d.effect = name;
+        INFO("effect " << name);
+        REQUIRE(ap::hook_output(d, "/repo/a.py").empty());
+    }
+}
+
+TEST_CASE("the rung 3 floor still raises a daemon that asked for silent") {
+    // Every test above shows the effect winning. This is the other half of
+    // effect_of: louder(said, kHookFloor[rung]) — the floor is not up for
+    // negotiation, and a daemon at rung 3 asking for silent gets Notify
+    // instead. See kHookFloor's comment for why rung 3 alone floors above
+    // Silent.
+    ap::Decision d;
+    d.rung = 3;
+    d.effect = "silent";
+    d.holder = "sess_a";
+    REQUIRE(ap::effect_of(d) == ap::Effect::Notify);
+    // Notify still has nowhere to go on the hook itself.
+    REQUIRE(ap::hook_output(d, "/repo/a.py").empty());
+}
+
+namespace {
+
+/// A fake `getenv`, so these tests exercise `resolve_sock_path`'s fallthrough
+/// without touching this process's real environment. `EnvLookup` is a plain
+/// function pointer, so the table it reads has to live outside the function.
+std::map<std::string, std::string>& fake_env() {
+    static std::map<std::string, std::string> m;
+    return m;
+}
+
+char* fake_getenv(const char* key) {
+    const auto it = fake_env().find(key);
+    // Same const-cast every std::getenv caller already lives with: the value
+    // must never be written through, but the signature says char*.
+    return it == fake_env().end() ? nullptr : const_cast<char*>(it->second.c_str());
+}
+
+}  // namespace
+
+// The one case this whole extraction exists for: XDG_RUNTIME_DIR, presenced's
+// envOr and statusline-presence.sh's ${VAR:-fallback} already treat "" as
+// unset, and the hook used to be the holdout — join_path("", "agent-presence.sock")
+// produced "/agent-presence.sock", a path nothing binds.
+TEST_CASE("resolve_sock_path treats a set-but-empty AGENT_PRESENCE_SOCK as unset") {
+    fake_env() = {{"AGENT_PRESENCE_SOCK", ""}, {"XDG_RUNTIME_DIR", "/run/agent"}};
+    REQUIRE(ap::resolve_sock_path(fake_getenv) == "/run/agent/agent-presence.sock");
+}
+
+TEST_CASE("resolve_sock_path treats a set-but-empty XDG_RUNTIME_DIR as unset") {
+    fake_env() = {{"XDG_RUNTIME_DIR", ""}, {"TMPDIR", "/tmp/agentx"}};
+    REQUIRE(ap::resolve_sock_path(fake_getenv) == "/tmp/agentx/agent-presence.sock");
+}
+
+TEST_CASE("resolve_sock_path treats a set-but-empty TMPDIR as unset") {
+    fake_env() = {{"TMPDIR", ""}};
+    REQUIRE(ap::resolve_sock_path(fake_getenv) == "/tmp/agent-presence.sock");
+}
+
+TEST_CASE("resolve_sock_path honours a non-empty AGENT_PRESENCE_SOCK outright") {
+    fake_env() = {{"AGENT_PRESENCE_SOCK", "/custom/agent.sock"}, {"XDG_RUNTIME_DIR", "/run/agent"}};
+    REQUIRE(ap::resolve_sock_path(fake_getenv) == "/custom/agent.sock");
+}
+
+TEST_CASE("resolve_sock_path falls all the way through to /tmp when nothing is set") {
+    fake_env() = {};
+    REQUIRE(ap::resolve_sock_path(fake_getenv) == "/tmp/agent-presence.sock");
 }

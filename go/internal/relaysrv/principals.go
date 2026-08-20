@@ -232,9 +232,14 @@ func parsePriorityAny(v any) (int, error) {
 	case string:
 		return ParsePriority(val)
 	case int64:
-		return ParsePriority(fmt.Sprintf("%d", val))
+		// A real unquoted TOML integer, not a string that looks like one —
+		// ParsePriorityInt, not a round trip through fmt.Sprintf into
+		// ParsePriority, which used to make `attended = "3"` and
+		// `attended = 3` indistinguishable by the time either reached the
+		// string parser.
+		return ParsePriorityInt(int(val))
 	case int:
-		return ParsePriority(fmt.Sprintf("%d", val))
+		return ParsePriorityInt(val)
 	case bool:
 		return 0, fmt.Errorf("%v is a boolean, not a priority tier", val)
 	default:

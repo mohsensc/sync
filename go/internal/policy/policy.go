@@ -73,8 +73,10 @@ func Louder(a, b Effect) Effect {
 type Table [Rungs]Effect
 
 // Builtin is what installing the engine and configuring nothing produces.
-// Byte for byte cpp/daemon/policy_cache.hpp's kBuiltin. Rung 4 sits at
-// context: AGENT_PRESENCE_RUNG4 is already its off switch.
+// Byte for byte python/src/agent_presence/policy.py's BUILTIN table — the
+// C++ policy_cache.hpp this used to mirror is gone, that file is the
+// source of truth now. Rung 4 sits at context: AGENT_PRESENCE_RUNG4 is
+// already its off switch.
 var Builtin = Table{Silent, Notify, Context, Deny, Context}
 
 // BuiltinFloor is kBuiltinFloor: rung 3's floor is notify, not silent — a

@@ -131,4 +131,29 @@ describe('attachGitSignals', () => {
     expect(setFreshness).toHaveBeenCalledWith(null)
     s.stop()
   })
+
+  // -- forget: the per-agent counterpart to stop(), see office.html's
+  // despawnLive. A stray reference in fxByAgent isn't just a memory nit —
+  // deskHeat/deskDust's dispose() frees the GPU-side geometry, which a
+  // WeakMap eventually reclaiming the JS wrapper would never do.
+  it('forget disposes the desk-fx groups and drops the agent from the map', async () => {
+    const root = { add: vi.fn(), remove: vi.fn() }
+    const agent = { gitPath: 'web/src/office/anim.js', setFreshness: vi.fn(), setChurn: vi.fn(), root, scale: 1 }
+    const world = { agents: [agent] }
+    const zones = { setOwner: vi.fn() }
+    const fetchFn: FetchStub = vi.fn(async () => stubResponse(null, false))
+    const s = attachGitSignals({ world, zones, fetchFn, intervalMs: 999999 })
+    await s.poll() // lazily builds the heat/cold desk-fx for agent.root
+    expect(root.add).toHaveBeenCalled()
+
+    s.forget(agent)
+    // deskHeat/deskDust's dispose() detaches its group from the parent
+    // it was added to — one call per treatment.
+    expect(root.remove).toHaveBeenCalledTimes(2)
+
+    // idempotent: nothing left to dispose the second time, so nothing throws
+    expect(() => s.forget(agent)).not.toThrow()
+    expect(root.remove).toHaveBeenCalledTimes(2)
+    s.stop()
+  })
 })

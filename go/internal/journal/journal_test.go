@@ -2,6 +2,7 @@ package journal
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -147,12 +148,124 @@ func TestTrimKeepsMostRecentAndRewritesFile(t *testing.T) {
 	}
 }
 
+// TestNewOverExistingFileTrims is the case #110 shipped without: a fresh
+// process's New() opens a path that already holds more than MaxLines
+// records from a previous run. Without seeding the counter from what's
+// already there, this process's own lines starts at 0 and would have to
+// write MaxLines more records itself before ever trimming — exactly the
+// restart-doesn't-trim bug.
+func TestNewOverExistingFileTrims(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "journal.jsonl")
+
+	var buf bytes.Buffer
+	total := MaxLines + 50
+	for i := 0; i < total; i++ {
+		line, err := json.Marshal(Record{Rung: 3, Path: "a.py", AtMs: int64(i)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		buf.Write(line)
+		buf.WriteByte('\n')
+	}
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	j := New(path, nil)
+	defer j.Stop()
+
+	// No new records at all: seeding plus the existing file is the whole
+	// trigger, nothing this process writes matters here.
+	waitFor(t, 3*time.Second, func() bool {
+		lines := readLines(t, path)
+		return len(lines) <= KeepLines
+	})
+
+	lines := readLines(t, path)
+	if len(lines) != KeepLines {
+		t.Fatalf("got %d lines, want %d", len(lines), KeepLines)
+	}
+	last := lines[len(lines)-1].AtMs
+	if last != int64(total-1) {
+		t.Fatalf("last kept record has AtMs %d, want %d (the newest)", last, total-1)
+	}
+}
+
+// TestRestartAccumulationStaysBounded is issue #110's own repro, run to a
+// bound instead of just observed: many short-lived Journals writing to the
+// same path in turn, the way a restart-heavy daemon does. Each process's
+// own write count never nears MaxLines, so only seeding-from-file keeps the
+// file from growing without limit across the run.
+func TestRestartAccumulationStaysBounded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "journal.jsonl")
+
+	const restarts = 12
+	const perRestart = 500 // matches wave4-findings' repro: 12 x 500 = 6000, well past MaxLines
+	for i := 0; i < restarts; i++ {
+		j := New(path, nil)
+		for k := 0; k < perRestart; k++ {
+			j.Record(Record{Rung: 3, Path: "a.py", AtMs: int64(i*perRestart + k)})
+		}
+		waitFor(t, 3*time.Second, func() bool { return j.Written() == uint64(perRestart) })
+		// Give the 100ms trim tick a chance to run before this process
+		// exits — a restart this short-lived is exactly the case seeding
+		// exists for, but the trim itself still only happens on a tick.
+		time.Sleep(150 * time.Millisecond)
+		j.Stop()
+	}
+
+	lines := readLines(t, path)
+	if len(lines) > MaxLines {
+		t.Fatalf("file has %d lines after %d restarts, want <= %d (unbounded growth across restarts)", len(lines), restarts, MaxLines)
+	}
+	last := lines[len(lines)-1].AtMs
+	if want := int64(restarts*perRestart - 1); last != want {
+		t.Fatalf("last kept record has AtMs %d, want %d (the newest)", last, want)
+	}
+}
+
 func TestStopClosesCleanly(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "journal.jsonl")
 	j := New(path, nil)
 	j.Record(Record{Rung: 3, Path: "a.py"})
 	waitFor(t, 2*time.Second, func() bool { return j.Written() == 1 })
 	j.Stop() // must return, not hang
+}
+
+// TestStopDrainsBufferedRecords is #115: run()'s select gives j.stop and
+// j.recs equal priority, so Stop() could return with records Record() had
+// already accepted still sitting unwritten in the channel. Built by hand
+// rather than through New so every record is queued before the owning
+// goroutine's first select — the same race the bug needs, forced instead of
+// hoped for — and Stop is called immediately after starting it, before the
+// goroutine has any chance to drain on its own.
+func TestStopDrainsBufferedRecords(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "journal.jsonl")
+
+	j := &Journal{
+		path: path,
+		recs: make(chan Record, 4096),
+		stop: make(chan struct{}),
+		done: make(chan struct{}),
+	}
+
+	const n = 50
+	for i := 0; i < n; i++ {
+		j.recs <- Record{Rung: 3, Path: "a.py", AtMs: int64(i)}
+	}
+
+	go j.run()
+	j.Stop()
+
+	lines := readLines(t, path)
+	if len(lines) != n {
+		t.Fatalf("got %d lines after Stop, want %d (buffered records dropped on stop)", len(lines), n)
+	}
+	for i, r := range lines {
+		if r.AtMs != int64(i) {
+			t.Fatalf("record %d has AtMs %d, want %d (drain order)", i, r.AtMs, i)
+		}
+	}
 }
 
 func TestEmptyPathNeverWrites(t *testing.T) {

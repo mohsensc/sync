@@ -32,16 +32,26 @@ func New() *Queue {
 
 // Note remembers a path. Safe from any goroutine. Repeats within one drain
 // collapse; past Max distinct paths, the newest are dropped.
-func (q *Queue) Note(path string) {
+//
+// key is the caller's dedup key for path — the same normalized region key
+// ContendFrame will put on the wire (repo.RegionKeyResolved), so two
+// spellings of one path (./a.go vs a.go) collapse to a single pending entry
+// instead of costing two contend frames. path itself is stored and drained
+// unnormalized: it still goes to decide.ContendFrame, which normalizes it
+// again on its own.
+func (q *Queue) Note(path, key string) {
 	if path == "" {
 		return
 	}
+	if key == "" {
+		key = path
+	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if q.seen[path] || len(q.pending) >= Max {
+	if q.seen[key] || len(q.pending) >= Max {
 		return
 	}
-	q.seen[path] = true
+	q.seen[key] = true
 	q.pending = append(q.pending, path)
 }
 

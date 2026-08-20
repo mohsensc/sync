@@ -217,6 +217,113 @@ func TestReleaseToEmptyHandedResetsAgeForTheNextGenuinelyNewAsk(t *testing.T) {
 	}
 }
 
+// -- issue #163: wait-die age's three-way split on removal ------------------
+//
+// agentClaimAdded always clears firstSeenSet, so ageOf never sees the value
+// agentClaimRemoved preserves unless the removal path actually re-latches
+// it. Three endings, three different rules: abort/expiry preserve the age
+// (a retry keeps the priority it earned), a voluntary release resets it
+// (the transaction concluded on its own terms), and a session ending clears
+// it outright (the identity is gone, not just between claims).
+
+func TestAbortPreservesAgeSoARetryIsToldWaitNotReset(t *testing.T) {
+	clock, reg, _ := newTestRegistry()
+	other := Region{Path: "src/db.py", Symbol: strp("query")}
+
+	// old claims early, at t=0.
+	reg.Acquire("r1", "sara", "old", authRegion, "x", nil, PriorityNormal, nil)
+	clock.Advance(10)
+	// newbie claims a different region at t=10 — newbie is younger.
+	reg.Acquire("r1", "dev", "newbie", other, "y", nil, PriorityNormal, nil)
+	clock.Advance(5)
+	// newbie contends old's region and, being younger, gets told abort —
+	// wait-die makes it drop everything it holds via ReleaseAll (relay.go's
+	// onClaim mirrors this by calling ReleaseAll on decisionAbort).
+	res := reg.Acquire("r1", "dev", "newbie", authRegion, "steal", nil, PriorityNormal, nil)
+	if res.Decision != decisionAbort {
+		t.Fatalf("expected newbie (younger) to abort, got %v", res.Decision)
+	}
+	reg.ReleaseAll("r1", "newbie", nil)
+
+	clock.Advance(50)
+	if got := reg.AgeOf("newbie"); got != 10.0 {
+		t.Fatalf("expected newbie's age to stay latched at its acquire time (10.0) across the abort, got %v", got)
+	}
+
+	// Consequence: newbie retries later and, because its age is preserved
+	// rather than reset to "now", still loses to old (which is genuinely
+	// older) — but the point of preserving age is that a still-younger
+	// retry gets the short handover grace, not the long fair-share one. See
+	// TestAgeIsTheOldestLiveClaimNotTheNewest and the Contend test above for
+	// the grace-size assertion; this test only pins the age itself.
+}
+
+func TestExpiryPreservesAgeTheSameWayAbortDoes(t *testing.T) {
+	clock, reg, _ := newTestRegistry()
+
+	reg.Acquire("r1", "sara", "a1", authRegion, "x", nil, PriorityNormal, nil)
+	clock.Advance(LeaseTTLS + 1) // lease expires; a1 holds nothing lazily
+
+	// Nothing has touched a1's shard since the acquire, so the expiry
+	// hasn't been discovered yet — force it via the read path, same as
+	// TestExpiryDiscoveredByAReadStillPublishes.
+	if reg.HolderOf("r1", authRegion, nil) != nil {
+		t.Fatalf("expected the lease to have expired")
+	}
+
+	if got := reg.AgeOf("a1"); got != 0.0 {
+		t.Fatalf("expected a lazy expiry to preserve age at acquire time (0.0), got %v", got)
+	}
+}
+
+func TestVoluntaryReleaseResetsAgeEvenAfterAnEarlierAbort(t *testing.T) {
+	clock, reg, _ := newTestRegistry()
+
+	// Seed a1 with a latched age the way an abort would, to make sure
+	// release() actually clears it rather than merely never setting it.
+	reg.Acquire("r1", "sara", "a1", authRegion, "x", nil, PriorityNormal, nil)
+	clock.Advance(3)
+	reg.ReleaseAll("r1", "a1", nil) // abort-shaped removal: preserves age
+	if got := reg.AgeOf("a1"); got != 0.0 {
+		t.Fatalf("setup: expected the abort to preserve age 0.0, got %v", got)
+	}
+
+	clock.Advance(4) // now 7
+	reg.Acquire("r1", "sara", "a1", authRegion, "y", nil, PriorityNormal, nil)
+	clock.Advance(2) // now 9
+	reg.Release("r1", "a1", authRegion, nil)
+
+	clock.Advance(1) // now 10
+	if got := reg.AgeOf("a1"); got != 10.0 {
+		t.Fatalf("expected a voluntary release to reset age to now (10.0) regardless of the earlier abort, got %v", got)
+	}
+}
+
+func TestSessionEndClearsAgeAndARejoinStartsFresh(t *testing.T) {
+	clock, reg, _ := newTestRegistry()
+
+	// a1 is old — claims at t=0 — so it would normally outrank anyone who
+	// shows up later.
+	reg.Acquire("r1", "sara", "a1", authRegion, "x", nil, PriorityNormal, nil)
+	clock.Advance(20)
+
+	// The connection actually ends (relay.go's Leave), not an abort.
+	reg.ReleaseAllSessionEnd("r1", "a1", nil)
+
+	clock.Advance(5)
+	// a1 rejoins under the same agent id and immediately contends a region
+	// someone else took while it was gone. If session end had preserved
+	// age (like an abort does), a1 would still read as the room's elder.
+	other := Region{Path: "src/db.py", Symbol: strp("query")}
+	reg.Acquire("r1", "dev", "newer", other, "warm up", nil, PriorityNormal, nil)
+
+	got := reg.AgeOf("a1")
+	if got != 25.0 {
+		t.Fatalf("expected a1's age to start fresh at 25.0 (now, on first sight after rejoin), got %v — "+
+			"session end must clear the wait-die entry, not preserve it like an abort", got)
+	}
+}
+
 // -- PR #37 / issue #34: lazy expiry discovered by a read still broadcasts -
 
 func TestExpiryDiscoveredByAReadStillPublishes(t *testing.T) {
@@ -315,17 +422,14 @@ func TestHigherTierWaitsAgainstAnOlderLowerTierHolder(t *testing.T) {
 	}
 }
 
-// -- carry: the dodge-the-deadline check, keyed like python's ------------
+// -- carry: the dodge-the-deadline check survives a changed line range ----
 //
-// leases.py's `_carry` dict keys on the full frozen Region — path, symbol
-// *and* lines — not same_region()'s coarser path+symbol contention unit.
-// A carryKey that dropped lines would resume a capped handover deadline
-// across a release/re-claim that reports a different line range for the
-// same symbol, which python's carry would treat as a miss (a different
-// key) and Go's would treat as a hit — a real wire-behavior divergence,
-// not just an internal one. See leases.go's carryKey doc comment.
+// Lines is display-only, never region identity (types.go), so carryKey
+// can't key on it — a holder that releases and re-claims the same symbol
+// with a different (or absent) line range is still the same claim dodging
+// its deadline, and must inherit it. See leases.go's carryKey doc comment.
 
-func TestCarryDoesNotResumeAcrossADifferentLineRange(t *testing.T) {
+func TestCarryResumesAcrossADifferentLineRange(t *testing.T) {
 	clock, reg, _ := newTestRegistry()
 	other := Region{Path: "src/db.py", Symbol: strp("query")}
 	linesA := Region{Path: "src/auth.py", Symbol: strp("sign_in"), Lines: []int{1, 10}}
@@ -343,6 +447,7 @@ func TestCarryDoesNotResumeAcrossADifferentLineRange(t *testing.T) {
 	if held.HandoverAt == nil {
 		t.Fatalf("expected a handover deadline before the dodge")
 	}
+	deadline := *held.HandoverAt
 
 	// a1 lets go early (before the deadline) and re-claims the same symbol
 	// but a different line range.
@@ -351,9 +456,39 @@ func TestCarryDoesNotResumeAcrossADifferentLineRange(t *testing.T) {
 	if !reacquired.Ok {
 		t.Fatalf("expected the re-claim to succeed, got %+v", reacquired)
 	}
-	if reacquired.Claim.HandoverAt != nil {
-		t.Fatalf("carry resumed across a different line range for the same symbol; "+
-			"got handover_at %v, want none (carryKey must include lines)", *reacquired.Claim.HandoverAt)
+	if reacquired.Claim.HandoverAt == nil || *reacquired.Claim.HandoverAt != deadline {
+		t.Fatalf("expected the carried deadline %v to survive a changed line range, got %+v",
+			deadline, reacquired.Claim.HandoverAt)
+	}
+}
+
+func TestCarryResumesAcrossNoLines(t *testing.T) {
+	clock, reg, _ := newTestRegistry()
+	other := Region{Path: "src/db.py", Symbol: strp("query")}
+	linesA := Region{Path: "src/auth.py", Symbol: strp("sign_in"), Lines: []int{1, 10}}
+	noLines := Region{Path: "src/auth.py", Symbol: strp("sign_in")}
+
+	reg.Acquire("r1", "dev", "a2", other, "warm up", nil, PriorityNormal, nil)
+	clock.Advance(10)
+	reg.Acquire("r1", "sara", "a1", linesA, "x", nil, PriorityNormal, nil)
+	reg.Contend("r1", linesA, "a2", "dev", PriorityNormal, nil, nil)
+
+	held := reg.HolderOf("r1", linesA, nil)
+	if held.HandoverAt == nil {
+		t.Fatalf("expected a handover deadline before the dodge")
+	}
+	deadline := *held.HandoverAt
+
+	// a1 lets go early (before the deadline) and re-claims the same symbol
+	// with no line range at all.
+	reg.Release("r1", "a1", linesA, nil)
+	reacquired := reg.Acquire("r1", "sara", "a1", noLines, "y", nil, PriorityNormal, nil)
+	if !reacquired.Ok {
+		t.Fatalf("expected the re-claim to succeed, got %+v", reacquired)
+	}
+	if reacquired.Claim.HandoverAt == nil || *reacquired.Claim.HandoverAt != deadline {
+		t.Fatalf("expected the carried deadline %v to survive an absent line range, got %+v",
+			deadline, reacquired.Claim.HandoverAt)
 	}
 }
 

@@ -149,6 +149,13 @@ std::string verb_for(const std::string& tool) {
     return "think";
 }
 
+// Overflow defense only, not a plausibility check on any one field: this cap
+// has to clear the largest value we legitimately parse, which is
+// lost_ms_ago riding a 30-minute window (1,800,000ms). Kept well above that
+// so raising the window doesn't silently reintroduce the saturation bug.
+// See HandoverNoteMs in go/internal/leases/leases.go.
+constexpr long long kIntFieldCeiling = 10000000;  // ~2.8 hours in ms
+
 /// Integer scalar, or `missing` when the key is absent or not a bare number.
 /// A quoted "3" is rejected on purpose: a daemon that sends the wrong type is a
 /// daemon we should not be guessing on behalf of.
@@ -171,10 +178,31 @@ int int_field(std::string_view json, std::string_view key, int missing) {
     long long v = 0;
     while (pos < json.size() && json[pos] >= '0' && json[pos] <= '9') {
         v = v * 10 + (json[pos] - '0');
-        if (v > 1000000) v = 1000000;  // saturate; nothing sane is this big
+        // Saturate well clear of overflow, not against what a well-behaved
+        // sender would send. lost_ms_ago rides this field up to
+        // leases.go's HandoverNoteMs (30 minutes); if that grows, raise this too.
+        if (v > kIntFieldCeiling) v = kIntFieldCeiling;
         ++pos;
     }
     return static_cast<int>(negative ? -v : v);
+}
+
+/// True only for a bare `true` value on `key`. A quoted "true" does not count,
+/// same reasoning as int_field rejecting a quoted "3": a daemon sending the
+/// wrong type is not one we guess on behalf of. The match also has to end
+/// where the token ends, or "truest" would read as true.
+bool bool_field(std::string_view json, std::string_view key) {
+    std::string needle = "\"";
+    needle += key;
+    needle += "\":";
+    auto pos = json.find(needle);
+    if (pos == std::string_view::npos) return false;
+    pos += needle.size();
+    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t')) ++pos;
+    if (json.substr(pos, 4) != "true") return false;
+    pos += 4;
+    return pos >= json.size() || json[pos] == ',' || json[pos] == '}' || json[pos] == ' ' ||
+           json[pos] == '\t';
 }
 
 /// Blocks SIGPIPE on this thread for as long as it lives, and swallows one if
@@ -407,7 +435,31 @@ void append_field(std::string& out, const char* key, const std::string& value) {
     out += '"';
 }
 
+/// True for a variable that actually has a value. `std::getenv` returns
+/// non-null for `FOO=""`, and that used to read as "set" here while every
+/// other reader in the repo — presenced's envOr, the statusline segment's
+/// `${VAR:-fallback}` — falls through on an empty value. This is that same
+/// rule, applied at the one holdout.
+bool env_set(const char* v) { return v != nullptr && v[0] != '\0'; }
+
+std::string join_path(std::string dir, const char* leaf) {
+    if (!dir.empty() && dir.back() == '/') dir.pop_back();
+    dir += '/';
+    dir += leaf;
+    return dir;
+}
+
 }  // namespace
+
+std::string resolve_sock_path(EnvLookup lookup) {
+    const char* sock = lookup("AGENT_PRESENCE_SOCK");
+    if (env_set(sock)) return sock;
+    const char* rt = lookup("XDG_RUNTIME_DIR");
+    if (env_set(rt)) return join_path(rt, "agent-presence.sock");
+    const char* tmp = lookup("TMPDIR");
+    if (env_set(tmp)) return join_path(tmp, "agent-presence.sock");
+    return "/tmp/agent-presence.sock";
+}
 
 std::string build_event(const std::string& hook_json) {
     const std::string tool = field(hook_json, "tool_name");
@@ -500,7 +552,7 @@ Decision parse_decision(const std::string& line) {
     d.handover_to = field(line, "handover_to");
     d.handover_to_human = field(line, "handover_to_human");
     d.handover_to_priority = field(line, "handover_to_priority");
-    d.handover_to_me = line.find("\"handover_to_me\":true") != std::string::npos;
+    d.handover_to_me = bool_field(line, "handover_to_me");
     d.waiting = int_field(line, "waiting", 0);
     d.lost_to = field(line, "lost_to");
     d.lost_to_priority = field(line, "lost_to_priority");

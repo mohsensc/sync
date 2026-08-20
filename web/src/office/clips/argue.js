@@ -307,6 +307,11 @@ function playLocal(root, name, fade) {
   return action
 }
 
+// Walk-phase leg-to-mark delta, reused across legs and frames — see
+// handshake.js's _ab. Each leg's use starts and ends within one loop
+// iteration below, so there's no aliasing between legs or frames.
+const _d = new THREE.Vector3()
+
 /**
  * @param {{group:THREE.Object3D, root:THREE.Object3D, height:number}} a  gets the `argue` (pointer) role
  * @param {{group:THREE.Object3D, root:THREE.Object3D, height:number}} b  gets the `argueReact` (hands-up) role
@@ -333,7 +338,7 @@ export function argueRoutine(a, b, {
       let all = true
       for (const l of legs) {
         const g = l.c.group
-        const d = new THREE.Vector3().subVectors(l.mark.pos, g.position); d.y = 0
+        const d = _d.subVectors(l.mark.pos, g.position); d.y = 0
         const dist = d.length()
         if (dist > arriveEps) {
           all = false

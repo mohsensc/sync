@@ -34,7 +34,7 @@ func TestNoBriefWhenTheRegionIsFree(t *testing.T) {
 
 func TestDeferDoesNotGrant(t *testing.T) {
 	_, _, n := newNegotiatorFixture()
-	outcome := n.Apply("r1", "a2", negR, "DEFER", "", nil, PriorityNormal, nil)
+	outcome := n.Apply("r1", "a2", negR, "DEFER", "", nil, PriorityNormal, "", nil)
 	if outcome.Granted {
 		t.Fatalf("expected DEFER not to grant")
 	}
@@ -42,12 +42,18 @@ func TestDeferDoesNotGrant(t *testing.T) {
 
 func TestSplitGrantsADisjointRegion(t *testing.T) {
 	_, reg, n := newNegotiatorFixture()
-	outcome := n.Apply("r1", "a2", negOther, "SPLIT", "", nil, PriorityNormal, nil)
+	outcome := n.Apply("r1", "a2", negOther, "SPLIT", "", nil, PriorityNormal, "kim", nil)
 	if !outcome.Granted {
 		t.Fatalf("expected SPLIT onto a disjoint region to grant, got %+v", outcome)
 	}
-	if held := reg.HolderOf("r1", negOther, nil); held == nil || held.Agent != "a2" {
+	held := reg.HolderOf("r1", negOther, nil)
+	if held == nil || held.Agent != "a2" {
 		t.Fatalf("expected a2 to hold the split region, got %+v", held)
+	}
+	// The requester's human, not the requester's agent id, belongs here —
+	// this is what #176 fixed: split used to pass the agent id twice.
+	if held.Human != "kim" {
+		t.Fatalf("expected split lease human to be kim, got %q", held.Human)
 	}
 }
 
@@ -59,7 +65,7 @@ func TestHandoffDropsTheRequesterClaimAndLeavesTheHolder(t *testing.T) {
 		t.Fatalf("fixture setup failed")
 	}
 
-	outcome := n.Apply("r1", "a2", negOther, "HANDOFF", "", nil, PriorityNormal, nil)
+	outcome := n.Apply("r1", "a2", negOther, "HANDOFF", "", nil, PriorityNormal, "", nil)
 	if outcome.Granted || outcome.Action != "handoff" {
 		t.Fatalf("got %+v", outcome)
 	}
@@ -74,7 +80,7 @@ func TestHandoffDropsTheRequesterClaimAndLeavesTheHolder(t *testing.T) {
 
 func TestProceedIsAlwaysAvailableAndIsLoggedAsAnOverride(t *testing.T) {
 	_, _, n := newNegotiatorFixture()
-	outcome := n.Apply("r1", "a2", negR, "PROCEED", "independent change", nil, PriorityNormal, nil)
+	outcome := n.Apply("r1", "a2", negR, "PROCEED", "independent change", nil, PriorityNormal, "", nil)
 	if !outcome.Granted || !outcome.LoggedOverride {
 		t.Fatalf("got %+v", outcome)
 	}
@@ -84,7 +90,7 @@ func TestUnknownMoveIsRejected(t *testing.T) {
 	// Rejected, but as data. Panicking here would escape through the MCP
 	// tool call and the agent would see a crash instead of an answer.
 	_, _, n := newNegotiatorFixture()
-	outcome := n.Apply("r1", "a2", negR, "ARGUE", "", nil, PriorityNormal, nil)
+	outcome := n.Apply("r1", "a2", negR, "ARGUE", "", nil, PriorityNormal, "", nil)
 	if outcome.Granted || outcome.Action != "invalid_move" {
 		t.Fatalf("got %+v", outcome)
 	}
@@ -92,7 +98,7 @@ func TestUnknownMoveIsRejected(t *testing.T) {
 
 func TestSplitOntoTheContestedRegionIsRejectedNotSilentlyDeferred(t *testing.T) {
 	_, reg, n := newNegotiatorFixture()
-	outcome := n.Apply("r1", "a2", negR, "SPLIT", "", nil, PriorityNormal, nil)
+	outcome := n.Apply("r1", "a2", negR, "SPLIT", "", nil, PriorityNormal, "", nil)
 	if outcome.Granted || outcome.Action != "split_rejected" {
 		t.Fatalf("got %+v", outcome)
 	}
@@ -106,12 +112,16 @@ func TestSplitOntoTheContestedRegionIsRejectedNotSilentlyDeferred(t *testing.T) 
 
 func TestSplitClaimsTheNamedDisjointSubRegion(t *testing.T) {
 	_, reg, n := newNegotiatorFixture()
-	outcome := n.Apply("r1", "a2", negR, "SPLIT", "", &negOther, PriorityNormal, nil)
+	outcome := n.Apply("r1", "a2", negR, "SPLIT", "", &negOther, PriorityNormal, "kim", nil)
 	if !outcome.Granted || outcome.Action != "split" {
 		t.Fatalf("got %+v", outcome)
 	}
-	if held := reg.HolderOf("r1", negOther, nil); held == nil || held.Agent != "a2" {
+	held := reg.HolderOf("r1", negOther, nil)
+	if held == nil || held.Agent != "a2" {
 		t.Fatalf("expected a2 to hold the split scope, got %+v", held)
+	}
+	if held.Human != "kim" {
+		t.Fatalf("expected split lease human to be kim, got %q", held.Human)
 	}
 	// The holder keeps what it had.
 	if held := reg.HolderOf("r1", negR, nil); held == nil || held.Agent != "a1" {
@@ -122,7 +132,7 @@ func TestSplitClaimsTheNamedDisjointSubRegion(t *testing.T) {
 func TestAWholeFileSplitIsNotDisjointFromASymbolHolder(t *testing.T) {
 	_, _, n := newNegotiatorFixture()
 	whole := Region{Path: "src/auth.py"}
-	outcome := n.Apply("r1", "a2", negR, "SPLIT", "", &whole, PriorityNormal, nil)
+	outcome := n.Apply("r1", "a2", negR, "SPLIT", "", &whole, PriorityNormal, "", nil)
 	if outcome.Granted || outcome.Action != "split_rejected" {
 		t.Fatalf("got %+v", outcome)
 	}
@@ -131,7 +141,7 @@ func TestAWholeFileSplitIsNotDisjointFromASymbolHolder(t *testing.T) {
 func TestSplitOntoARegionSomeoneElseAlreadyHoldsIsRejected(t *testing.T) {
 	_, reg, n := newNegotiatorFixture()
 	reg.Acquire("r1", "kim", "a3", negOther, "already mine", nil, PriorityNormal, nil)
-	outcome := n.Apply("r1", "a2", negR, "SPLIT", "", &negOther, PriorityNormal, nil)
+	outcome := n.Apply("r1", "a2", negR, "SPLIT", "", &negOther, PriorityNormal, "", nil)
 	if outcome.Granted || outcome.Action != "split_rejected" {
 		t.Fatalf("got %+v", outcome)
 	}
@@ -139,24 +149,24 @@ func TestSplitOntoARegionSomeoneElseAlreadyHoldsIsRejected(t *testing.T) {
 
 func TestMoveNamesAreCaseInsensitive(t *testing.T) {
 	_, _, n := newNegotiatorFixture()
-	if !n.Apply("r1", "a2", negR, "split", "", &negOther, PriorityNormal, nil).Granted {
+	if !n.Apply("r1", "a2", negR, "split", "", &negOther, PriorityNormal, "", nil).Granted {
 		t.Fatalf("expected lowercase split to be recognized")
 	}
-	if !n.Apply("r1", "a2", negR, "  Proceed  ", "", nil, PriorityNormal, nil).Granted {
+	if !n.Apply("r1", "a2", negR, "  Proceed  ", "", nil, PriorityNormal, "", nil).Granted {
 		t.Fatalf("expected padded/mixed-case proceed to be recognized")
 	}
 }
 
 func TestLowercaseDeferIsStillADefer(t *testing.T) {
 	_, _, n := newNegotiatorFixture()
-	if got := n.Apply("r1", "a2", negR, "defer", "", nil, PriorityNormal, nil).Action; got != "defer" {
+	if got := n.Apply("r1", "a2", negR, "defer", "", nil, PriorityNormal, "", nil).Action; got != "defer" {
 		t.Fatalf("got %s, want defer", got)
 	}
 }
 
 func TestAnInventedMoveReturnsAStructuredErrorInsteadOfRaising(t *testing.T) {
 	_, _, n := newNegotiatorFixture()
-	outcome := n.Apply("r1", "a2", negR, "ARGUE", "", nil, PriorityNormal, nil)
+	outcome := n.Apply("r1", "a2", negR, "ARGUE", "", nil, PriorityNormal, "", nil)
 	if outcome.Granted || outcome.Action != "invalid_move" {
 		t.Fatalf("got %+v", outcome)
 	}

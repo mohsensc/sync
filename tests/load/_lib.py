@@ -75,6 +75,14 @@ PRESENCED = GO_BUILD / "presenced"
 GORELAY = GO_BUILD / "gorelay"
 
 
+class HarnessSendError(Exception):
+    """DaemonProc.send_lines could not deliver — the daemon stalled, refused
+    the connection, or reset it. This is the harness failing to exercise the
+    product, not the product doing anything; a scenario that catches this
+    must record it as a harness error, never fold it into a product
+    finding."""
+
+
 # -- stats --------------------------------------------------------------------
 
 
@@ -293,31 +301,39 @@ class DaemonProc:
     def pid(self) -> int:
         return self.proc.pid if self.proc else 0
 
-    def snapshot_paths(self) -> dict[str, str]:
+    def snapshot_paths(self) -> dict[str, str] | None:
         """What the statusline would render: agent human -> last path seen.
 
         Doubles as a probe for how much of a batch the daemon actually read,
-        because the table records the most recent line it processed.
+        because the table records the most recent line it processed. Returns
+        None when the snapshot can't be read — a daemon that hasn't written
+        one yet, or a read racing a rename, is not the same thing as a
+        daemon that read zero peers, and callers must not conflate the two.
         """
         try:
             data = json.loads(self.snapshot.read_text())
         except Exception:
-            return {}
+            return None
         return {p.get("human", ""): p.get("path", "")
                 for p in data.get("peers", [])}
 
-    def send_lines(self, lines: list[str], timeout: float = 2.0) -> bool:
+    def send_lines(self, lines: list[str], timeout: float = 2.0) -> None:
         """One connection, every line, the way a burst of hooks would look if
-        they shared a socket. Returns False if the daemon would not take it."""
+        they shared a socket. Raises HarnessSendError if the daemon would
+        not take it — including a send that just times out, which used to
+        come back as a bare False indistinguishable from a real refusal (and
+        used to leak the socket on this path). Callers decide what a
+        harness-side send failure means for their scenario; this only
+        reports it."""
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
-            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             s.settimeout(timeout)
             s.connect(str(self.sock))
             s.sendall(("\n".join(lines) + "\n").encode())
+        except OSError as exc:
+            raise HarnessSendError(f"send_lines to {self.sock}: {exc}") from exc
+        finally:
             s.close()
-            return True
-        except OSError:
-            return False
 
     def sigkill(self) -> None:
         if self.proc is not None and self.proc.poll() is None:

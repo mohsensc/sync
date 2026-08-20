@@ -33,7 +33,7 @@ func TestDecideRung0WhenNoConflict(t *testing.T) {
 
 func TestDecideRung3OnConflict(t *testing.T) {
 	c := leases.New()
-	c.Upsert(leases.RegionKey("a.py", ""), leases.Lease{Agent: "other", Human: "sara", ExpiresAtMs: 90_000})
+	c.Upsert(leases.RegionKey("a.py", ""), leases.Lease{Agent: "other", Human: "sara", ExpiresAtMs: 90_000}, 0)
 
 	resp := Decide(Request{Verb: "edit", Path: "a.py", Agent: "sess1"}, c, policy.New(), 0, "", "")
 	if resp.Rung != 3 || resp.Effect != "deny" {
@@ -49,7 +49,7 @@ func TestDecideRung3OnConflict(t *testing.T) {
 
 func TestDecideNonEditNeverBlocks(t *testing.T) {
 	c := leases.New()
-	c.Upsert(leases.RegionKey("a.py", ""), leases.Lease{Agent: "other", ExpiresAtMs: 90_000})
+	c.Upsert(leases.RegionKey("a.py", ""), leases.Lease{Agent: "other", ExpiresAtMs: 90_000}, 0)
 	resp := Decide(Request{Verb: "read", Path: "a.py", Agent: "sess1"}, c, policy.New(), 0, "", "")
 	if resp.Rung != 0 {
 		t.Fatalf("got %+v", resp)
@@ -61,7 +61,7 @@ func TestDecideUsesSelfAgentOverRequestAgent(t *testing.T) {
 	// hook-session "agent" field would collide with if self_agent were
 	// ignored. See decide.hpp's note on why these are different namespaces.
 	c := leases.New()
-	c.Upsert(leases.RegionKey("a.py", ""), leases.Lease{Agent: "room-agent", ExpiresAtMs: 90_000})
+	c.Upsert(leases.RegionKey("a.py", ""), leases.Lease{Agent: "room-agent", ExpiresAtMs: 90_000}, 0)
 
 	resp := Decide(Request{Verb: "edit", Path: "a.py", Agent: "room-agent"}, c, policy.New(), 0, "room-agent", "")
 	if resp.Rung != 0 {
@@ -73,7 +73,7 @@ func TestDecideOwnHandoverRidesOnRung0(t *testing.T) {
 	c := leases.New()
 	c.Upsert(leases.RegionKey("a.py", ""), leases.Lease{
 		Agent: "me", ExpiresAtMs: 90_000, HasHandover: true, HandoverAtMs: 5_000, HandoverTo: "other", Waiting: 1,
-	})
+	}, 0)
 	resp := Decide(Request{Verb: "edit", Path: "a.py", Agent: "me"}, c, policy.New(), 0, "me", "")
 	if resp.Rung != 0 {
 		t.Fatalf("own handover must not block: %+v", resp)
@@ -99,7 +99,7 @@ func TestDecideBlockedCarriesHandoverToMe(t *testing.T) {
 	c := leases.New()
 	c.Upsert(leases.RegionKey("a.py", ""), leases.Lease{
 		Agent: "other", ExpiresAtMs: 90_000, HasHandover: true, HandoverAtMs: 5_000, HandoverTo: "me",
-	})
+	}, 0)
 	resp := Decide(Request{Verb: "edit", Path: "a.py", Agent: "me"}, c, policy.New(), 0, "me", "")
 	if resp.Rung != 3 || !resp.HandoverToMe {
 		t.Fatalf("got %+v", resp)
@@ -191,10 +191,10 @@ func TestAbsentExpiresInMsOmittedOnRung0(t *testing.T) {
 func TestDecideRung2WhenBothSymbolsAreKnownAndDisjoint(t *testing.T) {
 	c := leases.New()
 	c.Upsert(leases.RegionKey("auth.py", "sign_out"),
-		leases.Lease{Agent: "me", Symbol: "sign_out", ExpiresAtMs: 90_000})
+		leases.Lease{Agent: "me", Symbol: "sign_out", ExpiresAtMs: 90_000}, 0)
 	c.Upsert(leases.RegionKey("auth.py", "sign_in"),
 		leases.Lease{Agent: "other", Human: "sara", Intent: "move session handling to JWT",
-			Symbol: "sign_in", ExpiresAtMs: 90_000})
+			Symbol: "sign_in", ExpiresAtMs: 90_000}, 0)
 
 	resp := Decide(Request{Verb: "edit", Path: "auth.py", Agent: "me"}, c, policy.New(), 0, "me", "")
 	if resp.Rung != 2 || resp.Effect != "context" {
@@ -221,7 +221,7 @@ func TestDecideRung2WhenBothSymbolsAreKnownAndDisjoint(t *testing.T) {
 func TestDecideStaysRung3WithoutMyOwnClaim(t *testing.T) {
 	c := leases.New()
 	c.Upsert(leases.RegionKey("auth.py", "sign_in"),
-		leases.Lease{Agent: "other", Human: "sara", Symbol: "sign_in", ExpiresAtMs: 90_000})
+		leases.Lease{Agent: "other", Human: "sara", Symbol: "sign_in", ExpiresAtMs: 90_000}, 0)
 
 	resp := Decide(Request{Verb: "edit", Path: "auth.py", Agent: "me"}, c, policy.New(), 0, "me", "")
 	if resp.Rung != 3 || resp.Effect != "deny" {
@@ -240,11 +240,11 @@ func TestDecideStaysRung3WithoutMyOwnClaim(t *testing.T) {
 func TestDecideRung3WinsOverRung2AmongSeveralHolders(t *testing.T) {
 	c := leases.New()
 	c.Upsert(leases.RegionKey("auth.py", "sign_out"),
-		leases.Lease{Agent: "me", Symbol: "sign_out", ExpiresAtMs: 90_000})
+		leases.Lease{Agent: "me", Symbol: "sign_out", ExpiresAtMs: 90_000}, 0)
 	c.Upsert(leases.RegionKey("auth.py", "sign_in"),
-		leases.Lease{Agent: "other-a", Symbol: "sign_in", ExpiresAtMs: 90_000})
+		leases.Lease{Agent: "other-a", Symbol: "sign_in", ExpiresAtMs: 90_000}, 0)
 	c.Upsert(leases.RegionKey("auth.py", "sign_out")+"#2",
-		leases.Lease{Agent: "other-b", Symbol: "sign_out", ExpiresAtMs: 90_000})
+		leases.Lease{Agent: "other-b", Symbol: "sign_out", ExpiresAtMs: 90_000}, 0)
 
 	resp := Decide(Request{Verb: "edit", Path: "auth.py", Agent: "me"}, c, policy.New(), 0, "me", "")
 	if resp.Rung != 3 {
@@ -260,9 +260,9 @@ func TestDecideRung3WinsOverRung2AmongSeveralHolders(t *testing.T) {
 func TestDecideRung2RespectsPolicyEscalation(t *testing.T) {
 	c := leases.New()
 	c.Upsert(leases.RegionKey("auth.py", "sign_out"),
-		leases.Lease{Agent: "me", Symbol: "sign_out", ExpiresAtMs: 90_000})
+		leases.Lease{Agent: "me", Symbol: "sign_out", ExpiresAtMs: 90_000}, 0)
 	c.Upsert(leases.RegionKey("auth.py", "sign_in"),
-		leases.Lease{Agent: "other", Symbol: "sign_in", ExpiresAtMs: 90_000})
+		leases.Lease{Agent: "other", Symbol: "sign_in", ExpiresAtMs: 90_000}, 0)
 
 	pol := policy.New()
 	pol.SetFloor(policy.Table{policy.Silent, policy.Silent, policy.Deny, policy.Silent, policy.Silent}, "org")
@@ -288,7 +288,7 @@ func TestDecideBlockedCarriesFullHandoverTarget(t *testing.T) {
 	c.Upsert(leases.RegionKey("a.py", ""), leases.Lease{
 		Agent: "other", ExpiresAtMs: 90_000, HasHandover: true, HandoverAtMs: 5_000,
 		HandoverTo: "them", HandoverToHuman: "sara", HandoverToPriority: "elevated",
-	})
+	}, 0)
 	resp := Decide(Request{Verb: "edit", Path: "a.py", Agent: "me"}, c, policy.New(), 0, "me", "")
 	if resp.HandoverToHuman != "sara" || resp.HandoverToPriority != "elevated" {
 		t.Fatalf("got %+v, want handover_to_human and handover_to_priority carried through same as handover_to", resp)
@@ -303,7 +303,7 @@ func TestDecideOwnSessionLeaseNotBlocked(t *testing.T) {
 	// Decide used to check only the daemon's own relay identity, and the
 	// same session that just claimed the region got denied editing it.
 	c := leases.New()
-	c.Upsert(leases.RegionKey("a.py", ""), leases.Lease{Agent: "sess-alice-1", ExpiresAtMs: 90_000})
+	c.Upsert(leases.RegionKey("a.py", ""), leases.Lease{Agent: "sess-alice-1", ExpiresAtMs: 90_000}, 0)
 	resp := Decide(Request{Verb: "edit", Path: "a.py", Agent: "sess-alice-1"}, c, policy.New(), 0, "presenced@host", "")
 	if resp.Rung != 0 {
 		t.Fatalf("a lease held under my own session id must not block me: got %+v", resp)
@@ -312,7 +312,7 @@ func TestDecideOwnSessionLeaseNotBlocked(t *testing.T) {
 
 func TestDecideOwnRelayIdentityLeaseNotBlocked(t *testing.T) {
 	c := leases.New()
-	c.Upsert(leases.RegionKey("a.py", ""), leases.Lease{Agent: "presenced@host", ExpiresAtMs: 90_000})
+	c.Upsert(leases.RegionKey("a.py", ""), leases.Lease{Agent: "presenced@host", ExpiresAtMs: 90_000}, 0)
 	resp := Decide(Request{Verb: "edit", Path: "a.py", Agent: "sess-alice-1"}, c, policy.New(), 0, "presenced@host", "")
 	if resp.Rung != 0 {
 		t.Fatalf("a lease held under this daemon's own relay identity must not block it either: got %+v", resp)
@@ -323,7 +323,7 @@ func TestDecideThirdPartyLeaseStillBlocks(t *testing.T) {
 	// The fix widens "mine" to two identities; it must not widen it to
 	// everyone. A lease held by neither still has to deny.
 	c := leases.New()
-	c.Upsert(leases.RegionKey("a.py", ""), leases.Lease{Agent: "sess-bob-1", ExpiresAtMs: 90_000})
+	c.Upsert(leases.RegionKey("a.py", ""), leases.Lease{Agent: "sess-bob-1", ExpiresAtMs: 90_000}, 0)
 	resp := Decide(Request{Verb: "edit", Path: "a.py", Agent: "sess-alice-1"}, c, policy.New(), 0, "presenced@host", "")
 	if resp.Rung != 3 || resp.Holder != "sess-bob-1" {
 		t.Fatalf("a genuine third party's lease must still block: got %+v", resp)
@@ -415,7 +415,7 @@ func TestDecideResponseBoundedForAdversarialLease(t *testing.T) {
 		Priority: adversarial, ExpiresAtMs: 90_000,
 		HasHandover: true, HandoverAtMs: 5_000,
 		HandoverTo: adversarial, HandoverToHuman: adversarial, HandoverToPriority: adversarial,
-	})
+	}, 0)
 	c.NoteHandover("a.py", leases.HandoverNote{To: adversarial, ToHuman: adversarial, ToPriority: adversarial, AtMs: 0})
 
 	resp := Decide(Request{Verb: "edit", Path: "a.py", Agent: "me"}, c, policy.New(), 0, "", "")
@@ -466,7 +466,7 @@ func TestDecideAndEventFrameUnifyTwoCheckoutsOfOneRepo(t *testing.T) {
 	}
 
 	c := leases.New()
-	c.Upsert(leases.RegionKey(ev.Region.Path, ""), leases.Lease{Agent: "carol-sess", ExpiresAtMs: 90_000})
+	c.Upsert(leases.RegionKey(ev.Region.Path, ""), leases.Lease{Agent: "carol-sess", ExpiresAtMs: 90_000}, 0)
 
 	// Dan edits "the same" file by his own absolute path, in his own
 	// checkout. Decide has to normalize against his root before the
@@ -511,7 +511,7 @@ func TestDecideConflictBranchHonorsPathRule(t *testing.T) {
 	pol := pathScopedCache(t, `["","","","ask",""]`)
 
 	c := leases.New()
-	c.Upsert(leases.RegionKey("src/pay.py", ""), leases.Lease{Agent: "other", ExpiresAtMs: 90_000})
+	c.Upsert(leases.RegionKey("src/pay.py", ""), leases.Lease{Agent: "other", ExpiresAtMs: 90_000}, 0)
 
 	resp := Decide(Request{Verb: "edit", Path: "src/pay.py", Agent: "me"}, c, pol, 0, "", "")
 	if resp.Rung != 3 {
@@ -529,7 +529,7 @@ func TestDecideConflictBranchPathRuleDoesNotLeakToUnmatchedPath(t *testing.T) {
 	pol := pathScopedCache(t, `["","","","ask",""]`)
 
 	c := leases.New()
-	c.Upsert(leases.RegionKey("docs/readme.md", ""), leases.Lease{Agent: "other", ExpiresAtMs: 90_000})
+	c.Upsert(leases.RegionKey("docs/readme.md", ""), leases.Lease{Agent: "other", ExpiresAtMs: 90_000}, 0)
 
 	resp := Decide(Request{Verb: "edit", Path: "docs/readme.md", Agent: "me"}, c, pol, 0, "", "")
 	if resp.Effect != "deny" {

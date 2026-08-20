@@ -76,6 +76,14 @@ const RUNG_EXPLAIN = {
 
 const REVEAL_STEP = 40
 
+// A long-running session (this store never gets recreated — office.html
+// keeps one for the life of the page) would otherwise grow this array
+// forever, one push per live decision frame. 1000 is comfortably above
+// anything a real session accumulates (seed + sample data tops out under
+// 90) while still bounding worst case: memory, and the per-add insert
+// below, which is O(n) either way.
+const MAX_EVENTS = 1000
+
 /** Pure event + UI-state store: add, order, filter, and the bits of
  *  interaction state (open row, playing row, reveal cap, arrival marks)
  *  that don't need a DOM to be correct. No DOM anywhere in this class. */
@@ -92,13 +100,26 @@ export class ReelStore {
     for (const e of events) this.add(e)
   }
 
-  /** Newest-first insert. Ties (equal ts) keep insertion order stable —
-   *  Array.sort is stable in every engine this runs in. Live-sourced
-   *  events are also queued for `takeNewLiveIds()` so the render layer can
-   *  flash them once without the store knowing what a flash is. */
+  /** Newest-first insert. `_events` is always kept sorted, so a new event
+   *  only ever needs to find its own slot, not a full re-sort of everyone
+   *  else's — the live path calls this once per decision frame, and a
+   *  sort-on-every-add was O(n log n) per frame for a store that only ever
+   *  grows. Walk from the front for the first element older than the new
+   *  one and splice in ahead of it; that's index 0 for the common case
+   *  (a live frame newer than everything seen so far) and handles a
+   *  same-tick or out-of-order ts by falling further in, same as a stable
+   *  sort would. Ties (equal ts) land after existing equal-ts entries,
+   *  preserving insertion order, matching the old sort()'s stability.
+   *  Then cap at MAX_EVENTS by dropping off the (now oldest) tail — the
+   *  array is newest-first, so the tail is exactly what should go.
+   *  Live-sourced events are also queued for `takeNewLiveIds()` so the
+   *  render layer can flash them once without the store knowing what a
+   *  flash is. */
   add(event) {
-    this._events.push(event)
-    this._events.sort((x, y) => y.ts - x.ts)
+    let i = 0
+    while (i < this._events.length && this._events[i].ts >= event.ts) i++
+    this._events.splice(i, 0, event)
+    if (this._events.length > MAX_EVENTS) this._events.length = MAX_EVENTS
     if (event.source === 'live') this._newLiveIds.push(event.id)
     return event
   }

@@ -19,6 +19,7 @@ package journal
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"sync/atomic"
 	"time"
@@ -36,6 +37,13 @@ const KeepLines = 1000
 // Backing off by a count rather than a clock keeps a read-only runtime
 // directory from costing a full-file read ten times a second forever.
 const TrimRetryLines = 200
+
+// maybeTrim never needs more than the file's tail to find the newest
+// KeepLines — capped the same way policy.go's maxBytes guards
+// Cache.Refresh, so a journal neglected across enough restarts to reach
+// gigabytes still costs one bounded read per trim, not a read of the whole
+// file.
+const maxTrimReadBytes = 8 * 1024 * 1024
 
 // Record is one line `ap why` reads. Field names match
 // python/src/agent_presence/journal.py's DecisionRecord exactly; JSON
@@ -120,7 +128,14 @@ func (j *Journal) run() {
 		}
 	}()
 
-	lines := 0
+	// #110: seed from whatever this path already holds. Without this, every
+	// restart starts counting from zero against a file that just keeps
+	// growing, because the file is opened O_APPEND below rather than
+	// truncated — a restart-heavy daemon would never pass MaxLines from its
+	// own writes alone. gate stays MaxLines regardless: the first tick's
+	// maybeTrim call fires (or doesn't) off the seeded count exactly the way
+	// it would off a count this process built up itself.
+	lines := seedLines(j.path)
 	gate := MaxLines
 
 	// Same cadence as the daemon's own tick: trimming is not on the
@@ -137,26 +152,43 @@ func (j *Journal) run() {
 		return err == nil
 	}
 
+	writeRecord := func(r Record) {
+		if !openFile() {
+			return // fail open: no journal is not a reason to stall anything
+		}
+		line, err := json.Marshal(r)
+		if err != nil {
+			return
+		}
+		line = append(line, '\n')
+		if _, err := f.Write(line); err == nil {
+			lines++
+			j.written.Add(1)
+			if j.metrics != nil {
+				j.metrics.JournalWrites.Inc()
+			}
+		}
+	}
+
 	for {
 		select {
 		case <-j.stop:
-			return
-		case r := <-j.recs:
-			if !openFile() {
-				continue // fail open: no journal is not a reason to stall anything
-			}
-			line, err := json.Marshal(r)
-			if err != nil {
-				continue
-			}
-			line = append(line, '\n')
-			if _, err := f.Write(line); err == nil {
-				lines++
-				j.written.Add(1)
-				if j.metrics != nil {
-					j.metrics.JournalWrites.Inc()
+			// select gives j.stop and j.recs equal priority, so stop can win
+			// a race against records Record() already accepted into the
+			// channel — drain what's buffered before returning instead of
+			// dropping it. Non-blocking: nobody sends into j.recs once this
+			// goroutine stops reading it, so the channel's current length is
+			// everything there is to write.
+			for {
+				select {
+				case r := <-j.recs:
+					writeRecord(r)
+				default:
+					return
 				}
 			}
+		case r := <-j.recs:
+			writeRecord(r)
 		case <-tick.C:
 			lines, gate = j.maybeTrim(&f, lines, gate)
 		}
@@ -186,7 +218,7 @@ func (j *Journal) maybeTrim(f **os.File, lines, gate int) (int, int) {
 
 	j.scans.Add(1)
 
-	data, err := os.ReadFile(j.path)
+	data, err := readTail(j.path, maxTrimReadBytes)
 	if err != nil {
 		// Somebody took the file away. Nothing to trim, and the count has
 		// to come back down or every tick tries again forever.
@@ -247,4 +279,73 @@ func splitLines(data []byte) [][]byte {
 		data = data[i+1:]
 	}
 	return out
+}
+
+// readTail reads at most maxBytes from the end of path. A trim only ever
+// keeps the newest KeepLines, so there is no reason to pull an arbitrarily
+// large file onto this goroutine to find them — see maxTrimReadBytes.
+func readTail(path string, maxBytes int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	offset := int64(0)
+	if st.Size() > maxBytes {
+		offset = st.Size() - maxBytes
+	}
+	if offset > 0 {
+		if _, err := f.Seek(offset, io.SeekStart); err != nil {
+			return nil, err
+		}
+	}
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, err
+	}
+	if offset > 0 {
+		// Seeking into the middle of the file almost certainly lands inside
+		// a line. Drop that leading fragment the same way splitLines drops
+		// a torn trailing one, so a truncated head is never mistaken for a
+		// record.
+		if i := bytes.IndexByte(data, '\n'); i >= 0 {
+			data = data[i+1:]
+		} else {
+			data = nil
+		}
+	}
+	return data, nil
+}
+
+// seedLines counts the newline-terminated lines already in path so New can
+// start this run's counter where the file actually is, not at zero (#110).
+// A streaming byte scan rather than os.ReadFile: it only runs once, at
+// startup, so unlike maybeTrim's repeating tick-driven read there is no
+// per-tick cost to bound — but a journal neglected across many restarts can
+// still be large, and counting in a fixed-size buffer keeps this an O(1)
+// memory pass instead of loading the whole file to get one number. It
+// counts '\n' bytes, the same unit splitLines keeps: a torn last line with
+// no terminating newline is silently not counted, same as it wouldn't
+// survive a trim either.
+func seedLines(path string) int {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0 // no existing file: nothing to seed, same behavior as before this fix
+	}
+	defer f.Close()
+
+	buf := make([]byte, 64*1024)
+	n := 0
+	for {
+		read, err := f.Read(buf)
+		n += bytes.Count(buf[:read], []byte{'\n'})
+		if err != nil {
+			return n
+		}
+	}
 }

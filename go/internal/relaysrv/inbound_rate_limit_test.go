@@ -94,6 +94,39 @@ func TestRefillingTheBucketClearsTheSaturationClock(t *testing.T) {
 	}
 }
 
+// TestAdmitInboundEmitsFrameRejectedInboundMetric closes the gap issue #94
+// reported: admitInbound was bumping inboundDropped without telling the
+// metrics package anything, so a rate-limited agent was invisible on
+// /metrics — only the log line saw it. It counts against its own
+// ap_frames_rejected_inbound_total, not ap_frames_dropped_total: a
+// token-bucket rejection never reached delivery in the first place, which
+// is a different failure than the one DroppedFramesRising and
+// docs/monitoring.md describe for that counter.
+func TestAdmitInboundEmitsFrameRejectedInboundMetric(t *testing.T) {
+	clock := NewVirtualClock(0)
+	reg := metrics.New()
+	conn := NewWsConn(newFakeWs(false), clock, reg)
+	conn.tokens = 1
+	conn.tokenTs = clock.Now()
+
+	if !conn.admitInbound() {
+		t.Fatalf("expected the first token to admit")
+	}
+	if got := counterValue(t, reg, "ap_frames_rejected_inbound_total"); got != 0 {
+		t.Fatalf("an admitted frame must not count as rejected, got %v", got)
+	}
+
+	if conn.admitInbound() {
+		t.Fatalf("expected the empty bucket to refuse")
+	}
+	if got := counterValue(t, reg, "ap_frames_rejected_inbound_total"); got != 1 {
+		t.Fatalf("ap_frames_rejected_inbound_total = %v, want 1", got)
+	}
+	if got := counterValue(t, reg, "ap_frames_dropped_total"); got != 0 {
+		t.Fatalf("an inbound rejection must not also count as a drop, got %v", got)
+	}
+}
+
 // TestAFloodingPeerDoesNotStallARoomsRelayLoop is the end-to-end version,
 // through Relay.Handle/session-shaped calls rather than WsConn internals
 // directly: a connection well past its inbound budget gets nothing back

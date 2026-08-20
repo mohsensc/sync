@@ -3,7 +3,6 @@
 #include <csignal>
 #include <cstddef>
 #include <cstdio>
-#include <cstdlib>
 #include <string>
 
 #include "hook/hook.hpp"
@@ -36,13 +35,6 @@ constexpr int kReadBudgetMs = 1000;
 // tests/test_latency.cpp measures the real number and asserts the cap.
 constexpr int kSocketBudgetMs = 2;
 
-std::string join_path(std::string dir, const char* leaf) {
-    if (!dir.empty() && dir.back() == '/') dir.pop_back();
-    dir += '/';
-    dir += leaf;
-    return dir;
-}
-
 }  // namespace
 
 int main() {
@@ -57,17 +49,7 @@ int main() {
     try {
         const std::string input = ap::read_bounded(STDIN_FILENO, kMaxInput, kReadBudgetMs);
 
-        const char* sock = std::getenv("AGENT_PRESENCE_SOCK");
-        std::string path;
-        if (sock != nullptr) {
-            path = sock;
-        } else if (const char* rt = std::getenv("XDG_RUNTIME_DIR")) {
-            path = join_path(rt, "agent-presence.sock");
-        } else if (const char* tmp = std::getenv("TMPDIR")) {
-            path = join_path(tmp, "agent-presence.sock");
-        } else {
-            path = "/tmp/agent-presence.sock";
-        }
+        const std::string path = ap::resolve_sock_path();
 
         // Empty means say nothing, and saying nothing is how a hook allows.
         const std::string out = ap::run_hook(input, path, kSocketBudgetMs);

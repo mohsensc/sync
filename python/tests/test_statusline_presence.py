@@ -272,6 +272,54 @@ def test_trailing_slash_on_tmpdir(tmp_path):
     assert r.out == "· sara here"
 
 
+# --- sock-derived path: #90, a second daemon on AGENT_PRESENCE_SOCK -----------
+#
+# go/cmd/presenced/main.go's siblingPath, ported here: the snapshot lives
+# beside the socket, named after it. Before this the script only ever
+# looked at the fixed name, so a second daemon on a repo's own socket had
+# its segment silently reading the first repo's snapshot.
+
+
+def test_sock_override_alone_redirects_the_reader(tmp_path):
+    (tmp_path / "ap2.json").write_text(peers_json("sara"))
+    r = ok(run(None, env={"AGENT_PRESENCE_SOCK": str(tmp_path / "ap2.sock")}))
+    assert r.out == "· sara here"
+
+
+def test_sock_override_does_not_read_the_default_name(tmp_path):
+    # The fixed name still exists on disk, from a first daemon; the second
+    # daemon's socket has to win, not fall through to it.
+    (tmp_path / "agent-presence.json").write_text(peers_json("wrong-daemon"))
+    (tmp_path / "ap2.json").write_text(peers_json("sara"))
+    r = ok(run(None, env={"AGENT_PRESENCE_SOCK": str(tmp_path / "ap2.sock")}))
+    assert r.out == "· sara here"
+
+
+def test_explicit_snapshot_still_beats_socket_derivation(tmp_path):
+    (tmp_path / "ap2.json").write_text(peers_json("wrong-daemon"))
+    explicit = tmp_path / "wherever.json"
+    explicit.write_text(peers_json("sara"))
+    r = ok(run(None, env={
+        "AGENT_PRESENCE_SOCK": str(tmp_path / "ap2.sock"),
+        "AGENT_PRESENCE_SNAPSHOT": str(explicit),
+    }))
+    assert r.out == "· sara here"
+
+
+def test_two_sockets_sharing_a_runtime_dir_read_two_snapshots(tmp_path):
+    (tmp_path / "a.json").write_text(peers_json("carol"))
+    (tmp_path / "b.json").write_text(peers_json("dan"))
+    a = ok(run(None, env={"AGENT_PRESENCE_SOCK": str(tmp_path / "a.sock")}))
+    b = ok(run(None, env={"AGENT_PRESENCE_SOCK": str(tmp_path / "b.sock")}))
+    assert a.out == "· carol here"
+    assert b.out == "· dan here"
+
+
+# No-env-at-all coverage for the ordinary single-daemon case already lives
+# above (test_default_path_follows_xdg_runtime_dir and friends) — this
+# section only adds AGENT_PRESENCE_SOCK to the picture.
+
+
 # --- end to end against the daemon's real writer ------------------------------
 
 

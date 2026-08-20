@@ -141,6 +141,13 @@ type Client struct {
 	drops           atomic.Uint64
 	protocolErrors  atomic.Uint64
 
+	// outboundDropped mirrors the last value read off c.outbound.Dropped(),
+	// which is a running total, not a delta — same shape as
+	// leases.Cache.believed shadowing the cache. Recorded here so SendText
+	// can fold each new drop into metrics.Registry.OutboundDropped, which
+	// (like every other counter in that package) only accepts increments.
+	outboundDropped atomic.Uint64
+
 	// mu guards lastError alone; every other piece of shared state on
 	// Client is already an atomic. One string, set from Run's goroutine
 	// and read from LastError by anything reporting status — not on the
@@ -213,6 +220,29 @@ func (c *Client) setError(why string) {
 // same rule as RelayClient::send_text.
 func (c *Client) SendText(msg []byte) {
 	c.outbound.Push(msg)
+	c.recordOutboundDropped()
+}
+
+// recordOutboundDropped folds outbound.Queue's cumulative drop count into
+// metrics.Registry.OutboundDropped as a delta. Push may be called
+// concurrently from several goroutines (SendText has no single-caller
+// rule), so this CASes rather than swaps: two callers racing on a stale
+// "prev" must not both count the same drop, or double it.
+func (c *Client) recordOutboundDropped() {
+	if c.metrics == nil {
+		return
+	}
+	total := uint64(c.outbound.Dropped())
+	for {
+		prev := c.outboundDropped.Load()
+		if total <= prev {
+			return
+		}
+		if c.outboundDropped.CompareAndSwap(prev, total) {
+			c.metrics.OutboundDropped.Add(float64(total - prev))
+			return
+		}
+	}
 }
 
 // Run drives the connect/backoff loop until ctx is cancelled. Intended to be
@@ -496,11 +526,35 @@ func (c *Client) writePump(conn *websocket.Conn, stop <-chan struct{}) error {
 				return err
 			}
 		case <-drainT.C:
-			for _, msg := range c.outbound.Drain() {
+			// Peek, not Drain: a message only leaves the queue once
+			// WriteMessage actually accepts it. A write error here used to
+			// hit an already-emptied queue, so the failed frame and
+			// everything queued behind it (Drain had already taken the
+			// whole batch) were gone for good, with nothing left to retry
+			// on reconnect — the opposite of the contract SendText
+			// promises. Leaving the message queued until it is confirmed
+			// sent means a mid-write failure just stops here and picks up
+			// again, in order, next tick after reconnect.
+			//
+			// Bounded to this tick's starting depth, same as Drain's
+			// snapshot was: SendText can run concurrently with this loop
+			// (no single-writer rule on it), and without a bound a steady
+			// stream of pushes would keep this case from ever returning to
+			// select — late pings, an unresponsive stop channel.
+			for n := c.outbound.Len(); n > 0; n-- {
+				msg, seq, ok := c.outbound.Peek()
+				if !ok {
+					break // drop-oldest can shrink the queue out from under us
+				}
 				if err := conn.WriteMessage(websocket.TextMessage, msg); err != nil {
 					return err
 				}
 				c.sent.Add(1)
+				// Pop(seq) is a no-op, not an error, if drop-oldest already
+				// evicted this exact frame between the write above and
+				// here — it was still written, just also counted as a
+				// drop; see outbound.Queue.Pop.
+				c.outbound.Pop(seq)
 			}
 		}
 	}
@@ -695,7 +749,7 @@ func (c *Client) applyLease(e wire.LeaseFrame) {
 	if !ok {
 		return
 	}
-	c.leases.Upsert(k, lease)
+	c.leases.Upsert(k, lease, nowMs())
 	c.believedMu.Lock()
 	c.believed[k] = lease
 	c.believedMu.Unlock()
@@ -719,7 +773,7 @@ func (c *Client) applyClaimResult(e wire.LeaseFrame) {
 	if !ok {
 		return
 	}
-	c.leases.Upsert(k, lease)
+	c.leases.Upsert(k, lease, nowMs())
 	c.believedMu.Lock()
 	c.believed[k] = lease
 	c.believedMu.Unlock()
@@ -730,10 +784,10 @@ func (c *Client) applyClaimResult(e wire.LeaseFrame) {
 // that the snapshot does not list — the reconcile point named in the
 // gauge's help text. Only unexpired entries count: after a long outage
 // every held lease has aged past its own ExpiresAtMs, the relay's snapshot
-// legitimately drops them the same way, and Conflict already skips them
-// (see leases.Cache.Conflict's "ages out on its own" comment) — counting
-// those would fire the gauge loudest exactly when nothing is blocking on
-// anything.
+// legitimately drops them the same way, and Conflict already skips them on
+// expiry even before a prune sweep removes them (see leases.Cache.Conflict's
+// stale-but-harmless check) — counting those would fire the gauge loudest
+// exactly when nothing is blocking on anything.
 func (c *Client) recordDivergence(fresh map[string]leases.Lease) {
 	if c.metrics == nil {
 		return

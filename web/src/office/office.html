@@ -349,6 +349,7 @@ import { seedEvents } from './seed.js'
 import { createCaptionArbiter, PRIORITY } from './caption.js'
 import { createReplayCard } from './replay-card.js'
 import { attachGitSignals } from './gitsignals.js'
+import { YAW_MIN, YAW_MAX, clampYaw, headFraming, pickFraming, resolveFrameMode } from './framing.js'
 
 const P = { cream:0xF0ECE6, sand:0xE9E0CE, taupe:0xC3B39B, sage:0xE5E1D2, butter:0xF7DFAF,
             mustard:0xD6B45C, caramel:0xC0762A, coffee:0xB0674F, terracotta:0xD9714F,
@@ -814,23 +815,9 @@ loader.load('/glb/character.glb', gltf => {
 // Default framing shows the whole floor plate. At pitch 0.42 with the target on
 // the desk bank the open +z edge fell off the bottom of the frame.
 let yaw = 0.78, pitch = 0.46, dist = 1.14, spin = false, top = false, wire = false
-// The room is a cutaway, open on +x and +z only. Orbiting past these puts the
-// camera behind a wall and the view goes blank, so the arc is clamped.
-const YAW_MIN = 0.18, YAW_MAX = 1.39
-const YAW_MID = (YAW_MIN + YAW_MAX) / 2
-/** Clamp a yaw into the room's valid orbit arc, correctly on the circle. A
- *  plain Math.max/min is periodicity-blind: an angle just past a full turn
- *  clamps to the FAR boundary instead of wrapping back to the near one. The
- *  room's own orbit never noticed because dragging only ever fed this small,
- *  already-nearby deltas — but head framing routinely computes something
- *  like `a.yaw + PI`, which lands anywhere across a full turn, and the arc
- *  here (1.21 rad) is well under PI wide, so "wrap to the representative
- *  nearest the arc's centre, then clamp" always finds the true closest
- *  reachable point instead of whichever raw number happens to be smaller. */
-function clampYaw(y) {
-  const d = ((y - YAW_MID) % (Math.PI * 2) + Math.PI * 3) % (Math.PI * 2) - Math.PI
-  return Math.max(YAW_MIN, Math.min(YAW_MAX, YAW_MID + d))
-}
+// YAW_MIN/MAX, YAW_MID and clampYaw live in framing.js now — the room's orbit
+// arc and the head-zoom framing that has to fit inside it are one thing, not
+// two copies of the same wrap math.
 let spinDir = 1
 const target = new THREE.Vector3(0.2, 1.0, 0.7)
 const goal = { target: target.clone(), dist: 1.14, yaw: 0.78, active: false }
@@ -844,7 +831,7 @@ const RADIUS = 18
 function focus([x, z], d = 1, y = null, targetY = 1.15) {
   goal.target.set(x, targetY, z)
   goal.dist = d
-  if (y != null) goal.yaw = Math.max(YAW_MIN, Math.min(YAW_MAX, y))
+  if (y != null) goal.yaw = clampYaw(y)
   goal.active = true
 }
 
@@ -923,25 +910,9 @@ function beginReplayOutro() {
 }
 
 // ---- click-to-zoom on a character's head -------------------------------
-// A character is 1.68 tall; the head sits near the top of that, not at the
-// torso height focus() aims at by default. Zooming there needs its own
-// close, slightly-off-axis framing — a dead-on close-up on a low-poly face
-// reads as a mugshot, a few degrees of yaw off center reads as a look.
-const HEAD_Y = 1.5
-const HEAD_DIST = 0.24
-const HEAD_YAW_OFFSET = 0.16
-// The old flight never touched pitch at all — it just carried over whatever
-// the room happened to be at, top-down button included. That's the "scalp"
-// the reviewer landed on: select someone right after pressing top-down and
-// the head zoom stayed looking almost straight down. A close portrait wants
-// something closer to eye level.
-const HEAD_PITCH = 0.26
-// "Over the shoulder": lower and a little further back than the front
-// portrait, so the desk/monitor the character is facing has room in frame.
-const SHOULDER_DIST = 0.27
-const SHOULDER_Y = 1.42
-const SHOULDER_YAW_OFFSET = 0.22
-const SHOULDER_PITCH = 0.16
+// HEAD_*/SHOULDER_* constants and headFraming/pickFraming live in
+// framing.js — see that file for why the two framings exist and how the
+// picker chooses between them.
 
 let priorFraming = null   // { target, dist, yaw, pitch } to restore to on deselect/Escape
 
@@ -984,36 +955,15 @@ function startFlight(toXZ, toDist, toYaw, toTargetY, toPitch) {
   goal.active = false
 }
 
-// Two ?frame= choices for where the head-zoom camera lands, switchable live
-// via window.__zoomMode.setFrame() so both sit in the room to compare rather
-// than argued about from memory (same spirit as the ease/snap toggle below).
-let frameMode = new URLSearchParams(location.search).get('frame') === 'shoulder' ? 'shoulder' : 'threequarter'
-
-/**
- * Where the head-zoom camera should land, derived from the character's own
- * facing (a.yaw — external convention, forward is -(sin y, 0, cos y), see
- * zones.js's header note) instead of whatever the room camera happened to be
- * pointed at before the click. That was the bug: landing on a face was luck,
- * because the old flight kept the room's yaw *and* pitch untouched.
- *
- *   'threequarter' (default) — camera sits roughly opposite the character's
- *     forward direction (a.yaw + PI), so it looks back at their face. A few
- *     degrees off dead-on so a head-on close-up doesn't read as a mugshot.
- *   'shoulder' — camera sits roughly behind the character, on their own
- *     forward side (a.yaw), a little further back and lower, framing past
- *     their shoulder toward whatever they're facing.
- *
- * Either result still gets clamped to [YAW_MIN, YAW_MAX] by startFlight. The
- * room is a cutaway open only on +x/+z — a character planted facing the back
- * or left wall genuinely cannot be framed face-on from the camera's side of
- * the room. That clamp is the honest degrade, not a bug still to chase.
- */
-function headFraming(a, mode) {
-  if (mode === 'shoulder') {
-    return { yaw: a.yaw + SHOULDER_YAW_OFFSET, pitch: SHOULDER_PITCH, dist: SHOULDER_DIST, y: SHOULDER_Y }
-  }
-  return { yaw: a.yaw + Math.PI + HEAD_YAW_OFFSET, pitch: HEAD_PITCH, dist: HEAD_DIST, y: HEAD_Y }
-}
+// ?frame=threequarter / ?frame=shoulder are explicit pins that bypass
+// pickFraming entirely — forcing one framing for every agent, useful for
+// comparing the two head-on. Anything else, including no ?frame= at all,
+// leaves frameMode null: zoomToAgent then asks pickFraming (framing.js) to
+// choose per-agent instead of using a single mode for the whole room.
+// Switchable live via window.__zoomMode.setFrame() so all three sit in the
+// room to compare rather than argued about from memory (same spirit as the
+// ease/snap toggle below).
+let frameMode = resolveFrameMode(new URLSearchParams(location.search).get('frame'))
 
 function zoomToAgent(a) {
   if (!priorFraming) {
@@ -1024,7 +974,7 @@ function zoomToAgent(a) {
     priorFraming = { target: target.clone(), dist, yaw, pitch }
   }
   interaction?.clearHover()
-  const f = headFraming(a, frameMode)
+  const f = frameMode ? headFraming(a, frameMode) : pickFraming(a)
   startFlight([a.pos.x, a.pos.z], f.dist, f.yaw, f.y, f.pitch)
   updateDeclutter()
 }
@@ -1181,6 +1131,13 @@ function despawnLive(id) {
   if (interaction) interaction.removeAgent(a)
   world.remove(a)
   Z.releaseSlots(id)
+  // Drops this agent's gitsignals desk-fx (heat/cold groups + their own
+  // geometry) before the traverse below, so it doesn't see meshes that
+  // are already detached from a.root — see gitsignals.js's forget().
+  if (window.__gitSignals) window.__gitSignals.forget(a)
+  // Same story for the ghost-author state parked beside this desk — see
+  // ghost.js's forget().
+  if (window.__ghostAuthors) window.__ghostAuthors.forget(a)
   scene.remove(a.root)
   a.root.traverse(n => {
     if (!n.isMesh && !n.isSkinnedMesh) return
@@ -1499,12 +1456,21 @@ function goLive() {
   // the badge lying by omission. Null it out, not just cancel: a later
   // drop needs startDemo() to see "no demo running" and start a fresh one,
   // not find a stale cancelled handle and skip it (see goDemoFallback).
-  if (demo) { demo.cancel(); demo = null }
+  // Restore before cancel: cancel() still lets the run's own promise settle
+  // (see startDemo), and restoreGreetings keys off `demo` still pointing at
+  // this run to tell "this run" apart from "a run that replaced it".
+  if (demo) { demo.restoreGreetings?.(); demo.cancel(); demo = null }
+  // Same "badge must not lie" reasoning as the demo cancel above: a
+  // "Restart demo" click that's still live would run the scripted cast
+  // under the live badge. Disable rather than repurpose the button so its
+  // label stays honest too.
+  bDemo.disabled = true
 }
 
 function goDemoFallback(reason) {
   liveMode = false
   setMode('demo', `demo — ${reason}`)
+  bDemo.disabled = false
   // Only the first fallback (or the first after a reconnect) needs to
   // start the story — connectWithReconnect's onClose fires again on every
   // failed retry, and restarting the script from beat one on every miss
@@ -1561,6 +1527,7 @@ function startDemo() {
   if (agents.length < 5 || !props.tortoise) { caption('still loading'); return }
   spin = false; setB(bSpin, false)
   bDemo.textContent = 'Restart demo'
+  const preGreetings = world.greetings
   world.greetings = false; setB(bGreet, false)   // the demo scripts its own
   let n = 0
   demo = runDemo({
@@ -1572,10 +1539,19 @@ function startDemo() {
   // handler switched greetings back on underneath the run that replaced it —
   // which then hijacked the cast into spontaneous high fives mid-story.
   const run = demo
+  // Restoring greetings has two ways in: the run settling on its own, or
+  // goLive() cutting it short because real presence showed up. Both call
+  // this — whichever gets there first restores and clears itself, so the
+  // other is a no-op instead of a second flip (or, worse, restoring a
+  // run that's already been replaced by a fresh startDemo()).
+  run.restoreGreetings = () => {
+    if (demo !== run || !run.restoreGreetings) return
+    world.greetings = preGreetings; setB(bGreet, preGreetings)
+    run.restoreGreetings = null
+  }
   demo.promise.then(r => {
-    if (demo !== run) return
-    reel.setFoot(`demo <b>${r}</b>`)
-    world.greetings = true; setB(bGreet, true)
+    if (demo === run) reel.setFoot(`demo <b>${r}</b>`)
+    run.restoreGreetings?.()
   })
 }
 bDemo.onclick = startDemo
@@ -1726,7 +1702,11 @@ window.__setCam = (y,p,d) => { goal.active=false; flight=null; yaw=y; pitch=p; d
 window.__zoomMode = { get: () => zoomMode, set: m => { zoomMode = m === 'snap' ? 'snap' : 'ease' },
   get flying() { return !!flight },
   get frame() { return frameMode },
-  setFrame(m) { frameMode = m === 'shoulder' ? 'shoulder' : 'threequarter' } }
+  // resolveFrameMode (framing.js) clears anything but an exact pin back to
+  // null — the pickFraming default — so this can hand control back to the
+  // picker. Used to coerce every non-'shoulder' call to 'threequarter',
+  // which had no way back to the picker once a pin was set.
+  setFrame(m) { frameMode = resolveFrameMode(m) } }
 window.__focusMode = { get: () => focusEnabled, set: v => { focusEnabled = !!v; updateDeclutter() },
   get active() { return declutterOn } }
 window.__agentState = () => world.agents.map(a => ({

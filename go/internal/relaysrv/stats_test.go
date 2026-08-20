@@ -36,6 +36,7 @@ func TestOnStatsFoldsAHugeDeltaWithoutSpinning(t *testing.T) {
 			"coalesce_dropped":     huge,
 			"region_keys_relative": huge,
 			"region_keys_absolute": huge,
+			"outbound_dropped":     huge,
 		})
 	}()
 
@@ -66,6 +67,25 @@ func TestOnStatsAppliesTheDeltaNotTheTotal(t *testing.T) {
 	got := counterValue(t, reg, "ap_journal_writes_total")
 	if got != 25 {
 		t.Fatalf("ap_journal_writes_total = %v, want 25 (the latest total, folded as deltas)", got)
+	}
+}
+
+// TestOnStatsFoldsOutboundDropped is the wiring check for outbound.Queue's
+// Dropped() reaching /metrics: a daemon-side drop is invisible past its own
+// process unless the stats frame that carries it (see daemon/stats.go) is
+// actually folded here, the same way reconnects and journal writes already
+// are.
+func TestOnStatsFoldsOutboundDropped(t *testing.T) {
+	reg := metrics.New()
+	relay := NewRelay(NewVirtualClock(0), InertRoster(), reg)
+	conn := newFakeConn("daemon-1", "alice")
+
+	relay.onStats(conn, map[string]any{"type": "stats", "outbound_dropped": float64(7)})
+	relay.onStats(conn, map[string]any{"type": "stats", "outbound_dropped": float64(12)})
+
+	got := counterValue(t, reg, "ap_outbound_dropped_total")
+	if got != 12 {
+		t.Fatalf("ap_outbound_dropped_total = %v, want 12 (the latest total, folded as deltas)", got)
 	}
 }
 

@@ -103,8 +103,37 @@ func (c *Claim) NoteContender(contender Contender) {
 	}
 }
 
-// HandoverWinner is the contender this region goes to when the lease ends.
-func (c *Claim) HandoverWinner() *Contender {
+// removeContender deletes agent's ask against this claim, if any, and
+// invalidates the cached winner so the next handoverWinner call rescans
+// instead of returning a pointer whose backing map entry is gone. If that
+// was the last contender, the HandoverAt cap it (or an earlier contender)
+// set is dropped too: with nobody left to hand the region over to, the
+// holder's next renewal should reach its natural TTL again rather than
+// staying capped at a deadline set by an ask that no longer exists.
+// Reports whether there was anything to remove, so callers only pay for a
+// snapshot+fan-out when something actually changed.
+func (c *Claim) removeContender(agent string) bool {
+	if _, ok := c.Contenders[agent]; !ok {
+		return false
+	}
+	delete(c.Contenders, agent)
+	c.winnerStale = true
+	if len(c.Contenders) == 0 {
+		c.HandoverAt = nil
+	}
+	return true
+}
+
+// handoverWinner is the contender this region goes to when the lease ends.
+//
+// Caller must hold the owning shard's mutex: the lazy rescan below *writes*
+// c.winner/c.winnerStale and reads c.Contenders, which NoteContender writes
+// under that same lock. It used to be exported and got called from
+// connection goroutines off the lock (issue #86) — a concurrent map
+// read/write, which is a fatal runtime error, not a panic session()'s
+// recover can catch. Nothing outside the lock needs it now: take a
+// claimView instead.
+func (c *Claim) handoverWinner() *Contender {
 	if c.winnerStale {
 		var best *Contender
 		for agent := range c.Contenders {
@@ -118,6 +147,62 @@ func (c *Claim) HandoverWinner() *Contender {
 		c.winnerStale = false
 	}
 	return c.winner
+}
+
+// claimView is a claim as everything outside the shard lock is allowed to
+// see it: a value copy, taken under s.mu, with the handover winner already
+// resolved and the contender map reduced to its count. The registry used to
+// hand back the live *Claim, which connection goroutines then read and
+// (through handoverWinner) wrote while another goroutine mutated the same
+// claim under the lock — issue #86.
+//
+// Field names match Claim's so a read site reads the same either way.
+// Scope's Lines slice shares its backing array with the claim's; regions are
+// built once at ingest and never mutated, so that share is read-only.
+type claimView struct {
+	Room       string
+	Human      string
+	Agent      string
+	Scope      Region
+	Intent     string
+	AcquiredAt float64
+	ExpiresAt  float64
+	Priority   int
+	HandoverAt *float64
+	// Winner and HandoverAt are pointers to copies, never into the claim:
+	// the point of the whole exercise is that nothing here aliases memory
+	// the lock protects.
+	Winner *Contender
+	// Waiting is len(Contenders) at copy time — the only thing the wire
+	// wants from the map.
+	Waiting int
+}
+
+// viewOf copies a claim for use outside the lock. Caller holds the owning
+// shard's mutex (handoverWinner writes).
+func viewOf(c *Claim) claimView {
+	v := claimView{
+		Room: c.Room, Human: c.Human, Agent: c.Agent, Scope: c.Scope, Intent: c.Intent,
+		AcquiredAt: c.AcquiredAt, ExpiresAt: c.ExpiresAt, Priority: c.Priority,
+		Waiting: len(c.Contenders),
+	}
+	if c.HandoverAt != nil {
+		h := *c.HandoverAt
+		v.HandoverAt = &h
+	}
+	if w := c.handoverWinner(); w != nil {
+		cw := *w
+		v.Winner = &cw
+	}
+	return v
+}
+
+func viewPtr(c *Claim) *claimView {
+	if c == nil {
+		return nil
+	}
+	v := viewOf(c)
+	return &v
 }
 
 // AgentEvent is a hook or MCP touch, claim or release. Mirrors

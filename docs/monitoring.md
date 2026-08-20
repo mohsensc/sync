@@ -153,8 +153,11 @@ Whether the relay itself is keeping up.
   slowest consumer the relay is writing to. Climbing without recovering is
   the leading indicator for the next panel.
 - **Dropped frames** (`ap_frames_dropped_total` by `reason`) — frames the
-  relay gave up delivering. `DroppedFramesRising` fires on any sustained
-  rate above zero; the `reason` label says why.
+  relay accepted and then gave up delivering. `DroppedFramesRising` fires
+  on any sustained rate above zero; the `reason` label says why. This is
+  outbound delivery failure only — a frame refused inbound, before the
+  relay tried to deliver it, is `ap_frames_rejected_inbound_total` below,
+  not this counter.
 - **Journal writes / trims** (`ap_journal_writes_total`,
   `ap_journal_trims_total`) — the decision journal's own write and trim
   rate. Writes without trims growing the journal unbounded is worth a look
@@ -162,9 +165,26 @@ Whether the relay itself is keeping up.
 
 ## In the catalogue, not on the dashboard
 
-Four metrics `metrics.go` emits don't have a panel — kept off on purpose,
+Six metrics `metrics.go` emits don't have a panel — kept off on purpose,
 not forgotten:
 
+- **`ap_outbound_dropped_total`** — daemon-side mirror of `ap_frames_dropped_total`:
+  an upper bound on frames a laptop's own bounded outbound queue discarded
+  because the relay was unreachable longer than the queue could hold.
+  Under sustained backpressure it can, in a narrow window, also count a
+  frame that was actually written and delivered — see the drop-oldest
+  comment in `outbound.go` — so treat it as "at most this many," not an
+  exact loss count. Folded in from each daemon's stats frame. Nonzero means
+  an outage outlasted the buffer, not that anything is currently broken,
+  so it isn't alert-worthy the way a live drop rate is.
+- **`ap_frames_rejected_inbound_total`** — inbound frames the
+  per-connection token bucket refused before the relay ever attempted
+  delivery. A rate-limited sender, not a delivery failure, so it's kept
+  out of `ap_frames_dropped_total` and off `DroppedFramesRising` on
+  purpose: mixing the two would make that alert fire on a well-behaved
+  bucket doing its job. No panel yet because nobody's hit a rate-limited
+  agent in the wild; add one alongside the Saturation row's dropped-frames
+  panel if that changes.
 - **`ap_daemon_connected`** — a per-process gauge presenced sets on its own
   registry ("1 while I have a live relay connection"). It never reaches the
   relay's `/metrics`: there's deliberately no per-daemon label to hang it

@@ -19,9 +19,10 @@ claude mcp add agent-presence -- ~/.local/bin/agent-presence-mcp
 ~/.local/bin/gorelay                                    # or --host/--port, AGENT_PRESENCE_*
 ```
 
-`install.sh` builds the Go binaries locally unless `dist/` holds release
-ones; with neither Go nor a populated `dist/` it fails, and there's no
-download step — fetch from a tagged release yourself. Everything dials `AGENT_PRESENCE_RELAY`
+`install.sh` prefers `dist/` when it's populated, but rebuilds from source if
+`go/` looks newer and Go is on PATH, or installs the stale binary with a loud
+warning if it isn't; with neither Go nor a populated `dist/` it fails, and
+there's no download step — fetch from a tagged release yourself. Everything dials `AGENT_PRESENCE_RELAY`
 (`ws://127.0.0.1:8799` by default), and `--tls-cert`/`--tls-key` (or `AGENT_PRESENCE_TLS_CERT`/`_KEY`, see `docs/tls-dev-cert.md`) terminate `wss://` instead; unset stays `ws://`.
 
 ## Policy

@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import pathlib
 import shutil
 import socket
@@ -41,9 +42,14 @@ import time
 import pytest
 import websockets
 
+from agent_presence import journal as journal_mod
+from agent_presence import paths as paths_mod
+
 sys.path.insert(0, str(pathlib.Path(__file__).parent / "helpers"))
 from gorelay_proc import start_gorelay  # noqa: E402
 from presenced_proc import find_or_build_presenced, start_presenced  # noqa: E402
+
+STATUSLINE = pathlib.Path(__file__).resolve().parents[2] / "scripts" / "statusline-presence.sh"
 
 ROOM = "two-checkouts"
 FILE = "src/orders.py"
@@ -429,3 +435,74 @@ async def test_daemon_that_never_joins_fails_readably(tmp_path, sockdir):
         )
     finally:
         orphan.stop()
+
+
+async def test_sock_override_redirects_journal_snapshot_and_statusline(
+        two_checkouts, tmp_path, sockdir):
+    """#90's whole premise, driven by the real binary: presenced derives its
+    journal and snapshot from AGENT_PRESENCE_SOCK (siblingPath,
+    go/cmd/presenced/main.go), and every reader hanging off that socket has
+    to land on the same two files or it silently answers for whichever
+    daemon happened to own the fixed name.
+
+    The snapshot is written once up front, before this daemon ever joins a
+    room (daemon.go), so that half needs no relay. The journal is only
+    written for a real conflict (rung > 0 — journal.Journal.Record drops
+    everything else), so this reuses the claim-then-collide shape every
+    other test in this module drives against the real gorelay.
+    """
+    carol, _dan = two_checkouts
+    binary = find_or_build_presenced(tmp_path / "bin")
+    relay = await start_gorelay()
+    sock = str(sockdir / "ap2.sock")
+    claim = None
+    daemon = start_presenced(binary, cwd=str(carol), relay_url=relay.url,
+                             room=ROOM, sock=sock)
+    try:
+        claim = await _claim(relay.url, "sess-carol", "carol", FILE)
+        assert claim["granted"], "carol's claim was refused"
+
+        journal_file = sockdir / "ap2.decisions.jsonl"
+        snapshot_file = sockdir / "ap2.json"
+        assert snapshot_file.exists(), (
+            f"daemon never wrote its sibling snapshot:\n{daemon.recent_output()}"
+        )
+
+        blocked = _poll_blocked(daemon, path=str(carol / FILE),
+                                agent="sess-dan", human="dan")
+        assert blocked.get("rung") == 3, (
+            f"never saw a conflict to journal: {blocked}"
+        )
+
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not journal_file.exists():
+            time.sleep(0.05)
+        assert journal_file.exists(), (
+            f"daemon never wrote its sibling journal:\n{daemon.recent_output()}"
+        )
+
+        env = {"AGENT_PRESENCE_SOCK": sock}
+        assert journal_mod.journal_path(env) == journal_file
+        assert paths_mod.snapshot_path(env) == snapshot_file
+
+        # A file sitting at the old fixed name, from a first daemon on this
+        # box — the exact collision #90 is about. The real daemon above
+        # wrote an empty peer list to its own sibling snapshot; the
+        # statusline has to read that, not this one.
+        (sockdir / "agent-presence.json").write_text(
+            '{"peers":[{"human":"wrong-daemon","verb":"edit","path":"x"}]}'
+        )
+        r = subprocess.run(
+            [str(STATUSLINE)], capture_output=True, text=True, timeout=10,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                 "AGENT_PRESENCE_SOCK": sock},
+        )
+        assert r.returncode == 0
+        assert r.stdout.strip() == "", (
+            f"statusline read the wrong daemon's snapshot: {r.stdout!r}"
+        )
+    finally:
+        if claim:
+            await claim["ws"].close()
+        daemon.stop()
+        await relay.stop()

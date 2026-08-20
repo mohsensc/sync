@@ -32,6 +32,15 @@ const (
 
 	MaxFrameBytes = 65536
 
+	// MaxRoomNameBytes bounds what Join will allocate a roomInfo/roomShards
+	// pair for (issue #175). Room names are project/session identifiers a
+	// human or a daemon chooses, not user documents — real ones are a few
+	// dozen bytes at most — so 256 is generous headroom, not a tight fit,
+	// while still keeping a spray of distinct names from buying more than
+	// a few KB of room-name bytes per connection no matter how long the
+	// limiter lets it run.
+	MaxRoomNameBytes = 256
+
 	// How often a writer that is parked on a socket looks at the clock,
 	// in real wall time — not a threshold itself, SendStallS/SendSaturatedS
 	// are, and they're read off the injectable clock; this is only the
@@ -306,7 +315,10 @@ func (c *WsConn) write(payload []byte) bool {
 // close frame cannot keep this goroutine (or the one still blocked in
 // write's WriteMessage, if that's why shed was called) parked forever.
 func (c *WsConn) shed(reason, why string) {
-	log.Printf("dropping subscriber %q (room %q): %s, %d frames shed", c.Agent(), c.Room(), why, c.dropped)
+	c.mu.Lock()
+	dropped := c.dropped
+	c.mu.Unlock()
+	log.Printf("dropping subscriber %q (room %q): %s, %d frames shed", c.Agent(), c.Room(), why, dropped)
 	c.shutdown()
 	c.metrics.FrameDropped(reason)
 	_ = c.ws.WriteControl(websocket.CloseMessage,
@@ -317,6 +329,23 @@ func (c *WsConn) shed(reason, why string) {
 
 func (c *WsConn) shutdown() {
 	c.closeOnce.Do(func() { close(c.closed) })
+}
+
+// Close sends a close frame with the given code/reason and then takes the
+// transport down — the graceful counterpart to shed's too-slow hangup,
+// used for a server-initiated shutdown (see Server.closeConns) rather
+// than a saturated peer. Safe to call from outside the writer goroutine
+// while writeLoop/write may still be mid-WriteMessage on the same
+// connection: WriteControl and Close are the two *websocket.Conn methods
+// gorilla documents as callable concurrently with any other method, so
+// this doesn't need to route through the outbound channel the way a data
+// frame would.
+func (c *WsConn) Close(code int, reason string) {
+	c.shutdown()
+	_ = c.ws.WriteControl(websocket.CloseMessage,
+		websocket.FormatCloseMessage(code, reason),
+		time.Now().Add(closeDeadline))
+	_ = c.ws.Close()
 }
 
 // -- inbound rate limiting -------------------------------------------------
@@ -340,6 +369,7 @@ func (c *WsConn) admitInbound() bool {
 			t := now
 			c.inSaturatedSince = &t
 		}
+		c.metrics.FrameRejectedInbound()
 		return false
 	}
 	c.tokens -= 1.0
@@ -357,6 +387,17 @@ func (c *WsConn) inboundShedReason() string {
 		return "inbound rate exceeded budget for over the saturation window"
 	}
 	return ""
+}
+
+// validRoomName bounds the room-name-bloat vector issue #175 describes: an
+// unauthenticated joiner spraying long or unbounded names to inflate
+// Relay.rooms/Registry.rooms one entry at a time. Length only, not a
+// stricter charset — room names come from daemons and humans typing
+// project/session identifiers, not from a namespace this relay defines, so
+// a control-character ban would risk refusing something legitimate for no
+// safety gain the length cap doesn't already give.
+func validRoomName(room string) bool {
+	return len(room) <= MaxRoomNameBytes
 }
 
 // -- session ----------------------------------------------------------------
@@ -413,7 +454,7 @@ func (s *Server) session(ws *websocket.Conn) {
 
 		if t, _ := msg["type"].(string); t == "join" {
 			roomVal, _ := msg["room"].(string)
-			if roomVal == "" {
+			if roomVal == "" || !validRoomName(roomVal) {
 				continue
 			}
 			agent, _ := msg["agent"].(string)
@@ -482,6 +523,19 @@ type Server struct {
 	conns   map[*WsConn]struct{}
 }
 
+// closeDeadline bounds one connection's close handshake: how long
+// WriteControl gets to land the close frame before Close gives up and
+// takes the socket down anyway. Mirrors shed's own control-frame deadline.
+const closeDeadline = 2 * time.Second
+
+// shutdownDeadline bounds Serve's whole shutdown path. closeConns fans the
+// per-connection close handshake out to every tracked session
+// concurrently, so one stuck peer only ever costs closeDeadline — this is
+// the backstop for everything else (many sessions, a wedged goroutine)
+// that could otherwise push a relay restart past what an operator is
+// willing to wait.
+const shutdownDeadline = 5 * time.Second
+
 func (s *Server) trackConn(c *WsConn) {
 	s.connsMu.Lock()
 	if s.conns == nil {
@@ -514,6 +568,39 @@ func (s *Server) sampleSendQueueDepth() {
 	}
 	s.connsMu.Unlock()
 	s.Relay.metrics.SendQueueDepth.Set(float64(deepest))
+}
+
+// closeConns sends every currently-tracked session a 1001 (going away)
+// close frame and takes its transport down, so a relay restart reads to
+// every connected daemon as a clean disconnect instead of the RST an
+// unclosed hijacked connection gets when the process exits underneath it
+// — see issue #97. One goroutine per connection so a peer that never
+// reads its close frame only costs closeDeadline, and the wait for all of
+// them is itself capped at shutdownDeadline so a pile of stuck peers
+// can't hang a restart either.
+func (s *Server) closeConns() {
+	s.connsMu.Lock()
+	conns := make([]*WsConn, 0, len(s.conns))
+	for c := range s.conns {
+		conns = append(conns, c)
+	}
+	s.connsMu.Unlock()
+
+	var wg sync.WaitGroup
+	wg.Add(len(conns))
+	for _, c := range conns {
+		go func(c *WsConn) {
+			defer wg.Done()
+			c.Close(websocket.CloseGoingAway, "relay shutting down")
+		}(c)
+	}
+
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(shutdownDeadline):
+	}
 }
 
 // Listen binds the socket and returns the bound address; call Serve to
@@ -577,7 +664,14 @@ func (s *Server) Serve(ctx context.Context) error {
 
 	select {
 	case <-ctx.Done():
+		// srv.Close() first: it stops the listener immediately and, by
+		// contract, never touches an already-hijacked connection. Doing
+		// closeConns() first left the listener open for up to
+		// shutdownDeadline while it drained sessions, so a client dialing
+		// in that window wasn't in the snapshot closeConns fanned out to
+		// and got the raw RST this whole fix exists to remove.
 		_ = srv.Close()
+		s.closeConns()
 		return nil
 	case err := <-errCh:
 		return err

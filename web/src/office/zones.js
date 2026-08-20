@@ -231,6 +231,25 @@ export function claimSlot(zoneName, agentId, { share = null } = {}) {
   const zn = zone(zoneName)
   const key = i => `${zoneName}:${i}`
 
+  // Re-claiming the same zone keeps the same seat. office.html calls
+  // claimSlot on every presence frame, not just zone changes, so without
+  // this an agent working one zone for a while would hop seats each frame.
+  // This wins over `share` below: an agent already seated here stays put —
+  // the partner comes to it, not the other way round.
+  for (let i = 0; i < zn.slots.length; i++) {
+    if (occupancy.get(key(i)) === agentId) {
+      const s = zn.slots[i]
+      return { pos: [s[0], s[1]], yaw: s[2], index: i, shared: false }
+    }
+  }
+
+  // An agent only ever holds one slot at a time (every caller passes a
+  // fresh zone per claim, never two live claims for the same id). Drop
+  // whatever slot it held elsewhere before taking a new one here, so a
+  // zone change frees the old zone instead of leaving a ghost claim that
+  // never clears until despawn.
+  releaseSlots(agentId)
+
   // Co-location: if the agent we're sharing with already holds a slot here,
   // stand beside them rather than taking a fresh one.
   if (share != null) {

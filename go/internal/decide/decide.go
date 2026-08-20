@@ -101,9 +101,9 @@ func truncateUTF8(s string, max int) string {
 
 // boundResponse truncates every free-text field on r. Called last, after
 // HandoverToMe has already been computed from the untruncated lease data —
-// the hook's own handover_to_me fallback (hook.cpp:558) compares the
-// wire's handover_to against its own session id, and a field truncated
-// before that comparison could break a match that was otherwise exact.
+// hook.cpp's queued_for_me check compares the wire's handover_to against
+// its own session id, and a field truncated before that comparison could
+// break a match that was otherwise exact.
 func boundResponse(r Response) Response {
 	r.Holder = truncateUTF8(r.Holder, maxNameBytes)
 	r.Human = truncateUTF8(r.Human, maxNameBytes)

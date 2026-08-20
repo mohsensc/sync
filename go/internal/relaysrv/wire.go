@@ -46,7 +46,11 @@ func regionPayloadUnmarked(r Region) Frame {
 // leaseFrame is the body shared by "lease" (state=held), the elements of
 // "leases", and "claim_result" — the daemon parses all three the same way.
 // Mirrors relay.py's _lease_entry.
-func leaseFrame(c *Claim, now float64) Frame {
+//
+// Takes a claimView, not a *Claim: this runs on connection goroutines with
+// no lock held (issue #86), so the winner has to be resolved and the
+// contender count taken back where the shard lock was.
+func leaseFrame(c claimView, now float64) Frame {
 	f := Frame{
 		"agent":         c.Agent,
 		"human":         c.Human,
@@ -56,14 +60,14 @@ func leaseFrame(c *Claim, now float64) Frame {
 		"expires_in_ms": msRemaining(c.ExpiresAt, now),
 		"expires_at":    c.ExpiresAt,
 	}
-	winner := c.HandoverWinner()
+	winner := c.Winner
 	if c.HandoverAt != nil && winner != nil {
 		f["handover_in_ms"] = clampedHandoverMs(*c.HandoverAt, c.ExpiresAt, now)
 		f["handover_at"] = *c.HandoverAt
 		f["handover_to"] = winner.Agent
 		f["handover_to_human"] = winner.Human
 		f["handover_to_priority"] = PriorityName(winner.Priority)
-		f["waiting"] = len(c.Contenders)
+		f["waiting"] = c.Waiting
 	}
 	return f
 }
