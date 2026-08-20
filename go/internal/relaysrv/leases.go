@@ -3,7 +3,6 @@ package relaysrv
 import (
 	"os"
 	"strconv"
-	"strings"
 	"sync"
 
 	"github.com/mohsensc/sync/go/internal/metrics"
@@ -79,29 +78,14 @@ type Publisher interface {
 }
 
 // carryKey identifies a claim's identity for the dodge-the-deadline check
-// in handOver/resumeCarry. Mirrors leases.py's `_carry` dict key exactly:
-// python keys on the full frozen Region (path, symbol *and* lines), not
-// same_region()'s coarser path+symbol contention unit — same_region()
-// deliberately ignores lines for conflict detection, but the carry dict is
-// a different question ("is this the literal same claim reappearing"),
-// and python answers it with plain dataclass equality. Dropping lines
-// here would make Go's carry match in cases Python's wouldn't (a release
-// and re-claim of the same symbol with a different line range would
-// still reattach the remembered deadline in Go but not Python) — a real,
-// if narrow, wire-behavior divergence, not just an internal difference.
+// in handOver/resumeCarry. Keyed on room, path, symbol and agent — same
+// unit same_region() contends on, and the same fields claimKey below uses.
+// Lines is display-only, never region identity (see types.go), so it can't
+// be part of this key: a holder that releases and re-claims with a
+// different (or absent) line range is still the literal same claim
+// reappearing, and must inherit the deadline it's trying to dodge.
 type carryKey struct {
-	room, path, symbol, lines, agent string
-}
-
-func linesKey(r Region) string {
-	if len(r.Lines) == 0 {
-		return ""
-	}
-	parts := make([]string, len(r.Lines))
-	for i, v := range r.Lines {
-		parts[i] = strconv.Itoa(v)
-	}
-	return strings.Join(parts, ",")
+	room, path, symbol, agent string
 }
 
 type carryEntry struct {
@@ -365,16 +349,16 @@ func (r *Registry) pruneExpired(room string, s *shard, now float64, actor Conn) 
 // handOver is called with s.mu held, for a claim that just left the table
 // (expired here, or released/replaced by the caller). If its renewal
 // deadline is what ended it, reserve the region for the contender it was
-// capped for. Mirrors leases.py's _hand_over exactly, including the carry
-// bookkeeping that stops a holder dodging its deadline by releasing and
-// re-taking a region a second before it fires.
+// capped for. The carry bookkeeping here is what stops a holder dodging
+// its deadline by releasing and re-taking a region a second before it
+// fires.
 func (r *Registry) handOver(s *shard, c *Claim, now float64) *Reservation {
 	winner := c.handoverWinner()
 	if winner == nil {
 		return nil
 	}
 	if c.HandoverAt == nil || *c.HandoverAt > now {
-		key := carryKey{c.Room, c.Scope.Path, symbolKey(c.Scope), linesKey(c.Scope), c.Agent}
+		key := carryKey{c.Room, c.Scope.Path, symbolKey(c.Scope), c.Agent}
 		s.carry[key] = carryEntry{winner: *winner, deadline: c.HandoverAt}
 		if len(s.carry) > carryMax {
 			for k, v := range s.carry {
@@ -404,7 +388,7 @@ func (r *Registry) resumeCarry(s *shard, c *Claim, now float64) {
 	if len(s.carry) == 0 {
 		return
 	}
-	key := carryKey{c.Room, c.Scope.Path, symbolKey(c.Scope), linesKey(c.Scope), c.Agent}
+	key := carryKey{c.Room, c.Scope.Path, symbolKey(c.Scope), c.Agent}
 	carried, ok := s.carry[key]
 	if !ok {
 		return
