@@ -18,6 +18,7 @@ package hooksock
 
 import (
 	"bufio"
+	"fmt"
 	"net"
 	"os"
 	"sync"
@@ -62,9 +63,44 @@ func (s *Server) OnRequest(h RequestHandler) { s.respond = h }
 
 // Start binds the socket and begins accepting in a background goroutine. A
 // stale socket file from a crashed daemon must never prevent restart, same
-// as SocketServer::start.
+// as SocketServer::start — but a live one must never be stolen out from
+// under a running daemon, so a second presenced against the same socket
+// path shares a journal/snapshot/policy cache with the first (see
+// siblingPath in cmd/presenced/main.go) and hooks start getting answered by
+// whichever daemon happens to win the race. So: probe first. Something
+// answers the connect, this path is live, and Start fails instead of
+// unlinking it. Nothing answers, the file (if any) is a stale leftover from
+// a crash and is safe to remove before binding.
+//
+// probe → remove → bind is three steps, and none of the OS's own guarantees
+// cover the gap between them: two cold starts against the same stale path
+// can both probe and see "nothing answers", and the second one to run
+// os.Remove isn't removing a stale file anymore — it's removing the live
+// socket the first one just bound, orphaning that listener with no error
+// raised anywhere (ListenUnix creates a fresh inode; unlinking the path
+// doesn't touch the fd already holding it open). Bind semantics never even
+// get a chance to settle it, because by the time the second Start calls
+// ListenUnix the path is simply empty again, not contended. So the whole
+// sequence runs under startLock, a flock'd sidecar <path>.lock: whoever
+// gets the lock first runs probe → remove → bind to completion before the
+// second Start's probe is allowed to happen, and that second probe now sees
+// the first Start's live socket and correctly errors "already running"
+// instead of racing to unlink it. The lock is held until Start returns;
+// past the bind, the OS's own one-listener-per-path semantics cover it
+// anyway, so nothing is lost by not releasing any earlier.
 func (s *Server) Start() error {
-	_ = os.Remove(s.path)
+	unlock, err := startLock(s.path)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	if probeListening(s.path) {
+		return fmt.Errorf("hooksock: already running at %s", s.path)
+	}
+	if err := os.Remove(s.path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
 
 	addr, err := net.ResolveUnixAddr("unix", s.path)
 	if err != nil {
@@ -74,12 +110,57 @@ func (s *Server) Start() error {
 	if err != nil {
 		return err
 	}
+	// net.ListenUnix creates the file at 0777&^umask; docs/threat-model.md
+	// treats filesystem permission as the hook<->daemon boundary, so a
+	// world-writable socket defeats that without this.
+	if err := os.Chmod(s.path, 0o600); err != nil {
+		_ = ln.Close() // unlinks s.path itself; nothing else to clean up
+		return err
+	}
 	s.mu.Lock()
 	s.ln = ln
 	s.mu.Unlock()
 
 	go s.acceptLoop(ln)
 	return nil
+}
+
+// startLock serializes Start's probe → remove → bind sequence, across
+// goroutines and across processes — two separate presenced invocations
+// racing the same crash-restart go through the same sidecar lockfile, not
+// just two calls in one binary. The acquire blocks rather than
+// fail-fast-and-retry: the loser simply waits out the winner's critical
+// section, then runs its own probe against whatever the winner left behind
+// (a live socket, almost always), which is what turns the loser's outcome
+// into the ordinary "already running" error instead of a race. The lockfile
+// itself is never removed — deleting it would just reopen the same
+// unlink-out-from-under-someone gap one level down, and leaving it behind
+// costs nothing.
+func startLock(sockPath string) (unlock func(), err error) {
+	lf, err := os.OpenFile(sockPath+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("hooksock: open lockfile: %w", err)
+	}
+	if err := flockExclusive(lf); err != nil {
+		_ = lf.Close()
+		return nil, fmt.Errorf("hooksock: lock %s: %w", lf.Name(), err)
+	}
+	return func() {
+		_ = flockUnlock(lf)
+		_ = lf.Close()
+	}, nil
+}
+
+// probeListening reports whether something is already accepting
+// connections at path. A refused or otherwise failed dial means no live
+// listener — the file, if present, is stale.
+func probeListening(path string) bool {
+	conn, err := net.DialTimeout("unix", path, 200*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 func (s *Server) acceptLoop(ln *net.UnixListener) {
@@ -137,17 +218,24 @@ func (s *Server) serveLine(conn *net.UnixConn, line []byte) {
 	_, _ = conn.Write(reply)
 }
 
-// Stop closes the listener and removes the socket file. Idempotent.
+// Stop closes the listener. Idempotent. Only touches the listener if this
+// Server actually bound it — Start failing with "already running" leaves
+// s.ln nil, and a Stop on that half-started Server must not tear down the
+// socket the live daemon it found is using. No explicit os.Remove here:
+// UnixListener.Close unlinks its own path, so removing it again is not just
+// redundant, it's the exact bug this fix exists for — a stray Remove after
+// Close races a second daemon that already bound the just-freed path out
+// from under it.
 func (s *Server) Stop() {
 	s.mu.Lock()
 	ln := s.ln
 	s.ln = nil
 	s.mu.Unlock()
 
-	if ln != nil {
-		_ = ln.Close()
+	if ln == nil {
+		return
 	}
-	_ = os.Remove(s.path)
+	_ = ln.Close()
 }
 
 // Addr is the path this server is listening on, or empty before Start.
