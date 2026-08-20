@@ -63,8 +63,9 @@ func main() {
 
 	// Tracks the *http.Server for our own :5173 bind, if any — set here on
 	// winning at startup, and again from the heartbeat goroutine on
-	// re-election. Read on the lease-lost path so it can be closed
-	// immediately instead of waiting on vite; see closeArbiterListener.
+	// re-election or a --force takeover. Read on the lease-lost path so it
+	// can be closed immediately instead of waiting on vite; see
+	// closeArbiterListener.
 	var arbiterSrv atomic.Pointer[http.Server]
 	arbiterAddr, becameArbiter, srv := claimPublicPort(*owner, *worktree, pid, vitePort)
 	if becameArbiter {
@@ -90,6 +91,12 @@ func main() {
 	log.Printf("webdev: lease granted to %s (worktree %s), vite on 127.0.0.1:%d behind %s",
 		holder.Owner, holder.Worktree, vitePort, publicAddr)
 
+	// Signals the heartbeat goroutine that ensureArbiterAfterForce won the
+	// bind, so it can switch off whatever slower interval it started this
+	// process's own heartbeat at — otherwise a forcer that wins the rebind
+	// still watches its new lease at heartbeatEvery (20s) until its first
+	// tick, reopening the very window --force just closed.
+	becameArbiterCh := make(chan struct{}, 1)
 	if *force && !becameArbiter {
 		// We just broke someone else's lease over HTTP, which means we
 		// didn't win the :5173 bind ourselves — the process we forced out
@@ -97,7 +104,7 @@ func main() {
 		// it exits (see arbiterHeartbeatEvery), and :5173 sits unbound
 		// until someone rebinds it. Race for it now instead of waiting for
 		// our own next heartbeat tick to notice "arbiter unreachable".
-		go ensureArbiterAfterForce(*owner, *worktree, pid, vitePort, &arbiterSrv)
+		go ensureArbiterAfterForce(*owner, *worktree, pid, vitePort, &arbiterSrv, becameArbiterCh)
 	}
 
 	vite := exec.Command("pnpm", "exec", "vite",
@@ -131,7 +138,7 @@ func main() {
 	if becameArbiter {
 		interval = arbiterHeartbeatEvery
 	}
-	go heartbeat(client, *owner, *worktree, pid, vitePort, interval, heartbeatDone, lostLease, &arbiterSrv)
+	go heartbeat(client, *owner, *worktree, pid, vitePort, interval, heartbeatDone, lostLease, &arbiterSrv, becameArbiterCh, arbiterHeartbeatEvery)
 
 	viteDone := make(chan error, 1)
 	go func() { viteDone <- vite.Wait() }()
@@ -231,12 +238,15 @@ func newArbiterLock(owner, worktree string, pid, port int) *devproxy.Lock {
 // small. If the process we forced the lease from wasn't the arbiter, every
 // attempt here just fails fast (address already in use) and this exits
 // once the bound retry window elapses — cheap, and harmless either way.
-func ensureArbiterAfterForce(owner, worktree string, pid, port int, arbiterSrv *atomic.Pointer[http.Server]) {
+func ensureArbiterAfterForce(owner, worktree string, pid, port int, arbiterSrv *atomic.Pointer[http.Server], becameArbiter chan<- struct{}) {
 	deadline := time.Now().Add(forceTakeoverRetryFor)
 	for time.Now().Before(deadline) {
 		if _, became, srv := claimPublicPort(owner, worktree, pid, port); became {
 			arbiterSrv.Store(srv)
 			log.Printf("webdev: took over arbiter on %s after --force", publicAddr)
+			// Buffered by one and sent exactly once here, so this never
+			// blocks even if the heartbeat goroutine has already exited.
+			becameArbiter <- struct{}{}
 			return
 		}
 		time.Sleep(forceTakeoverRetryEvery)
@@ -284,13 +294,20 @@ func pickPort() int {
 // up but refuses — someone else (or --force) holds the lease now — that's
 // reported on lostLease and this loop stops; main is the one that decides
 // what dying loudly means (kill vite, exit 1).
-func heartbeat(client *devproxy.Client, owner, worktree string, pid, vitePort int, interval time.Duration, done <-chan struct{}, lostLease chan<- devproxy.Holder, arbiterSrv *atomic.Pointer[http.Server]) {
+func heartbeat(client *devproxy.Client, owner, worktree string, pid, vitePort int, interval time.Duration, done <-chan struct{}, lostLease chan<- devproxy.Holder, arbiterSrv *atomic.Pointer[http.Server], becameArbiter <-chan struct{}, arbiterInterval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-done:
 			return
+		case <-becameArbiter:
+			// ensureArbiterAfterForce just won the bind outside this
+			// loop (a --force takeover). Switch off whatever interval we
+			// started at so the next --force is noticed at
+			// arbiterInterval instead of on this loop's original,
+			// slower schedule.
+			ticker.Reset(arbiterInterval)
 		case <-ticker.C:
 			if _, err := client.Claim(owner, worktree, pid, vitePort, false); err != nil {
 				if refused, ok := err.(*devproxy.ErrRefused); ok {
@@ -302,7 +319,7 @@ func heartbeat(client *devproxy.Client, owner, worktree string, pid, vitePort in
 					// We're the arbiter now — watch our own lease at the
 					// fast interval so a future --force takeover is
 					// noticed promptly, same as if we'd won at startup.
-					ticker.Reset(arbiterHeartbeatEvery)
+					ticker.Reset(arbiterInterval)
 				}
 			}
 		}

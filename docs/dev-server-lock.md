@@ -32,17 +32,17 @@ survivors race the bind again and one re-elects.
 
 If the holder you `--force` out is also the arbiter, that process dies
 (refused ⇒ die loudly) and `:5173` goes unbound until someone rebinds it.
-Bounded, not open-ended: the forced-out arbiter checks its own lease every
-2s while serving `:5173` (not the normal 20s), so it exits fast; the
-forcer races to rebind right after its claim lands — every 100ms for up
-to 5s — instead of waiting for a heartbeat tick. Net window is ~2s, not
-the up-to-20s a heartbeat-only recovery would leave. Whoever wins the
-rebind seeds the lock with its own claim first, so a stray third
-`pnpm dev` landing in that window gets refused, not an empty lock to win.
-
-Separately: the port is only unstealable while some `webdev` holds it —
-once the last one exits, a raw `vite --strictPort` outside `webdev` could
-grab `:5173` first.
+Bounded, not open-ended: the forced-out arbiter checks its lease every 2s
+and, on noticing, closes its listener immediately — before it even
+signals vite to stop — so a hung vite ignoring SIGTERM can't hold the
+port past that tick. The forcer races to rebind every 100ms for up to
+5s, and its own heartbeat switches to the 2s interval the moment it wins
+so a second `--force` doesn't reopen a 20s window. Net window is ~2s,
+not the up-to-20s a heartbeat-only recovery would leave. Whoever wins
+seeds the lock with its own claim first, so a stray third `pnpm dev`
+landing in that window gets refused, not an empty lock to win. Separately,
+the port is only unstealable while a `webdev` holds it — once the last
+exits, a raw `vite --strictPort` could grab `:5173` first.
 
 ## Manual check
 

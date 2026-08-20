@@ -66,7 +66,8 @@ func TestHeartbeatDetectsForcedEvictionPromptly(t *testing.T) {
 	lost := make(chan devproxy.Holder, 1)
 	fastInterval := 30 * time.Millisecond
 	var arbiterSrv atomic.Pointer[http.Server]
-	go heartbeat(client, "victim", "featA", 111, 4001, fastInterval, done, lost, &arbiterSrv)
+	becameArbiter := make(chan struct{}, 1)
+	go heartbeat(client, "victim", "featA", 111, 4001, fastInterval, done, lost, &arbiterSrv, becameArbiter, fastInterval)
 	defer close(done)
 
 	time.Sleep(fastInterval / 2)
@@ -171,4 +172,51 @@ func TestCloseArbiterListenerFreesPortBeforeViteStops(t *testing.T) {
 	// however long that takes.
 	const grace = 300 * time.Millisecond
 	_ = stopVite(vite, viteDone, grace)
+}
+
+// TestHeartbeatSwitchesToFastIntervalAfterForceTakeover covers the second
+// fix-up interaction: winning the bind via ensureArbiterAfterForce (a
+// --force takeover by this process) must move the already-running
+// heartbeat loop off whatever slower interval it started at, not leave it
+// ticking at heartbeatEvery until the next --force reopens the window.
+func TestHeartbeatSwitchesToFastIntervalAfterForceTakeover(t *testing.T) {
+	lock := devproxy.NewLock(90 * time.Second)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := &http.Server{Handler: devproxy.Handler(lock)}
+	go srv.Serve(ln)
+	defer srv.Close()
+
+	client := devproxy.NewClient("http://" + ln.Addr().String())
+	if _, err := client.Claim("forcer", "featA", 111, 4001, false); err != nil {
+		t.Fatalf("setup claim: %v", err)
+	}
+
+	done := make(chan struct{})
+	lost := make(chan devproxy.Holder, 1)
+	var arbiterSrv atomic.Pointer[http.Server]
+	becameArbiter := make(chan struct{}, 1)
+	slowInterval := 2 * time.Second // stand-in for heartbeatEvery
+	fastInterval := 30 * time.Millisecond
+	go heartbeat(client, "forcer", "featA", 111, 4001, slowInterval, done, lost, &arbiterSrv, becameArbiter, fastInterval)
+	defer close(done)
+
+	// Signal what ensureArbiterAfterForce signals on winning the bind.
+	becameArbiter <- struct{}{}
+	time.Sleep(fastInterval) // let the ticker.Reset land
+
+	if _, err := client.Claim("attacker", "featB", 222, 4002, true); err != nil {
+		t.Fatalf("force claim: %v", err)
+	}
+
+	select {
+	case holder := <-lost:
+		if holder.Owner != "attacker" {
+			t.Fatalf("want attacker as the evicting holder, got %+v", holder)
+		}
+	case <-time.After(20 * fastInterval):
+		t.Fatal("heartbeat still on the slow interval after becoming arbiter via --force")
+	}
 }
