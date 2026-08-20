@@ -27,6 +27,7 @@ from _lib import (
     TLS_ENABLED,
     Client,
     DaemonProc,
+    HarnessSendError,
     Latency,
     RelayProc,
     cpu_seconds,
@@ -45,6 +46,7 @@ class Result:
     name: str
     metrics: dict = field(default_factory=dict)
     findings: list[str] = field(default_factory=list)
+    harness_errors: list[str] = field(default_factory=list)
     skipped: str = ""
 
     @property
@@ -53,6 +55,13 @@ class Result:
 
     def bad(self, msg: str) -> None:
         self.findings.append(msg)
+
+    def harness_error(self, msg: str) -> None:
+        """Something in the harness itself failed to exercise the product —
+        a stalled send, a socket the harness couldn't open. Kept separate
+        from findings so a harness hiccup never gets read as a thing the
+        product did wrong."""
+        self.harness_errors.append(msg)
 
 
 # -- helpers ------------------------------------------------------------------
@@ -318,10 +327,12 @@ async def rooms(n_rooms: int, per_room: int, rounds: int) -> Result:
         if phase2 > 512 and phase2 > phase1 * 0.5:
             r.bad(f"DEAD ROOMS ARE NEVER FORGOTTEN: 500 rooms whose every "
                   f"member has disconnected cost {phase1} KiB, and the next 500 "
-                  f"cost {phase2} KiB — it is not levelling off. Relay._members, "
-                  f"._activity and ._last_ts are keyed by room and nothing ever "
-                  f"deletes a room, so a long-lived relay grows with the number "
-                  f"of repos it has ever seen.")
+                  f"cost {phase2} KiB — it is not levelling off. Relay.rooms "
+                  f"(go/internal/relaysrv/relay.go, each entry's members/"
+                  f"activity/lastTs) and Registry.rooms (leases.go's per-room "
+                  f"shards) are both keyed by room and nothing ever deletes an "
+                  f"entry, so a long-lived relay grows with the number of "
+                  f"repos it has ever seen.")
 
         shared_name = await _shared_agent_name_across_rooms(relay)
         for f in shared_name["findings"]:
@@ -356,11 +367,16 @@ async def _shared_agent_name_across_rooms(relay: RelayProc) -> dict:
     """Two rooms, one agent id.
 
     Not a contrived case. presenced defaults its relay identity to
-    "presenced@<hostname>" (cpp/daemon/main.cpp), so two checkouts on one
-    laptop are two daemons, two rooms and one name. Both of the relay's
-    release paths — the wait-die abort in Relay._on_claim and the disconnect
-    sweep in Relay.leave — call LeaseRegistry.release_all(agent), which is
-    documented as dropping "every lease an agent holds, in every room".
+    "presenced@<hostname>" (go/cmd/presenced/main.go), so two checkouts on
+    one laptop are two daemons, two rooms and one name. Both of the relay's
+    release paths — the wait-die abort in Relay.onClaim and the disconnect
+    sweep in Relay.Leave — call Registry.ReleaseAll(room, agent, ...), which
+    is room-scoped by design now (leases.go: "drops every lease an agent
+    holds in one room"). The old cross-room sweep survives as
+    Registry.ReleaseEverywhere, reserved for an agent id changing priority
+    tier (dropStrandedClaims), not for either path below. Both checks here
+    guard against a regression back to the pre-Go relay's room-unscoped
+    release_all, not describe a live bug.
     """
     out: dict = {"findings": [], "metrics": {}}
     name = "presenced@laptop"
@@ -389,10 +405,12 @@ async def _shared_agent_name_across_rooms(relay: RelayProc) -> dict:
             out["findings"].append(
                 "CROSS-ROOM LEASE LOSS ON WAIT-DIE ABORT: an agent id that "
                 "exists in two rooms lost its repo-a lease because a claim it "
-                "made in repo-b was refused. Relay._on_claim answers an abort "
-                "with registry.release_all(agent), and release_all is not "
-                "room-scoped. presenced names itself presenced@<hostname> by "
-                "default, so two checkouts on one machine hit this.")
+                "made in repo-b was refused. Relay.onClaim answers an abort "
+                "with Registry.ReleaseAll(room, agent, ...), which is supposed "
+                "to be room-scoped (leases.go) — this run shows it leaking "
+                "across rooms the way the old room-unscoped release_all used "
+                "to. presenced names itself presenced@<hostname> by default, "
+                "so two checkouts on one machine hit this.")
 
         # And again for the disconnect path.
         await a.claim("src/only-in-repo-a.py", intent="the innocent lease")
@@ -406,8 +424,9 @@ async def _shared_agent_name_across_rooms(relay: RelayProc) -> dict:
             out["findings"].append(
                 "CROSS-ROOM LEASE LOSS ON DISCONNECT: closing the repo-b "
                 "connection released the same agent id's repo-a leases. "
-                "Relay.leave calls release_all(agent), which sweeps every "
-                "room.")
+                "Relay.Leave calls the same Registry.ReleaseAll(room, agent, "
+                "...) — this run shows it sweeping every room instead of "
+                "just the one being left.")
     finally:
         for c in (a, b, rival):
             with contextlib.suppress(Exception):
@@ -444,8 +463,11 @@ async def relay_restart(daemons: int) -> Result:
             n = 0
             while time.time() < end:
                 for p in procs:
-                    p.send_lines([event_line(f"sess-{p.name}", "read",
-                                             f"src/{tag}/{p.name}-{n}.py")])
+                    try:
+                        p.send_lines([event_line(f"sess-{p.name}", "read",
+                                                 f"src/{tag}/{p.name}-{n}.py")])
+                    except HarnessSendError as exc:
+                        r.harness_error(f"observe({tag}) send to {p.name}: {exc}")
                 n += 1
                 await asyncio.sleep(0.25)
             await asyncio.sleep(1.5)
@@ -481,7 +503,10 @@ async def relay_restart(daemons: int) -> Result:
         outage_paths = [f"src/outage/{i}.py" for i in range(6)]
         for i, path in enumerate(outage_paths):
             for p in procs:
-                p.send_lines([event_line(f"sess-{p.name}", "edit", path)])
+                try:
+                    p.send_lines([event_line(f"sess-{p.name}", "edit", path)])
+                except HarnessSendError as exc:
+                    r.harness_error(f"outage send to {p.name}: {exc}")
             await asyncio.sleep(0.25)
 
         crashed = [p.name for p in procs if not p.alive()]
@@ -792,28 +817,34 @@ async def flood(events: int, threads: int) -> Result:
                   f"single event, so the file is rewritten and renamed on every "
                   f"loop iteration for as long as the flood lasts.")
 
-        # One connection carrying a big batch, which is what a hook writing
-        # more than it can flush in its 5ms slice looks like. The daemon's
-        # presence table records the last line it got to, so the index in the
-        # snapshot says how far it read before the budget ran out.
+        # One connection carrying a big batch. The old story here was
+        # SocketServer::drain_conn giving every connection a 5ms slice of a
+        # single-threaded loop and dropping whatever was left; that class is
+        # gone. go/internal/hooksock.Server (:44-52) hands each connection
+        # its own goroutine and a 2s ConnTimeout on the whole connection's
+        # lifetime, not a per-read fairness slice — see the package doc
+        # there. batch_read < batch_n under that model just means reading
+        # and applying 5000 lines took longer than 2s; it is not evidence of
+        # a silent-drop bug, so this is reported as a metric, not a finding.
         batch_n = 5000
         batch = [event_line("batch-agent", "read", f"src/batch/{i:05d}.py")
                  for i in range(batch_n)]
         obs.fanout.clear()
-        d.send_lines(batch)
+        try:
+            d.send_lines(batch)
+        except HarnessSendError as exc:
+            r.harness_error(f"batch send to {d.name}: {exc}")
         await asyncio.sleep(3.0)
         batch_seen = sum(1 for f in obs.fanout if f.get("type") == "presence")
-        last = d.snapshot_paths().get("batch-agent", "")
-        try:
-            batch_read = int(last.split("/")[-1].split(".")[0]) + 1
-        except ValueError:
-            batch_read = 0
-        if batch_read < batch_n:
-            r.bad(f"ONE CONNECTION IS TRUNCATED AT THE BUDGET: of {batch_n} "
-                  f"lines written on a single socket the daemon read {batch_read} "
-                  f"and closed. SocketServer::drain_conn gets 5ms and drops "
-                  f"whatever is left, silently. Fine for one line per hook; a "
-                  f"client that batches loses the tail with no error anywhere.")
+        snap = d.snapshot_paths()
+        batch_read = None
+        if snap is not None:
+            last = snap.get("batch-agent")
+            if last:
+                try:
+                    batch_read = int(last.split("/")[-1].split(".")[0]) + 1
+                except ValueError:
+                    batch_read = None
 
         r.metrics = {
             "events_offered": sent + failed,
@@ -899,6 +930,8 @@ class DeafSubscriber:
 
 
 async def slow_subscriber(busy_agents: int, seconds: float) -> Result:
+    import threading
+
     r = Result("slow-subscriber")
     relay = RelayProc()
     relay.start()
@@ -933,12 +966,21 @@ async def slow_subscriber(busy_agents: int, seconds: float) -> Result:
         rss_track = [rss_kb(relay.pid)]
         stop_at = time.perf_counter() + seconds
 
-        async def sample_rss() -> None:
-            while time.perf_counter() < stop_at:
-                rss_track.append(rss_kb(relay.pid))
-                await asyncio.sleep(0.25)
+        # A real thread, not an asyncio task: rss_kb() blocks on a `ps`
+        # subprocess, and a task that parks the event loop every 250ms would
+        # sit on top of exactly the claim latency this arm is measuring —
+        # contaminating this arm's p99 against a baseline that has no
+        # sampler at all. flood() (:719) already samples this way for the
+        # same reason.
+        stop_sampling = threading.Event()
 
-        sampler = asyncio.create_task(sample_rss())
+        def sample_rss() -> None:
+            while not stop_sampling.is_set():
+                rss_track.append(rss_kb(relay.pid))
+                time.sleep(0.25)
+
+        sampler = threading.Thread(target=sample_rss, daemon=True)
+        sampler.start()
         try:
             deaf_ops = sum(await asyncio.wait_for(asyncio.gather(
                 *(churn(c, i, lat_deaf, stop_at)
@@ -947,9 +989,8 @@ async def slow_subscriber(busy_agents: int, seconds: float) -> Result:
             deaf_ops = 0
             r.bad("INGEST STALLED: a subscriber that never reads stopped the "
                   "other agents from making progress")
-        sampler.cancel()
-        with contextlib.suppress(BaseException):
-            await sampler
+        stop_sampling.set()
+        sampler.join(timeout=2)
 
         rss_peak = max(rss_track)
         growth = rss_peak - rss_base
@@ -966,15 +1007,18 @@ async def slow_subscriber(busy_agents: int, seconds: float) -> Result:
             r.bad(f"INGEST DEGRADED: throughput fell from {base_ops} to "
                   f"{deaf_ops} ops in the same window with one deaf subscriber")
         if growth > 20480:
-            r.bad(f"UNBOUNDED RELAY MEMORY ON A SLOW SUBSCRIBER: RSS grew "
+            r.bad(f"RELAY MEMORY GROWS ON A SLOW SUBSCRIBER: RSS grew "
                   f"{growth} KiB in {seconds}s ({rate:.0f} KiB/s), "
                   f"{first_half} KiB in the first half and {second_half} KiB in "
-                  f"the second — it is a rate, not a one-off. "
-                  f"serve.WsConn.send fires a task per outbound frame and parks "
-                  f"it in the module-level _INFLIGHT set; a peer that never "
-                  f"reads never lets those tasks finish, so the set and the "
-                  f"payloads they pin grow without limit. Nothing sheds the "
-                  f"connection and nothing bounds the queue.")
+                  f"the second — it is a rate, not a one-off. WsConn.Send "
+                  f"(go/internal/relaysrv/server.go) now queues into a bounded "
+                  f"channel (SendQueueMax=512) and drops the oldest frame once "
+                  f"it's full, and a peer stuck at SendStallS/SendSaturatedS "
+                  f"gets shed outright — so this is no longer the old unbounded "
+                  f"per-frame task pin. Growth this large despite that bound "
+                  f"means either the shed isn't firing in time or something "
+                  f"else (presence/activity buffers, dropped-frame bookkeeping) "
+                  f"is growing with a subscriber this slow.")
 
         deaf.close()
         await asyncio.sleep(2.0)
@@ -1242,11 +1286,13 @@ async def lease_takeover() -> Result:
                   "agent edit it. The relay publishes `held` for the new holder "
                   "before `expired` for the old one "
                   f"(order: {order}), both frames name the same region, and "
-                  "RelayClient::on_text erases on the region key without "
-                  "checking which agent the frame is about — so the expiry "
-                  "frame deletes the lease that was just granted. Every "
-                  "takeover after an expiry lands here, and it stays wrong "
-                  "until the new holder's next heartbeat.")
+                  "Client.applyLease (go/internal/relay/client.go) is supposed "
+                  "to guard the erase with leases.Cache.EraseIfHeldBy so the "
+                  "old holder's expiry can never delete the new holder's "
+                  "just-granted lease. This run shows that guard not holding — "
+                  "_replay_lease_stream below models the same guarded rule and "
+                  "did not predict it, so this is a live regression, not the "
+                  "old unconditional-erase bug.")
 
         r.metrics = {
             "lease_ttl_s": ttl,

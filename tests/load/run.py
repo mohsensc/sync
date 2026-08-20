@@ -153,6 +153,8 @@ def print_result(res: S.Result) -> None:
     print(json.dumps(res.metrics, indent=2, default=str))
     for f in res.findings:
         print(f"  ! {f}")
+    for e in res.harness_errors:
+        print(f"  ~ harness: {e}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -188,21 +190,31 @@ def main(argv: list[str] | None = None) -> int:
     print("SUMMARY")
     print("=" * 72)
     failures = 0
+    harness_errors = 0
     for res in results:
         mark = "ok  " if res.ok else "FAIL"
         print(f"  [{mark}] {res.name:28s} {res.metrics.get('scenario_wall_s', 0)}s")
         for f in res.findings:
             failures += 1
             print(f"           ! {f}")
-    print(f"\n{len(results)} scenarios, {failures} findings")
+        for e in res.harness_errors:
+            harness_errors += 1
+            print(f"           ~ harness: {e}")
+    print(f"\n{len(results)} scenarios, {failures} findings, "
+          f"{harness_errors} harness errors")
     if failures == 0:
         print("A harness that finds nothing is a suspect harness. Check that the "
               "relay and daemon really came up before believing this.")
+    if harness_errors:
+        print("Harness errors above are the harness failing to exercise the "
+              "product, not the product doing anything — re-run before trusting "
+              "any finding from an affected scenario.")
 
     if args.json:
         args.json.write_text(json.dumps(
             [{"name": r.name, "ok": r.ok, "metrics": r.metrics,
-              "findings": r.findings} for r in results], indent=2, default=str))
+              "findings": r.findings, "harness_errors": r.harness_errors}
+             for r in results], indent=2, default=str))
     return 1 if failures else 0
 
 
