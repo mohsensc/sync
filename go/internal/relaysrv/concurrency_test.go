@@ -86,25 +86,33 @@ func TestConcurrentSendNeverBlocks(t *testing.T) {
 	wg.Wait()
 }
 
-// TestReleaseEverywhereSeesRoomsCreatedDuringItsOwnSweep guards against a
-// snapshot-then-iterate race: ReleaseEverywhere used to copy the room map
-// under a brief RLock and then iterate the copy after releasing it, so a
-// room created in that window was invisible to that call — a real gap for
-// the identity-reclaim path it backs (relay.go's dropStrandedClaims),
-// even though the exact end-to-end exploit is narrow. Fixed by holding
-// the read lock for the whole sweep, which also blocks concurrent room
-// *creation* (not room traffic) for its short duration. This hammers many
-// goroutines creating brand new rooms concurrently with repeated
-// ReleaseEverywhere calls and checks the registry is left consistent
-// (every claim any goroutine created has a plausible owner, none orphaned
-// mid-sweep) — run under -race, since the property under test is a lock
-// gap, not a single-threaded assertion.
-func TestReleaseEverywhereSeesRoomsCreatedDuringItsOwnSweep(t *testing.T) {
+// TestReleaseEverywhereClearsEveryRoomItSweeps hammers ReleaseEverywhere
+// against many goroutines creating brand new rooms at once — the pattern
+// that used to matter when ReleaseEverywhere copied the room map under a
+// brief RLock and iterated the copy after releasing it, so a room created
+// in that window was invisible to that call, a real gap for the
+// identity-reclaim path it backs (relay.go's dropStrandedClaims). Fixed by
+// holding the read lock for the whole sweep, which also blocks concurrent
+// room *creation* (not room traffic) for its short duration — meaning a
+// room can no longer be born mid-sweep at all, so there is no longer a
+// window for a single call to miss. The concurrent hammer plus -race is
+// what actually guards that lock discipline (a regression back to
+// snapshot-then-iterate would race on the room map, not just misbehave
+// logically).
+//
+// What this test asserts, once the hammer settles: a final synchronous
+// sweep — with no concurrent room creation left to race against — must be
+// exhaustive over every room that exists by then, and scoped to just the
+// swept agent. Neither of those was checked before (issue #131): the old
+// len(claims) > 1 assertion was unreachable by construction, since each
+// room only ever got one Acquire.
+func TestReleaseEverywhereClearsEveryRoomItSweeps(t *testing.T) {
 	clock := RealClock{}
 	pub := &fakePublisher{}
 	reg := NewRegistry(clock, pub, metrics.New())
 
 	const agent = "reclaimed-agent"
+	const bystander = "bystander-agent"
 	var wg sync.WaitGroup
 
 	// One goroutine hammers ReleaseEverywhere for the identity being
@@ -120,7 +128,9 @@ func TestReleaseEverywhereSeesRoomsCreatedDuringItsOwnSweep(t *testing.T) {
 
 	// Many goroutines race to create brand new rooms and immediately
 	// claim a region in them under the same agent id — exactly the
-	// pattern the race window would have to land in to matter.
+	// pattern the race window used to have to land in to matter. A second,
+	// untouched agent claims a distinct path in each of those same rooms,
+	// so the final sweep has something present it must leave alone.
 	for g := 0; g < 16; g++ {
 		wg.Add(1)
 		go func(g int) {
@@ -128,20 +138,30 @@ func TestReleaseEverywhereSeesRoomsCreatedDuringItsOwnSweep(t *testing.T) {
 			for i := 0; i < 50; i++ {
 				room := fmt.Sprintf("fresh-room-%d-%d", g, i)
 				reg.Acquire(room, "human", agent, Region{Path: "f.py"}, "work", nil, PriorityNormal, nil)
+				if res := reg.Acquire(room, "human", bystander, Region{Path: "g.py"}, "work", nil, PriorityNormal, nil); !res.Ok {
+					t.Errorf("room %s: bystander claim should not contend with the swept agent's, got %+v", room, res)
+				}
 			}
 		}(g)
 	}
 	wg.Wait()
 
-	// No assertion on final state beyond "did not race and did not
-	// panic" — -race is the actual check here. A best-effort sanity pass:
-	// every room's claim table stays internally coherent.
+	// The hammer has stopped, so nothing is racing to create rooms out
+	// from under this call — every fresh room already exists in the
+	// registry. If ReleaseEverywhere's lock discipline still walks every
+	// room, this sweep must be exhaustive: no swept-agent claim survives
+	// it anywhere.
+	reg.ReleaseEverywhere(agent, nil)
+
 	for r := 0; r < 16; r++ {
 		for i := 0; i < 50; i++ {
 			room := fmt.Sprintf("fresh-room-%d-%d", r, i)
 			claims := reg.ActiveClaims(room, nil)
-			if len(claims) > 1 {
-				t.Fatalf("room %s: expected at most one claim, got %d", room, len(claims))
+			if len(claims) != 1 {
+				t.Fatalf("room %s: expected only the bystander's claim to survive, got %d claims", room, len(claims))
+			}
+			if claims[0].Agent != bystander {
+				t.Fatalf("room %s: expected the bystander's claim to survive, got %s's", room, claims[0].Agent)
 			}
 		}
 	}
