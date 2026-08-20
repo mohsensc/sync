@@ -62,6 +62,13 @@ describe('World: DOM-free surface', () => {
     // resolveContest's own guard (`e && e.kind === 'contest' ...`) covers it.
     expect(() => w.resolveContest(undefined)).not.toThrow()
     expect(() => w.resolveContest(null)).not.toThrow()
+    // remove() itself never touches THREE/document — only this.encounters,
+    // this.agents, and agent.world — so a minimal stand-in proves it's a
+    // no-op on an agent the world never tracked, without needing a real
+    // (DOM-dependent, see file header) Agent.
+    const fake = { world: null } as unknown as Agent
+    expect(() => w.remove(fake)).not.toThrow()
+    expect(w.agents).toEqual([])
   })
 })
 
