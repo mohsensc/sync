@@ -1256,7 +1256,13 @@ export class World {
     const { a, b } = e
     e.t += dt
     if (e.phase === 'approach') {
-      if (e.t > 14) return this.#end(e)                 // never hang forever
+      if (e.t > 14) {                                    // never hang forever
+        // Silent on the happy path elsewhere — but a pair stuck here never
+        // reached their marks, and that looks identical to a clean replay
+        // once #end clears busy. Say so.
+        console.warn(`replay approach timeout: ${e.a.name} + ${e.b.name} (${e.kind})`)
+        return this.#end(e)
+      }
       if (!a.moving && !b.moving && !a._turn && !b._turn && !a.seated && !b.seated) {
         // Arrival has a tolerance, so each of them can stop up to 10cm short.
         // Two of those and the pair stands 20cm too far apart, which is enough
