@@ -166,11 +166,14 @@ Five metrics `metrics.go` emits don't have a panel — kept off on purpose,
 not forgotten:
 
 - **`ap_outbound_dropped_total`** — daemon-side mirror of `ap_frames_dropped_total`:
-  frames a laptop's own bounded outbound queue discarded because the relay
-  was unreachable longer than the queue could hold. Folded in from each
-  daemon's stats frame. Nonzero means an outage outlasted the buffer, not
-  that anything is currently broken, so it isn't alert-worthy the way a
-  live drop rate is.
+  an upper bound on frames a laptop's own bounded outbound queue discarded
+  because the relay was unreachable longer than the queue could hold.
+  Under sustained backpressure it can, in a narrow window, also count a
+  frame that was actually written and delivered — see the drop-oldest
+  comment in `outbound.go` — so treat it as "at most this many," not an
+  exact loss count. Folded in from each daemon's stats frame. Nonzero means
+  an outage outlasted the buffer, not that anything is currently broken,
+  so it isn't alert-worthy the way a live drop rate is.
 - **`ap_daemon_connected`** — a per-process gauge presenced sets on its own
   registry ("1 while I have a live relay connection"). It never reaches the
   relay's `/metrics`: there's deliberately no per-daemon label to hang it

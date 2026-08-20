@@ -46,6 +46,15 @@ func (q *Queue) Push(msg []byte) {
 		return
 	}
 	if len(q.messages) >= q.cap {
+		// This can evict messages[0] while writePump has it out on Peek and
+		// has already written it to the relay but not yet called Pop — Pop
+		// then finds head advanced past its seq and reports false, which is
+		// fine (see Pop), but dropped has already counted a frame that was
+		// really delivered. Narrow window, only under sustained backpressure
+		// at capacity, and the alternative (holding the lock across the
+		// write, or not counting until Pop loses the race) costs more than
+		// this rare over-count is worth. ap_outbound_dropped_total is
+		// documented as an upper bound for exactly this reason.
 		q.messages = q.messages[1:]
 		q.dropped++
 		q.head++

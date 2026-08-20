@@ -215,8 +215,11 @@ func New() *Registry {
 	r.coalesce = counterVec("ap_coalesce_total",
 		"Hook events the coalescer admitted or dropped as duplicates.", "outcome")
 	r.OutboundDropped = counter("ap_outbound_dropped_total",
-		"Frames a daemon's bounded outbound queue dropped (oldest first) before "+
-			"they ever reached the relay, e.g. during a long reconnect backoff.")
+		"Upper bound on frames a daemon's bounded outbound queue dropped "+
+			"(oldest first) before they ever reached the relay, e.g. during a "+
+			"long reconnect backoff. Under sustained backpressure this can "+
+			"rarely count a frame that was actually written and delivered; "+
+			"see outbound.go's drop-oldest comment.")
 
 	return r
 }
