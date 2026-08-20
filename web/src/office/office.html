@@ -1131,6 +1131,10 @@ function despawnLive(id) {
   if (interaction) interaction.removeAgent(a)
   world.remove(a)
   Z.releaseSlots(id)
+  // Drops this agent's gitsignals desk-fx (heat/cold groups + their own
+  // geometry) before the traverse below, so it doesn't see meshes that
+  // are already detached from a.root — see gitsignals.js's forget().
+  if (window.__gitSignals) window.__gitSignals.forget(a)
   scene.remove(a.root)
   a.root.traverse(n => {
     if (!n.isMesh && !n.isSkinnedMesh) return
