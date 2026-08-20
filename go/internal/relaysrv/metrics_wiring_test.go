@@ -2,6 +2,8 @@ package relaysrv
 
 import (
 	"context"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -81,6 +83,45 @@ func TestMetricsServerServesOnlyMetrics(t *testing.T) {
 	ms.Handler.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("GET /: status %d, want 404 — nothing but /metrics should be served here", rec.Code)
+	}
+}
+
+// TestMetricsServerServesOnProvidedListener is the seam gorelay's main.go
+// relies on: bind with net.Listen first, hand the listener to Serve, and
+// only then is the endpoint actually reachable. http.Server.Serve accepts
+// any net.Listener, so this is stdlib behavior — the test exists to pin it
+// against MetricsServer specifically, since a future change to what it
+// returns (e.g. wrapping the *http.Server) could break that assumption
+// silently.
+func TestMetricsServerServesOnProvidedListener(t *testing.T) {
+	reg := metrics.New()
+	reg.Decision(0, "silent")
+	ms := MetricsServer("127.0.0.1:0", reg)
+	if ms == nil {
+		t.Fatal("expected a server once an address is given")
+	}
+
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %s", err)
+	}
+	go ms.Serve(ln)
+	defer ms.Close()
+
+	resp, err := http.Get("http://" + ln.Addr().String() + "/metrics")
+	if err != nil {
+		t.Fatalf("GET /metrics: %s", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /metrics: status %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %s", err)
+	}
+	if !strings.Contains(string(body), "ap_decisions_total") {
+		t.Fatalf("expected the catalogue in the body, got %q", body)
 	}
 }
 
