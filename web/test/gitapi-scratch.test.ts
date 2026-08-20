@@ -120,3 +120,50 @@ describe('gitApiMiddleware against a scratch repo', () => {
     expect(stat.json.ok).toBe(true)
   })
 })
+
+// #130: recent/shortlog's identity-dedup coverage used to run against this
+// checkout's own HEAD, on the assumption every commit in this repo's history
+// happened to be authored under an email mergeAuthorsByEmail already knows
+// to merge. A commit under a genuinely different email made that assumption
+// false and turned CI red for no reason about the dedup logic itself. A
+// fixture repo with known split and distinct identities pins the behavior
+// instead of trusting whatever HEAD looks like today.
+describe('gitApiMiddleware identity dedup against a scratch repo', () => {
+  let dir = ''
+
+  const authorCommit = (repoDir: string, name: string, email: string, file: string, body: string) => {
+    writeFileSync(join(repoDir, file), body)
+    git(repoDir, ['add', '-A'])
+    git(repoDir, ['-c', `user.email=${email}`, '-c', `user.name=${name}`, 'commit', '-q', '-m', `${name}: ${file}`])
+  }
+
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), 'gitapi-identity-'))
+    git(dir, ['init', '-q'])
+    // same person, two name spellings, one inbox — must merge
+    authorCommit(dir, 'alpha', 'alpha@example.com', 'f.txt', 'one\n')
+    authorCommit(dir, 'Alpha Full Name', 'alpha@example.com', 'f.txt', 'two\n')
+    // a different person entirely — must stay distinct
+    authorCommit(dir, 'beta', 'beta@example.com', 'g.txt', 'one\n')
+  })
+
+  afterAll(() => { if (dir) rmSync(dir, { recursive: true, force: true }) })
+
+  it('shortlog: merges the split identity by email, sums commits, keeps the newest spelling', async () => {
+    const mw = gitApiMiddleware(dir)
+    const r: any = await callMiddleware(mw, '/api/git/shortlog')
+    expect(r.json.ok).toBe(true)
+    expect(r.json.owners).toEqual([
+      { author: 'Alpha Full Name', commits: 2, share: 2 / 3 },
+      { author: 'beta', commits: 1, share: 1 / 3 },
+    ])
+  })
+
+  it('recent: names the split-identity commits with one canonical spelling, not two', async () => {
+    const mw = gitApiMiddleware(dir)
+    const r: any = await callMiddleware(mw, '/api/git/recent?count=10')
+    expect(r.json.ok).toBe(true)
+    const names = new Set<string>(r.json.entries.map((e: any) => String(e.author)))
+    expect(names).toEqual(new Set(['Alpha Full Name', 'beta']))
+  })
+})

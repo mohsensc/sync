@@ -578,14 +578,6 @@ describe('gitApiMiddleware against the real repo', () => {
     expect(huge.json.entries.length).toBeLessThanOrEqual(30)
   })
 
-  it('recent: dedups this repo\'s own split identity the same way shortlog does', async () => {
-    const r: any = await callMiddleware(mw, '/api/git/recent?count=30')
-    // new Set(x) with x: any resolves to Set<unknown>, which makes `n` below
-    // unknown and .toLowerCase() a type error. The element type has to be said.
-    const names = new Set<string>(r.json.entries.map((e: any) => String(e.author)))
-    expect([...names].filter((n) => n.toLowerCase().includes('mohsen')).length).toBeLessThanOrEqual(1)
-  })
-
   it('shortlog: gives owners with shares summing to 1 for a real dir', async () => {
     const r: any = await callMiddleware(mw, '/api/git/shortlog?dir=web/src/office')
     expect(r.json.ok).toBe(true)
@@ -599,15 +591,13 @@ describe('gitApiMiddleware against the real repo', () => {
     expect(r.json).toEqual({ ok: false, reason: 'not a tracked dir' })
   })
 
-  it('shortlog: dedups this repo\'s own split identity into one owner', async () => {
-    // real regression case: this repo's history has "mohsensc" and
-    // "Mohsen Sarrafan Chaharsoughi" as separate git-log identities that
-    // share one email — before dedup, shortlog listed both as owners.
-    const r: any = await callMiddleware(mw, '/api/git/shortlog?dir=web/src/office')
-    expect(r.json.ok).toBe(true)
-    const names = r.json.owners.map((o: any) => o.author)
-    expect(names.filter((n: string) => n.toLowerCase().includes('mohsen')).length).toBeLessThanOrEqual(1)
-  })
+  // The recent/shortlog identity-dedup cases used to run here against this
+  // checkout's own HEAD, on the assumption every commit in this repo's
+  // history was authored under an email mergeAuthorsByEmail already knows
+  // to merge. A commit under a genuinely different email turned this
+  // false and CI red for no reason about the dedup logic itself (#130).
+  // Moved to gitapi-scratch.test.ts, which builds a fixture repo with
+  // known split and distinct identities instead of trusting HEAD.
 
   it('blame: honors start/end to scope the porcelain call to a range', async () => {
     const r: any = await callMiddleware(
