@@ -327,10 +327,12 @@ async def rooms(n_rooms: int, per_room: int, rounds: int) -> Result:
         if phase2 > 512 and phase2 > phase1 * 0.5:
             r.bad(f"DEAD ROOMS ARE NEVER FORGOTTEN: 500 rooms whose every "
                   f"member has disconnected cost {phase1} KiB, and the next 500 "
-                  f"cost {phase2} KiB — it is not levelling off. Relay._members, "
-                  f"._activity and ._last_ts are keyed by room and nothing ever "
-                  f"deletes a room, so a long-lived relay grows with the number "
-                  f"of repos it has ever seen.")
+                  f"cost {phase2} KiB — it is not levelling off. Relay.rooms "
+                  f"(go/internal/relaysrv/relay.go, each entry's members/"
+                  f"activity/lastTs) and Registry.rooms (leases.go's per-room "
+                  f"shards) are both keyed by room and nothing ever deletes an "
+                  f"entry, so a long-lived relay grows with the number of "
+                  f"repos it has ever seen.")
 
         shared_name = await _shared_agent_name_across_rooms(relay)
         for f in shared_name["findings"]:
@@ -365,11 +367,16 @@ async def _shared_agent_name_across_rooms(relay: RelayProc) -> dict:
     """Two rooms, one agent id.
 
     Not a contrived case. presenced defaults its relay identity to
-    "presenced@<hostname>" (cpp/daemon/main.cpp), so two checkouts on one
-    laptop are two daemons, two rooms and one name. Both of the relay's
-    release paths — the wait-die abort in Relay._on_claim and the disconnect
-    sweep in Relay.leave — call LeaseRegistry.release_all(agent), which is
-    documented as dropping "every lease an agent holds, in every room".
+    "presenced@<hostname>" (go/cmd/presenced/main.go), so two checkouts on
+    one laptop are two daemons, two rooms and one name. Both of the relay's
+    release paths — the wait-die abort in Relay.onClaim and the disconnect
+    sweep in Relay.Leave — call Registry.ReleaseAll(room, agent, ...), which
+    is room-scoped by design now (leases.go: "drops every lease an agent
+    holds in one room"). The old cross-room sweep survives as
+    Registry.ReleaseEverywhere, reserved for an agent id changing priority
+    tier (dropStrandedClaims), not for either path below. Both checks here
+    guard against a regression back to the pre-Go relay's room-unscoped
+    release_all, not describe a live bug.
     """
     out: dict = {"findings": [], "metrics": {}}
     name = "presenced@laptop"
@@ -398,10 +405,12 @@ async def _shared_agent_name_across_rooms(relay: RelayProc) -> dict:
             out["findings"].append(
                 "CROSS-ROOM LEASE LOSS ON WAIT-DIE ABORT: an agent id that "
                 "exists in two rooms lost its repo-a lease because a claim it "
-                "made in repo-b was refused. Relay._on_claim answers an abort "
-                "with registry.release_all(agent), and release_all is not "
-                "room-scoped. presenced names itself presenced@<hostname> by "
-                "default, so two checkouts on one machine hit this.")
+                "made in repo-b was refused. Relay.onClaim answers an abort "
+                "with Registry.ReleaseAll(room, agent, ...), which is supposed "
+                "to be room-scoped (leases.go) — this run shows it leaking "
+                "across rooms the way the old room-unscoped release_all used "
+                "to. presenced names itself presenced@<hostname> by default, "
+                "so two checkouts on one machine hit this.")
 
         # And again for the disconnect path.
         await a.claim("src/only-in-repo-a.py", intent="the innocent lease")
@@ -415,8 +424,9 @@ async def _shared_agent_name_across_rooms(relay: RelayProc) -> dict:
             out["findings"].append(
                 "CROSS-ROOM LEASE LOSS ON DISCONNECT: closing the repo-b "
                 "connection released the same agent id's repo-a leases. "
-                "Relay.leave calls release_all(agent), which sweeps every "
-                "room.")
+                "Relay.Leave calls the same Registry.ReleaseAll(room, agent, "
+                "...) — this run shows it sweeping every room instead of "
+                "just the one being left.")
     finally:
         for c in (a, b, rival):
             with contextlib.suppress(Exception):
@@ -987,15 +997,18 @@ async def slow_subscriber(busy_agents: int, seconds: float) -> Result:
             r.bad(f"INGEST DEGRADED: throughput fell from {base_ops} to "
                   f"{deaf_ops} ops in the same window with one deaf subscriber")
         if growth > 20480:
-            r.bad(f"UNBOUNDED RELAY MEMORY ON A SLOW SUBSCRIBER: RSS grew "
+            r.bad(f"RELAY MEMORY GROWS ON A SLOW SUBSCRIBER: RSS grew "
                   f"{growth} KiB in {seconds}s ({rate:.0f} KiB/s), "
                   f"{first_half} KiB in the first half and {second_half} KiB in "
-                  f"the second — it is a rate, not a one-off. "
-                  f"serve.WsConn.send fires a task per outbound frame and parks "
-                  f"it in the module-level _INFLIGHT set; a peer that never "
-                  f"reads never lets those tasks finish, so the set and the "
-                  f"payloads they pin grow without limit. Nothing sheds the "
-                  f"connection and nothing bounds the queue.")
+                  f"the second — it is a rate, not a one-off. WsConn.Send "
+                  f"(go/internal/relaysrv/server.go) now queues into a bounded "
+                  f"channel (SendQueueMax=512) and drops the oldest frame once "
+                  f"it's full, and a peer stuck at SendStallS/SendSaturatedS "
+                  f"gets shed outright — so this is no longer the old unbounded "
+                  f"per-frame task pin. Growth this large despite that bound "
+                  f"means either the shed isn't firing in time or something "
+                  f"else (presence/activity buffers, dropped-frame bookkeeping) "
+                  f"is growing with a subscriber this slow.")
 
         deaf.close()
         await asyncio.sleep(2.0)
@@ -1263,11 +1276,13 @@ async def lease_takeover() -> Result:
                   "agent edit it. The relay publishes `held` for the new holder "
                   "before `expired` for the old one "
                   f"(order: {order}), both frames name the same region, and "
-                  "RelayClient::on_text erases on the region key without "
-                  "checking which agent the frame is about — so the expiry "
-                  "frame deletes the lease that was just granted. Every "
-                  "takeover after an expiry lands here, and it stays wrong "
-                  "until the new holder's next heartbeat.")
+                  "Client.applyLease (go/internal/relay/client.go) is supposed "
+                  "to guard the erase with leases.Cache.EraseIfHeldBy so the "
+                  "old holder's expiry can never delete the new holder's "
+                  "just-granted lease. This run shows that guard not holding — "
+                  "_replay_lease_stream below models the same guarded rule and "
+                  "did not predict it, so this is a live regression, not the "
+                  "old unconditional-erase bug.")
 
         r.metrics = {
             "lease_ttl_s": ttl,
