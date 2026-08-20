@@ -18,6 +18,18 @@ type Queue struct {
 	cap      int
 	dropped  int
 	messages [][]byte
+
+	// head is a monotonic sequence number for whatever currently sits at
+	// messages[0]. It advances by one on every removal from the front —
+	// Pop or drop-oldest, whichever gets there first — so Peek's caller can
+	// hand its sequence back to Pop and have Pop refuse to act if that
+	// exact frame already left some other way. Without this, Peek+write+Pop
+	// has a gap between "write succeeded" and "Pop runs" that a concurrent
+	// Push's drop-oldest can land in: it evicts the peeked frame (already
+	// written, fine) and promotes the next one to the front, and a Pop with
+	// no way to name what it's removing would then delete that next frame
+	// instead — the one actually unwritten. See client.writePump.
+	head uint64
 }
 
 func New(capacity int) *Queue {
@@ -36,17 +48,44 @@ func (q *Queue) Push(msg []byte) {
 	if len(q.messages) >= q.cap {
 		q.messages = q.messages[1:]
 		q.dropped++
+		q.head++
 	}
 	q.messages = append(q.messages, msg)
 }
 
-// Drain returns and clears everything queued.
-func (q *Queue) Drain() [][]byte {
+// Peek returns the oldest queued message without removing it, plus the
+// sequence number to pass back to Pop, and whether there was a message at
+// all. The writer uses Peek+Pop instead of a drain-then-write loop so a
+// message that fails to write is still sitting at the front of the queue
+// afterward, in its original position relative to both what was already
+// behind it and whatever Push adds while the write was in flight — nothing
+// was ever removed to lose. It also keeps a still-unwritten message
+// eligible for Push's ordinary drop-oldest accounting, which is correct:
+// past the write deadline it *is* the oldest thing queued.
+func (q *Queue) Peek() (msg []byte, seq uint64, ok bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	out := q.messages
-	q.messages = nil
-	return out
+	if len(q.messages) == 0 {
+		return nil, 0, false
+	}
+	return q.messages[0], q.head, true
+}
+
+// Pop removes the oldest queued message, but only if seq (from Peek) still
+// names it — i.e. nothing has removed it already. Call it only after that
+// message has been handed off successfully. Reports whether it actually
+// removed anything; false means the frame Peek named is already gone
+// (drop-oldest beat it there while the write was in flight), which is not
+// an error — the write still happened, Pop just has nothing left to do.
+func (q *Queue) Pop(seq uint64) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.messages) == 0 || q.head != seq {
+		return false
+	}
+	q.messages = q.messages[1:]
+	q.head++
+	return true
 }
 
 func (q *Queue) Dropped() int {
