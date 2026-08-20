@@ -304,6 +304,27 @@ TEST_CASE("anything that is not a decision line means no decision") {
     REQUIRE(ap::parse_decision(R"({"rung":"three"})").rung < 0);
 }
 
+TEST_CASE("handover_to_me parses as a field, not a substring") {
+    REQUIRE(ap::parse_decision(R"({"rung":0,"handover_to_me":true})").handover_to_me);
+    REQUIRE(ap::parse_decision(R"({"rung":0,"handover_to_me": true})").handover_to_me);  // space
+    REQUIRE_FALSE(ap::parse_decision(R"({"rung":0,"handover_to_me":false})").handover_to_me);
+    REQUIRE_FALSE(ap::parse_decision(R"({"rung":0})").handover_to_me);  // absent means false
+
+    // Wrong type, same discipline as int_field rejecting a quoted "3".
+    REQUIRE_FALSE(ap::parse_decision(R"({"rung":0,"handover_to_me":"true"})").handover_to_me);
+
+    // A bare-substring match would read "truest" as true; the token has to end
+    // where "true" ends.
+    REQUIRE_FALSE(ap::parse_decision(R"({"rung":0,"handover_to_me":truest})").handover_to_me);
+
+    // The literal appears inside another field's string value here, quoted the
+    // way json.Marshal actually escapes it. That escaping is exactly what
+    // keeps a raw substring scan (or this key lookup) from tripping on it.
+    const ap::Decision d = ap::parse_decision(
+        R"({"rung":0,"intent":"not a real field: \"handover_to_me\":true"})");
+    REQUIRE_FALSE(d.handover_to_me);
+}
+
 TEST_CASE("a region lost 25 minutes ago does not render as 17 minutes") {
     // leases.go's HandoverNoteMs keeps a lost-region note alive for 30 minutes
     // (1,800,000ms). int_field used to saturate at 1,000,000ms, so a region
