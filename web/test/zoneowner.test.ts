@@ -1,7 +1,8 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
 import {
   HAIR_COLORS, hairFor, POSSESSIVE_SHARE, CONTESTED_MARGIN,
   pickOwnership, plaqueScale, rugSplit, flourishFor, ownerLine,
+  attachZoneOwner,
 } from '../src/office/zoneowner.js'
 
 // -- colour parity with palette.ts's hairFor --------------------------------
@@ -226,5 +227,74 @@ describe('rugSplit', () => {
       { author: 'a', commits: 51, share: 0.51 }, { author: 'b', commits: 49, share: 0.49 },
     ] })
     expect(rugSplit(own).secondFrac).toBeLessThanOrEqual(0.45)
+  })
+})
+
+// -- attachZoneOwner: tick overlap guard (issue #166) -----------------------
+// No jsdom/happy-dom in this project (see office-vcard.test.ts) — `document`
+// is undefined by default. attachZoneOwner's render path calls
+// document.createElement('canvas') to paint the rug/plaque texture, so this
+// stubs just that one touchpoint rather than pulling in a browser DOM.
+
+function fakeCanvasDocument() {
+  const fillTextCalls: unknown[][] = []
+  const ctx = new Proxy({}, {
+    get(_t, prop) {
+      if (prop === 'fillText') return (...args: unknown[]) => { fillTextCalls.push(args) }
+      return () => {}
+    },
+    set() { return true },
+  })
+  const canvas = { width: 0, height: 0, getContext: () => ctx }
+  return {
+    document: { createElement: (tag: string) => (tag === 'canvas' ? canvas : {}) },
+    fillTextCalls,
+  }
+}
+
+function deferredFetch() {
+  let resolve!: (data: unknown) => void
+  const promise = new Promise<{ json(): Promise<unknown> }>((res) => {
+    resolve = (data: unknown) => res({ json: () => Promise.resolve(data) })
+  })
+  return { promise, resolve }
+}
+
+const shortlogOf = (author: string) => ({ ok: true, owners: [{ author, commits: 1, share: 1 }] })
+
+describe('attachZoneOwner — tick overlap guard', () => {
+  const { document: fakeDoc, fillTextCalls } = fakeCanvasDocument()
+  vi.stubGlobal('document', fakeDoc)
+  afterEach(() => { fillTextCalls.length = 0 })
+
+  it('keeps the newer tick\'s result even when the older tick\'s fetch resolves last', async () => {
+    const pending: ReturnType<typeof deferredFetch>[] = []
+    const fetchFn = () => {
+      const d = deferredFetch()
+      pending.push(d)
+      return d.promise
+    }
+    const zoneDirs = { reception: 'zones/reception' }
+    const h = attachZoneOwner({ zoneDirs, fetchFn, intervalMs: 1e9 })
+
+    // attachZoneOwner() kicks off tick A itself on construction.
+    expect(pending.length).toBe(1)
+
+    // tick B starts (a restart burst, or a slow-git overlap) before A resolves.
+    const tickB = h.tick()
+    expect(pending.length).toBe(2)
+
+    // Resolve B (the newer poll) first, then A (the stale one) last — the
+    // stale response landing later in wall time must not win.
+    pending[1].resolve(shortlogOf('fresh-owner'))
+    await tickB
+    pending[0].resolve(shortlogOf('stale-owner'))
+    // tick A's fetch chain (fetch -> .json() -> .catch -> await in tick())
+    // runs several microtask hops deep; a macrotask flush drains all of
+    // them regardless of hop count, unlike a fixed number of awaits.
+    await new Promise((r) => setTimeout(r, 0))
+
+    const names = fillTextCalls.map((args) => args[0])
+    expect(names).toEqual(['fresh-owner'])
   })
 })
