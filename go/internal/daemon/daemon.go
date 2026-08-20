@@ -143,6 +143,15 @@ type Daemon struct {
 	decideObs prometheus.Observer
 
 	dirty atomic.Bool
+
+	// closeOnce and done make Close idempotent and let it block until the
+	// shutdown sequence — see shutdown — has actually finished, whether it
+	// was triggered by ctx being cancelled or by a caller invoking Close
+	// directly (tests do the latter). Without this, main.go had nothing to
+	// wait on: it returned as soon as ctx.Done() fired, racing the
+	// goroutine that stops the sockets and drains the journal — see #144.
+	closeOnce sync.Once
+	done      chan struct{}
 }
 
 // New builds and starts the hook sockets, and starts the relay connection
@@ -171,6 +180,7 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 		coalescer: coalesce.New(coalesceWindowMs, coalesceMaxPerWin),
 		metrics:   opts.Metrics,
 		decideObs: noopObserver,
+		done:      make(chan struct{}),
 	}
 	if opts.Metrics != nil {
 		d.decideObs = opts.Metrics.DecideDuration
@@ -260,14 +270,43 @@ func New(ctx context.Context, opts Options) (*Daemon, error) {
 
 	go func() {
 		<-ctx.Done()
+		d.shutdown()
+	}()
+
+	return d, nil
+}
+
+// shutdown stops both hooksock servers and drains the journal, exactly
+// once regardless of how many times it's called or from where — ctx being
+// cancelled and an explicit Close() both funnel through here, so there is
+// only ever one Stop() call per server. done is closed last so Close can
+// block until this has actually finished.
+func (d *Daemon) shutdown() {
+	d.closeOnce.Do(func() {
 		d.eventSock.Stop()
 		d.decideSock.Stop()
 		if d.journal != nil {
 			d.journal.Stop()
 		}
-	}()
+		close(d.done)
+	})
+}
 
-	return d, nil
+// Close runs (or waits for) the full shutdown sequence and blocks until it
+// has finished — see #144: main used to return as soon as ctx was
+// cancelled, racing the goroutine above to Stop() the sockets and journal,
+// which made PR #124's journal stop-drain unreachable in production.
+// Callers that already have a ctx to cancel should still do that (it's
+// what unblocks everything else keyed off ctx, like the tick loop and the
+// relay client); Close is what makes waiting for the daemon-owned part of
+// shutdown possible at all.
+//
+// Honest residual: hooksock doesn't track in-flight serveConn goroutines,
+// so a decision request that was already accepted when shutdown began can
+// still race Stop() and never make it into the journal.
+func (d *Daemon) Close() {
+	d.shutdown()
+	<-d.done
 }
 
 // tick is main.cpp's for(;;) loop, minus the socket poll — hooksock's

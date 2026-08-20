@@ -154,10 +154,12 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if _, err := daemon.New(ctx, opts); err != nil {
+	d, err := daemon.New(ctx, opts)
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "presenced: failed to start:", err)
 		os.Exit(1)
 	}
+	defer d.Close()
 
 	<-ctx.Done()
 }

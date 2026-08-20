@@ -223,6 +223,124 @@ func TestDecideSocket(t *testing.T) {
 	}
 }
 
+// TestCloseWaitsForJournalDrain is #144: main.go used to return the moment
+// ctx was cancelled, racing the goroutine that stops the sockets and the
+// journal — so PR #124's journal stop-drain (#115) never actually ran on
+// the production shutdown path, only in journal's own test, which builds a
+// Journal by hand. Close is what main.go now blocks on instead, so this
+// drives the daemon exactly the way main.go does — cancel ctx, then call
+// Close — and checks the records queued right before shutdown are still on
+// disk after Close returns, not just eventually.
+func TestCloseWaitsForJournalDrain(t *testing.T) {
+	// onRequest only ever queues a record for rung > 0 (journal.Record's
+	// "rung 0 is every clean edit" rule) — so a decision that actually
+	// lands in the journal needs a real conflict, not just an ambient
+	// answer. A held lease is what gets rung 3, and the only way to seed
+	// one here is the same fake relay's leases-snapshot the end-to-end
+	// tests use.
+	fr := &fakeRelay{joined: make(chan wire.Join, 4), leasePath: "src/journaled.py"}
+	srv := httptest.NewServer(http.HandlerFunc(fr.handler))
+	defer srv.Close()
+
+	sock := filepath.Join(t.TempDir(), "s")
+	journalPath := filepath.Join(t.TempDir(), "journal.jsonl")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	d, err := New(ctx, Options{
+		Sock:     sock,
+		Journal:  journalPath,
+		RelayURL: "ws://" + srv.Listener.Addr().String() + "/",
+		Room:     "test-room",
+		Agent:    "go-daemon-test",
+		Human:    "mohsen",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	select {
+	case <-fr.joined:
+	case <-time.After(5 * time.Second):
+		t.Fatal("daemon never joined the room")
+	}
+
+	const n = 25
+	deadline := time.Now().Add(5 * time.Second)
+	sent := 0
+	for sent < n {
+		resp := decideOverSocket(t, sock,
+			`{"verb":"edit","path":"src/journaled.py","agent":"sess1","want":"decision"}`)
+		if resp["rung"] == float64(3) {
+			sent++
+			continue
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("lease from the join never showed up in decisions; last response: %+v", resp)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// No sleep here on purpose: onRequest queues the journal record
+	// synchronously on the decide path (see daemon.go's onRequest), but the
+	// journal's own goroutine writes it asynchronously — cancelling right
+	// away is what forces Close to actually wait, rather than happening to
+	// find nothing left to drain.
+	cancel()
+	d.Close()
+
+	f, err := os.Open(journalPath)
+	if err != nil {
+		t.Fatalf("journal never written: %v", err)
+	}
+	defer f.Close()
+	var got int
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		var r struct {
+			Path string `json:"path"`
+		}
+		if err := json.Unmarshal(sc.Bytes(), &r); err != nil {
+			t.Fatalf("torn or invalid journal line: %q: %v", sc.Text(), err)
+		}
+		got++
+	}
+	if got != n {
+		t.Fatalf("Close returned with %d of %d records drained to disk", got, n)
+	}
+}
+
+// TestCloseIsIdempotent is the double-Stop guard: main.go's own goroutine
+// (ctx.Done) and its deferred Close both funnel through shutdown, and
+// calling Close a second time — directly, the way a test or a caller not
+// going through ctx might — must not panic on a second Stop() or block
+// forever on a channel already closed.
+func TestCloseIsIdempotent(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "s")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	d, err := New(ctx, Options{Sock: sock})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		d.Close()
+		d.Close()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("double Close hung")
+	}
+}
+
 func decideOverSocket(t *testing.T, sock, line string) map[string]any {
 	t.Helper()
 	conn, err := net.Dial("unix", sock)
