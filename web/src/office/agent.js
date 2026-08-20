@@ -1206,10 +1206,17 @@ export class World {
   #startChain(a, b, stages) {
     const [stage, ...rest] = stages
     const height = (a.height + b.height) / 2
+    // Anchor is the pair's geometry at the moment the chain opens — every
+    // *Marks() helper only ever reads aPos/bPos to derive a midpoint and
+    // axis, so caching these two vectors is enough. #advanceChain reuses
+    // them for every later stage instead of re-reading e.a.pos/e.b.pos,
+    // which is what let position error compound stage over stage (#78).
+    const anchor = {
+      a: new THREE.Vector3(a.pos.x, 0, a.pos.z),
+      b: new THREE.Vector3(b.pos.x, 0, b.pos.z),
+    }
     const marks = clearMarks(
-      STAGE_MARKS[stage.kind](
-        new THREE.Vector3(a.pos.x, 0, a.pos.z),
-        new THREE.Vector3(b.pos.x, 0, b.pos.z), height),
+      STAGE_MARKS[stage.kind](anchor.a, anchor.b, height),
       this.#clearanceObstacles(a, b))
     const ax = marks.a.pos.x, az = marks.a.pos.z
     const bx = marks.b.pos.x, bz = marks.b.pos.z
@@ -1222,7 +1229,7 @@ export class World {
     const e = {
       a, b, kind: stage.kind, phase: 'approach', t: 0,
       marks: { a: [ax, az], b: [bx, bz] },
-      isChain: true, stage, chain: rest,
+      isChain: true, stage, chain: rest, anchor,
     }
     this.encounters.push(e)
     return e
@@ -1238,13 +1245,13 @@ export class World {
     e.kind = stage.kind
     e.chain = rest
     const height = (e.a.height + e.b.height) / 2
-    // Re-cleared here too, not just at #startChain: this runs once per
-    // stage transition, and a bystander who walked into the spot between
-    // stages (mid-chain) needs the same treatment a stationary desk gets.
+    // Marks come from the anchor captured once at #startChain, not the
+    // pair's live post-settle positions — that's what kept small per-stage
+    // position error from compounding across the chain (#78). Clearance
+    // still runs fresh per stage: a bystander can walk into the spot
+    // mid-chain, and that's a per-stage concern, not part of the anchor.
     const marks = clearMarks(
-      STAGE_MARKS[stage.kind](
-        new THREE.Vector3(e.a.pos.x, 0, e.a.pos.z),
-        new THREE.Vector3(e.b.pos.x, 0, e.b.pos.z), height),
+      STAGE_MARKS[stage.kind](e.anchor.a, e.anchor.b, height),
       this.#clearanceObstacles(e.a, e.b))
     e.marks = { a: [marks.a.pos.x, marks.a.pos.z], b: [marks.b.pos.x, marks.b.pos.z] }
     e.from = { a: [e.a.pos.x, e.a.pos.z], b: [e.b.pos.x, e.b.pos.z] }

@@ -261,6 +261,10 @@ export interface Encounter {
   stage?: ReplayStage
   chain?: ReplayStage[]
   from?: { a: [number, number]; b: [number, number] }
+  /** The pair's geometry captured once at #startChain — every later stage's
+   *  marks derive from this, not from live positions, so error doesn't
+   *  compound across the chain. */
+  anchor?: { a: THREE.Vector3; b: THREE.Vector3 }
 }
 
 export class World {
