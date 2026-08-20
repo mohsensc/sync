@@ -331,9 +331,25 @@ export function attachGitSignals({ world, zones, ownership, fetchFn = fetch, int
     for (const fx of fxByAgent.values()) fx.heat.update(elapsed)
   }
 
+  // Per-agent counterpart to stop(): office.html's despawnLive calls this
+  // for one agent instead of waiting for the whole room to tear down.
+  // A WeakMap wouldn't need this call at all, but that's the trap — GC
+  // eventually reclaiming the JS wrapper says nothing about the GPU-side
+  // geometry deskHeat/deskDust allocated, which only a dispose() call frees.
+  // Called before despawnLive's own a.root.traverse: fx.dispose() detaches
+  // the heat/cold groups from a.root (parent.remove), so that traverse
+  // never sees them and doesn't double-dispose their materials.
+  function forget(a) {
+    const fx = fxByAgent.get(a)
+    if (fx) { fx.heat.dispose(); fx.cold.dispose() }
+    fxByAgent.delete(a)
+    gitByAgent.delete(a)
+  }
+
   return {
     poll,
     tick,
+    forget,
     stop: () => {
       clearInterval(timer)
       if (typeof removeEventListener === 'function') removeEventListener('keydown', onKeydown)
