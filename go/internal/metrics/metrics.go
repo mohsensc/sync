@@ -115,11 +115,12 @@ type Registry struct {
 	mcpDuration *prometheus.HistogramVec
 
 	// -- saturation ------------------------------------------------------
-	SendQueueDepth prometheus.Gauge
-	framesDropped  *prometheus.CounterVec // reason
-	JournalWrites  prometheus.Counter
-	JournalTrims   prometheus.Counter
-	coalesce       *prometheus.CounterVec // outcome
+	SendQueueDepth  prometheus.Gauge
+	framesDropped   *prometheus.CounterVec // reason
+	JournalWrites   prometheus.Counter
+	JournalTrims    prometheus.Counter
+	coalesce        *prometheus.CounterVec // outcome
+	OutboundDropped prometheus.Counter
 }
 
 // New builds the catalogue. The Go runtime and process collectors come along
@@ -213,6 +214,12 @@ func New() *Registry {
 	r.JournalTrims = counter("ap_journal_trims_total", "Times the journal was trimmed.")
 	r.coalesce = counterVec("ap_coalesce_total",
 		"Hook events the coalescer admitted or dropped as duplicates.", "outcome")
+	r.OutboundDropped = counter("ap_outbound_dropped_total",
+		"Upper bound on frames a daemon's bounded outbound queue dropped "+
+			"(oldest first) before they ever reached the relay, e.g. during a "+
+			"long reconnect backoff. Under sustained backpressure this can "+
+			"rarely count a frame that was actually written and delivered; "+
+			"see outbound.go's drop-oldest comment.")
 
 	return r
 }

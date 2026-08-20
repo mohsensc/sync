@@ -78,6 +78,8 @@ type statsFrame struct {
 
 	RegionKeysRelative uint64 `json:"region_keys_relative"`
 	RegionKeysAbsolute uint64 `json:"region_keys_absolute"` // non-zero here means collision detection has silently broken
+
+	OutboundDropped uint64 `json:"outbound_dropped"`
 }
 
 // pushStats gathers the current catalogue and sends one statsFrame over
@@ -145,13 +147,16 @@ func buildStatsFrame(m *metrics.Registry) (statsFrame, bool) {
 	f.RegionKeysRelative = labeledCounterValue(byName["ap_region_keys_total"], "shape", metrics.ShapeRelative)
 	f.RegionKeysAbsolute = labeledCounterValue(byName["ap_region_keys_total"], "shape", metrics.ShapeAbsolute)
 
+	f.OutboundDropped = soleCounterValue(byName["ap_outbound_dropped_total"])
+
 	return f, true
 }
 
 // soleHistogram, soleGaugeValue and soleCounterValue read the one metric a
 // label-less family carries. Every family this file reads that has no
 // label vector (DecideDuration, DaemonConnected, Reconnects, JournalWrites,
-// JournalTrims, LeaseCacheDiverge) is registered with prometheus.NewX, not
+// JournalTrims, LeaseCacheDiverge, OutboundDropped) is registered with
+// prometheus.NewX, not
 // prometheus.NewXVec, so Gather always hands back exactly one Metric for it.
 func soleHistogram(fam *dto.MetricFamily) *dto.Histogram {
 	if fam == nil || len(fam.Metric) == 0 {

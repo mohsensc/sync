@@ -65,6 +65,7 @@ type daemonBaseline struct {
 	reconnects, coalesceAdmitted, coalesceDropped uint64
 	journalWrites, journalTrims                   uint64
 	regionKeysRelative, regionKeysAbsolute        uint64
+	outboundDropped                               uint64
 }
 
 // onStats folds one daemon's cumulative counters into this relay's
@@ -89,6 +90,7 @@ func (r *Relay) onStats(conn Conn, msg map[string]any) {
 		journalTrims:       statU64(msg["journal_trims"], before.journalTrims),
 		regionKeysRelative: statU64(msg["region_keys_relative"], before.regionKeysRelative),
 		regionKeysAbsolute: statU64(msg["region_keys_absolute"], before.regionKeysAbsolute),
+		outboundDropped:    statU64(msg["outbound_dropped"], before.outboundDropped),
 	}
 	if r.statsSeen == nil {
 		r.statsSeen = make(map[Conn]daemonBaseline)
@@ -113,6 +115,7 @@ func (r *Relay) onStats(conn Conn, msg map[string]any) {
 	r.metrics.JournalTrims.Add(float64(deltaU64(before.journalTrims, after.journalTrims)))
 	r.metrics.RegionKeyAdd(metrics.ShapeRelative, float64(deltaU64(before.regionKeysRelative, after.regionKeysRelative)))
 	r.metrics.RegionKeyAdd(metrics.ShapeAbsolute, float64(deltaU64(before.regionKeysAbsolute, after.regionKeysAbsolute)))
+	r.metrics.OutboundDropped.Add(float64(deltaU64(before.outboundDropped, after.outboundDropped)))
 
 	if v, ok := msg["lease_cache_diverge"].(float64); ok && v >= 0 {
 		r.metrics.LeaseCacheDiverge.Set(v)

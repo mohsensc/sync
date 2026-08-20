@@ -37,6 +37,7 @@ func TestBuildStatsFrameReadsEveryField(t *testing.T) {
 	m.RegionKey(metrics.ShapeRelative)
 	m.RegionKey(metrics.ShapeRelative)
 	m.RegionKey(metrics.ShapeAbsolute)
+	m.OutboundDropped.Add(5)
 
 	f, ok := buildStatsFrame(m)
 	if !ok {
@@ -88,6 +89,9 @@ func TestBuildStatsFrameReadsEveryField(t *testing.T) {
 	}
 	if f.RegionKeysAbsolute != 1 {
 		t.Errorf("RegionKeysAbsolute = %d, want 1", f.RegionKeysAbsolute)
+	}
+	if f.OutboundDropped != 5 {
+		t.Errorf("OutboundDropped = %d, want 5", f.OutboundDropped)
 	}
 }
 
