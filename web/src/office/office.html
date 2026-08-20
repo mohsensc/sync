@@ -1456,12 +1456,21 @@ function goLive() {
   // the badge lying by omission. Null it out, not just cancel: a later
   // drop needs startDemo() to see "no demo running" and start a fresh one,
   // not find a stale cancelled handle and skip it (see goDemoFallback).
-  if (demo) { demo.cancel(); demo = null }
+  // Restore before cancel: cancel() still lets the run's own promise settle
+  // (see startDemo), and restoreGreetings keys off `demo` still pointing at
+  // this run to tell "this run" apart from "a run that replaced it".
+  if (demo) { demo.restoreGreetings?.(); demo.cancel(); demo = null }
+  // Same "badge must not lie" reasoning as the demo cancel above: a
+  // "Restart demo" click that's still live would run the scripted cast
+  // under the live badge. Disable rather than repurpose the button so its
+  // label stays honest too.
+  bDemo.disabled = true
 }
 
 function goDemoFallback(reason) {
   liveMode = false
   setMode('demo', `demo — ${reason}`)
+  bDemo.disabled = false
   // Only the first fallback (or the first after a reconnect) needs to
   // start the story — connectWithReconnect's onClose fires again on every
   // failed retry, and restarting the script from beat one on every miss
@@ -1518,6 +1527,7 @@ function startDemo() {
   if (agents.length < 5 || !props.tortoise) { caption('still loading'); return }
   spin = false; setB(bSpin, false)
   bDemo.textContent = 'Restart demo'
+  const preGreetings = world.greetings
   world.greetings = false; setB(bGreet, false)   // the demo scripts its own
   let n = 0
   demo = runDemo({
@@ -1529,10 +1539,19 @@ function startDemo() {
   // handler switched greetings back on underneath the run that replaced it —
   // which then hijacked the cast into spontaneous high fives mid-story.
   const run = demo
+  // Restoring greetings has two ways in: the run settling on its own, or
+  // goLive() cutting it short because real presence showed up. Both call
+  // this — whichever gets there first restores and clears itself, so the
+  // other is a no-op instead of a second flip (or, worse, restoring a
+  // run that's already been replaced by a fresh startDemo()).
+  run.restoreGreetings = () => {
+    if (demo !== run || !run.restoreGreetings) return
+    world.greetings = preGreetings; setB(bGreet, preGreetings)
+    run.restoreGreetings = null
+  }
   demo.promise.then(r => {
-    if (demo !== run) return
-    reel.setFoot(`demo <b>${r}</b>`)
-    world.greetings = true; setB(bGreet, true)
+    if (demo === run) reel.setFoot(`demo <b>${r}</b>`)
+    run.restoreGreetings?.()
   })
 }
 bDemo.onclick = startDemo
