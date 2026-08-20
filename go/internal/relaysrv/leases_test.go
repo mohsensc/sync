@@ -315,17 +315,14 @@ func TestHigherTierWaitsAgainstAnOlderLowerTierHolder(t *testing.T) {
 	}
 }
 
-// -- carry: the dodge-the-deadline check, keyed like python's ------------
+// -- carry: the dodge-the-deadline check survives a changed line range ----
 //
-// leases.py's `_carry` dict keys on the full frozen Region — path, symbol
-// *and* lines — not same_region()'s coarser path+symbol contention unit.
-// A carryKey that dropped lines would resume a capped handover deadline
-// across a release/re-claim that reports a different line range for the
-// same symbol, which python's carry would treat as a miss (a different
-// key) and Go's would treat as a hit — a real wire-behavior divergence,
-// not just an internal one. See leases.go's carryKey doc comment.
+// Lines is display-only, never region identity (types.go), so carryKey
+// can't key on it — a holder that releases and re-claims the same symbol
+// with a different (or absent) line range is still the same claim dodging
+// its deadline, and must inherit it. See leases.go's carryKey doc comment.
 
-func TestCarryDoesNotResumeAcrossADifferentLineRange(t *testing.T) {
+func TestCarryResumesAcrossADifferentLineRange(t *testing.T) {
 	clock, reg, _ := newTestRegistry()
 	other := Region{Path: "src/db.py", Symbol: strp("query")}
 	linesA := Region{Path: "src/auth.py", Symbol: strp("sign_in"), Lines: []int{1, 10}}
@@ -343,6 +340,7 @@ func TestCarryDoesNotResumeAcrossADifferentLineRange(t *testing.T) {
 	if held.HandoverAt == nil {
 		t.Fatalf("expected a handover deadline before the dodge")
 	}
+	deadline := *held.HandoverAt
 
 	// a1 lets go early (before the deadline) and re-claims the same symbol
 	// but a different line range.
@@ -351,9 +349,39 @@ func TestCarryDoesNotResumeAcrossADifferentLineRange(t *testing.T) {
 	if !reacquired.Ok {
 		t.Fatalf("expected the re-claim to succeed, got %+v", reacquired)
 	}
-	if reacquired.Claim.HandoverAt != nil {
-		t.Fatalf("carry resumed across a different line range for the same symbol; "+
-			"got handover_at %v, want none (carryKey must include lines)", *reacquired.Claim.HandoverAt)
+	if reacquired.Claim.HandoverAt == nil || *reacquired.Claim.HandoverAt != deadline {
+		t.Fatalf("expected the carried deadline %v to survive a changed line range, got %+v",
+			deadline, reacquired.Claim.HandoverAt)
+	}
+}
+
+func TestCarryResumesAcrossNoLines(t *testing.T) {
+	clock, reg, _ := newTestRegistry()
+	other := Region{Path: "src/db.py", Symbol: strp("query")}
+	linesA := Region{Path: "src/auth.py", Symbol: strp("sign_in"), Lines: []int{1, 10}}
+	noLines := Region{Path: "src/auth.py", Symbol: strp("sign_in")}
+
+	reg.Acquire("r1", "dev", "a2", other, "warm up", nil, PriorityNormal, nil)
+	clock.Advance(10)
+	reg.Acquire("r1", "sara", "a1", linesA, "x", nil, PriorityNormal, nil)
+	reg.Contend("r1", linesA, "a2", "dev", PriorityNormal, nil, nil)
+
+	held := reg.HolderOf("r1", linesA, nil)
+	if held.HandoverAt == nil {
+		t.Fatalf("expected a handover deadline before the dodge")
+	}
+	deadline := *held.HandoverAt
+
+	// a1 lets go early (before the deadline) and re-claims the same symbol
+	// with no line range at all.
+	reg.Release("r1", "a1", linesA, nil)
+	reacquired := reg.Acquire("r1", "sara", "a1", noLines, "y", nil, PriorityNormal, nil)
+	if !reacquired.Ok {
+		t.Fatalf("expected the re-claim to succeed, got %+v", reacquired)
+	}
+	if reacquired.Claim.HandoverAt == nil || *reacquired.Claim.HandoverAt != deadline {
+		t.Fatalf("expected the carried deadline %v to survive an absent line range, got %+v",
+			deadline, reacquired.Claim.HandoverAt)
 	}
 }
 
