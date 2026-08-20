@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Callable, Mapping, Sequence, TextIO
 
 from . import journal as journal_mod
+from . import paths as paths_mod
 from . import policy as policy_mod
 from . import policy_edit
 from . import principals as principals_mod
@@ -51,8 +52,6 @@ from .priority import PRIORITY_NAMES, name_of, parse_priority
 OK, PROBLEM, USAGE = 0, 1, 2
 
 REPO_ENV = "AGENT_PRESENCE_REPO_ROOT"
-SOCK_ENV = "AGENT_PRESENCE_SOCK"
-SNAPSHOT_ENV = "AGENT_PRESENCE_SNAPSHOT"
 ROSTER_ENV = "AGENT_PRESENCE_PRINCIPALS"
 ROSTER_RELPATH = ".agent-presence/principals.toml"
 
@@ -60,9 +59,6 @@ ROSTER_RELPATH = ".agent-presence/principals.toml"
 # org floor reaches the daemon from the relay, not from a file on this disk.
 ALL_LAYERS: tuple[str, ...] = LAYER_ORDER
 EDITABLE_LAYERS: tuple[str, ...] = ("user", "session", "repo", "org")
-
-SNAPSHOT_NAME = "agent-presence.json"
-SOCK_NAME = "agent-presence.sock"
 
 
 # -- colour -----------------------------------------------------------------
@@ -243,12 +239,14 @@ class Context:
         return Path(base)
 
     def snapshot_path(self) -> Path:
-        override = self.env.get(SNAPSHOT_ENV, "").strip()
-        return Path(override) if override else self.runtime_dir() / SNAPSHOT_NAME
+        """$AGENT_PRESENCE_SNAPSHOT if set, else the socket's sibling — see
+        paths.py, ported from main.go's siblingPath. Two presenced sharing
+        one runtime dir need their own snapshot the same way they already
+        need their own socket."""
+        return paths_mod.snapshot_path(self.env)
 
     def sock_path(self) -> Path:
-        override = self.env.get(SOCK_ENV, "").strip()
-        return Path(override) if override else self.runtime_dir() / SOCK_NAME
+        return paths_mod.sock_path(self.env)
 
 
 # -- validation with line numbers -------------------------------------------

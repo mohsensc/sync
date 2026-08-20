@@ -17,7 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
-JOURNAL_NAME = "agent-presence.decisions.jsonl"
+from . import paths as paths_mod
+
 JOURNAL_MAX_LINES = 2000
 
 _FIELDS = ("path", "agent", "holder", "human", "intent", "reason", "effect")
@@ -50,18 +51,17 @@ class DecisionRecord:
 
 
 def journal_path(env: Mapping[str, str] | None = None) -> Path:
-    """Same rule as the snapshot and the sockets: derive it, let one var move it.
+    """Same rule as the snapshot and the socket: derive it from the socket,
+    let one var move it.
 
-    `$AGENT_PRESENCE_JOURNAL` has to be read here as well as in the daemon —
-    two presenced sharing an XDG_RUNTIME_DIR is the normal way to run one per
-    repo, and a reader that ignores the override reads the other repo's file.
+    `$AGENT_PRESENCE_JOURNAL` has to be read here as well as in the daemon,
+    and so does `$AGENT_PRESENCE_SOCK` (see paths.py, ported from main.go's
+    siblingPath) — two presenced sharing an XDG_RUNTIME_DIR is the normal
+    way to run one per repo, and a reader that derives the journal from a
+    fixed name instead of the socket reads the other repo's file.
     """
     env = os.environ if env is None else env
-    configured = env.get("AGENT_PRESENCE_JOURNAL")
-    if configured:
-        return Path(configured)
-    base = env.get("XDG_RUNTIME_DIR") or env.get("TMPDIR") or "/tmp"
-    return Path(base) / JOURNAL_NAME
+    return paths_mod.journal_path(env)
 
 
 def parse_record(line: str) -> DecisionRecord | None:

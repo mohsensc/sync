@@ -10,7 +10,23 @@ set -uo pipefail
 # usually unset on macOS, so dropping the TMPDIR step points the reader at a
 # file the daemon never writes and the segment is blank forever.
 runtime="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}"
-SNAP="${AGENT_PRESENCE_SNAPSHOT:-$runtime/agent-presence.json}"
+sock="${AGENT_PRESENCE_SOCK:-$runtime/agent-presence.sock}"
+
+# siblingPath, ported from go/cmd/presenced/main.go: the snapshot lives
+# beside the socket, named after it, not at a fixed name in the runtime
+# dir. Two presenced sharing one runtime dir (the normal way to run one per
+# repo) already keep their sockets apart; without this the segment for
+# both just reads whichever daemon's snapshot got the fixed name.
+sock_dir="${sock%/*}"
+[[ "$sock_dir" == "$sock" ]] && sock_dir="."
+sock_base="${sock##*/}"
+case "$sock_base" in
+  *.*) stem="${sock_base%.*}" ;;
+  *) stem="$sock_base" ;;
+esac
+[[ -z "$stem" ]] && stem="agent-presence"
+
+SNAP="${AGENT_PRESENCE_SNAPSHOT:-$sock_dir/$stem.json}"
 
 # -f on top of -r: a directory errors out, a fifo blocks until someone writes.
 [[ -f "$SNAP" && -r "$SNAP" ]] || exit 0
