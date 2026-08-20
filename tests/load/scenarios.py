@@ -807,28 +807,34 @@ async def flood(events: int, threads: int) -> Result:
                   f"single event, so the file is rewritten and renamed on every "
                   f"loop iteration for as long as the flood lasts.")
 
-        # One connection carrying a big batch, which is what a hook writing
-        # more than it can flush in its 5ms slice looks like. The daemon's
-        # presence table records the last line it got to, so the index in the
-        # snapshot says how far it read before the budget ran out.
+        # One connection carrying a big batch. The old story here was
+        # SocketServer::drain_conn giving every connection a 5ms slice of a
+        # single-threaded loop and dropping whatever was left; that class is
+        # gone. go/internal/hooksock.Server (:44-52) hands each connection
+        # its own goroutine and a 2s ConnTimeout on the whole connection's
+        # lifetime, not a per-read fairness slice — see the package doc
+        # there. batch_read < batch_n under that model just means reading
+        # and applying 5000 lines took longer than 2s; it is not evidence of
+        # a silent-drop bug, so this is reported as a metric, not a finding.
         batch_n = 5000
         batch = [event_line("batch-agent", "read", f"src/batch/{i:05d}.py")
                  for i in range(batch_n)]
         obs.fanout.clear()
-        d.send_lines(batch)
+        try:
+            d.send_lines(batch)
+        except HarnessSendError as exc:
+            r.harness_error(f"batch send to {d.name}: {exc}")
         await asyncio.sleep(3.0)
         batch_seen = sum(1 for f in obs.fanout if f.get("type") == "presence")
-        last = d.snapshot_paths().get("batch-agent", "")
-        try:
-            batch_read = int(last.split("/")[-1].split(".")[0]) + 1
-        except ValueError:
-            batch_read = 0
-        if batch_read < batch_n:
-            r.bad(f"ONE CONNECTION IS TRUNCATED AT THE BUDGET: of {batch_n} "
-                  f"lines written on a single socket the daemon read {batch_read} "
-                  f"and closed. SocketServer::drain_conn gets 5ms and drops "
-                  f"whatever is left, silently. Fine for one line per hook; a "
-                  f"client that batches loses the tail with no error anywhere.")
+        snap = d.snapshot_paths()
+        batch_read = None
+        if snap is not None:
+            last = snap.get("batch-agent")
+            if last:
+                try:
+                    batch_read = int(last.split("/")[-1].split(".")[0]) + 1
+                except ValueError:
+                    batch_read = None
 
         r.metrics = {
             "events_offered": sent + failed,
