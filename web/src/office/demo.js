@@ -260,6 +260,12 @@ export function runDemo(ctx) {
       lock.visible = false
       plod = null
       scene.remove(lock)
+      // Nothing here is shared past this runDemo() call, so it's all safe
+      // to dispose: geometry, materials, and the sprite's canvas texture.
+      lockRing.geometry.dispose()
+      lockRing.material.dispose()
+      lockSprite.material.map.dispose()
+      lockSprite.material.dispose()
     },
   }
 }
