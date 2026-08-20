@@ -107,3 +107,86 @@ func TestRejoiningTheSameRoomDoesNotReleaseItsOwnClaim(t *testing.T) {
 		t.Fatal("rejoining the same room should not release its own claim")
 	}
 }
+
+// -- fix (b): agentSessionEnded only clears the index when nothing is
+// -- live anywhere for that agent id -------------------------------------
+
+func TestSecondConnLeavingDoesNotWipeTheFirstConnsLiveIndexEntry(t *testing.T) {
+	clock := NewVirtualClock(1000.0)
+	rel := NewRelay(clock, criticalRoster(), metrics.New())
+
+	c1 := &authConn{agent: "dev", human: "Alice", principal: "alice", token: "s3cret"}
+	c2 := &authConn{agent: "dev", human: "Alice", principal: "alice", token: "s3cret"}
+	if !rel.Join("roomA", c1) {
+		t.Fatal("c1 join refused")
+	}
+	if !rel.Join("roomB", c2) {
+		t.Fatal("c2 join refused (heldByPeer should allow same principal+tier)")
+	}
+	rel.Handle(c1, map[string]any{"type": "claim", "region": scopeRegion("src/a.go"), "intent": "refactor"})
+
+	// c2 held nothing; its session ending must not clear "dev" globally
+	// while c1's roomA claim is still live.
+	rel.Leave(c2)
+
+	h := rel.registry.HolderOf("roomA", Region{Path: "src/a.go"}, nil)
+	if h == nil {
+		t.Fatal("c1's roomA claim should still be live after c2 leaves")
+	}
+	if pr := rel.registry.PriorityOf("dev", PriorityNormal); pr != PriorityCritical {
+		t.Fatalf("DESYNC: live critical claim but agent index reads %d after c2's Leave", pr)
+	}
+
+	// c1 leaving afterward should still clear the index, once nothing is
+	// left live anywhere.
+	rel.Leave(c1)
+	if pr := rel.registry.PriorityOf("dev", PriorityNormal); pr != PriorityNormal {
+		t.Fatalf("expected the index to clear once both connections are gone, got %d", pr)
+	}
+}
+
+// -- full chain: the laundering scenario from issue #173 now ends with
+// -- the stranded claim gone before an attacker can adopt it -------------
+
+func TestStrandedCriticalLeaseIsNotLaundered(t *testing.T) {
+	clock := NewVirtualClock(1000.0)
+	rel := NewRelay(clock, criticalRoster(), metrics.New())
+
+	legit := &authConn{agent: "dev", human: "Alice", principal: "alice", token: "s3cret"}
+	rel.Join("roomA", legit)
+	rel.Handle(legit, map[string]any{"type": "claim", "region": scopeRegion("src/a.go"), "intent": "refactor"})
+	rel.Join("roomB", legit) // room switch: roomA's claim is released now (fix a)
+	rel.Leave(legit)         // session end: index clears cleanly, nothing left live (fix b)
+
+	// A fresh, unauthenticated connection takes the agent id.
+	attacker := &authConn{agent: "dev", human: "Mallory"}
+	if !rel.Join("roomA", attacker) {
+		t.Fatal("attacker join refused")
+	}
+	if got := rel.priorityOf(attacker); got != PriorityNormal {
+		t.Fatalf("attacker should be normal, got %d", got)
+	}
+
+	h := rel.registry.HolderOf("roomA", Region{Path: "src/a.go"}, nil)
+	if h != nil {
+		t.Fatalf("stranded claim should already be gone by the time the attacker joins, got %+v", h)
+	}
+
+	var snap Frame
+	for _, f := range attacker.sent {
+		if f["type"] == "leases" {
+			snap = f
+		}
+	}
+	if leases, ok := snap["leases"].([]any); !ok || len(leases) != 0 {
+		t.Fatalf("attacker's join snapshot should carry no stranded lease, got %+v", snap["leases"])
+	}
+
+	// A genuinely critical rostered agent can now claim the region.
+	victim := &authConn{agent: "bob", human: "Bob", principal: "alice", token: "s3cret"}
+	rel.Join("roomA", victim)
+	reply := rel.Handle(victim, map[string]any{"type": "claim", "region": scopeRegion("src/a.go"), "intent": "fix"})
+	if reply["granted"] != true {
+		t.Fatalf("expected the rostered critical agent to get the region, got %+v", reply)
+	}
+}
