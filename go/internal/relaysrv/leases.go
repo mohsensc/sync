@@ -134,6 +134,18 @@ type agentEntry struct {
 	// between claims is not brand new, so its age latches to the first
 	// moment it was seen holding nothing rather than resetting to "now"
 	// every time.
+	//
+	// Three endings write here, and they mean three different things
+	// (issue #163): a voluntary release (agentClaimRemovedByRelease) clears
+	// firstSeenSet and lets ageOf re-latch to "now" on its next call — the
+	// transaction concluded on its own terms, so there's nothing to
+	// preserve. An involuntary one that isn't the agent's choice — lazy
+	// expiry or a wait-die abort (agentClaimRemoved) — latches firstSeen to
+	// the age the agent already had, so an abort-retry keeps the priority
+	// it earned instead of reading as brand new. A session ending
+	// (agentSessionEnded) deletes the entry outright: the identity itself
+	// is going away with the connection, so nothing should be there to
+	// latch onto when it reconnects.
 	firstSeen    float64
 	firstSeenSet bool
 }
@@ -266,13 +278,16 @@ func (r *Registry) agentClaimAdded(agent string, acquiredAt float64, tier int) {
 	e.firstSeenSet = false
 }
 
-// agentClaimRemoved decrements liveCount and nothing else. Used by lazy
-// expiry and by ReleaseAll (session end / a wait-die abort) — neither is a
-// transaction concluding on its own terms, so neither touches firstSeen.
-// Losing this distinction either way breaks something: an abort-retry that
-// got reset here never gets old enough to be told wait (see ageOf), and a
-// version that never resets anywhere means the first agent to ever connect
-// outranks the room forever. See leases.py's release_all docstring (PR #37).
+// agentClaimRemoved decrements liveCount and, if that leaves the agent
+// holding nothing, latches firstSeen to the age it already had. Used by
+// lazy expiry and by ReleaseAll's wait-die-abort caller (relay.go's
+// onClaim) — neither is a transaction the agent concluded on its own
+// terms, so both preserve the age rather than letting ageOf re-latch to
+// "now": an abort-retry that got reset here never gets old enough to be
+// told wait (see ageOf). Do NOT call this for a session ending — that's
+// agentSessionEnded, which clears the entry instead of preserving it, or
+// an agent's priority would survive a disconnect/reconnect forever. See
+// agentEntry's doc comment for the full three-way split.
 func (r *Registry) agentClaimRemoved(agent string, now float64) {
 	r.agentMu.Lock()
 	defer r.agentMu.Unlock()
@@ -282,6 +297,10 @@ func (r *Registry) agentClaimRemoved(agent string, now float64) {
 	}
 	if e.liveCount > 0 {
 		e.liveCount--
+	}
+	if e.liveCount == 0 {
+		e.firstSeen = e.claimAge
+		e.firstSeenSet = true
 	}
 }
 
@@ -311,6 +330,19 @@ func (r *Registry) agentClaimRemovedByRelease(agent string, now float64) {
 // changed hands, so its accrued age must not carry over to whoever takes
 // the name next, any more than its tier does.
 func (r *Registry) agentIdentityReset(agent string) {
+	r.agentMu.Lock()
+	defer r.agentMu.Unlock()
+	delete(r.agents, agent)
+}
+
+// agentSessionEnded is ReleaseAllSessionEnd's other half, shaped exactly
+// like agentIdentityReset: the connection is gone, not merely between
+// claims, so there's no retry coming that should inherit the age it had.
+// This is what keeps agentClaimRemoved's preserved age (see its doc
+// comment) from turning into "the first agent to ever connect outranks
+// the room forever" — that failure only shows up if session end reuses
+// the abort/expiry path instead of clearing outright.
+func (r *Registry) agentSessionEnded(agent string) {
 	r.agentMu.Lock()
 	defer r.agentMu.Unlock()
 	delete(r.agents, agent)
@@ -696,8 +728,12 @@ func (r *Registry) Release(room, agent string, scope Region, actor Conn) {
 	r.pub.Publish(room, frame, actor)
 }
 
-// ReleaseAll drops every lease an agent holds in one room. Used on session
-// end and on a wait-die abort.
+// ReleaseAll drops every lease an agent holds in one room, preserving its
+// wait-die age (agentClaimRemoved). This is the wait-die-abort path
+// (relay.go's onClaim, on decisionAbort) — the agent didn't choose to let
+// go, so a retry should keep the priority it earned. For a connection's
+// session actually ending, use ReleaseAllSessionEnd instead: reusing this
+// one there would let an agent's age survive disconnect/reconnect forever.
 func (r *Registry) ReleaseAll(room, agent string, actor Conn) {
 	rs := r.roomOf(room)
 	now := r.clock.Now()
@@ -717,6 +753,18 @@ func (r *Registry) ReleaseAll(room, agent string, actor Conn) {
 		}
 		s.mu.Unlock()
 	}
+}
+
+// ReleaseAllSessionEnd is ReleaseAll's counterpart for a connection's
+// session actually ending (relay.go's Leave). Unlike an abort, there's no
+// retry on the way — the identity is leaving with the socket — so once
+// every lease is dropped the same way ReleaseAll drops them, the agent's
+// wait-die entry is cleared outright instead of preserved: a rejoin under
+// the same agent id starts fresh, exactly like a genuinely new agent
+// would.
+func (r *Registry) ReleaseAllSessionEnd(room, agent string, actor Conn) {
+	r.ReleaseAll(room, agent, actor)
+	r.agentSessionEnded(agent)
 }
 
 // ReleaseEverywhere drops every lease this agent id holds, in every room —
