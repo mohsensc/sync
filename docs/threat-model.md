@@ -108,9 +108,17 @@ Concretely, once the relay is reachable from outside one machine:
   `no-token` path) and can submit real `event`, `claim`, `heartbeat` and
   `move` frames at that tier. It cannot outrank a rostered principal, and it
   cannot preempt anyone's lease mid-edit — the wait-die ordering and the
-  no-preemption invariant apply regardless of who's asking — but it can
-  contend for regions, occupy the low end of the priority order, and consume
-  a connection's worth of resources.
+  no-preemption invariant apply regardless of who's asking. It *can* contend
+  for a region a rostered principal holds, including a CRITICAL one: one
+  `contend` frame starts the fair-share clock (`handoverAt = now +
+  FairShareGraceS`, 900s) on the holder's lease, and heartbeats don't stop
+  it — at the deadline the region is reserved for the anonymous contender
+  and the holder's next acquire is refused. That's not the mid-edit
+  preemption ruled out above; it's the ask-deadline giving 900s notice
+  before the handoff, the same anti-starvation mechanism a legitimate
+  contender gets (`policy-design.md` §5.2). The gap is that it fires the
+  same way for an unauthenticated peer, per region, in parallel from a
+  single frame, and consumes a connection's worth of resources doing it.
 - It is *not* equivalent to being a teammate with push access to the repo.
   Room membership and roster membership are different gates, and only the
   second one is currently authenticated. **This is still true after #22.**
@@ -212,6 +220,8 @@ This closes the two items #11 filed against transport encryption:
   put itself back at pre-#22 exposure to an on-path attacker, with the one
   difference that the traffic is still opaque to a passive observer who
   isn't on-path.
+- **Whether fair-share contends should require an authenticated principal**
+  is an open design question, not just the exposure noted above — see #167.
 
 ## Rung 4's embedding backend: an offline tool, not a relay-adjacent surface
 
