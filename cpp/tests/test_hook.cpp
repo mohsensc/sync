@@ -304,6 +304,20 @@ TEST_CASE("anything that is not a decision line means no decision") {
     REQUIRE(ap::parse_decision(R"({"rung":"three"})").rung < 0);
 }
 
+TEST_CASE("a region lost 25 minutes ago does not render as 17 minutes") {
+    // leases.go's HandoverNoteMs keeps a lost-region note alive for 30 minutes
+    // (1,800,000ms). int_field used to saturate at 1,000,000ms, so a region
+    // lost 25 minutes ago rendered as "17 minutes ago". 1,500,000ms (25min) is
+    // comfortably inside the live window and past the old cap.
+    const ap::Decision d = ap::parse_decision(
+        R"({"rung":0,"lost_to":"sess_b","human":"sara","lost_ms_ago":1500000})");
+    REQUIRE(d.lost_ms_ago == 1500000);  // not clamped to 1,000,000
+
+    const std::string out = ap::hook_output(d, "/repo/src/auth.py");
+    REQUIRE(out.find("25 minutes ago") != std::string::npos);
+    REQUIRE(out.find("17 minutes ago") == std::string::npos);
+}
+
 TEST_CASE("no answer from the daemon prints nothing at all") {
     ap::Decision none;  // rung -1
     REQUIRE(ap::hook_output(none, "/repo/src/auth.py").empty());
