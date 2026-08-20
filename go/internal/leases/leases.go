@@ -14,6 +14,11 @@ import (
 // enough that it is news rather than history. Also the horizon Cache prunes
 // on, so the lost-region map is bounded by the last half hour rather than
 // by uptime. Matches lease_cache.hpp's kHandoverNoteMs.
+//
+// decide.go sends lost_ms_ago derived from this unclamped; the hook reads it
+// through int_field, which saturates at kIntFieldCeiling in cpp/hook/hook.cpp.
+// That ceiling must stay comfortably above this value or old losses render
+// with the wrong "ago".
 const HandoverNoteMs = 30 * 60 * 1000
 
 // Lease is the Go shape of cpp/daemon/lease_cache.hpp's CachedLease.

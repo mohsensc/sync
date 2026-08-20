@@ -149,6 +149,13 @@ std::string verb_for(const std::string& tool) {
     return "think";
 }
 
+// Overflow defense only, not a plausibility check on any one field: this cap
+// has to clear the largest value we legitimately parse, which is
+// lost_ms_ago riding a 30-minute window (1,800,000ms). Kept well above that
+// so raising the window doesn't silently reintroduce the saturation bug.
+// See HandoverNoteMs in go/internal/leases/leases.go.
+constexpr long long kIntFieldCeiling = 10000000;  // ~2.8 hours in ms
+
 /// Integer scalar, or `missing` when the key is absent or not a bare number.
 /// A quoted "3" is rejected on purpose: a daemon that sends the wrong type is a
 /// daemon we should not be guessing on behalf of.
@@ -171,7 +178,10 @@ int int_field(std::string_view json, std::string_view key, int missing) {
     long long v = 0;
     while (pos < json.size() && json[pos] >= '0' && json[pos] <= '9') {
         v = v * 10 + (json[pos] - '0');
-        if (v > 1000000) v = 1000000;  // saturate; nothing sane is this big
+        // Saturate well clear of overflow, not against what a well-behaved
+        // sender would send. lost_ms_ago rides this field up to
+        // leases.go's HandoverNoteMs (30 minutes); if that grows, raise this too.
+        if (v > kIntFieldCeiling) v = kIntFieldCeiling;
         ++pos;
     }
     return static_cast<int>(negative ? -v : v);
