@@ -1,5 +1,12 @@
 # Agent Presence Implementation Plan
 
+**Superseded — read this first:** this plan describes a C++ hook + C++
+daemon (`presenced`) forwarding to a Python relay. The daemon and the Python
+relay are both gone — `cpp/daemon/` was deleted and the relay is Go-only now
+(`go/internal/relaysrv`). See `docs/go-daemon.md` for the current
+architecture. Kept for the original design reasoning, not as a description
+of what's running.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build a system where multiple people's coding agents in a shared repo are mutually aware — rendered as an ambient animated world for humans, and as claims and negotiation for agents — preventing redundant work and conflicting edits.

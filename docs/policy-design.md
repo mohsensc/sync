@@ -1,5 +1,12 @@
 # Policy engine and priority arbitration
 
+**Superseded — read this first:** this spec cites `cpp/daemon/*` files that
+no longer exist — the C++ daemon was replaced by the Go one. See
+`docs/go-daemon.md` for the current architecture. The policy design itself
+(priority tiers, the line between policy and lease grants) is kept because
+it's still the reasoning behind the code, not because the file paths still
+resolve.
+
 Branch: `feat/policy-engine`, worktree `/Users/mohsen-agentai/src-2/sync-policy`.
 Base: `fix/lease-protection` (transport wiring plus the load fixes).
 
