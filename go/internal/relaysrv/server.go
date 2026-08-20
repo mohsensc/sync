@@ -644,8 +644,14 @@ func (s *Server) Serve(ctx context.Context) error {
 
 	select {
 	case <-ctx.Done():
-		s.closeConns()
+		// srv.Close() first: it stops the listener immediately and, by
+		// contract, never touches an already-hijacked connection. Doing
+		// closeConns() first left the listener open for up to
+		// shutdownDeadline while it drained sessions, so a client dialing
+		// in that window wasn't in the snapshot closeConns fanned out to
+		// and got the raw RST this whole fix exists to remove.
 		_ = srv.Close()
+		s.closeConns()
 		return nil
 	case err := <-errCh:
 		return err

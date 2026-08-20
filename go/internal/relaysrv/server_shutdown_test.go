@@ -121,3 +121,50 @@ func TestServeShutdownBoundedByUnresponsivePeer(t *testing.T) {
 		t.Fatalf("closeConns took %s, expected roughly shutdownDeadline (%s)", elapsed, shutdownDeadline)
 	}
 }
+
+// TestServeStopsAcceptingBeforeClosingSessions is the discriminating
+// regression test for the close-order bug this fix corrects: closeConns
+// used to run before srv.Close(), so while a wedged session ate up to
+// shutdownDeadline waiting on it, the listener was still open and happily
+// accepted new dials — each one landing outside the snapshot closeConns
+// fanned out to, and getting the raw RST this whole feature exists to
+// avoid. Swapping the order (srv.Close() first) means the listener is
+// gone before closeConns ever starts, so a dial that lands in this window
+// is refused outright instead of accepted-then-RST.
+func TestServeStopsAcceptingBeforeClosingSessions(t *testing.T) {
+	relay := NewRelay(NewVirtualClock(0), InertRoster(), metrics.New())
+	srv := &Server{Addr: "127.0.0.1:0", Relay: relay}
+	addr, err := srv.Listen()
+	if err != nil {
+		t.Fatalf("Listen: %s", err)
+	}
+
+	// A wedged session that never completes its close handshake keeps
+	// closeConns occupied for the full shutdownDeadline, opening a real
+	// window between "shutdown started" and "closeConns returns" for the
+	// race to land in.
+	srv.trackConn(NewWsConn(wedgedWs{}, relay.Clock(), relay.metrics))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- srv.Serve(ctx) }()
+
+	cancel() // simulate a relay restart
+
+	// Give shutdown a moment to reach srv.Close(): with the fix that's
+	// near-instant, with the bug it doesn't happen until closeConns times
+	// out, shutdownDeadline later — either way this is well inside that
+	// window.
+	time.Sleep(50 * time.Millisecond)
+
+	_, _, err = websocket.DefaultDialer.Dial("ws://"+addr+"/", nil)
+	if err == nil {
+		t.Fatal("dial succeeded during shutdown: listener was still accepting while closeConns drained a wedged session")
+	}
+
+	select {
+	case <-serveDone:
+	case <-time.After(shutdownDeadline + time.Second):
+		t.Fatal("Serve did not return after shutdown")
+	}
+}
