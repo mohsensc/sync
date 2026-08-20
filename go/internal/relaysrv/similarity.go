@@ -258,6 +258,17 @@ func tokenWeight(token string) float64 {
 // fold bigrams, then fold and stem. Returns a slice (not a set) — the
 // cosine below uses counts, and repetition is mild evidence of emphasis.
 func tokenize(text string) []string {
+	// strings.ToLower is a simple case fold: U+0130 (Turkish dotted capital
+	// İ) goes to a bare "i". Python's str.lower() is a full case mapping and
+	// yields "i" + U+0307 (combining dot above) instead, which the
+	// [a-z0-9]+ token regex then splits the word around. Pre-mapping İ to
+	// that same two-rune form before ToLower reproduces the split here, so
+	// "İstanbul" folds to ["stanbul", ...] on both sides instead of "istanbul"
+	// surviving whole on Go's. This is the only full-case-mapping divergence
+	// that matters: the regex is ASCII-only, so it already discards anything
+	// else full case mapping could change (final sigma, ligatures) before it
+	// could affect a score.
+	text = strings.ReplaceAll(text, "İ", "i̇")
 	raw := tokenRe.FindAllString(strings.ToLower(text), -1)
 
 	folded := make([]string, 0, len(raw))
