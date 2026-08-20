@@ -39,8 +39,8 @@ const KeepLines = 1000
 const TrimRetryLines = 200
 
 // maybeTrim never needs more than the file's tail to find the newest
-// KeepLines — capped the same way policy.go's maxBytes guards Cache.Refresh
-// (policy.go:119), so a journal neglected across enough restarts to reach
+// KeepLines — capped the same way policy.go's maxBytes guards
+// Cache.Refresh, so a journal neglected across enough restarts to reach
 // gigabytes still costs one bounded read per trim, not a read of the whole
 // file.
 const maxTrimReadBytes = 8 * 1024 * 1024
