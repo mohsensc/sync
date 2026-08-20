@@ -831,7 +831,7 @@ const RADIUS = 18
 function focus([x, z], d = 1, y = null, targetY = 1.15) {
   goal.target.set(x, targetY, z)
   goal.dist = d
-  if (y != null) goal.yaw = Math.max(YAW_MIN, Math.min(YAW_MAX, y))
+  if (y != null) goal.yaw = clampYaw(y)
   goal.active = true
 }
 
