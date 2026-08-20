@@ -744,7 +744,7 @@ func (r *Relay) dispatch(conn Conn, msg map[string]any) Frame {
 			splitScope = &sc
 		}
 		move, _ := msg["move"].(string)
-		outcome := r.negotiator.Apply(room, conn.Agent(), region, move, CleanIntent(msg["reason"]), splitScope, r.priorityOf(conn), conn)
+		outcome := r.negotiator.Apply(room, conn.Agent(), region, move, CleanIntent(msg["reason"]), splitScope, r.priorityOf(conn), conn.Human(), conn)
 		reply := Frame{"type": "move_result", "granted": outcome.Granted, "action": outcome.Action}
 		if outcome.Error != "" {
 			reply["error"] = outcome.Error

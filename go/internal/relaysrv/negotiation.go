@@ -84,7 +84,7 @@ func (n *Negotiator) Open(room, requester string, requesterAcquiredAt float64, s
 }
 
 // Apply applies a negotiation move. Mirrors negotiation.py's apply.
-func (n *Negotiator) Apply(room, requester string, scope Region, move, reason string, splitScope *Region, requesterPriority int, actor Conn) NegotiationOutcome {
+func (n *Negotiator) Apply(room, requester string, scope Region, move, reason string, splitScope *Region, requesterPriority int, requesterHuman string, actor Conn) NegotiationOutcome {
 	canonical, ok := normalizeMove(move)
 	if !ok {
 		return NegotiationOutcome{Granted: false, Action: "invalid_move",
@@ -94,7 +94,7 @@ func (n *Negotiator) Apply(room, requester string, scope Region, move, reason st
 	case "DEFER":
 		return NegotiationOutcome{Granted: false, Action: "defer"}
 	case "SPLIT":
-		return n.split(room, requester, scope, splitScope, requesterPriority, actor)
+		return n.split(room, requester, scope, splitScope, requesterPriority, requesterHuman, actor)
 	case "HANDOFF":
 		n.registry.Release(room, requester, scope, actor)
 		return NegotiationOutcome{Granted: false, Action: "handoff"}
@@ -111,7 +111,7 @@ func orNone(s string) string {
 	return s
 }
 
-func (n *Negotiator) split(room, requester string, scope Region, splitScope *Region, requesterPriority int, actor Conn) NegotiationOutcome {
+func (n *Negotiator) split(room, requester string, scope Region, splitScope *Region, requesterPriority int, requesterHuman string, actor Conn) NegotiationOutcome {
 	target := scope
 	if splitScope != nil {
 		target = *splitScope
@@ -129,7 +129,10 @@ func (n *Negotiator) split(room, requester string, scope Region, splitScope *Reg
 		}
 	}
 
-	result := n.registry.Acquire(room, requester, requester, target, "split", nil, requesterPriority, actor)
+	// Acquire wants (human, agent), same order onClaim uses — the split
+	// lease previously passed requester twice here, so the human field
+	// rendered as the agent id everywhere a split lease showed up.
+	result := n.registry.Acquire(room, requesterHuman, requester, target, "split", nil, requesterPriority, actor)
 	if !result.Ok {
 		var blocker, waiting string
 		if result.HeldBy != nil {
