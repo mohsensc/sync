@@ -1,6 +1,7 @@
 package relaysrv
 
 import (
+	"math"
 	"testing"
 
 	"github.com/mohsensc/sync/go/internal/metrics"
@@ -136,5 +137,44 @@ func TestClaimGrantCarriesRung4RedundantWork(t *testing.T) {
 	redundant, ok := reply["redundant"].(Frame)
 	if !ok || redundant["agent"] != "a1" {
 		t.Fatalf("expected a redundant payload naming a1, got %+v", reply["redundant"])
+	}
+}
+
+// TestTokenizeMatchesPythonOnDottedCapitalI pins similarity.go's tokenize
+// and lexicalScore against python/src/agent_presence/similarity.py's
+// tokens()/LexicalSimilarity for the Turkish dotted capital İ (U+0130)
+// case from #165: Python's str.lower() is a full case mapping and yields
+// "i" + U+0307, which the [a-z0-9]+ token regex then splits the word
+// around; Go's strings.ToLower is a simple fold and used to leave the
+// word intact, so the two sides scored 0.676 vs 1.0 across the rung-4
+// threshold (0.82). The expected token list and score below were produced
+// by running, against this same commit's python/src:
+//
+//	python3 -c "
+//	from agent_presence.similarity import tokens, LexicalSimilarity
+//	a, b = 'İstanbul auth token add', 'istanbul auth token add'
+//	print(tokens(a))
+//	print('%.17f' % LexicalSimilarity().score(a, b))"
+//
+// which prints ['stanbul', 'auth', 'token', 'add'] and
+// 0.67637540453074441.
+func TestTokenizeMatchesPythonOnDottedCapitalI(t *testing.T) {
+	a := "İstanbul auth token add"
+	b := "istanbul auth token add"
+
+	gotTokens := tokenize(a)
+	wantTokens := []string{"stanbul", "auth", "token", "add"}
+	if len(gotTokens) != len(wantTokens) {
+		t.Fatalf("tokenize(%q) = %v, want %v", a, gotTokens, wantTokens)
+	}
+	for i, tok := range wantTokens {
+		if gotTokens[i] != tok {
+			t.Fatalf("tokenize(%q) = %v, want %v", a, gotTokens, wantTokens)
+		}
+	}
+
+	const wantScore = 0.67637540453074441
+	if got := lexicalScore(a, b); math.Abs(got-wantScore) > 1e-15 {
+		t.Fatalf("lexicalScore(%q, %q) = %.17f, want %.17f", a, b, got, wantScore)
 	}
 }
