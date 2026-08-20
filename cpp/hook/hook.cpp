@@ -187,6 +187,24 @@ int int_field(std::string_view json, std::string_view key, int missing) {
     return static_cast<int>(negative ? -v : v);
 }
 
+/// True only for a bare `true` value on `key`. A quoted "true" does not count,
+/// same reasoning as int_field rejecting a quoted "3": a daemon sending the
+/// wrong type is not one we guess on behalf of. The match also has to end
+/// where the token ends, or "truest" would read as true.
+bool bool_field(std::string_view json, std::string_view key) {
+    std::string needle = "\"";
+    needle += key;
+    needle += "\":";
+    auto pos = json.find(needle);
+    if (pos == std::string_view::npos) return false;
+    pos += needle.size();
+    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t')) ++pos;
+    if (json.substr(pos, 4) != "true") return false;
+    pos += 4;
+    return pos >= json.size() || json[pos] == ',' || json[pos] == '}' || json[pos] == ' ' ||
+           json[pos] == '\t';
+}
+
 /// Blocks SIGPIPE on this thread for as long as it lives, and swallows one if
 /// the socket work generated it.
 ///
@@ -510,7 +528,7 @@ Decision parse_decision(const std::string& line) {
     d.handover_to = field(line, "handover_to");
     d.handover_to_human = field(line, "handover_to_human");
     d.handover_to_priority = field(line, "handover_to_priority");
-    d.handover_to_me = line.find("\"handover_to_me\":true") != std::string::npos;
+    d.handover_to_me = bool_field(line, "handover_to_me");
     d.waiting = int_field(line, "waiting", 0);
     d.lost_to = field(line, "lost_to");
     d.lost_to_priority = field(line, "lost_to_priority");
