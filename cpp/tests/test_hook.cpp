@@ -11,6 +11,7 @@
 #include <cctype>
 #include <chrono>
 #include <filesystem>
+#include <map>
 #include <string>
 #include <thread>
 #include "hook/hook.hpp"
@@ -884,4 +885,52 @@ TEST_CASE("the rung 3 floor still raises a daemon that asked for silent") {
     REQUIRE(ap::effect_of(d) == ap::Effect::Notify);
     // Notify still has nowhere to go on the hook itself.
     REQUIRE(ap::hook_output(d, "/repo/a.py").empty());
+}
+
+namespace {
+
+/// A fake `getenv`, so these tests exercise `resolve_sock_path`'s fallthrough
+/// without touching this process's real environment. `EnvLookup` is a plain
+/// function pointer, so the table it reads has to live outside the function.
+std::map<std::string, std::string>& fake_env() {
+    static std::map<std::string, std::string> m;
+    return m;
+}
+
+char* fake_getenv(const char* key) {
+    const auto it = fake_env().find(key);
+    // Same const-cast every std::getenv caller already lives with: the value
+    // must never be written through, but the signature says char*.
+    return it == fake_env().end() ? nullptr : const_cast<char*>(it->second.c_str());
+}
+
+}  // namespace
+
+// The one case this whole extraction exists for: XDG_RUNTIME_DIR, presenced's
+// envOr and statusline-presence.sh's ${VAR:-fallback} already treat "" as
+// unset, and the hook used to be the holdout — join_path("", "agent-presence.sock")
+// produced "/agent-presence.sock", a path nothing binds.
+TEST_CASE("resolve_sock_path treats a set-but-empty AGENT_PRESENCE_SOCK as unset") {
+    fake_env() = {{"AGENT_PRESENCE_SOCK", ""}, {"XDG_RUNTIME_DIR", "/run/agent"}};
+    REQUIRE(ap::resolve_sock_path(fake_getenv) == "/run/agent/agent-presence.sock");
+}
+
+TEST_CASE("resolve_sock_path treats a set-but-empty XDG_RUNTIME_DIR as unset") {
+    fake_env() = {{"XDG_RUNTIME_DIR", ""}, {"TMPDIR", "/tmp/agentx"}};
+    REQUIRE(ap::resolve_sock_path(fake_getenv) == "/tmp/agentx/agent-presence.sock");
+}
+
+TEST_CASE("resolve_sock_path treats a set-but-empty TMPDIR as unset") {
+    fake_env() = {{"TMPDIR", ""}};
+    REQUIRE(ap::resolve_sock_path(fake_getenv) == "/tmp/agent-presence.sock");
+}
+
+TEST_CASE("resolve_sock_path honours a non-empty AGENT_PRESENCE_SOCK outright") {
+    fake_env() = {{"AGENT_PRESENCE_SOCK", "/custom/agent.sock"}, {"XDG_RUNTIME_DIR", "/run/agent"}};
+    REQUIRE(ap::resolve_sock_path(fake_getenv) == "/custom/agent.sock");
+}
+
+TEST_CASE("resolve_sock_path falls all the way through to /tmp when nothing is set") {
+    fake_env() = {};
+    REQUIRE(ap::resolve_sock_path(fake_getenv) == "/tmp/agent-presence.sock");
 }
