@@ -26,6 +26,7 @@ survivors race the bind again and one re-elects.
 
 - `POST /__devlock/claim {owner, worktree, pid, port, force}` → granted or refused-with-holder.
 - `GET /__devlock/status` → the current holder, or 404 if none.
+- `POST /__devlock/release {owner, worktree, pid}` → frees the lease early; called on every exit path.
 - `--force` breaks a live lease. Explicit operator action, not a habit.
 
 ## The `--force` takeover window
@@ -46,5 +47,4 @@ exits, a raw `vite --strictPort` could grab `:5173` first.
 
 ## Manual check
 
-Start `pnpm dev` in a second worktree while the first still holds the
-lease — it should refuse and exit non-zero. Manual, not a merge gate.
+Start `pnpm dev` in a second worktree while the first holds the lease — it should refuse and exit non-zero. Manual, not a merge gate.
