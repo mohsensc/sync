@@ -115,12 +115,13 @@ type Registry struct {
 	mcpDuration *prometheus.HistogramVec
 
 	// -- saturation ------------------------------------------------------
-	SendQueueDepth  prometheus.Gauge
-	framesDropped   *prometheus.CounterVec // reason
-	JournalWrites   prometheus.Counter
-	JournalTrims    prometheus.Counter
-	coalesce        *prometheus.CounterVec // outcome
-	OutboundDropped prometheus.Counter
+	SendQueueDepth        prometheus.Gauge
+	framesDropped         *prometheus.CounterVec // reason
+	framesRejectedInbound prometheus.Counter
+	JournalWrites         prometheus.Counter
+	JournalTrims          prometheus.Counter
+	coalesce              *prometheus.CounterVec // outcome
+	OutboundDropped       prometheus.Counter
 }
 
 // New builds the catalogue. The Go runtime and process collectors come along
@@ -210,6 +211,10 @@ func New() *Registry {
 		"Frames queued for the slowest consumer the relay is writing to.")
 	r.framesDropped = counterVec("ap_frames_dropped_total",
 		"Frames the relay gave up on delivering, by reason.", "reason")
+	r.framesRejectedInbound = counter("ap_frames_rejected_inbound_total",
+		"Inbound frames refused by the per-connection token bucket before "+
+			"the relay ever tried to deliver them. Distinct from "+
+			"ap_frames_dropped_total, which is only outbound delivery failure.")
 	r.JournalWrites = counter("ap_journal_writes_total", "Decision journal records written.")
 	r.JournalTrims = counter("ap_journal_trims_total", "Times the journal was trimmed.")
 	r.coalesce = counterVec("ap_coalesce_total",
@@ -267,6 +272,13 @@ func (r *Registry) MCPCall(tool, outcome string, d time.Duration) {
 
 // FrameDropped records a frame the relay could not deliver.
 func (r *Registry) FrameDropped(reason string) { r.framesDropped.WithLabelValues(reason).Inc() }
+
+// FrameRejectedInbound records an inbound frame the per-connection token
+// bucket refused before the relay ever attempted delivery. Kept separate
+// from FrameDropped: that counter's alert and docs are about the relay
+// failing to deliver a frame it accepted, and a rate-limited sender isn't
+// that.
+func (r *Registry) FrameRejectedInbound() { r.framesRejectedInbound.Inc() }
 
 // Coalesce records whether a hook event was admitted or dropped as a
 // duplicate.
