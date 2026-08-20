@@ -105,6 +105,15 @@ type shard struct {
 	claims       map[string]*Claim // key: path + "\x00" + symbolKey
 	reservations []*Reservation
 	carry        map[carryKey]carryEntry
+	// dead is set, under mu, by reapRoomLocked once it has verified (also
+	// under mu, across every shard of the room at once) that the room is
+	// genuinely empty and removed it from Registry.rooms. A caller that
+	// fetched this shard's *roomShards before the reap and is only now
+	// getting mu sees dead and must not write here — the room is gone from
+	// the map, so nothing will ever sweep or read this shard again. It
+	// re-resolves through roomOf instead, which recreates the room fresh.
+	// See lockLiveShard.
+	dead bool
 }
 
 func newShard() *shard {
@@ -217,6 +226,40 @@ func (r *Registry) roomOf(room string) *roomShards {
 func (r *Registry) shardFor(room, path string) *shard {
 	rs := r.roomOf(room)
 	return rs.shards[fnv32(path)%shardsPerRoom]
+}
+
+// lockLiveShard resolves room/path to a shard and returns it locked,
+// guaranteed live at the instant it's handed back. Every room-scoped,
+// shard-locking operation in this file goes through it rather than raw
+// shardFor+Lock — only Acquire can actually put a *new* claim into a shard
+// that had none (every other operation only touches claims already there,
+// and a room SweepAll judged empty enough to reap can't contain one of
+// those), but making that the *only* path that resolves-and-locks a shard
+// means the invariant is structural, not a convention five other call
+// sites have to remember to honor. A future call site added here gets the
+// same safety for free instead of a chance to reintroduce the race.
+//
+// The race this closes: a caller's shardFor(room, path) can return a
+// *roomShards that a concurrent SweepAll reaps — deletes from
+// Registry.rooms — in the window between that lookup and the caller taking
+// the shard's own mu. Without a check, a write there lands in a shard
+// nothing will ever sweep or read again: the same "claim survives, room
+// the map remembers doesn't" bug #100 already paid for. reapRoomLocked
+// only ever sets dead while holding every shard's mu at once, so a shard
+// is never marked dead out from under a caller that already holds its
+// lock — a caller either gets mu before the reap (and, if it writes, that
+// makes the shard non-empty, so the reap aborts) or after it (and sees
+// dead, and retries through roomOf, which recreates the room if it's
+// really gone).
+func (r *Registry) lockLiveShard(room, path string) *shard {
+	for {
+		s := r.shardFor(room, path)
+		s.mu.Lock()
+		if !s.dead {
+			return s
+		}
+		s.mu.Unlock()
+	}
 }
 
 // -- agent index --------------------------------------------------------
@@ -538,8 +581,7 @@ func contendLocked(held *Claim, agent, human string, tier int, decision waitDieD
 // -- public, room-scoped operations --------------------------------------
 
 func (r *Registry) HolderOf(room string, region Region, actor Conn) *claimView {
-	s := r.shardFor(room, region.Path)
-	s.mu.Lock()
+	s := r.lockLiveShard(room, region.Path)
 	defer s.mu.Unlock()
 	now := r.clock.Now()
 	r.pruneExpired(room, s, now, actor)
@@ -547,8 +589,7 @@ func (r *Registry) HolderOf(room string, region Region, actor Conn) *claimView {
 }
 
 func (r *Registry) ReservationFor(room string, region Region, actor Conn) *Reservation {
-	s := r.shardFor(room, region.Path)
-	s.mu.Lock()
+	s := r.lockLiveShard(room, region.Path)
 	defer s.mu.Unlock()
 	now := r.clock.Now()
 	r.pruneExpired(room, s, now, actor)
@@ -598,12 +639,72 @@ func (r *Registry) SweepAll() {
 	r.roomsMu.RUnlock()
 
 	now := r.clock.Now()
+	// A loose, sequential (lock-one-shard-at-a-time) pass: cheap, and the
+	// existing per-request cost of pruning. It also tells us which rooms
+	// are worth the strict double-check below — a room this pass finds
+	// non-empty cannot have become reapable by the time we get to it, so
+	// there is no point paying for one.
+	var candidates []string
 	for room, rs := range rooms {
+		empty := true
 		for _, s := range rs.shards {
 			s.mu.Lock()
 			r.pruneExpired(room, s, now, nil)
+			if len(s.claims) != 0 || len(s.carry) != 0 || len(liveReservations(s, now)) != 0 {
+				empty = false
+			}
 			s.mu.Unlock()
 		}
+		if empty {
+			candidates = append(candidates, room)
+		}
+	}
+
+	// The strict pass, one candidate room at a time: re-verify emptiness
+	// with every one of the room's shards locked simultaneously (not
+	// sequentially — a sequential re-check would leave the exact same gap
+	// between "shard 0 looked empty" and "shard 15 looked empty" that the
+	// loose pass above already has) and only then delete. roomsMu.Lock()
+	// is taken per room, not once for the whole batch, so an ordinary
+	// Join/roomOf for an unrelated room is never blocked for longer than
+	// one room's worth of reaping.
+	for _, room := range candidates {
+		r.roomsMu.Lock()
+		if rs, ok := r.rooms[room]; ok {
+			r.reapRoomLocked(room, rs, now)
+		}
+		r.roomsMu.Unlock()
+	}
+}
+
+// reapRoomLocked deletes room from r.rooms if it is genuinely empty across
+// every shard at once. Caller holds r.roomsMu (write); this additionally
+// takes every shard's own mu for the duration of the check, which is what
+// makes the check-then-delete atomic with respect to Acquire — see
+// lockLiveShard's doc comment for the race this closes and why marking
+// dead here, under the same mu a straggling Acquire is about to wait on,
+// is the part that actually matters (roomsMu alone is not enough: a caller
+// that already resolved this *roomShards before we got roomsMu is not
+// looking at the map again, so removing the map entry doesn't stop it).
+func (r *Registry) reapRoomLocked(room string, rs *roomShards, now float64) {
+	for _, s := range rs.shards {
+		s.mu.Lock()
+	}
+	empty := true
+	for _, s := range rs.shards {
+		if len(s.claims) != 0 || len(s.carry) != 0 || len(liveReservations(s, now)) != 0 {
+			empty = false
+			break
+		}
+	}
+	if empty {
+		delete(r.rooms, room)
+		for _, s := range rs.shards {
+			s.dead = true
+		}
+	}
+	for _, s := range rs.shards {
+		s.mu.Unlock()
 	}
 }
 
@@ -615,8 +716,7 @@ func (r *Registry) SweepAll() {
 // the caller re-resolving it off the lock (negotiation.Open used to) reads
 // a claim that may already have moved on.
 func (r *Registry) Contend(room string, scope Region, agent, human string, tier int, requesterAcquiredAt *float64, actor Conn) (*claimView, waitDieDecision) {
-	s := r.shardFor(room, scope.Path)
-	s.mu.Lock()
+	s := r.lockLiveShard(room, scope.Path)
 	defer s.mu.Unlock()
 	now := r.clock.Now()
 	r.pruneExpired(room, s, now, actor)
@@ -648,8 +748,7 @@ func (r *Registry) Acquire(room, human, agent string, scope Region, intent strin
 	tier := r.priorityOf(agent, priority)
 	now := r.clock.Now()
 
-	s := r.shardFor(room, scope.Path)
-	s.mu.Lock()
+	s := r.lockLiveShard(room, scope.Path)
 	defer s.mu.Unlock()
 	r.pruneExpired(room, s, now, actor)
 
@@ -706,8 +805,7 @@ func (r *Registry) Acquire(room, human, agent string, scope Region, intent strin
 }
 
 func (r *Registry) Heartbeat(room, agent string, scope Region, actor Conn) bool {
-	s := r.shardFor(room, scope.Path)
-	s.mu.Lock()
+	s := r.lockLiveShard(room, scope.Path)
 	defer s.mu.Unlock()
 	now := r.clock.Now()
 	r.pruneExpired(room, s, now, actor)
@@ -722,8 +820,7 @@ func (r *Registry) Heartbeat(room, agent string, scope Region, actor Conn) bool 
 }
 
 func (r *Registry) Release(room, agent string, scope Region, actor Conn) {
-	s := r.shardFor(room, scope.Path)
-	s.mu.Lock()
+	s := r.lockLiveShard(room, scope.Path)
 	defer s.mu.Unlock()
 	now := r.clock.Now()
 	r.pruneExpired(room, s, now, actor)

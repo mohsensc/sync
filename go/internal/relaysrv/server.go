@@ -32,6 +32,15 @@ const (
 
 	MaxFrameBytes = 65536
 
+	// MaxRoomNameBytes bounds what Join will allocate a roomInfo/roomShards
+	// pair for (issue #175). Room names are project/session identifiers a
+	// human or a daemon chooses, not user documents — real ones are a few
+	// dozen bytes at most — so 256 is generous headroom, not a tight fit,
+	// while still keeping a spray of distinct names from buying more than
+	// a few KB of room-name bytes per connection no matter how long the
+	// limiter lets it run.
+	MaxRoomNameBytes = 256
+
 	// How often a writer that is parked on a socket looks at the clock,
 	// in real wall time — not a threshold itself, SendStallS/SendSaturatedS
 	// are, and they're read off the injectable clock; this is only the
@@ -380,6 +389,17 @@ func (c *WsConn) inboundShedReason() string {
 	return ""
 }
 
+// validRoomName bounds the room-name-bloat vector issue #175 describes: an
+// unauthenticated joiner spraying long or unbounded names to inflate
+// Relay.rooms/Registry.rooms one entry at a time. Length only, not a
+// stricter charset — room names come from daemons and humans typing
+// project/session identifiers, not from a namespace this relay defines, so
+// a control-character ban would risk refusing something legitimate for no
+// safety gain the length cap doesn't already give.
+func validRoomName(room string) bool {
+	return len(room) <= MaxRoomNameBytes
+}
+
 // -- session ----------------------------------------------------------------
 
 func (s *Server) session(ws *websocket.Conn) {
@@ -434,7 +454,7 @@ func (s *Server) session(ws *websocket.Conn) {
 
 		if t, _ := msg["type"].(string); t == "join" {
 			roomVal, _ := msg["room"].(string)
-			if roomVal == "" {
+			if roomVal == "" || !validRoomName(roomVal) {
 				continue
 			}
 			agent, _ := msg["agent"].(string)

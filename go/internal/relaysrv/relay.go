@@ -281,6 +281,32 @@ func (r *Relay) roomOf(name string) *roomInfo {
 	return ri
 }
 
+// joinRoom resolves room and adds conn to its membership in one critical
+// section under roomsMu (issue #175). roomOf on its own releases roomsMu
+// before returning the *roomInfo, so a plain "roomOf then ri.mu.Lock() and
+// append" — what Join used to do — leaves a window between the two where
+// leaveAllRooms can see a freshly created, still-empty room and delete it
+// out from under the joiner about to become its first member: the same
+// orphaning bug #100 already paid for, on the relay's own membership map
+// this time. Doing the resolve-or-create and the append under one
+// roomsMu.Lock() closes it, and is what makes leaveAllRooms's own re-check
+// under roomsMu actually mean something — membership can now only change
+// under roomsMu, here or there, never in between.
+func (r *Relay) joinRoom(room string, conn Conn) (first bool) {
+	r.roomsMu.Lock()
+	defer r.roomsMu.Unlock()
+	ri, ok := r.rooms[room]
+	if !ok {
+		ri = &roomInfo{}
+		r.rooms[room] = ri
+	}
+	ri.mu.Lock()
+	before := len(ri.members)
+	ri.members = append(ri.members, conn)
+	ri.mu.Unlock()
+	return before == 0
+}
+
 // -- membership -----------------------------------------------------------
 
 // Join puts a connection in a room. False means the join was refused, and
@@ -350,12 +376,7 @@ func (r *Relay) Join(room string, conn Conn) bool {
 	r.publishPolicyChange()
 
 	conn.SetRoom(room)
-	ri := r.roomOf(room)
-	ri.mu.Lock()
-	before := len(ri.members)
-	ri.members = append(ri.members, conn)
-	ri.mu.Unlock()
-	if before == 0 {
+	if r.joinRoom(room, conn) {
 		r.metrics.Rooms.Add(1)
 	}
 
@@ -380,26 +401,35 @@ func removeConn(members []Conn, conn Conn) []Conn {
 
 // leaveAllRooms removes conn from whichever room currently holds it — at
 // most one, by the one-connection-one-room invariant Join enforces — and
-// decrements Rooms exactly when that removal leaves it with no members.
-// Shared by Join's own membership cleanup and Leave, so the gauge
-// transition is computed in exactly one place rather than at every call
-// site that happens to mutate membership. Naturally idempotent: calling
-// this again for a conn already removed from everywhere finds every
-// room's length unchanged and decrements nothing, which matters because
-// Leave itself can run twice for one connection (bindAgent's forced
-// eviction, then the session's own defer on the same conn).
+// decrements Rooms exactly when that removal leaves it with no members. A
+// room emptied this way is also dropped from r.rooms outright (issue #175):
+// unlike the registry side (see leases.go's SweepAll/reapRoomLocked), the
+// relay has an authoritative, cheap membership count right here, so there
+// is no reason to wait for a lazy sweep. Shared by Join's own membership
+// cleanup and Leave, so the gauge transition and the delete are computed in
+// exactly one place rather than at every call site that happens to mutate
+// membership. Naturally idempotent: calling this again for a conn already
+// removed from everywhere finds every room's length unchanged and deletes
+// nothing, which matters because Leave itself can run twice for one
+// connection (bindAgent's forced eviction, then the session's own defer on
+// the same conn).
 func (r *Relay) leaveAllRooms(conn Conn) {
-	// RLock held for the whole walk, not snapshotted-then-released: a
-	// snapshot here would reopen exactly the gap ReleaseEverywhere's own
-	// doc comment exists to close (see leases.go) — a room created by a
-	// concurrent Join after the snapshot but before this returns would
-	// never be checked, so a conn that Join just moved out of one room
-	// and into a brand new one could stay counted as a member of the old
-	// room's gauge forever. Blocking concurrent room *creation* for the
-	// duration is the same trade that fix already made and pays for.
-	r.roomsMu.RLock()
-	defer r.roomsMu.RUnlock()
-	for _, ri := range r.rooms {
+	// Lock (not RLock) held for the whole walk: deleting from r.rooms
+	// needs the write lock anyway, and taking it up front is what makes
+	// "re-check len(ri.members)==0 while holding the lock" actually mean
+	// something. That re-check is only trustworthy because joinRoom does
+	// its resolve-or-create *and* its append to ri.members inside one
+	// roomsMu.Lock() critical section too — membership can only ever
+	// change under roomsMu, so nothing can hand a caller a membership slot
+	// in a room this walk is deleting out from under it. (Before #175,
+	// Join resolved via roomOf, which releases roomsMu, and appended
+	// after — leaving exactly that window open; see joinRoom's doc
+	// comment.) Blocking concurrent room *creation* and *lookup* for the
+	// duration is the same trade leaveAllRooms already made; deletion
+	// just needs it to cover lookups too.
+	r.roomsMu.Lock()
+	defer r.roomsMu.Unlock()
+	for name, ri := range r.rooms {
 		ri.mu.Lock()
 		before := len(ri.members)
 		ri.members = removeConn(ri.members, conn)
@@ -407,6 +437,12 @@ func (r *Relay) leaveAllRooms(conn Conn) {
 		ri.mu.Unlock()
 		if before > 0 && after == 0 {
 			r.metrics.Rooms.Add(-1)
+		}
+		// Re-checking after==0 here, still holding roomsMu, is the whole
+		// point: len(ri.members) can only change under roomsMu now (either
+		// here or in roomOf's create path), so this read is never stale.
+		if after == 0 {
+			delete(r.rooms, name)
 		}
 	}
 }
