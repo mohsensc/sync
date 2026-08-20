@@ -420,6 +420,22 @@ export function attachGhostAuthors(cfg = {}) {
     }
   }
 
+  // Per-agent counterpart to dispose(): office.html's despawnLive calls
+  // this for one agent instead of waiting for the whole room to tear
+  // down. poll() only ever visits ids still in world.agents, so a
+  // despawned agent's state/lastEncounterAt entries would otherwise sit
+  // here forever with tick() still writing sway transforms to them every
+  // ambient frame — same bug gitsignals.js's forget() fixed for desk-fx.
+  // Disposes immediately rather than routing through beginRemove's fade:
+  // the agent it was parked beside is already gone, so there's nothing
+  // left to fade next to.
+  function forget(agent) {
+    const s = states.get(agent.id)
+    if (s) disposeState(s)
+    states.delete(agent.id)
+    lastEncounterAt.delete(agent.id)
+  }
+
   // -- per-frame: fade + idle sway -----------------------------------------
   // A ghost's fade and sway are slow, ambient motion — not something
   // that needs a full 60Hz step (see frame-throttle.js). No mixer update
@@ -470,6 +486,7 @@ export function attachGhostAuthors(cfg = {}) {
     get mode() { return mode },
     poll,
     tick,
+    forget,
     dispose() {
       if (timer) clearInterval(timer)
       if (typeof removeEventListener === 'function') removeEventListener('keydown', onKeydown)
