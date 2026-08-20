@@ -1,7 +1,5 @@
 import type { CharacterRegistry } from './characters.js'
 
-const DIMMED = 0.25
-
 interface PresenceMessage {
   type: string
   agent: string
@@ -24,40 +22,51 @@ function isPresence(m: unknown): m is PresenceMessage {
   )
 }
 
-export class Subscription {
-  #hovered: string | null = null
-  #contested = new Set<string>()
+// The join reply (relaysrv/relay.go's sendLeaseSnapshot) is type "leases",
+// carrying recent activity as a bare `presence` array — entries with the
+// same agent/human/verb/region fields a live presence frame has, just
+// without the envelope. Mirrors live.js's isLeasesSnapshot: without this, a
+// room that's already busy renders empty until the next live event.
+interface LeasesMessage {
+  type: string
+  presence: unknown[]
+}
 
-  constructor(private registry: CharacterRegistry, private myHuman: string) {}
+function isLeasesSnapshot(m: unknown): m is LeasesMessage {
+  if (typeof m !== 'object' || m === null) return false
+  const x = m as Record<string, unknown>
+  return x.type === 'leases' && Array.isArray(x.presence)
+}
+
+export class Subscription {
+  constructor(private registry: CharacterRegistry) {}
 
   /** Malformed input is dropped, never fatal — the world must survive a bad
    *  frame from the relay without going blank. */
   onMessage(msg: unknown, now: number): void {
-    if (!isPresence(msg)) return
+    if (isPresence(msg)) {
+      this.#applyPresence(msg, now)
+      return
+    }
+    if (isLeasesSnapshot(msg)) {
+      for (const entry of msg.presence) {
+        const p = { type: 'presence', ...(entry as object) }
+        if (isPresence(p)) this.#applyPresence(p, now)
+      }
+    }
+  }
+
+  #applyPresence(msg: PresenceMessage, now: number): void {
     this.registry.upsert(msg.agent, msg.human, msg.verb, msg.region.path, now)
-    if ((msg.rung ?? 0) >= 3) this.#contested.add(msg.agent)
-    else this.#contested.delete(msg.agent)
   }
 
-  setHover(human: string | null): void {
-    this.#hovered = human
-  }
-
-  /** With twenty-plus characters on screen, the world is beautiful but busy.
-   *  Dimming everyone else is what makes your own agents findable. */
-  emphasis(agent: string): number {
-    if (this.#hovered === null) return 1
-    const c = this.registry.all().find((x) => x.agent === agent)
-    if (!c) return 1
-    return c.human === this.#hovered ? 1 : DIMMED
-  }
-
-  /** Who to hover when nobody has been picked yet. */
-  mine(): string[] {
-    return this.registry.byHuman(this.myHuman).map((c) => c.agent)
-  }
-
-  contested(): string[] {
-    return [...this.#contested]
+  // This page has no pointer picking on the capsule viewer (that's
+  // office/*.js's interact.js, a different scene) so there is nothing here
+  // to ever call anything but this default — emphasis used to carry a
+  // hover/contest system with no caller anywhere in src/, which is exactly
+  // the dead surface the no-dead-code rule means. Deleted rather than
+  // wired up: there's no trivial hook point to wire it to.
+  emphasis(_agent: string): number {
+    return 1
   }
 }
