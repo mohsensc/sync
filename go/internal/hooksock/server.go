@@ -18,6 +18,7 @@ package hooksock
 
 import (
 	"bufio"
+	"fmt"
 	"net"
 	"os"
 	"sync"
@@ -62,8 +63,26 @@ func (s *Server) OnRequest(h RequestHandler) { s.respond = h }
 
 // Start binds the socket and begins accepting in a background goroutine. A
 // stale socket file from a crashed daemon must never prevent restart, same
-// as SocketServer::start.
+// as SocketServer::start — but a live one must never be stolen out from
+// under a running daemon, so a second presenced against the same socket
+// path shares a journal/snapshot/policy cache with the first (see
+// siblingPath in cmd/presenced/main.go) and hooks start getting answered by
+// whichever daemon happens to win the race. So: probe first. Something
+// answers the connect, this path is live, and Start fails instead of
+// unlinking it. Nothing answers, the file (if any) is a stale leftover from
+// a crash and is safe to remove before binding.
+//
+// This narrows the race, it doesn't close it: two cold starts probing the
+// same stale path at the same instant can both see "nothing answers" and
+// both proceed to ListenUnix, where the OS's own bind semantics (one
+// listener per path) settle it — the loser gets a bind error, not a stolen
+// socket. What this guards against is the case that bind alone can't catch:
+// a *live* listener's socket file, unlinked out from under it by whoever
+// probes and finds the stale-looking gap.
 func (s *Server) Start() error {
+	if probeListening(s.path) {
+		return fmt.Errorf("hooksock: already running at %s", s.path)
+	}
 	_ = os.Remove(s.path)
 
 	addr, err := net.ResolveUnixAddr("unix", s.path)
@@ -74,12 +93,31 @@ func (s *Server) Start() error {
 	if err != nil {
 		return err
 	}
+	// net.ListenUnix creates the file at 0777&^umask; docs/threat-model.md
+	// treats filesystem permission as the hook<->daemon boundary, so a
+	// world-writable socket defeats that without this.
+	if err := os.Chmod(s.path, 0o600); err != nil {
+		_ = ln.Close() // unlinks s.path itself; nothing else to clean up
+		return err
+	}
 	s.mu.Lock()
 	s.ln = ln
 	s.mu.Unlock()
 
 	go s.acceptLoop(ln)
 	return nil
+}
+
+// probeListening reports whether something is already accepting
+// connections at path. A refused or otherwise failed dial means no live
+// listener — the file, if present, is stale.
+func probeListening(path string) bool {
+	conn, err := net.DialTimeout("unix", path, 200*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 func (s *Server) acceptLoop(ln *net.UnixListener) {
@@ -137,17 +175,24 @@ func (s *Server) serveLine(conn *net.UnixConn, line []byte) {
 	_, _ = conn.Write(reply)
 }
 
-// Stop closes the listener and removes the socket file. Idempotent.
+// Stop closes the listener. Idempotent. Only touches the listener if this
+// Server actually bound it — Start failing with "already running" leaves
+// s.ln nil, and a Stop on that half-started Server must not tear down the
+// socket the live daemon it found is using. No explicit os.Remove here:
+// UnixListener.Close unlinks its own path, so removing it again is not just
+// redundant, it's the exact bug this fix exists for — a stray Remove after
+// Close races a second daemon that already bound the just-freed path out
+// from under it.
 func (s *Server) Stop() {
 	s.mu.Lock()
 	ln := s.ln
 	s.ln = nil
 	s.mu.Unlock()
 
-	if ln != nil {
-		_ = ln.Close()
+	if ln == nil {
+		return
 	}
-	_ = os.Remove(s.path)
+	_ = ln.Close()
 }
 
 // Addr is the path this server is listening on, or empty before Start.

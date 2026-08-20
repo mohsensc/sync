@@ -3,7 +3,9 @@ package hooksock
 import (
 	"bufio"
 	"net"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -123,4 +125,123 @@ func TestNoAnswerMeansNoReply(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected EOF or timeout, got nil error")
 	}
+}
+
+// TestStartWhenLive is #88: a second Start() against a path a live server
+// is already listening on must fail instead of unlinking the socket out
+// from under it.
+func TestStartWhenLive(t *testing.T) {
+	p := sockPath(t)
+
+	first := New(p)
+	if err := first.Start(); err != nil {
+		t.Fatalf("first Start: %v", err)
+	}
+	defer first.Stop()
+
+	second := New(p)
+	err := second.Start()
+	if err == nil {
+		second.Stop()
+		t.Fatal("second Start succeeded, expected an already-running error")
+	}
+	if !strings.Contains(err.Error(), "already running") || !strings.Contains(err.Error(), p) {
+		t.Fatalf("error = %q, want it to say already running and name %q", err, p)
+	}
+
+	// The first server must still be reachable — the second Start must not
+	// have unlinked its socket.
+	conn, dialErr := net.Dial("unix", p)
+	if dialErr != nil {
+		t.Fatalf("first server unreachable after a stolen Start attempt: %v", dialErr)
+	}
+	conn.Close()
+}
+
+// TestStartOnStaleSocketSucceeds is the other half: a socket file left
+// behind by a crashed daemon (nothing listening) must not block a fresh
+// Start, same as before this fix.
+func TestStartOnStaleSocketSucceeds(t *testing.T) {
+	p := sockPath(t)
+
+	// Create a stale socket file the way a crash leaves one: bind, then
+	// close without unlinking.
+	addr, err := net.ResolveUnixAddr("unix", p)
+	if err != nil {
+		t.Fatalf("ResolveUnixAddr: %v", err)
+	}
+	ln, err := net.ListenUnix("unix", addr)
+	if err != nil {
+		t.Fatalf("ListenUnix: %v", err)
+	}
+	// UnixListener unlinks its own path on Close by default — turn that off
+	// so Close() leaves exactly what a crash leaves: a socket file with
+	// nothing behind it.
+	ln.SetUnlinkOnClose(false)
+	if err := ln.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := os.Stat(p); err != nil {
+		t.Fatalf("expected the stale socket file to still exist: %v", err)
+	}
+
+	s := New(p)
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start on stale socket: %v", err)
+	}
+	defer s.Stop()
+
+	conn, err := net.Dial("unix", p)
+	if err != nil {
+		t.Fatalf("Dial after Start on stale socket: %v", err)
+	}
+	conn.Close()
+}
+
+// TestStartSetsSocketMode is the other half of #88: docs/threat-model.md
+// treats filesystem permission as the hook<->daemon boundary, which only
+// holds if the socket isn't left at ListenUnix's default 0777&^umask.
+func TestStartSetsSocketMode(t *testing.T) {
+	p := sockPath(t)
+	s := New(p)
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer s.Stop()
+
+	fi, err := os.Stat(p)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if mode := fi.Mode().Perm(); mode != 0o600 {
+		t.Fatalf("socket mode = %o, want 0600", mode)
+	}
+}
+
+// TestStopAfterLoss makes sure a Server that lost
+// the race in Start (found a live listener, errored out) doesn't remove
+// that listener's socket when Stop is called on it anyway — a caller that
+// treats "New, Start, defer Stop" as one unconditional sequence must not be
+// able to take down someone else's daemon this way.
+func TestStopAfterLoss(t *testing.T) {
+	p := sockPath(t)
+
+	live := New(p)
+	if err := live.Start(); err != nil {
+		t.Fatalf("live Start: %v", err)
+	}
+	defer live.Stop()
+
+	loser := New(p)
+	if err := loser.Start(); err == nil {
+		loser.Stop()
+		t.Fatal("loser Start succeeded, expected an already-running error")
+	}
+	loser.Stop() // must be a no-op: loser never bound p
+
+	conn, err := net.Dial("unix", p)
+	if err != nil {
+		t.Fatalf("live server's socket gone after loser.Stop(): %v", err)
+	}
+	conn.Close()
 }
