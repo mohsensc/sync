@@ -787,13 +787,22 @@ func (c *Client) applyLease(e wire.LeaseFrame) {
 			delete(c.believed, key)
 		}
 		c.believedMu.Unlock()
-		if e.State == "handover" && e.Agent == c.cfg.Agent {
-			// It was ours. Remember who has it now — this is the only
-			// frame that ever explains why a region stopped being this
-			// agent's, and the agent itself is not reading the socket;
-			// its hook is, on its next edit.
+		if e.State == "handover" {
+			// Record every handover in the room, whoever it was taken
+			// from, and let the read side decide whose it was.
+			//
+			// This used to be gated on e.Agent == c.cfg.Agent — the
+			// daemon's own relay identity, presenced@host. But a real
+			// claim is filed under the hook session's own id (mcptools'
+			// agent id), and the relay broadcasts departures to the whole
+			// room, so the gate almost never matched and the note was
+			// silently skipped for exactly the leases that have one. A
+			// session's region would vanish with no explanation on its
+			// next edit. See Cache.HandoverNoteFor for the scoping that
+			// moved to the read.
 			c.leases.NoteHandover(e.Region.Path, leases.HandoverNote{
-				To: e.To, ToHuman: e.ToHuman, ToPriority: e.ToPriority, AtMs: nowMs(),
+				From: e.Agent, To: e.To, ToHuman: e.ToHuman,
+				ToPriority: e.ToPriority, AtMs: nowMs(),
 			})
 		}
 		return

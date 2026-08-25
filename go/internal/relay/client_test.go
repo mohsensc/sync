@@ -469,13 +469,16 @@ func TestDispatchLeaseHandoverOfOwnRegionRecordsLostNote(t *testing.T) {
 	if _, _, ok := lc.Conflict("a.py", []string{"someone-else"}, 0); ok {
 		t.Fatal("the erased lease must be gone")
 	}
-	note, ok := lc.HandoverNoteFor("a.py", 0, leases.HandoverNoteMs)
+	note, ok := lc.HandoverNoteFor("a.py", []string{"me"}, 0, leases.HandoverNoteMs)
 	if !ok || note.To != "other" || note.ToHuman != "sara" {
 		t.Fatalf("got %+v, ok=%v", note, ok)
 	}
 }
 
-func TestDispatchLeaseHandoverOfSomeoneElsesRegionRecordsNoNote(t *testing.T) {
+// A handover of a region this agent never held is still recorded — the
+// read side is what scopes it (see leases.Cache.HandoverNoteFor). What must
+// not happen is this agent being told it lost the region.
+func TestDispatchLeaseHandoverOfSomeoneElsesRegionIsNotReportedAsMine(t *testing.T) {
 	lc := leases.New()
 	c := New(Config{URL: "ws://x", Room: "r", Agent: "me"}, lc)
 
@@ -487,8 +490,12 @@ func TestDispatchLeaseHandoverOfSomeoneElsesRegionRecordsNoNote(t *testing.T) {
 	if err := c.dispatch(frame); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := lc.HandoverNoteFor("a.py", 0, leases.HandoverNoteMs); ok {
-		t.Fatal("a handover of a region this agent never held must not record a lost note")
+	if _, ok := lc.HandoverNoteFor("a.py", []string{"me"}, 0, leases.HandoverNoteMs); ok {
+		t.Fatal("a handover of a region this agent never held must not be reported as mine")
+	}
+	// It is recorded, though — the session that did hold it gets its note.
+	if _, ok := lc.HandoverNoteFor("a.py", []string{"other-agent"}, 0, leases.HandoverNoteMs); !ok {
+		t.Fatal("the note must reach the agent it was actually taken from")
 	}
 }
 

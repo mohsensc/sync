@@ -58,6 +58,10 @@ type Lease struct {
 // HandoverNote is a region this agent used to hold and no longer does, and
 // who has it now — lease_cache.hpp's HandoverNote struct.
 type HandoverNote struct {
+	// From is the agent the region was taken from. The cache is keyed on
+	// path alone (see NoteHandover), so this is what stops one session
+	// being told it lost a region another session was holding.
+	From       string
 	To         string
 	ToHuman    string
 	ToPriority string
@@ -371,9 +375,22 @@ func (c *Cache) NoteHandover(path string, note HandoverNote) {
 	c.lost[path] = note
 }
 
-// HandoverNoteFor is a handover of this file recorded within withinMs, if
-// any.
-func (c *Cache) HandoverNoteFor(path string, nowMs, withinMs int64) (HandoverNote, bool) {
+// HandoverNoteFor is a handover of this file recorded within withinMs and
+// taken from one of myAgents, if any.
+//
+// The myAgents scoping lives here rather than at the write, which is where
+// it used to be and where it was wrong. The writer only recorded a note
+// when the departing agent was the daemon's own relay identity
+// (presenced@host) — but every real claim is filed under a hook session's
+// own id, via the MCP surface, so the branch effectively never fired and
+// the whole mechanism was dark for live traffic. Recording unconditionally
+// and scoping on read is what makes a session's own losses reach it, and
+// this map is keyed on path alone, so without the check a session would
+// start being told it lost regions its neighbour was holding.
+//
+// Same myAgents shape Conflict/OwnHandover/IsMine already use — the daemon
+// identity and the requesting session's id.
+func (c *Cache) HandoverNoteFor(path string, myAgents []string, nowMs, withinMs int64) (HandoverNote, bool) {
 	if path == "" {
 		return HandoverNote{}, false
 	}
@@ -381,6 +398,9 @@ func (c *Cache) HandoverNoteFor(path string, nowMs, withinMs int64) (HandoverNot
 	defer c.mu.RUnlock()
 	n, ok := c.lost[path]
 	if !ok || nowMs-n.AtMs > withinMs {
+		return HandoverNote{}, false
+	}
+	if !IsMine(n.From, myAgents) {
 		return HandoverNote{}, false
 	}
 	return n, true
