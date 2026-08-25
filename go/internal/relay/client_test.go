@@ -615,3 +615,55 @@ func TestStalledRelayDoesNotWedgeTheClient(t *testing.T) {
 		t.Fatal("Run did not return after cancel — a pump is still parked")
 	}
 }
+
+// backoff was reset the instant a dial succeeded, before the connection
+// had proved anything. A relay that completes the handshake and then ends
+// the session immediately every time — join_refused, a mid-restart drain,
+// any policy path that closes after accept — therefore recomputed
+// nextBackoff(0) on every failure, and nextBackoff returns the floor for a
+// zero input. The result was a permanent retry spin at BackoffMin instead
+// of escalation toward BackoffMax.
+func TestHandshakeThenRejectStillEscalatesBackoff(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		up := websocket.Upgrader{}
+		ws, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		attempts.Add(1)
+		// Accept, then end the session at once — the shape that spun.
+		ws.Close()
+	}))
+	defer srv.Close()
+
+	c := New(Config{
+		URL:        "ws" + strings.TrimPrefix(srv.URL, "http"),
+		Room:       "r1",
+		Agent:      "a1",
+		BackoffMin: 20 * time.Millisecond,
+		BackoffMax: 400 * time.Millisecond,
+	}, leases.New())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); c.Run(ctx) }()
+
+	// Long enough that a floor-pinned client would rack up far more
+	// attempts than an escalating one. At a 20ms floor, 2s is ~100
+	// attempts; escalating 20/40/80/160/320/400... is under 15.
+	time.Sleep(2 * time.Second)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after cancel")
+	}
+
+	if got := attempts.Load(); got > 25 {
+		t.Fatalf("%d connect attempts in 2s — backoff is pinned at the floor instead of escalating", got)
+	}
+	if attempts.Load() == 0 {
+		t.Fatal("the test relay was never dialled")
+	}
+}

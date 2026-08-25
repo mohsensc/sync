@@ -316,6 +316,7 @@ func (c *Client) Run(ctx context.Context) {
 		}
 
 		c.state.Store(int32(StateOpen))
+		connectedAt := time.Now()
 		if c.metrics != nil {
 			c.metrics.DaemonConnected.Set(1)
 		}
@@ -328,7 +329,6 @@ func (c *Client) Run(ctx context.Context) {
 			log.Printf("relay: connected to %s", c.cfg.URL)
 			everConnected = true
 		}
-		backoff = 0
 		err = c.runConnection(ctx, conn)
 		c.drops.Add(1)
 		reason := err.Error()
@@ -339,6 +339,21 @@ func (c *Client) Run(ctx context.Context) {
 		}
 		downSince = time.Now()
 
+		// Reset the backoff only for a connection that actually lasted.
+		// Resetting on a successful *dial* meant a relay that completes the
+		// handshake and then ends the session every time — join_refused, a
+		// mid-restart drain, any policy path that closes after accept
+		// instead of refusing before it — was hammered at BackoffMin
+		// forever, since every failure computed nextBackoff(0) and
+		// nextBackoff returns the floor for a zero input. The doubling its
+		// own comment describes never happened.
+		//
+		// A duration, not "did we receive a frame": join_refused is itself
+		// a received frame, so that heuristic would reset the backoff on
+		// exactly the case this fixes.
+		if time.Since(connectedAt) >= minDurableConnection {
+			backoff = 0
+		}
 		backoff = c.nextBackoff(backoff)
 		log.Printf("relay: connection lost: %s — backing off %v before retrying", reason, backoff)
 		if !c.sleepBackoff(ctx, backoff) {
@@ -383,6 +398,12 @@ func (c *Client) buildTLSConfig() (*tls.Config, error) {
 
 // nextBackoff mirrors RelayClient::drop's doubling: min on the first
 // failure, doubled and capped at max after that.
+// minDurableConnection is how long a connection has to last before it
+// counts as "this relay works", clearing the accrued backoff. Anything
+// shorter is treated as a failed attempt that happened to get past the
+// handshake.
+const minDurableConnection = time.Second
+
 func (c *Client) nextBackoff(cur time.Duration) time.Duration {
 	if cur == 0 {
 		return c.cfg.BackoffMin
