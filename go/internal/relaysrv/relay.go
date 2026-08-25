@@ -50,6 +50,11 @@ func (r Refusal) frame(room string) Frame {
 
 type identityRecord struct {
 	agent, human string
+	// superseded is set when another connection has reclaimed this agent
+	// id and this one has been evicted for it. The record stays in the map
+	// so the collision check can still see it — see Leave for what the
+	// flag changes.
+	superseded bool
 }
 
 type principalRecord struct {
@@ -325,12 +330,15 @@ func (r *Relay) Join(room string, conn Conn) bool {
 	}
 
 	r.identityMu.Lock()
-	declared := identityRecord{conn.Agent(), conn.Human()}
+	declared := identityRecord{agent: conn.Agent(), human: conn.Human()}
 	latched, fresh := r.identity[conn]
 	isFresh := !fresh
 	if isFresh {
 		r.identity[conn] = declared
-	} else if declared != latched {
+	} else if declared.agent != latched.agent || declared.human != latched.human {
+		// Field-wise, not a struct compare: latched may carry the
+		// superseded flag, which says nothing about whether this
+		// connection is trying to re-identify.
 		conn.SetAgent(latched.agent)
 		conn.SetHuman(latched.human)
 		r.identityMu.Unlock()
@@ -555,6 +563,16 @@ func (r *Relay) bindAgent(conn Conn) *Refusal {
 	// above, and an authenticated `other` is refused outright — so there
 	// is nothing privileged left for it to do as this agent id.
 	for _, other := range toEvict {
+		// Mark before closing. The id belongs to the claimant from here
+		// on, so when this connection's own goroutine eventually notices
+		// the closed socket, its Leave must not reach into the registry
+		// and release claims that are now somebody else's — see Leave.
+		r.identityMu.Lock()
+		if rec, ok := r.identity[other]; ok {
+			rec.superseded = true
+			r.identity[other] = rec
+		}
+		r.identityMu.Unlock()
 		other.Evict("agent id " + agent + " reclaimed by another principal")
 	}
 
@@ -685,11 +703,24 @@ func (r *Relay) Leave(conn Conn) {
 	}
 	r.forgetDaemonBaseline(conn)
 
-	if hadIdentity && room != "" {
+	if hadIdentity && room != "" && !identity.superseded {
 		// Session end, not an abort: the connection is gone, so the age it
 		// accrued shouldn't outlive it either (issue #163).
 		r.registry.ReleaseAllSessionEnd(room, identity.agent, nil)
 	}
+	// A superseded connection skips that call entirely, and this is the
+	// half of deferred eviction that is easy to miss. ReleaseAllSessionEnd
+	// is scoped by (room, agent id) and nothing else, so by the time an
+	// evicted connection's own goroutine gets here, those are the
+	// claimant's claims under that id — not this connection's. Running it
+	// would delete a live agent's leases and, through agentSessionEnded
+	// (which isn't room-scoped at all), reset its wait-die age as though
+	// it had just connected, changing who wins an unrelated contention in
+	// another room.
+	//
+	// Whatever this connection still held lapses through ordinary lazy
+	// expiry instead. Releasing it synchronously back in bindAgent is what
+	// the cross-goroutine race was in the first place.
 	conn.SetRoom("")
 }
 

@@ -108,3 +108,67 @@ func TestAuthenticatedHolderIsRefusedNotEvicted(t *testing.T) {
 		t.Fatalf("an authenticated holder must never be evicted, got %v", first.evictions)
 	}
 }
+
+// The half of deferred eviction that is easy to miss. Calling Leave from
+// bindAgent used to release the victim's registry state *before* the
+// claimant could act under the reclaimed id. Deferring Leave removed that
+// ordering: the victim's own goroutine runs it at an unbounded later
+// moment, by which point ReleaseAllSessionEnd — scoped by (room, agent id)
+// and nothing else — would be deleting the claimant's leases, not the
+// victim's.
+func TestSupersededLeaveDoesNotReleaseTheClaimantsWork(t *testing.T) {
+	clock := NewVirtualClock(1000.0)
+	rel := NewRelay(clock, criticalRoster(), metrics.New())
+
+	victim := &authConn{agent: "x", human: "V"}
+	if !rel.Join("room1", victim) {
+		t.Fatal("victim should join")
+	}
+
+	// alice reclaims the id and gets to work in the same room.
+	claimant := &authConn{agent: "x", human: "A", principal: "alice", token: "s3cret"}
+	if !rel.Join("room1", claimant) {
+		t.Fatal("claimant should join")
+	}
+	rel.Handle(claimant, claimFrame("src/a.go"))
+	age := rel.registry.AgeOf("x")
+	if rel.registry.HolderOf("room1", regionOf("src/a.go"), nil) == nil {
+		t.Fatal("the claimant should hold its region")
+	}
+
+	// Only now does the evicted connection's goroutine notice the socket.
+	clock.Advance(5)
+	rel.Leave(victim)
+
+	held := rel.registry.HolderOf("room1", regionOf("src/a.go"), nil)
+	if held == nil {
+		t.Fatal("the victim's late Leave deleted the claimant's lease")
+	}
+	if held.Agent != "x" {
+		t.Fatalf("lease changed hands, held by %q", held.Agent)
+	}
+	// agentSessionEnded is not room-scoped, so a wrongly-run release would
+	// also reset the claimant's wait-die age.
+	if got := rel.registry.AgeOf("x"); got != age {
+		t.Fatalf("the claimant's wait-die age was reset: %v -> %v", age, got)
+	}
+}
+
+// A connection that was never superseded still unwinds everything on its
+// own Leave — the flag must not turn every Leave into a no-op.
+func TestOrdinaryLeaveStillReleasesItsClaims(t *testing.T) {
+	clock := NewVirtualClock(1000.0)
+	rel := NewRelay(clock, criticalRoster(), metrics.New())
+
+	conn := &authConn{agent: "solo", human: "S"}
+	rel.Join("room1", conn)
+	rel.Handle(conn, claimFrame("src/a.go"))
+	if rel.registry.HolderOf("room1", regionOf("src/a.go"), nil) == nil {
+		t.Fatal("should hold its region")
+	}
+
+	rel.Leave(conn)
+	if h := rel.registry.HolderOf("room1", regionOf("src/a.go"), nil); h != nil {
+		t.Fatalf("an ordinary session end should release its claims, still held by %+v", h)
+	}
+}
