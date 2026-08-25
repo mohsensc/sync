@@ -7,6 +7,8 @@ interface PresenceMessage {
   verb: string
   region: { path: string; symbol: string | null }
   rung?: number
+  /** Relay clock, in seconds, on every presence frame it sends. */
+  ts?: number
 }
 
 function isPresence(m: unknown): m is PresenceMessage {
@@ -57,7 +59,25 @@ export class Subscription {
   }
 
   #applyPresence(msg: PresenceMessage, now: number): void {
-    this.registry.upsert(msg.agent, msg.human, msg.verb, msg.region.path, now)
+    // Stamp with the relay's own clock, not local arrival.
+    //
+    // The entries replayed inside the join-time leases snapshot are not
+    // fresh — they are whatever activity is still inside the relay's
+    // presence TTL when a viewer joins, so up to ~30s old already. Stamping
+    // those with `now` handed them a second, full TTL on top of what they
+    // had already spent, and a character that went quiet just before a
+    // second viewer opened the room stayed on screen for up to twice
+    // PRESENCE_TTL_MS. CharacterRegistry.expire cannot correct for it: it
+    // only ever compares against the same client clock.
+    //
+    // Clamped to `now` rather than trusted outright — a relay clock running
+    // ahead of the browser's must not make an entry look fresher than the
+    // moment it actually arrived. Same fix office/live.js's onPresence
+    // already carries; this parallel implementation never got it.
+    const lastSeen = typeof msg.ts === 'number' && Number.isFinite(msg.ts)
+      ? Math.min(now, msg.ts * 1000)
+      : now
+    this.registry.upsert(msg.agent, msg.human, msg.verb, msg.region.path, lastSeen)
   }
 
   // This page has no pointer picking on the capsule viewer (that's
