@@ -70,6 +70,13 @@ type Config struct {
 	PingInterval time.Duration
 	IdleTimeout  time.Duration
 
+	// WriteTimeout bounds a single outbound write. Without one, a relay
+	// that keeps the socket open but stops reading parks writePump inside
+	// WriteMessage forever once the kernel send buffer fills — see
+	// writePump for why that wedges the whole client rather than just one
+	// frame.
+	WriteTimeout time.Duration
+
 	// Outbound queue capacity, in messages. Bounded and drop-oldest — see
 	// internal/outbound.
 	OutboundCapacity int
@@ -114,6 +121,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.IdleTimeout == 0 {
 		c.IdleTimeout = 90 * time.Second
+	}
+	if c.WriteTimeout == 0 {
+		c.WriteTimeout = 10 * time.Second
 	}
 	if c.OutboundCapacity == 0 {
 		c.OutboundCapacity = 1000
@@ -507,6 +517,27 @@ func (c *Client) readPump(conn *websocket.Conn) error {
 // writePump is the connection's only writer: gorilla permits at most one
 // concurrent WriteMessage caller, so the join, every ping and every queued
 // frame all flow through this one goroutine.
+// writePump sets a write deadline before every write. Without one, a relay
+// that keeps the socket open but stops reading — an overloaded relay, a
+// half-open connection after a NAT or load-balancer hiccup, a machine
+// waking from sleep — parks this goroutine inside WriteMessage for good
+// once the kernel send buffer fills.
+//
+// That wedges the entire client, not just one frame. readPump's own
+// deadline fires, so it returns and closes `stop`; the ctx watcher then
+// takes its `<-stop` branch and returns without closing the connection;
+// and the `defer conn.Close()` that would have unblocked this write only
+// runs after wg.Wait(), which is waiting on this goroutine. The socket and
+// this goroutine leak for the life of the process, Run never reaches its
+// backoff path, and because state and DaemonConnected only flip after
+// runConnection returns, the daemon goes on reporting StateOpen and
+// connected=1 forever — squarely against this package's promise that every
+// failure ends at backoff.
+//
+// The join write in runConnection is deliberately left without one: it
+// runs before either pump exists, so a block there cannot deadlock against
+// wg.Wait, and the dial's own handshake timeout already bounds getting
+// that far.
 func (c *Client) writePump(conn *websocket.Conn, stop <-chan struct{}) error {
 	pingT := time.NewTicker(c.cfg.PingInterval)
 	defer pingT.Stop()
@@ -522,6 +553,7 @@ func (c *Client) writePump(conn *websocket.Conn, stop <-chan struct{}) error {
 		case <-stop:
 			return nil
 		case <-pingT.C:
+			conn.SetWriteDeadline(time.Now().Add(c.cfg.WriteTimeout))
 			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return err
 			}
@@ -546,6 +578,7 @@ func (c *Client) writePump(conn *websocket.Conn, stop <-chan struct{}) error {
 				if !ok {
 					break // drop-oldest can shrink the queue out from under us
 				}
+				conn.SetWriteDeadline(time.Now().Add(c.cfg.WriteTimeout))
 				if err := conn.WriteMessage(websocket.TextMessage, msg); err != nil {
 					return err
 				}

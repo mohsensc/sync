@@ -538,3 +538,80 @@ func TestDispatchPolicyFrameWrongLengthIsIgnored(t *testing.T) {
 		t.Fatal("a malformed policy frame must leave the floor untouched")
 	}
 }
+
+// A relay that keeps the socket open but stops reading used to park
+// writePump inside WriteMessage forever: readPump's deadline fired and
+// closed `stop`, the ctx watcher took its <-stop branch without closing
+// the connection, and the deferred conn.Close that would have unblocked
+// the write was itself waiting on wg.Wait, which was waiting on writePump.
+// The client leaked a goroutine and a socket, never reached backoff, and
+// went on reporting StateOpen forever.
+func TestStalledRelayDoesNotWedgeTheClient(t *testing.T) {
+	// A server that completes the handshake, reads the join, then stops
+	// reading entirely while holding the connection open.
+	stalled := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		up := websocket.Upgrader{}
+		ws, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		// Read the join, then never read again and never close.
+		_, _, _ = ws.ReadMessage()
+		close(stalled)
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	c := New(Config{
+		URL:          "ws" + strings.TrimPrefix(srv.URL, "http"),
+		Room:         "r1",
+		Agent:        "a1",
+		PingInterval: 20 * time.Millisecond,
+		IdleTimeout:  200 * time.Millisecond,
+		WriteTimeout: 50 * time.Millisecond,
+		BackoffMin:       10 * time.Millisecond,
+		BackoffMax:       20 * time.Millisecond,
+		OutboundCapacity: 500,
+	}, leases.New())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); c.Run(ctx) }()
+
+	<-stalled
+
+	// Push enough bytes that a write actually blocks. The stall alone is
+	// not enough: WriteMessage only parks once the kernel send buffer is
+	// full, so a client sending nothing but 20ms pings would drain to
+	// backoff on readPump's deadline without ever exercising this.
+	big := strings.Repeat("x", 256*1024)
+	for i := 0; i < 200; i++ {
+		c.SendText([]byte(big))
+	}
+
+	// The client must notice and fall through to backoff rather than
+	// sitting at StateOpen with a parked writer.
+	deadline := time.After(5 * time.Second)
+	for {
+		if c.State() == StateBackoff {
+			break
+		}
+		select {
+		case <-deadline:
+			// Don't wait on done here: if writePump really is parked, Run
+			// never returns and this would hang until the package timeout
+			// instead of reporting the failure.
+			cancel()
+			t.Fatalf("client never left %v — writePump is wedged", c.State())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after cancel — a pump is still parked")
+	}
+}
