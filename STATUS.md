@@ -89,8 +89,14 @@ under the C++ baseline's own historical numbers, 0 isolation violations.
   sessions.
 - Rung 4 is off unless `AGENT_PRESENCE_RUNG4=1`; token-overlap, not
   embeddings.
-- `ap policy compile` puts `[[path]]` rules in the cache; the daemon (either
-  language, always) has only ever read the blanket table.
+- ~~`ap policy compile` puts `[[path]]` rules in the cache; the daemon (either
+  language, always) has only ever read the blanket table.~~ Fixed and never
+  struck through here (2026-08-25): `decide.Decide` calls
+  `policy.Cache.EffectForPath` on both the ambient and the conflict branch,
+  which is what `EffectForPath` was added for. Covered by decide_test.go's
+  `TestDecideAmbientBranchHonorsPathRule`,
+  `TestDecideConflictBranchHonorsPathRule` and
+  `TestDecideConflictBranchPathRuleDoesNotLeakToUnmatchedPath`.
 - 3D assets don't exist; the office scene is primitives.
 - Relay hosting and persistence are unaddressed — in-process asyncio, state
   in dicts, restart loses the lease table.
