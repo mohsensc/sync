@@ -50,9 +50,11 @@ func TestDeferWithdrawsTheAskItAnswers(t *testing.T) {
 	if held.Waiting != 0 {
 		t.Fatalf("waiting should be back to zero, got %d", held.Waiting)
 	}
-	if held.ExpiresAt <= capped {
-		t.Fatalf("the lease should stop expiring early: expiresAt %v, still at the capped %v",
-			held.ExpiresAt, capped)
+	// The cap is lifted, not pumped: withdrawing an ask must not hand the
+	// holder time it did not earn by heartbeating. See Withdraw.
+	if held.ExpiresAt != capped {
+		t.Fatalf("withdrawing an ask should leave ExpiresAt alone, moved %v -> %v",
+			capped, held.ExpiresAt)
 	}
 }
 
@@ -109,5 +111,42 @@ func TestDeferLeavesAnotherContendersDeadlineAlone(t *testing.T) {
 	}
 	if held.Waiting != 1 {
 		t.Fatalf("waiting should count only the remaining ask, got %d", held.Waiting)
+	}
+}
+
+// Withdraw must not renew. A holder that wedged and stopped heartbeating
+// would otherwise take a fresh TTL every time somebody asked and deferred —
+// and a polite client that opens a brief, sees contention and backs off does
+// exactly that on a loop, renewing a dead agent's lease with every courteous
+// retry.
+func TestDeferDoesNotRenewAWedgedHolder(t *testing.T) {
+	clock := NewVirtualClock(1000.0)
+	reg := NewRegistry(clock, &fakePublisher{}, metrics.New())
+	neg := NewNegotiator(reg)
+
+	scope := Region{Path: "src/a.go"}
+	reg.Acquire("r1", "H", "holder", scope, "work", nil, PriorityNormal, nil)
+	natural := reg.HolderOf("r1", scope, nil).ExpiresAt
+
+	// The holder wedges: no heartbeats from here on. An asker politely
+	// opens a brief and backs off, over and over.
+	for i := 0; i < 5; i++ {
+		clock.Advance(10)
+		neg.Open("r1", "asker", reg.AgeOf("asker"), scope, PriorityNormal, "A", nil)
+		neg.Apply("r1", "asker", scope, "DEFER", "later", nil, PriorityNormal, "A", nil)
+		held := reg.HolderOf("r1", scope, nil)
+		if held == nil {
+			break
+		}
+		if held.ExpiresAt > natural {
+			t.Fatalf("round %d: a wedged holder gained time, %v > %v", i, held.ExpiresAt, natural)
+		}
+	}
+
+	// And it does expire on schedule rather than being kept alive.
+	clock.Advance(LeaseTTLS + 1)
+	reg.SweepAll()
+	if reg.HolderOf("r1", scope, nil) != nil {
+		t.Fatal("the wedged holder's lease should have expired on its own schedule")
 	}
 }
