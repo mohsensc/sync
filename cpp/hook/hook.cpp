@@ -473,13 +473,23 @@ std::string resolve_sock_path(EnvLookup lookup) {
 // one shared empty region, and any message about it said "this file"
 // naming nothing.
 //
+// Grep and Glob spell theirs "path", and verb_for calls them "search".
+// install.sh registers both in the PostToolUse matcher, so they do reach
+// here, and reading only file_path meant every search went out with path
+// "". That costs twice: presence.Touch overwrites the agent's tracked
+// location with the empty string the moment it runs a search, so peers
+// lose its "editing X" while it is still mid-edit elsewhere; and
+// EventFrame drops any event with an empty path, so no search reaches the
+// relay or the room at all.
+//
 // Tool-agnostic rather than a per-tool table: field() is a flat scan with
-// no notion of nesting, so the fallback costs one extra pass only when
-// file_path is absent, and there is no list to keep in sync as tools come
-// and go.
+// no notion of nesting, so each fallback costs one extra pass only when
+// the earlier key is absent, and there is no list to keep in sync as
+// tools come and go.
 std::string path_of(const std::string& hook_json) {
     std::string p = field(hook_json, "file_path");
     if (p.empty()) p = field(hook_json, "notebook_path");
+    if (p.empty()) p = field(hook_json, "path");
     return p;
 }
 
