@@ -95,6 +95,7 @@ type Registry struct {
 	decisions     *prometheus.CounterVec // rung, effect
 	leases        *prometheus.CounterVec // outcome
 	RedundantWork prometheus.Counter
+	AskUnarmed    prometheus.Counter
 
 	// -- availability --------------------------------------------------
 	RelayConnections prometheus.Gauge
@@ -174,6 +175,11 @@ func New() *Registry {
 		"Lease lifecycle events, by outcome.", "outcome")
 	r.RedundantWork = counter("ap_redundant_work_total",
 		"Rung-4 hits: two agents found to be doing the same work in different files.")
+	r.AskUnarmed = counter("ap_asks_unarmed_total",
+		"Asks that did not start the holder's handover deadline because the asker "+
+			"was unauthenticated in a room with an enforcing roster. Climbing means "+
+			"somebody is contending without a token: an agent whose token is missing "+
+			"or wrong, or a peer that shouldn't be in the room.")
 
 	r.RelayConnections = gauge("ap_relay_connections",
 		"Websocket connections the relay currently holds.")

@@ -108,17 +108,38 @@ Concretely, once the relay is reachable from outside one machine:
   `no-token` path) and can submit real `event`, `claim`, `heartbeat` and
   `move` frames at that tier. It cannot outrank a rostered principal, and it
   cannot preempt anyone's lease mid-edit — the wait-die ordering and the
-  no-preemption invariant apply regardless of who's asking. It *can* contend
-  for a region a rostered principal holds, including a CRITICAL one: one
-  `contend` frame starts the fair-share clock (`handoverAt = now +
-  FairShareGraceS`, 900s) on the holder's lease, and heartbeats don't stop
-  it — at the deadline the region is reserved for the anonymous contender
-  and the holder's next acquire is refused. That's not the mid-edit
-  preemption ruled out above; it's the ask-deadline giving 900s notice
-  before the handoff, the same anti-starvation mechanism a legitimate
-  contender gets (`policy-design.md` §5.2). The gap is that it fires the
-  same way for an unauthenticated peer, per region, in parallel from a
-  single frame, and consumes a connection's worth of resources doing it.
+  no-preemption invariant apply regardless of who's asking. It *can* still
+  contend for a region a rostered principal holds: the ask is recorded, the
+  room sees it, and the asker keeps its place in the contender order.
+  **What it can no longer do, as of #167, is arm the ask-deadline.** In a
+  room whose roster is *enforcing* — present and naming at least one usable
+  principal — an unauthenticated ask leaves `handoverAt` alone, so the
+  holder's renewals aren't capped and its lease ends when it ends
+  (`Relay.armsDeadline`, `contendLocked`). Until then one frame from an
+  anonymous peer capped a rostered CRITICAL holder at 900s
+  (`FairShareGraceS`) — or at 90s (`HandoverGraceS`) against a normal-tier
+  holder it happened to outrank on age, which is the sharper version nobody
+  had noticed. Two things this does not change:
+  - A room with **no** roster is untouched. Everyone there is
+    unauthenticated by definition, so gating on authentication would delete
+    the anti-starvation bound (`policy-design.md` §5.2) for exactly the
+    zero-config case it exists to serve. Same for a roster that's present
+    but broken: a `principals.toml` with a typo parses to zero usable
+    principals and is deliberately *not* treated as a gate, because a
+    silently-removed bound is the worst way to find out about a typo.
+  - An unauthenticated ask can still **ride** somebody else's deadline. It
+    stays in the contender order, so when a rostered principal's ask does
+    arm one, the handover still goes to whoever sorts first — which can be
+    the anonymous contender. That's a narrower lever (it costs a second,
+    legitimate contender to open, and it never shortens a lease) and it is
+    left open on purpose: dropping an asker out of the order entirely is a
+    different decision, about who may hold a region at all, not about who
+    may end somebody else's lease. Pinned by
+    `TestUnarmedAskCanStillRideAnAuthenticatedDeadline`.
+
+  `ap_asks_unarmed_total` counts asks refused a deadline this way. Climbing
+  in a room you thought was rostered means an agent's token is missing or
+  wrong — or that somebody is in the room who shouldn't be.
 - It is *not* equivalent to being a teammate with push access to the repo.
   Room membership and roster membership are different gates, and only the
   second one is currently authenticated. **This is still true after #22.**
@@ -220,8 +241,10 @@ This closes the two items #11 filed against transport encryption:
   put itself back at pre-#22 exposure to an on-path attacker, with the one
   difference that the traffic is still opaque to a passive observer who
   isn't on-path.
-- **Whether fair-share contends should require an authenticated principal**
-  is an open design question, not just the exposure noted above — see #167.
+- **An unauthenticated ask still rides an authenticated one's deadline.**
+  See the anonymous-joiner bullet above for why that's left open. #167
+  settled the larger half of that question: an unauthenticated peer no
+  longer arms a deadline of its own.
 
 ## Rung 4's embedding backend: an offline tool, not a relay-adjacent surface
 

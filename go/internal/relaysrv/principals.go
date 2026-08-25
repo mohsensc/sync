@@ -163,6 +163,17 @@ func (r Roster) Problems() []string  { return r.problems }
 func (r Roster) Degraded() bool      { return len(r.problems) > 0 }
 func (r Roster) PrincipalCount() int { return len(r.byID) }
 
+// Enforcing is whether this roster is a real gate — a file that is present
+// *and* names at least one usable principal. Present() alone is not that
+// test: a principals.toml with a typo in it parses to present=true with an
+// empty byID (see ParseRoster's unparseable branch, and parsePrincipal
+// dropping every entry that has no usable token), so a room whose roster
+// broke this morning would look authenticated-by-policy while nobody in it
+// can actually authenticate. Whoever reads this decides whether an
+// unauthenticated connection loses a privilege, so the answer has to be
+// "somebody in this room can hold a token", not "a file exists".
+func (r Roster) Enforcing() bool { return r.present && len(r.byID) > 0 }
+
 // ParseRoster mirrors principals.py's Roster.parse.
 func ParseRoster(text string, source string) Roster {
 	var raw tomlRoster

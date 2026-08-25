@@ -135,6 +135,7 @@ func NewRelay(clock Clock, roster Roster, m *metrics.Registry) *Relay {
 		policy:    NewPolicyFileForRelay(clock, m),
 	}
 	r.registry = NewRegistry(clock, r, m)
+	r.registry.SetDeadlineGate(r.armsDeadline)
 	r.negotiator = NewNegotiator(r.registry)
 	r.policyDigest = r.policy.Current().Digest
 	if roster.Present() {
@@ -552,6 +553,37 @@ func (r *Relay) grantOf(conn Conn) Grant {
 		return Grant{Attended: PriorityNormal, Unattended: PriorityNormal, Reason: ReasonNoRoster}
 	}
 	return latched.grant
+}
+
+// armsDeadline decides whether conn's ask may cap somebody else's lease.
+// Issue #167: room membership and roster membership are different gates,
+// and only the authenticated one gets to shorten a teammate's lease. An ask
+// that doesn't arm is still recorded as a contender — see contendLocked.
+//
+// Two things this deliberately is not:
+//
+//   - It is not conn.Principal(). That's the name off the join frame, which
+//     an unauthenticated peer sets to whatever it likes; only the latched
+//     Grant (grantOf) knows whether a token backed it, which is the whole
+//     point of latching one at join.
+//   - It is not roster.Present(). A room with no roster at all is every
+//     connection unauthenticated, so gating on presence would delete the
+//     anti-starvation bound (policy-design.md §5.2) for the zero-config
+//     case it exists to serve. Enforcing() is the narrower question — see
+//     its comment for the broken-roster case it also rules out.
+//
+// The Enforcing() check first is not just an early return: it means a room
+// with no roster never reaches identityMu at all, so the ordinary
+// zero-config deployment pays nothing for this. The lookup that follows
+// runs under the registry's shard lock, one level down — the only place in
+// the relay where those two locks nest, and only in that direction
+// (identityMu's own critical sections are map reads and writes that never
+// call into the registry, so there is no reverse edge to deadlock against).
+func (r *Relay) armsDeadline(conn Conn) bool {
+	if !r.roster.Enforcing() {
+		return true
+	}
+	return r.grantOf(conn).Authenticated()
 }
 
 func (r *Relay) unattendedOf(conn Conn) bool {
