@@ -739,6 +739,46 @@ func (r *Registry) Contend(room string, scope Region, agent, human string, tier 
 	return viewPtr(held), decision
 }
 
+// Withdraw takes back an ask: the requester is dropped from the holder's
+// contender set, and if that was the last one the cap the ask put on the
+// holder's lease is lifted.
+//
+// This is DEFER's other half. Opening a brief is an ask, so by the time a
+// requester can answer one, contendLocked has already recorded it and
+// pulled the holder's HandoverAt (and its ExpiresAt with it) down to the
+// grace deadline. Answering "you keep it, I'm backing off" used to touch
+// nothing, so the ask outlived the decision that withdrew it and the
+// region was handed to the agent that had just declined it.
+//
+// Restoring ExpiresAt matters as much as clearing HandoverAt: contendLocked
+// clamps ExpiresAt down to the deadline, and removeContender only nils
+// HandoverAt. Left alone, the holder keeps a lease that still expires early
+// for an ask nobody is making. Restored to now + LeaseTTLS rather than to
+// whatever it was before, because the holder has been heartbeating
+// throughout — a fresh TTL is what its next heartbeat would have given it
+// anyway.
+func (r *Registry) Withdraw(room string, scope Region, requester string, actor Conn) {
+	s := r.lockLiveShard(room, scope.Path)
+	defer s.mu.Unlock()
+	now := r.clock.Now()
+	r.pruneExpired(room, s, now, actor)
+
+	held := holderOfLocked(s, scope)
+	if held == nil || held.Agent == requester {
+		return
+	}
+	before := snapshotOf(held)
+	if !held.removeContender(requester) {
+		return
+	}
+	if held.HandoverAt == nil {
+		if want := now + LeaseTTLS; want > held.ExpiresAt {
+			held.ExpiresAt = want
+		}
+	}
+	r.emitChange(room, held, before, now, actor)
+}
+
 // Acquire is the whole decision tree: grant, renew, refuse-with-wait,
 // refuse-with-abort, or grant-from-a-reservation. Mirrors leases.py's
 // acquire exactly, including the ordering of checks (renewal before
