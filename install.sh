@@ -13,7 +13,7 @@ settings_json() {
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Edit|Write|NotebookEdit",
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
         "hooks": [{ "type": "command", "command": "$BIN/ap-hook" }]
       }
     ],
