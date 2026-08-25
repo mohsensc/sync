@@ -858,11 +858,18 @@ func (r *Relay) onEvent(room string, conn Conn, msg map[string]any) Frame {
 	ri.hasLastTs = true
 	ri.mu.Unlock()
 
-	// regionPayload returns the named Frame type, not a bare map[string]any
-	// — a type assertion has to match the concrete type exactly, so this
-	// has to assert Frame, not the interface it happens to satisfy.
-	regionRaw, _ := clean["region"].(Frame)
-	region := regionFromPayload(regionRaw)
+	// Read as either concrete type, because RedactEvent returns both.
+	// It builds the region as the named Frame type (regionPayloadUnmarked),
+	// but under opaque mode it then walks the whole frame through
+	// applyOpaqueMap, which rebuilds every nested map as a bare
+	// map[string]any. A type assertion matches the concrete type, not the
+	// interface it satisfies, so asserting Frame alone succeeded in the
+	// clear and failed silently under opaque mode — leaving a nil Frame and
+	// an empty-path Region, which then fed collision classification, the
+	// room's activity log (so a joiner's presence snapshot showed path "")
+	// and the org policy lookup. Opaque mode is supposed to hash the path,
+	// not erase it.
+	region := regionFromPayload(asFrame(clean["region"]))
 	verb, _ := clean["verb"].(string)
 	// Hooks never carry one; only an MCP-sourced event does, and only that
 	// kind can reach rung 4.
