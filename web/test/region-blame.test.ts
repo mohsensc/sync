@@ -5,9 +5,14 @@ import {
 } from '../src/office/blamecard.js'
 
 // ---------------------------------------------------------------------
-// live.js: region.start/region.end riding a presence frame through to
+// live.js: a region's line range riding a presence frame through to
 // LiveDirector.onPresence's returned info, without disturbing anything a
 // consumer that never reads .start/.end would notice.
+//
+// The range arrives as `region.lines: [start, end]` — the only shape the
+// relay emits (wire.go's regionPayload, from redact.go's cleanLines). These
+// fixtures used to be shaped {start, end}, which nothing on the relay side
+// has ever sent, so they passed while live traffic always returned null.
 // ---------------------------------------------------------------------
 
 function presence(over: Record<string, unknown> = {}) {
@@ -19,7 +24,7 @@ function presence(over: Record<string, unknown> = {}) {
 
 describe('regionFromMsg', () => {
   it('reads a well-formed start/end off the region', () => {
-    expect(regionFromMsg(presence({ region: { path: 'x', start: 10, end: 20 } })))
+    expect(regionFromMsg(presence({ region: { path: 'x', lines: [10, 20] } })))
       .toEqual({ start: 10, end: 20 })
   })
 
@@ -27,19 +32,24 @@ describe('regionFromMsg', () => {
     expect(regionFromMsg(presence())).toBeNull()
   })
 
-  it('is null when only one of start/end is present', () => {
-    expect(regionFromMsg(presence({ region: { path: 'x', start: 10 } }))).toBeNull()
-    expect(regionFromMsg(presence({ region: { path: 'x', end: 20 } }))).toBeNull()
+  it('is null when lines is not a two-element array', () => {
+    expect(regionFromMsg(presence({ region: { path: 'x', lines: [10] } }))).toBeNull()
+    expect(regionFromMsg(presence({ region: { path: 'x', lines: [10, 20, 30] } }))).toBeNull()
+    expect(regionFromMsg(presence({ region: { path: 'x', lines: null } }))).toBeNull()
+  })
+
+  it('is null for the shape the relay never sends, so a regression is visible', () => {
+    expect(regionFromMsg(presence({ region: { path: 'x', start: 10, end: 20 } }))).toBeNull()
   })
 
   it('is null when end does not come after start', () => {
-    expect(regionFromMsg(presence({ region: { path: 'x', start: 20, end: 20 } }))).toBeNull()
-    expect(regionFromMsg(presence({ region: { path: 'x', start: 20, end: 10 } }))).toBeNull()
+    expect(regionFromMsg(presence({ region: { path: 'x', lines: [20, 20] } }))).toBeNull()
+    expect(regionFromMsg(presence({ region: { path: 'x', lines: [20, 10] } }))).toBeNull()
   })
 
   it('is null on non-finite values rather than throwing', () => {
-    expect(regionFromMsg(presence({ region: { path: 'x', start: 'a', end: 20 } }))).toBeNull()
-    expect(regionFromMsg(presence({ region: { path: 'x', start: 10, end: NaN } }))).toBeNull()
+    expect(regionFromMsg(presence({ region: { path: 'x', lines: ['a', 20] } }))).toBeNull()
+    expect(regionFromMsg(presence({ region: { path: 'x', lines: [10, NaN] } }))).toBeNull()
   })
 
   it('is null with no region object on the message', () => {
@@ -50,7 +60,7 @@ describe('regionFromMsg', () => {
 describe('LiveDirector.onPresence — region plumbing', () => {
   it('carries start/end through to the returned info when present', () => {
     const d = new LiveDirector()
-    const info = d.onPresence(presence({ region: { path: 'src/a.ts', start: 5, end: 40 } }), 0)
+    const info = d.onPresence(presence({ region: { path: 'src/a.ts', lines: [5, 40] } }), 0)
     expect(info.start).toBe(5)
     expect(info.end).toBe(40)
   })
@@ -64,14 +74,14 @@ describe('LiveDirector.onPresence — region plumbing', () => {
 
   it('does not let a bogus range leak through as a range', () => {
     const d = new LiveDirector()
-    const info = d.onPresence(presence({ region: { path: 'src/a.ts', start: 40, end: 5 } }), 0)
+    const info = d.onPresence(presence({ region: { path: 'src/a.ts', lines: [40, 5] } }), 0)
     expect(info.start).toBeNull()
     expect(info.end).toBeNull()
   })
 
   it('tracks region independently per agent, second frame does not bleed into the first', () => {
     const d = new LiveDirector()
-    const i1 = d.onPresence(presence({ agent: 'a1', region: { path: 'x', start: 1, end: 10 } }), 0)
+    const i1 = d.onPresence(presence({ agent: 'a1', region: { path: 'x', lines: [1, 10] } }), 0)
     const i2 = d.onPresence(presence({ agent: 'a2', region: { path: 'y' } }), 0)
     expect(i1.start).toBe(1)
     expect(i2.start).toBeNull()

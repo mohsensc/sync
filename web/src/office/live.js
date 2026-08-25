@@ -166,16 +166,28 @@ function isPresence(m) {
     !!m.region && typeof m.region === 'object' && typeof m.region.path === 'string'
 }
 
-/** region.start/region.end are optional on a presence frame — most verbs
- *  (read a whole file, run a command) have no line range at all. Pull them
- *  out defensively: both must be finite and end past start, or this reads
- *  as "no region", same as the field being absent. Never throws on a
- *  malformed frame; that's what the presence-frame guard above is for. */
+/** A line range is optional on a presence frame — most verbs (read a whole
+ *  file, run a command) have no range at all. Pull it out defensively:
+ *  both ends must be finite and end past start, or this reads as "no
+ *  region", same as the field being absent. Never throws on a malformed
+ *  frame; that's what the presence-frame guard above is for.
+ *
+ *  The range lives in `region.lines`, a two-element array — that is the
+ *  only shape the relay ever emits (wire.go's regionPayload, filled from
+ *  redact.go's cleanLines, which returns exactly []int{a, b}). This used to
+ *  read region.start/region.end, which nothing on the relay side has ever
+ *  sent: grep finds zero occurrences of either key in relaysrv. So it
+ *  returned null for every real frame, office.html set gitStart/gitEnd to
+ *  null on every live update, and the line-range branch in blamecard.js
+ *  and ghost.js — both gated on Number.isFinite(gitStart) — could only
+ *  ever fire from demo.js, which fabricates its own {start, end} fixtures.
+ *  Live traffic always got whole-file blame. */
 export function regionFromMsg(msg) {
   const r = msg && msg.region
   if (!r) return null
-  const start = r.start
-  const end = r.end
+  const lines = Array.isArray(r.lines) ? r.lines : null
+  if (!lines || lines.length !== 2) return null
+  const [start, end] = lines
   if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null
   return { start, end }
 }
