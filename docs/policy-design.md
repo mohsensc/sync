@@ -289,6 +289,7 @@ So the ask now carries a deadline. Being asked for a region caps the holder's re
 |---|---|---|
 | outranks the holder (`wait`) | 90 s | one TTL, which is what the docs always claimed |
 | does not (`abort`) | 15 min | the anti-starvation bound — see below |
+| unauthenticated, in a room with an enforcing roster | none | #167 — see below |
 
 When the cap is reached the lease ends on the ordinary lazy expiry, and the region is kept
 for the agent that waited for 10 s so the ex-holder's next heartbeat cannot take it
@@ -300,6 +301,22 @@ junior contending a critical holder is told to `abort`, so it never reaches `wai
 has still *asked*, and the ask still counts. Without it, priority would mean a normal-tier
 agent behind a busy senior one waits forever, which is the same defect wearing the other
 hat.
+
+The third row is the answer to #167. Arming a deadline is the one thing an ask does *to*
+somebody else — it decides when their lease ends — so it takes a rostered principal, in a
+room that has a roster to be rostered in. An unauthenticated ask in such a room is still
+recorded and still ranked; it just doesn't set the clock. Room membership and roster
+membership are different gates (`threat-model.md`), and this is the line between them
+drawn where it costs something: knowing a room id gets you in and gets you seen, it does
+not get you a say in when a teammate stops editing.
+
+Note the row is on the deadline, not on the 15-minute grace it was reported against. An
+anonymous connection older than a normal-tier holder sorts *below* it in the order above
+and so takes the `wait` branch — a 90 s cap. Gating the 15 minutes alone would have left
+the shorter, sharper lever untouched.
+
+Nothing here changes without a roster. A room with no `principals.toml` is one where
+nobody can authenticate, so the bound stays exactly as the two rows above describe it.
 
 ### 5.3 The argument
 

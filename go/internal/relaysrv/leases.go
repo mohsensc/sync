@@ -177,6 +177,14 @@ type Registry struct {
 
 	agentMu sync.Mutex
 	agents  map[string]*agentEntry
+
+	// deadlineGate answers "may this connection's ask cap somebody else's
+	// lease?". Injected by the relay (SetDeadlineGate) rather than read
+	// here, because the answer is a roster question and the registry has
+	// no business knowing what a principal is — it owns leases. nil means
+	// every ask arms the deadline, which is what a registry built without
+	// a relay in front of it (the tests) should do.
+	deadlineGate func(Conn) bool
 }
 
 type roomShards struct {
@@ -191,6 +199,18 @@ func NewRegistry(clock Clock, pub Publisher, m *metrics.Registry) *Registry {
 		rooms:   make(map[string]*roomShards),
 		agents:  make(map[string]*agentEntry),
 	}
+}
+
+// SetDeadlineGate installs the "may this asker arm a deadline" predicate.
+// Called once at construction, before any connection exists.
+func (r *Registry) SetDeadlineGate(gate func(Conn) bool) { r.deadlineGate = gate }
+
+// armsDeadline is the gate, with the nil case spelled out.
+func (r *Registry) armsDeadline(actor Conn) bool {
+	if r.deadlineGate == nil || actor == nil {
+		return true
+	}
+	return r.deadlineGate(actor)
 }
 
 func fnv32(s string) uint32 {
@@ -557,13 +577,50 @@ func renewTo(c *Claim, now float64) float64 {
 
 // contendLocked records that agent wants held's region, capping the
 // holder's renewal. Mirrors leases.py's _contend.
-func contendLocked(held *Claim, agent, human string, tier int, decision waitDieDecision, now float64) {
+//
+// arm is false for an ask the relay decided may not cap this lease — an
+// unauthenticated connection in a room whose roster is enforcing, see
+// Relay.armsDeadline and issue #167. The ask is still recorded either way,
+// which is the whole distinction: the holder and the room still see that
+// somebody wants the region (waiting, and handover_to once anything arms a
+// deadline), and the asker keeps its place in the handover order. It just
+// doesn't get to decide when the holder's lease ends.
+//
+// Two consequences worth being explicit about, because neither is obvious
+// from the one-line version of this rule:
+//
+//   - An unarmed ask on its own leaves HandoverAt nil, so handOver reserves
+//     nothing when the lease finally lapses — the region goes free and the
+//     asker races for it like anybody else. "Keeps its place" is about the
+//     ordering, not a promise of the region.
+//   - If an *authenticated* contender later arms a deadline on the same
+//     region, handoverWinner still ranks every recorded contender, so an
+//     unauthenticated one that sorts first can take the handover that
+//     somebody else's ask created. That is a deliberately narrower lever
+//     than the one this closes (it costs a second, legitimate contender to
+//     open, and it never shortens the lease), and it is written down in
+//     docs/threat-model.md rather than fixed here: excluding an asker from
+//     the order entirely is a different and larger decision about who is
+//     allowed to hold a region at all.
+//
+// The gate is on the deadline as a whole, not on the fair-share branch it
+// was reported against. An anonymous connection at default_tier that has
+// been around longer than a rostered *normal*-tier holder sorts below it in
+// wait-die's order (-priority, acquired_at, agent) and so takes the `wait`
+// branch, capping that lease at HandoverGraceS — 90 seconds, a sharper
+// lever than the 900 the issue described. Gating only the 900 would have
+// left the 90 wide open.
+func contendLocked(held *Claim, agent, human string, tier int, decision waitDieDecision, now float64, arm bool) {
 	existing, ok := held.Contenders[agent]
 	firstAsked := now
 	if ok {
 		firstAsked = existing.FirstAskedAt
 	}
 	held.NoteContender(Contender{Agent: agent, Human: human, Priority: tier, FirstAskedAt: firstAsked})
+
+	if !arm {
+		return
+	}
 
 	grace := FairShareGraceS
 	if decision == decisionWait {
@@ -734,7 +791,11 @@ func (r *Registry) Contend(room string, scope Region, agent, human string, tier 
 		ageVal = *age
 	}
 	decision := resolveWaitDie(agent, ageVal, held, tier)
-	contendLocked(held, agent, human, tier, decision, now)
+	arm := r.armsDeadline(actor)
+	contendLocked(held, agent, human, tier, decision, now, arm)
+	if !arm {
+		r.metrics.AskUnarmed.Inc()
+	}
 	r.emitChange(room, held, before, now, actor)
 	return viewPtr(held), decision
 }
@@ -762,7 +823,11 @@ func (r *Registry) Acquire(room, human, agent string, scope Region, intent strin
 		}
 		decision := resolveWaitDie(agent, ageVal, held, tier)
 		before := snapshotOf(held)
-		contendLocked(held, agent, human, tier, decision, now)
+		arm := r.armsDeadline(actor)
+		contendLocked(held, agent, human, tier, decision, now, arm)
+		if !arm {
+			r.metrics.AskUnarmed.Inc()
+		}
 		r.emitChange(room, held, before, now, actor)
 		view := viewPtr(held)
 		// wait and abort are peers in the outcome vocabulary, not one

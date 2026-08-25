@@ -17,7 +17,11 @@ import (
 // directly instead of only by inspection.
 type recorder struct {
 	agent, human, room string
-	sent               []Frame
+	// principal/token are what this connection claims at join. Empty on
+	// almost every test here, which is an unauthenticated connection —
+	// the only ones that set them are the roster tests.
+	principal, token string
+	sent             []Frame
 }
 
 func (r *recorder) Agent() string     { return r.agent }
@@ -26,8 +30,8 @@ func (r *recorder) Human() string     { return r.human }
 func (r *recorder) SetHuman(h string) { r.human = h }
 func (r *recorder) Room() string      { return r.room }
 func (r *recorder) SetRoom(rm string) { r.room = rm }
-func (r *recorder) Principal() string { return "" }
-func (r *recorder) Token() string     { return "" }
+func (r *recorder) Principal() string { return r.principal }
+func (r *recorder) Token() string     { return r.token }
 func (r *recorder) Unattended() bool  { return false }
 
 // Send decodes the wire bytes Relay.Broadcast/PublishTo hand it back into

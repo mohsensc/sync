@@ -165,7 +165,7 @@ Whether the relay itself is keeping up.
 
 ## In the catalogue, not on the dashboard
 
-Six metrics `metrics.go` emits don't have a panel — kept off on purpose,
+Seven metrics `metrics.go` emits don't have a panel — kept off on purpose,
 not forgotten:
 
 - **`ap_outbound_dropped_total`** — daemon-side mirror of `ap_frames_dropped_total`:
@@ -185,6 +185,15 @@ not forgotten:
   bucket doing its job. No panel yet because nobody's hit a rate-limited
   agent in the wild; add one alongside the Saturation row's dropped-frames
   panel if that changes.
+- **`ap_asks_unarmed_total`** — asks that didn't start the holder's
+  handover deadline because the asker was unauthenticated in a room with an
+  enforcing roster (#167). Healthy is zero, and it stays zero forever in a
+  room with no roster, so a panel would be empty on most deployments and
+  flat on the rest. Worth an ad-hoc query rather than a graph: anything but
+  zero means a token is missing or wrong, or somebody is in the room who
+  shouldn't be — and the first of those looks to the agent like being
+  quietly starved behind a busy holder, which is otherwise hard to tell
+  apart from the system working.
 - **`ap_daemon_connected`** — a per-process gauge presenced sets on its own
   registry ("1 while I have a live relay connection"). It never reaches the
   relay's `/metrics`: there's deliberately no per-daemon label to hang it
