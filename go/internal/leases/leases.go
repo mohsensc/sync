@@ -354,7 +354,20 @@ func (c *Cache) OwnHandover(path string, myAgents []string, nowMs int64) (Lease,
 	return soonest, found
 }
 
-// NoteHandover remembers that this agent's region went to somebody else.
+// lostKey is how the lost map is keyed: the agent the region was taken
+// from, plus the path.
+//
+// Path alone was enough while the write was gated on one identity — only
+// that identity's notes could ever land, so one slot per path could not
+// collide. Recording every handover in the room (which is what makes a
+// session's own losses reach it at all) makes a bare path key lossy in the
+// ordinary case: a contended file changing hands twice, A -> B then
+// B -> C, has C's note overwrite A's before A ever reads it, and A is then
+// never told it lost the file. Keying on the departing agent keeps each
+// party's own note until it expires.
+func lostKey(from, path string) string { return from + "|" + path }
+
+// NoteHandover remembers that an agent's region went to somebody else.
 func (c *Cache) NoteHandover(path string, note HandoverNote) {
 	if path == "" {
 		return
@@ -367,41 +380,53 @@ func (c *Cache) NoteHandover(path string, note HandoverNote) {
 	// Prune on write, so the map is bounded by the last half hour of
 	// handovers rather than by how long the daemon has been up.
 	cutoff := note.AtMs - HandoverNoteMs
-	for p, n := range c.lost {
+	for k, n := range c.lost {
 		if n.AtMs < cutoff {
-			delete(c.lost, p)
+			delete(c.lost, k)
 		}
 	}
-	c.lost[path] = note
+	c.lost[lostKey(note.From, path)] = note
 }
 
-// HandoverNoteFor is a handover of this file recorded within withinMs and
-// taken from one of myAgents, if any.
+// HandoverNoteFor is the most recent handover of this file recorded within
+// withinMs and taken from one of myAgents, if any.
 //
-// The myAgents scoping lives here rather than at the write, which is where
-// it used to be and where it was wrong. The writer only recorded a note
-// when the departing agent was the daemon's own relay identity
-// (presenced@host) — but every real claim is filed under a hook session's
-// own id, via the MCP surface, so the branch effectively never fired and
-// the whole mechanism was dark for live traffic. Recording unconditionally
-// and scoping on read is what makes a session's own losses reach it, and
-// this map is keyed on path alone, so without the check a session would
-// start being told it lost regions its neighbour was holding.
+// The scoping lives here rather than at the write, which is where it used
+// to be and where it was wrong: the writer only recorded a note when the
+// departing agent was the daemon's own relay identity (presenced@host),
+// but every real claim is filed under a hook session's own id via the MCP
+// surface, so the branch effectively never fired and the whole mechanism
+// was dark for live traffic.
 //
 // Same myAgents shape Conflict/OwnHandover/IsMine already use — the daemon
-// identity and the requesting session's id.
+// identity and the requesting session's id — so this is a lookup per
+// identity, not a scan: two, in practice.
+//
+// Not symbol-scoped. lost is keyed on path, so two symbol regions in one
+// file that change hands in the same window share a slot and the later one
+// wins. Threading the symbol through would mean carrying it from
+// applyLease, which drops it today; left alone because the note is
+// per-file advice ("you lost app.py, C has it") and naming a symbol would
+// not change what the agent does about it.
 func (c *Cache) HandoverNoteFor(path string, myAgents []string, nowMs, withinMs int64) (HandoverNote, bool) {
 	if path == "" {
 		return HandoverNote{}, false
 	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	n, ok := c.lost[path]
-	if !ok || nowMs-n.AtMs > withinMs {
-		return HandoverNote{}, false
+	var best HandoverNote
+	found := false
+	for _, a := range myAgents {
+		if a == "" {
+			continue
+		}
+		n, ok := c.lost[lostKey(a, path)]
+		if !ok || nowMs-n.AtMs > withinMs {
+			continue
+		}
+		if !found || n.AtMs > best.AtMs {
+			best, found = n, true
+		}
 	}
-	if !IsMine(n.From, myAgents) {
-		return HandoverNote{}, false
-	}
-	return n, true
+	return best, found
 }

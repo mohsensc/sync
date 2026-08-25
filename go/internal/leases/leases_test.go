@@ -441,3 +441,39 @@ func TestHandoverNoteIsScopedToItsOwnAgent(t *testing.T) {
 		t.Fatal("my own handover must be reported, under either of my ids")
 	}
 }
+
+// A contended file changing hands twice — A loses it to B, then B loses it
+// to C — used to leave only C's note, because the map was keyed on path
+// alone. A's own note was overwritten before A ever read it, so A was never
+// told it lost the file: the exact signal this mechanism exists to deliver,
+// discarded by an unrelated later event on the same path.
+func TestSerialHandoversDoNotClobberEachOthersNotes(t *testing.T) {
+	c := New()
+	c.NoteHandover("app.py", HandoverNote{From: "A", To: "B", AtMs: 1_000})
+	c.NoteHandover("app.py", HandoverNote{From: "B", To: "C", AtMs: 2_000})
+
+	a, ok := c.HandoverNoteFor("app.py", []string{"A"}, 3_000, HandoverNoteMs)
+	if !ok || a.To != "B" {
+		t.Fatalf("A should still be told it lost app.py to B, got %+v ok=%v", a, ok)
+	}
+	b, ok := c.HandoverNoteFor("app.py", []string{"B"}, 3_000, HandoverNoteMs)
+	if !ok || b.To != "C" {
+		t.Fatalf("B should be told it lost app.py to C, got %+v ok=%v", b, ok)
+	}
+	if _, ok := c.HandoverNoteFor("app.py", []string{"C"}, 3_000, HandoverNoteMs); ok {
+		t.Fatal("C still holds the region; it has lost nothing")
+	}
+}
+
+// With both of a caller's identities carrying a note for one path, the
+// newer one wins rather than whichever map iteration reached first.
+func TestHandoverNoteForPrefersTheNewerOfMyIdentities(t *testing.T) {
+	c := New()
+	c.NoteHandover("app.py", HandoverNote{From: "presenced@host", To: "X", AtMs: 1_000})
+	c.NoteHandover("app.py", HandoverNote{From: "session-1", To: "Y", AtMs: 2_000})
+
+	n, ok := c.HandoverNoteFor("app.py", []string{"presenced@host", "session-1"}, 3_000, HandoverNoteMs)
+	if !ok || n.To != "Y" {
+		t.Fatalf("the newer of my own notes should win, got %+v ok=%v", n, ok)
+	}
+}
