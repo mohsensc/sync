@@ -24,17 +24,41 @@ import (
 const defaultHost = "127.0.0.1"
 const defaultPort = 8799
 
-func envPort(name string, def int) int {
+// envPort reads a port from the environment, reporting rather than exiting
+// on a bad value. ok is false when the variable is unset.
+//
+// It used to print and os.Exit(2) inline, which was a problem of ordering
+// rather than of policy: a flag default is evaluated where it is written,
+// before flag.Parse runs, so `AGENT_PRESENCE_PORT=abc gorelay --port 9000`
+// died on the environment before it ever read the flag that was there to
+// override it. The flag's own help calls the env var the default, which
+// implies an explicit --port wins.
+//
+// Still a hard failure when nothing overrides it — a typo in a unit file
+// should be loud and name itself, not silently fall back to 8799 and leave
+// somebody wondering why the port they set isn't the port that's bound.
+func envPort(name string) (int, bool, error) {
 	raw := os.Getenv(name)
 	if raw == "" {
-		return def
+		return 0, false, nil
 	}
 	n, err := strconv.Atoi(raw)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "%s must be an integer, got %q\n", name, raw)
-		os.Exit(2)
+		return 0, true, fmt.Errorf("%s must be an integer, got %q", name, raw)
 	}
-	return n
+	return n, true, nil
+}
+
+// explicitlySet is whether the operator actually passed this flag, as
+// opposed to it carrying its default. flag.Visit walks only what was set.
+func explicitlySet(name string) bool {
+	seen := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			seen = true
+		}
+	})
+	return seen
 }
 
 func main() {
@@ -42,7 +66,7 @@ func main() {
 		"interface to bind (env AGENT_PRESENCE_HOST). Traffic is unencrypted "+
 			"unless --tls-cert/--tls-key are set; see docs/threat-model.md "+
 			"before binding anything but loopback.")
-	port := flag.Int("port", envPort("AGENT_PRESENCE_PORT", defaultPort),
+	port := flag.Int("port", defaultPort,
 		"port to bind, 0 picks a free one (env AGENT_PRESENCE_PORT)")
 	tlsCert := flag.String("tls-cert", os.Getenv("AGENT_PRESENCE_TLS_CERT"),
 		"PEM certificate (env AGENT_PRESENCE_TLS_CERT). Terminates wss:// "+
@@ -60,6 +84,19 @@ func main() {
 			"endpoint that shows up on a well-known port without anyone asking is "+
 			"a way to leak a room's shape to whoever shares the network.")
 	flag.Parse()
+
+	// The env var supplies the default, so an explicit --port wins and a
+	// malformed env var is only fatal when nothing overrode it.
+	if !explicitlySet("port") {
+		n, set, err := envPort("AGENT_PRESENCE_PORT")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		if set {
+			*port = n
+		}
+	}
 
 	if (*tlsCert == "") != (*tlsKey == "") {
 		fmt.Fprintln(os.Stderr, "--tls-cert and --tls-key must be given together")
