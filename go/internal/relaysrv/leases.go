@@ -1,7 +1,9 @@
 package relaysrv
 
 import (
+	"math"
 	"os"
+	"sort"
 	"strconv"
 	"sync"
 
@@ -467,13 +469,7 @@ func (r *Registry) handOver(s *shard, c *Claim, now float64) *Reservation {
 	if c.HandoverAt == nil || *c.HandoverAt > now {
 		key := carryKey{c.Room, c.Scope.Path, symbolKey(c.Scope), c.Agent}
 		s.carry[key] = carryEntry{winner: *winner, deadline: c.HandoverAt}
-		if len(s.carry) > carryMax {
-			for k, v := range s.carry {
-				if v.deadline == nil || *v.deadline <= now {
-					delete(s.carry, k)
-				}
-			}
-		}
+		capCarryLocked(s, now)
 		return nil
 	}
 	res := &Reservation{
@@ -509,6 +505,77 @@ func (r *Registry) resumeCarry(s *shard, c *Claim, now float64) {
 	c.HandoverAt = &d
 	if d < c.ExpiresAt {
 		c.ExpiresAt = d
+	}
+}
+
+// pruneCarryLocked drops every carry entry whose deadline has passed, and
+// returns how many are left. Caller holds s.mu.
+//
+// carry used to have exactly one exit — resumeCarry, which fires only when
+// the same agent re-takes the same region. An entry whose agent never came
+// back sat in the map forever, and because both emptiness checks below read
+// len(s.carry) directly, one such entry kept a room with no claims and no
+// reservations alive for the life of the process. Reservations never had
+// that problem: liveReservations runs on every sweep. This is carry's
+// equivalent, called from the same places.
+func pruneCarryLocked(s *shard, now float64) int {
+	for k, v := range s.carry {
+		if v.deadline == nil || *v.deadline <= now {
+			delete(s.carry, k)
+		}
+	}
+	return len(s.carry)
+}
+
+// capCarryLocked enforces carryMax after an insert. Caller holds s.mu.
+//
+// The expired pass alone was never a cap: an entry is only a candidate once
+// its deadline has passed, so a shard taking a steady stream of contended
+// releases — each carrying a deadline up to FairShareGraceS (900s) out —
+// grew past the limit unchecked, and every insert past it paid an O(n) scan
+// under the lock for nothing. Evict the soonest deadlines once the expired
+// pass hasn't got us under: they are the entries closest to being useless
+// anyway, and dropping one only costs the dodge-prevention guarantee for a
+// holder that was about to lose it.
+func capCarryLocked(s *shard, now float64) {
+	if len(s.carry) <= carryMax {
+		return
+	}
+	if pruneCarryLocked(s, now) <= carryMax {
+		return
+	}
+	type aged struct {
+		key      carryKey
+		deadline float64
+	}
+	order := make([]aged, 0, len(s.carry))
+	for k, v := range s.carry {
+		d := math.Inf(1)
+		if v.deadline != nil {
+			d = *v.deadline
+		}
+		order = append(order, aged{k, d})
+	}
+	sort.Slice(order, func(i, j int) bool { return order[i].deadline < order[j].deadline })
+	for i := 0; len(s.carry) > carryMax && i < len(order); i++ {
+		delete(s.carry, order[i].key)
+	}
+}
+
+// dropCarryFor removes every carry entry this agent is the recorded winner
+// of. Caller holds s.mu.
+//
+// carry is keyed by the departing *holder*, but the winner it stores is a
+// snapshot of a contender — so an agent's contention survives in a second
+// place that pruneContendersLocked (issue #174) never reached. Without
+// this, a contender whose session ended could be handed back to a claim by
+// resumeCarry and then win a reservation nobody can ever use, blocking
+// every live contender for the full ReservationS window.
+func dropCarryFor(s *shard, agent string) {
+	for k, v := range s.carry {
+		if v.winner.Agent == agent {
+			delete(s.carry, k)
+		}
 	}
 }
 
@@ -707,7 +774,7 @@ func (r *Registry) SweepAll() {
 		for _, s := range rs.shards {
 			s.mu.Lock()
 			r.pruneExpired(room, s, now, nil)
-			if len(s.claims) != 0 || len(s.carry) != 0 || len(liveReservations(s, now)) != 0 {
+			if len(s.claims) != 0 || pruneCarryLocked(s, now) != 0 || len(liveReservations(s, now)) != 0 {
 				empty = false
 			}
 			s.mu.Unlock()
@@ -749,7 +816,7 @@ func (r *Registry) reapRoomLocked(room string, rs *roomShards, now float64) {
 	}
 	empty := true
 	for _, s := range rs.shards {
-		if len(s.claims) != 0 || len(s.carry) != 0 || len(liveReservations(s, now)) != 0 {
+		if len(s.claims) != 0 || pruneCarryLocked(s, now) != 0 || len(liveReservations(s, now)) != 0 {
 			empty = false
 			break
 		}
@@ -961,9 +1028,13 @@ func (r *Registry) releaseAllInRoom(room, agent string, actor Conn, pruneAsks bo
 
 // pruneContendersLocked removes agent's contender entry from every claim
 // left in s (its own claims are already gone from s.claims by the time
-// this runs). Caller holds s.mu — same shard, no additional locking, same
-// discipline every other shard-local helper in this file uses.
+// this runs), and from the shard's carry map. Caller holds s.mu — same
+// shard, no additional locking, same discipline every other shard-local
+// helper in this file uses.
 func (r *Registry) pruneContendersLocked(room string, s *shard, agent string, now float64, actor Conn) {
+	// carry holds a snapshotted winner too — same departure, same purge.
+	// See dropCarryFor.
+	dropCarryFor(s, agent)
 	for _, c := range s.claims {
 		before := snapshotOf(c)
 		if !c.removeContender(agent) {
