@@ -31,6 +31,10 @@ type Conn interface {
 	Token() string
 	Unattended() bool
 	Send([]byte)
+	// Evict takes this connection's transport down, and nothing else. See
+	// bindAgent's eviction loop and WsConn.Evict for why the relay-owned
+	// state is deliberately left for the connection's own goroutine.
+	Evict(reason string)
 }
 
 // Refusal is why a join was refused, in a shape the client can act on.
@@ -526,8 +530,32 @@ func (r *Relay) bindAgent(conn Conn) *Refusal {
 		log.Printf("agent id %s reclaimed by principal %s; dropping the unauthenticated connection holding it", agent, grant.Principal)
 		toEvict = append(toEvict, other)
 	}
+	// Take the transport down and let each evicted connection's own
+	// goroutine run Leave, rather than calling Leave on it from here.
+	//
+	// Calling it from here was a real race. Join doesn't hold one lock for
+	// its whole body: a connection switching rooms sits between
+	// leaveAllRooms and SetRoom/joinRoom with nothing held, and an evicting
+	// goroutine landing in that window deleted its identity and principal
+	// records, reset its room to "", and cleared its wait-die age via
+	// ReleaseAllSessionEnd — the very age the room switch calls plain
+	// ReleaseAll to preserve. The target then finished its own Join and
+	// carried on as a working member of the new room with no identity
+	// record at all, which is exactly the state this function exists to
+	// prevent: the next collision check for that agent id can't see it.
+	//
+	// A closed socket ends the session through the one door that already
+	// runs on the right goroutine (server.go's `defer relay.Leave(conn)`),
+	// so relay-owned state is still only ever touched by its own
+	// connection. That leaves a short window where the evicted connection
+	// is still a member of its old room, bounded by socket teardown. That
+	// window is safe because every target here is unauthenticated —
+	// Authenticate zeroes Principal on failure, so two connections sharing
+	// an id with matching principal and tier are caught by heldByPeer
+	// above, and an authenticated `other` is refused outright — so there
+	// is nothing privileged left for it to do as this agent id.
 	for _, other := range toEvict {
-		r.Leave(other)
+		other.Evict("agent id " + agent + " reclaimed by another principal")
 	}
 
 	if !heldByPeer {

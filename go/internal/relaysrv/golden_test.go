@@ -22,6 +22,10 @@ type recorder struct {
 	// the only ones that set them are the roster tests.
 	principal, token string
 	sent             []Frame
+	// evictions is every reason Evict was called with, so a test can
+	// assert the relay took the transport down instead of unwinding the
+	// connection's state behind its back.
+	evictions []string
 }
 
 func (r *recorder) Agent() string     { return r.agent }
@@ -33,6 +37,8 @@ func (r *recorder) SetRoom(rm string) { r.room = rm }
 func (r *recorder) Principal() string { return r.principal }
 func (r *recorder) Token() string     { return r.token }
 func (r *recorder) Unattended() bool  { return false }
+
+func (r *recorder) Evict(reason string) { r.evictions = append(r.evictions, reason) }
 
 // Send decodes the wire bytes Relay.Broadcast/PublishTo hand it back into
 // a Frame, so this stays a faithful stand-in for a real connection (which
