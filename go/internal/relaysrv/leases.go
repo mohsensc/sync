@@ -329,7 +329,30 @@ func (r *Registry) KeyOf(agent string, def int) orderKey {
 	return newOrderKey(r.priorityOf(agent, def), r.ageOf(agent), agent)
 }
 
-func (r *Registry) agentClaimAdded(agent string, acquiredAt float64, tier int) {
+// latchClaimAge is ageOf and agentClaimAdded fused into one agentMu
+// critical section, for the one caller that does both: Acquire, granting a
+// fresh claim. It returns the age to stamp on that claim and, before
+// releasing the lock, records it as the agent's cached age.
+//
+// They used to be two calls with an unlocked gap between them — read the
+// age at the top of the grant branch, write it back several lines later —
+// and the invariant the old agentClaimAdded documented is what that gap
+// can break:
+// "every live claim an agent holds carries the same acquiredAt/tier by
+// construction". bindAgent deliberately lets two connections share one
+// agent id at a matching tier, so the gap is reachable without any
+// reordering: conn1 reads age T1; conn2 voluntarily releases the agent's
+// last claim, dropping liveCount to zero, and claims again, minting a
+// fresh age; conn1 then writes T1 back over it. Two live claims, two
+// different acquired_at values, and a cached age matching neither.
+//
+// That is not a data race — every access is under agentMu, so -race stays
+// quiet — it is a lost update, and it lands on the one field wait-die's
+// deadlock-freedom argument needs to be per-agent (docs/policy-design.md
+// §5.3, and §5.4's invariant that key_of(agent) equals every live claim's
+// own key). An agent presenting two ages can sit in a wait cycle where
+// nobody is ever told abort.
+func (r *Registry) latchClaimAge(agent string, tier int) float64 {
 	r.agentMu.Lock()
 	defer r.agentMu.Unlock()
 	e := r.agents[agent]
@@ -337,10 +360,24 @@ func (r *Registry) agentClaimAdded(agent string, acquiredAt float64, tier int) {
 		e = &agentEntry{}
 		r.agents[agent] = e
 	}
+
+	// Same three-way read ageOf does, inlined so the answer cannot change
+	// between deciding it and recording it.
+	var age float64
+	switch {
+	case e.liveCount > 0:
+		age = e.claimAge
+	case e.firstSeenSet:
+		age = e.firstSeen
+	default:
+		age = r.clock.Now()
+	}
+
 	e.liveCount++
-	e.claimAge = acquiredAt
+	e.claimAge = age
 	e.claimTier = tier
 	e.firstSeenSet = false
+	return age
 }
 
 // agentClaimRemoved decrements liveCount and, if that leaves the agent
@@ -413,7 +450,7 @@ func (r *Registry) agentIdentityReset(agent string) {
 // permits that for a matching principal/tier), or a room this session
 // left without releasing (should no longer happen after Join's own fix,
 // but this is the entry's last line of defense either way). liveCount is
-// already the global, cross-room count agentClaimAdded/Removed maintain
+// already the global, cross-room count latchClaimAge/agentClaimRemoved maintain
 // for exactly this reason (issue #173): only a session ending with
 // nothing left live anywhere should erase the identity.
 func (r *Registry) agentSessionEnded(agent string) {
@@ -924,13 +961,15 @@ func (r *Registry) Acquire(room, human, agent string, scope Region, intent strin
 
 	inherited := consumeReservationLocked(s, scope, agent, now)
 
+	// One call, not a separate read and write: the age this claim is
+	// stamped with and the age the registry caches for the agent are
+	// decided and recorded under a single agentMu hold. See latchClaimAge.
 	claim := &Claim{
 		Room: room, Human: human, Agent: agent, Scope: scope, Intent: intent,
-		AcquiredAt: r.ageOf(agent), ExpiresAt: now + LeaseTTLS, Priority: tier,
+		AcquiredAt: r.latchClaimAge(agent, tier), ExpiresAt: now + LeaseTTLS, Priority: tier,
 	}
 	r.resumeCarry(s, claim, now)
 	s.claims[claimKey(scope)] = claim
-	r.agentClaimAdded(agent, claim.AcquiredAt, tier)
 	r.emitNew(room, claim, now, actor)
 	r.metrics.Lease(metrics.OutcomeGranted)
 	return AcquireResult{Ok: true, Claim: viewPtr(claim), Inherited: inherited}
