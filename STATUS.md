@@ -460,6 +460,8 @@ than trusting a number this old going forward.
 **Previously-undocumented env vars, now documented:** `AGENT_PRESENCE_PRINCIPALS`,
 `AGENT_PRESENCE_REPO_ROOT`, `AGENT_PRESENCE_RUNG4_THRESHOLD` and
 `AGENT_PRESENCE_LOG_LEVEL` are read by shipped code (`relaysrv`, `agent-presence-mcp`)
+— `LOG_LEVEL` was read and validated but never applied until it was wired to
+`agent-presence-mcp`'s one log line —
 and were documented nowhere; they're now listed in `docs/go-daemon.md` next
 to the vars `presenced` itself reads, with a note that they belong to other
 binaries. `AGENT_PRESENCE_GORELAY_BIN` is test-harness-only, documented in

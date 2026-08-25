@@ -36,7 +36,9 @@ file gorelay loads; `AGENT_PRESENCE_REPO_ROOT` (same file, plus `policy.py`/
 looking, instead of deriving it from the working directory;
 `AGENT_PRESENCE_RUNG4_THRESHOLD` (`relaysrv/similarity.go`) overrides rung
 4's default 0.82 score cutoff; `AGENT_PRESENCE_LOG_LEVEL` sets
-`agent-presence-mcp`'s log verbosity (default `INFO`).
+`agent-presence-mcp`'s log verbosity (default `INFO`) — that binary logs
+one line, its startup banner, so anything at `WARNING` or above silences
+it and nothing else changes.
 
 ## What's here
 
