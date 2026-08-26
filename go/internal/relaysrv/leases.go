@@ -904,6 +904,46 @@ func (r *Registry) Contend(room string, scope Region, agent, human string, tier 
 	return viewPtr(held), decision
 }
 
+// Withdraw takes back an ask: the requester is dropped from the holder's
+// contender set, and if that was the last one the cap the ask put on the
+// holder's lease is lifted.
+//
+// This is DEFER's other half. Opening a brief is an ask, so by the time a
+// requester can answer one, contendLocked has already recorded it and
+// pulled the holder's HandoverAt (and its ExpiresAt with it) down to the
+// grace deadline. Answering "you keep it, I'm backing off" used to touch
+// nothing, so the ask outlived the decision that withdrew it and the
+// region was handed to the agent that had just declined it.
+//
+// Deliberately does NOT restore ExpiresAt. contendLocked clamps it down to
+// the deadline, so the obvious completion is to push it back out — but
+// nothing here knows whether the holder is still alive. A holder that
+// wedged at T0 and never heartbeated again would take a fresh 90s every
+// time somebody asked and then deferred, and an ordinary polite client
+// (open a brief, see it is contended, back off, retry later) does exactly
+// that on a loop. Each courteous retry would renew a dead agent's lease.
+//
+// removeContender nils HandoverAt, which is the part that has to be lifted.
+// The clamp then heals on its own: the holder's next heartbeat is at most
+// HeartbeatS away and renewTo gives it now + LeaseTTLS. A holder that has
+// stopped heartbeating gets nothing, which is the right answer.
+func (r *Registry) Withdraw(room string, scope Region, requester string, actor Conn) {
+	s := r.lockLiveShard(room, scope.Path)
+	defer s.mu.Unlock()
+	now := r.clock.Now()
+	r.pruneExpired(room, s, now, actor)
+
+	held := holderOfLocked(s, scope)
+	if held == nil || held.Agent == requester {
+		return
+	}
+	before := snapshotOf(held)
+	if !held.removeContender(requester) {
+		return
+	}
+	r.emitChange(room, held, before, now, actor)
+}
+
 // Acquire is the whole decision tree: grant, renew, refuse-with-wait,
 // refuse-with-abort, or grant-from-a-reservation. Mirrors leases.py's
 // acquire exactly, including the ordering of checks (renewal before
