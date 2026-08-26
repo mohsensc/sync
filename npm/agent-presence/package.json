@@ -1,0 +1,29 @@
+{
+  "name": "agent-presence",
+  "version": "0.1.0",
+  "description": "Multi-agent presence and coordination for Claude Code. One install, one command.",
+  "license": "MIT",
+  "bin": {
+    "agent-presence": "./bin/agent-presence.js"
+  },
+  "files": [
+    "bin",
+    "lib",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "optionalDependencies": {
+    "@agent-presence/darwin-arm64": "0.1.0",
+    "@agent-presence/darwin-x64": "0.1.0",
+    "@agent-presence/linux-x64": "0.1.0",
+    "@agent-presence/linux-arm64": "0.1.0",
+    "@agent-presence/win32-x64": "0.1.0"
+  }
+}
