@@ -13,3 +13,6 @@ spike/gohook/gohook
 go/bin/
 *.exe
 spike/relay/goprototype/gorelayd
+npm/platform/*/
+dist-npm/
+npm/agent-presence/node_modules/

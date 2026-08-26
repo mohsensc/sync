@@ -1,3 +1,16 @@
+# This is a deliberate exception to "no GitHub Actions", not a crack in it.
+# ci.yml was deleted in 1826514 ("delete the ci workflow, promote the local
+# suite") because the minutes were gone. That same commit *edited* this file
+# (added the gorelay glob line) and left it running on tags. So release.yml
+# already survived the purge on purpose - the local suite replaces CI, not
+# releases. Extending it below is using that standing exception, not
+# smuggling CI back in. Don't delete this file by reflex because of the "no
+# Actions" rule, and don't read the ap-hook job as someone quietly re-adding
+# CI - it only runs on a `v*` tag push, same trigger as everything else here.
+#
+# UNVERIFIED: nobody has pushed a tag since the ap-hook job below was added.
+# Nothing here has been watched run on GitHub's runners.
+
 name: release
 
 on:
@@ -29,3 +42,89 @@ jobs:
             dist/presenced-*
             dist/agent-presence-mcp-*
             dist/gorelay-*
+
+  # ap-hook is plain C++20 over POSIX + pthreads (cpp/CMakeLists.txt) - unix
+  # domain sockets, poll(), pthread_sigmask (cpp/hook/hook.cpp). None of that
+  # exists on Windows/MSVC, so there is no windows-2022 leg here. Adding one
+  # would just be a red job on every future tag; leaving it out is the
+  # honest call, per install-plan.md's "degradation is explicit, not
+  # silent" - a platform package with no ap-hook still ships a working
+  # relay/daemon/MCP surface, and `doctor` already names the gap and prints
+  # the cmake line to fix it locally.
+  #
+  # Only linux-amd64, darwin-arm64 and darwin-amd64 run here, because those
+  # are the runner labels this repo can rely on without guessing at
+  # availability. linux-arm64 (an arm ubuntu runner) is left out for the
+  # same "don't pretend" reason - ship it once someone can confirm the
+  # runner label works, not before. Its platform package degrades the same
+  # way Windows does: no ap-hook, everything else intact.
+  #
+  # No cross-compiling here on purpose (unlike the Go job above): ap-hook
+  # has no cgo-style "one machine, five targets" trick, it needs a real
+  # per-OS toolchain, hence the matrix instead of a single runner.
+  hook:
+    name: build ap-hook (${{ matrix.goos }}/${{ matrix.goarch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            goos: linux
+            goarch: amd64
+          - os: macos-14
+            goos: darwin
+            goarch: arm64
+          - os: macos-13
+            goos: darwin
+            goarch: amd64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # CMakeLists.txt's Catch2 fallback (FetchContent, cloned from GitHub)
+      # only fires when no installed Catch2 3 is found, which is every one
+      # of these runners - so configure needs network egress to
+      # github.com. Noting it here rather than letting a flaky clone show
+      # up as an unexplained failure later.
+      - name: configure
+        run: cmake -S cpp -B cpp/build -DCMAKE_BUILD_TYPE=Release
+
+      # Target ap-hook specifically, not a bare `cmake --build`. A bare
+      # build also compiles ap_tests and the Catch2-linked latency suite,
+      # which this job has no use for - it's here to produce one binary,
+      # not to run the cpp test job a second time on three extra runners.
+      - name: build ap-hook
+        run: cmake --build cpp/build --target ap-hook -j2
+
+      - name: stage artifact
+        shell: bash
+        run: |
+          mkdir -p stage
+          cp cpp/build/ap-hook "stage/ap-hook-${{ matrix.goos }}-${{ matrix.goarch }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ap-hook-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: stage/ap-hook-${{ matrix.goos }}-${{ matrix.goarch }}
+          if-no-files-found: error
+
+  # Separate job, gated on both builders finishing, so this is the only
+  # place that calls action-gh-release for ap-hook assets. Three matrix
+  # legs each uploading straight to the same release with softprops'
+  # action would be three concurrent writers to one release object -
+  # exactly the kind of race a `needs:` dependency avoids for free.
+  attach-hook:
+    name: attach ap-hook binaries to the release
+    needs: [build, hook]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ap-hook-*
+          path: dist-hook
+          merge-multiple: true
+
+      - name: attach to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist-hook/ap-hook-*
