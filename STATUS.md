@@ -414,9 +414,13 @@ describes; `scripts/ci-local.sh` is what a PR gets checked against now.
 **The "Deleted, once nothing referenced it anymore" list is wrong about two
 entries.** It names `similarity.py` and `tools/tune_rung4.py` as deleted
 alongside `leases.py`/`wait_die.py`. Neither was: `python/src/agent_presence/similarity.py`
-exists today and is imported by `embedding_similarity.py`, `tools/tune_rung4.py`,
-`tools/bench_redundant_peer.py` and the test suite; `python/tools/tune_rung4.py`
-exists and is the offline corpus-scoring tool rung 4's threshold came from.
+exists today and is imported by `embedding_similarity.py`, `tools/tune_rung4.py`
+and the test suite; `python/tools/tune_rung4.py` exists and is the offline
+corpus-scoring tool rung 4's threshold came from. (Correction, 2026-08-25:
+`tools/bench_redundant_peer.py` was in that list too, and had been raising
+ModuleNotFoundError since #40 took `ladder.py` with it — it benchmarked
+`redundant_peer`, which is Go-only now, so it is deleted rather than
+resurrected. `tune_rung4.py` was broken the same way and is fixed.)
 What did leave with the Python relay is `similarity.go`'s Go port taking
 over the relay's own request path — `similarity.py` just isn't on it any
 more, which is a different claim than "deleted."
