@@ -1,7 +1,9 @@
 package relaysrv
 
 import (
+	"math"
 	"os"
+	"sort"
 	"strconv"
 	"sync"
 
@@ -327,7 +329,30 @@ func (r *Registry) KeyOf(agent string, def int) orderKey {
 	return newOrderKey(r.priorityOf(agent, def), r.ageOf(agent), agent)
 }
 
-func (r *Registry) agentClaimAdded(agent string, acquiredAt float64, tier int) {
+// latchClaimAge is ageOf and agentClaimAdded fused into one agentMu
+// critical section, for the one caller that does both: Acquire, granting a
+// fresh claim. It returns the age to stamp on that claim and, before
+// releasing the lock, records it as the agent's cached age.
+//
+// They used to be two calls with an unlocked gap between them — read the
+// age at the top of the grant branch, write it back several lines later —
+// and the invariant the old agentClaimAdded documented is what that gap
+// can break:
+// "every live claim an agent holds carries the same acquiredAt/tier by
+// construction". bindAgent deliberately lets two connections share one
+// agent id at a matching tier, so the gap is reachable without any
+// reordering: conn1 reads age T1; conn2 voluntarily releases the agent's
+// last claim, dropping liveCount to zero, and claims again, minting a
+// fresh age; conn1 then writes T1 back over it. Two live claims, two
+// different acquired_at values, and a cached age matching neither.
+//
+// That is not a data race — every access is under agentMu, so -race stays
+// quiet — it is a lost update, and it lands on the one field wait-die's
+// deadlock-freedom argument needs to be per-agent (docs/policy-design.md
+// §5.3, and §5.4's invariant that key_of(agent) equals every live claim's
+// own key). An agent presenting two ages can sit in a wait cycle where
+// nobody is ever told abort.
+func (r *Registry) latchClaimAge(agent string, tier int) float64 {
 	r.agentMu.Lock()
 	defer r.agentMu.Unlock()
 	e := r.agents[agent]
@@ -335,10 +360,24 @@ func (r *Registry) agentClaimAdded(agent string, acquiredAt float64, tier int) {
 		e = &agentEntry{}
 		r.agents[agent] = e
 	}
+
+	// Same three-way read ageOf does, inlined so the answer cannot change
+	// between deciding it and recording it.
+	var age float64
+	switch {
+	case e.liveCount > 0:
+		age = e.claimAge
+	case e.firstSeenSet:
+		age = e.firstSeen
+	default:
+		age = r.clock.Now()
+	}
+
 	e.liveCount++
-	e.claimAge = acquiredAt
+	e.claimAge = age
 	e.claimTier = tier
 	e.firstSeenSet = false
+	return age
 }
 
 // agentClaimRemoved decrements liveCount and, if that leaves the agent
@@ -411,7 +450,7 @@ func (r *Registry) agentIdentityReset(agent string) {
 // permits that for a matching principal/tier), or a room this session
 // left without releasing (should no longer happen after Join's own fix,
 // but this is the entry's last line of defense either way). liveCount is
-// already the global, cross-room count agentClaimAdded/Removed maintain
+// already the global, cross-room count latchClaimAge/agentClaimRemoved maintain
 // for exactly this reason (issue #173): only a session ending with
 // nothing left live anywhere should erase the identity.
 func (r *Registry) agentSessionEnded(agent string) {
@@ -467,13 +506,7 @@ func (r *Registry) handOver(s *shard, c *Claim, now float64) *Reservation {
 	if c.HandoverAt == nil || *c.HandoverAt > now {
 		key := carryKey{c.Room, c.Scope.Path, symbolKey(c.Scope), c.Agent}
 		s.carry[key] = carryEntry{winner: *winner, deadline: c.HandoverAt}
-		if len(s.carry) > carryMax {
-			for k, v := range s.carry {
-				if v.deadline == nil || *v.deadline <= now {
-					delete(s.carry, k)
-				}
-			}
-		}
+		capCarryLocked(s, now)
 		return nil
 	}
 	res := &Reservation{
@@ -509,6 +542,77 @@ func (r *Registry) resumeCarry(s *shard, c *Claim, now float64) {
 	c.HandoverAt = &d
 	if d < c.ExpiresAt {
 		c.ExpiresAt = d
+	}
+}
+
+// pruneCarryLocked drops every carry entry whose deadline has passed, and
+// returns how many are left. Caller holds s.mu.
+//
+// carry used to have exactly one exit — resumeCarry, which fires only when
+// the same agent re-takes the same region. An entry whose agent never came
+// back sat in the map forever, and because both emptiness checks below read
+// len(s.carry) directly, one such entry kept a room with no claims and no
+// reservations alive for the life of the process. Reservations never had
+// that problem: liveReservations runs on every sweep. This is carry's
+// equivalent, called from the same places.
+func pruneCarryLocked(s *shard, now float64) int {
+	for k, v := range s.carry {
+		if v.deadline == nil || *v.deadline <= now {
+			delete(s.carry, k)
+		}
+	}
+	return len(s.carry)
+}
+
+// capCarryLocked enforces carryMax after an insert. Caller holds s.mu.
+//
+// The expired pass alone was never a cap: an entry is only a candidate once
+// its deadline has passed, so a shard taking a steady stream of contended
+// releases — each carrying a deadline up to FairShareGraceS (900s) out —
+// grew past the limit unchecked, and every insert past it paid an O(n) scan
+// under the lock for nothing. Evict the soonest deadlines once the expired
+// pass hasn't got us under: they are the entries closest to being useless
+// anyway, and dropping one only costs the dodge-prevention guarantee for a
+// holder that was about to lose it.
+func capCarryLocked(s *shard, now float64) {
+	if len(s.carry) <= carryMax {
+		return
+	}
+	if pruneCarryLocked(s, now) <= carryMax {
+		return
+	}
+	type aged struct {
+		key      carryKey
+		deadline float64
+	}
+	order := make([]aged, 0, len(s.carry))
+	for k, v := range s.carry {
+		d := math.Inf(1)
+		if v.deadline != nil {
+			d = *v.deadline
+		}
+		order = append(order, aged{k, d})
+	}
+	sort.Slice(order, func(i, j int) bool { return order[i].deadline < order[j].deadline })
+	for i := 0; len(s.carry) > carryMax && i < len(order); i++ {
+		delete(s.carry, order[i].key)
+	}
+}
+
+// dropCarryFor removes every carry entry this agent is the recorded winner
+// of. Caller holds s.mu.
+//
+// carry is keyed by the departing *holder*, but the winner it stores is a
+// snapshot of a contender — so an agent's contention survives in a second
+// place that pruneContendersLocked (issue #174) never reached. Without
+// this, a contender whose session ended could be handed back to a claim by
+// resumeCarry and then win a reservation nobody can ever use, blocking
+// every live contender for the full ReservationS window.
+func dropCarryFor(s *shard, agent string) {
+	for k, v := range s.carry {
+		if v.winner.Agent == agent {
+			delete(s.carry, k)
+		}
 	}
 }
 
@@ -707,7 +811,7 @@ func (r *Registry) SweepAll() {
 		for _, s := range rs.shards {
 			s.mu.Lock()
 			r.pruneExpired(room, s, now, nil)
-			if len(s.claims) != 0 || len(s.carry) != 0 || len(liveReservations(s, now)) != 0 {
+			if len(s.claims) != 0 || pruneCarryLocked(s, now) != 0 || len(liveReservations(s, now)) != 0 {
 				empty = false
 			}
 			s.mu.Unlock()
@@ -749,7 +853,7 @@ func (r *Registry) reapRoomLocked(room string, rs *roomShards, now float64) {
 	}
 	empty := true
 	for _, s := range rs.shards {
-		if len(s.claims) != 0 || len(s.carry) != 0 || len(liveReservations(s, now)) != 0 {
+		if len(s.claims) != 0 || pruneCarryLocked(s, now) != 0 || len(liveReservations(s, now)) != 0 {
 			empty = false
 			break
 		}
@@ -798,6 +902,46 @@ func (r *Registry) Contend(room string, scope Region, agent, human string, tier 
 	}
 	r.emitChange(room, held, before, now, actor)
 	return viewPtr(held), decision
+}
+
+// Withdraw takes back an ask: the requester is dropped from the holder's
+// contender set, and if that was the last one the cap the ask put on the
+// holder's lease is lifted.
+//
+// This is DEFER's other half. Opening a brief is an ask, so by the time a
+// requester can answer one, contendLocked has already recorded it and
+// pulled the holder's HandoverAt (and its ExpiresAt with it) down to the
+// grace deadline. Answering "you keep it, I'm backing off" used to touch
+// nothing, so the ask outlived the decision that withdrew it and the
+// region was handed to the agent that had just declined it.
+//
+// Deliberately does NOT restore ExpiresAt. contendLocked clamps it down to
+// the deadline, so the obvious completion is to push it back out — but
+// nothing here knows whether the holder is still alive. A holder that
+// wedged at T0 and never heartbeated again would take a fresh 90s every
+// time somebody asked and then deferred, and an ordinary polite client
+// (open a brief, see it is contended, back off, retry later) does exactly
+// that on a loop. Each courteous retry would renew a dead agent's lease.
+//
+// removeContender nils HandoverAt, which is the part that has to be lifted.
+// The clamp then heals on its own: the holder's next heartbeat is at most
+// HeartbeatS away and renewTo gives it now + LeaseTTLS. A holder that has
+// stopped heartbeating gets nothing, which is the right answer.
+func (r *Registry) Withdraw(room string, scope Region, requester string, actor Conn) {
+	s := r.lockLiveShard(room, scope.Path)
+	defer s.mu.Unlock()
+	now := r.clock.Now()
+	r.pruneExpired(room, s, now, actor)
+
+	held := holderOfLocked(s, scope)
+	if held == nil || held.Agent == requester {
+		return
+	}
+	before := snapshotOf(held)
+	if !held.removeContender(requester) {
+		return
+	}
+	r.emitChange(room, held, before, now, actor)
 }
 
 // Acquire is the whole decision tree: grant, renew, refuse-with-wait,
@@ -857,13 +1001,15 @@ func (r *Registry) Acquire(room, human, agent string, scope Region, intent strin
 
 	inherited := consumeReservationLocked(s, scope, agent, now)
 
+	// One call, not a separate read and write: the age this claim is
+	// stamped with and the age the registry caches for the agent are
+	// decided and recorded under a single agentMu hold. See latchClaimAge.
 	claim := &Claim{
 		Room: room, Human: human, Agent: agent, Scope: scope, Intent: intent,
-		AcquiredAt: r.ageOf(agent), ExpiresAt: now + LeaseTTLS, Priority: tier,
+		AcquiredAt: r.latchClaimAge(agent, tier), ExpiresAt: now + LeaseTTLS, Priority: tier,
 	}
 	r.resumeCarry(s, claim, now)
 	s.claims[claimKey(scope)] = claim
-	r.agentClaimAdded(agent, claim.AcquiredAt, tier)
 	r.emitNew(room, claim, now, actor)
 	r.metrics.Lease(metrics.OutcomeGranted)
 	return AcquireResult{Ok: true, Claim: viewPtr(claim), Inherited: inherited}
@@ -961,9 +1107,13 @@ func (r *Registry) releaseAllInRoom(room, agent string, actor Conn, pruneAsks bo
 
 // pruneContendersLocked removes agent's contender entry from every claim
 // left in s (its own claims are already gone from s.claims by the time
-// this runs). Caller holds s.mu — same shard, no additional locking, same
-// discipline every other shard-local helper in this file uses.
+// this runs), and from the shard's carry map. Caller holds s.mu — same
+// shard, no additional locking, same discipline every other shard-local
+// helper in this file uses.
 func (r *Registry) pruneContendersLocked(room string, s *shard, agent string, now float64, actor Conn) {
+	// carry holds a snapshotted winner too — same departure, same purge.
+	// See dropCarryFor.
+	dropCarryFor(s, agent)
 	for _, c := range s.claims {
 		before := snapshotOf(c)
 		if !c.removeContender(agent) {

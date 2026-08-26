@@ -137,3 +137,42 @@ def test_selecting_embedding_without_the_extra_falls_back(monkeypatch):
         pytest.skip("fastembed is installed; see test_embedding_similarity.py")
     monkeypatch.setenv(BACKEND_ENV, "embedding")
     assert default_similarity().name == "lexical"
+
+
+def test_tune_rung4_tool_still_imports():
+    """The tuning tool broke silently for months.
+
+    tune_rung4.py imported DEFAULT_RUNG4_THRESHOLD from ladder.py, which went
+    with the Python relay — so it raised ModuleNotFoundError on every run
+    while docs/languages.md and STATUS.md both called it live. Nothing
+    imported it from a test, so nothing noticed. This is that guard.
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    tool = Path(__file__).resolve().parents[1] / "tools" / "tune_rung4.py"
+    assert tool.exists(), "tune_rung4.py is documented as the rung-4 tuning tool"
+    out = subprocess.run(
+        [sys.executable, str(tool), "--help"],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert out.returncode == 0, f"tune_rung4.py --help failed:\n{out.stderr}"
+
+
+def test_threshold_matches_the_relay():
+    """relaysrv/similarity.go's defaultRung4Threshold is what actually fires.
+
+    The Python constant is only meaningful as the thing the corpus was tuned
+    against, so the two disagreeing would make the tuning table describe a
+    threshold nobody uses.
+    """
+    import re
+    from pathlib import Path
+
+    from agent_presence.similarity import DEFAULT_RUNG4_THRESHOLD
+
+    go = Path(__file__).resolve().parents[2] / "go" / "internal" / "relaysrv" / "similarity.go"
+    m = re.search(r"defaultRung4Threshold\s*=\s*([0-9.]+)", go.read_text())
+    assert m, "could not find defaultRung4Threshold in similarity.go"
+    assert float(m.group(1)) == DEFAULT_RUNG4_THRESHOLD

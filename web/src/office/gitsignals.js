@@ -292,7 +292,26 @@ export function attachGitSignals({ world, zones, ownership, fetchFn = fetch, int
   // the per-frame tick(dt) below — this one hits the network on a timer,
   // that one runs off office.html's frame loop. Same "poll now" contract
   // zoneowner.js's own tick() still has (it never grew a per-frame half).
+  // The TTLs above gate whether a path is re-fetched, not whether its entry
+  // is kept — so every distinct path any agent ever touched stayed cached
+  // for the life of the page, and an office left open on a large repo grew
+  // one entry per path forever. stop() clears fxByAgent but not these.
+  // Sweeping on the poll tick keeps them tracking only recently-relevant
+  // paths, at a few TTLs' grace so a path an agent keeps coming back to
+  // isn't evicted between visits.
+  const CACHE_MAX_AGE_MS = 5 * STAT_TTL_MS
+  function evictStale(cache, nowMs) {
+    const cutoff = nowMs - CACHE_MAX_AGE_MS
+    for (const [k, v] of cache) {
+      if (v.t < cutoff) cache.delete(k)
+    }
+  }
+
   async function poll() {
+    const nowMs = Date.now()
+    evictStale(statCache, nowMs)
+    evictStale(churnCache, nowMs)
+    evictStale(ownerCache, nowMs)
     const agents = (world && world.agents) || []
     await Promise.all(agents.map(a => pollAgent(a).catch(() => {})))
     await Promise.all(agents.map(a => pollChurn(a).catch(() => {})))

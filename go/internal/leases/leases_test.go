@@ -141,36 +141,36 @@ func TestOwnHandoverIgnoresExpiredLease(t *testing.T) {
 
 func TestNoteHandoverAndHandoverNoteFor(t *testing.T) {
 	c := New()
-	c.NoteHandover("a.py", HandoverNote{To: "other", ToHuman: "sara", AtMs: 1_000})
+	c.NoteHandover("a.py", HandoverNote{From: "me", To: "other", ToHuman: "sara", AtMs: 1_000})
 
-	note, ok := c.HandoverNoteFor("a.py", 2_000, HandoverNoteMs)
+	note, ok := c.HandoverNoteFor("a.py", []string{"me"}, 2_000, HandoverNoteMs)
 	if !ok || note.To != "other" || note.ToHuman != "sara" {
 		t.Fatalf("got %+v, ok=%v", note, ok)
 	}
 
-	if _, ok := c.HandoverNoteFor("b.py", 2_000, HandoverNoteMs); ok {
+	if _, ok := c.HandoverNoteFor("b.py", []string{"me"}, 2_000, HandoverNoteMs); ok {
 		t.Fatal("must not report a handover for an unrelated path")
 	}
 }
 
 func TestHandoverNoteForExpiresAfterWithin(t *testing.T) {
 	c := New()
-	c.NoteHandover("a.py", HandoverNote{To: "other", AtMs: 0})
-	if _, ok := c.HandoverNoteFor("a.py", HandoverNoteMs+1, HandoverNoteMs); ok {
+	c.NoteHandover("a.py", HandoverNote{From: "me", To: "other", AtMs: 0})
+	if _, ok := c.HandoverNoteFor("a.py", []string{"me"}, HandoverNoteMs+1, HandoverNoteMs); ok {
 		t.Fatal("a stale note past the horizon must not be reported")
 	}
 }
 
 func TestNoteHandoverPrunesOldEntries(t *testing.T) {
 	c := New()
-	c.NoteHandover("old.py", HandoverNote{To: "x", AtMs: 0})
+	c.NoteHandover("old.py", HandoverNote{From: "me", To: "x", AtMs: 0})
 	// A new note far enough in the future to push "old.py" past the cutoff.
-	c.NoteHandover("new.py", HandoverNote{To: "y", AtMs: HandoverNoteMs + 1000})
+	c.NoteHandover("new.py", HandoverNote{From: "me", To: "y", AtMs: HandoverNoteMs + 1000})
 
-	if _, ok := c.HandoverNoteFor("old.py", HandoverNoteMs+1000, HandoverNoteMs); ok {
+	if _, ok := c.HandoverNoteFor("old.py", []string{"me"}, HandoverNoteMs+1000, HandoverNoteMs); ok {
 		t.Fatal("a note older than the horizon must be pruned on the next write")
 	}
-	if _, ok := c.HandoverNoteFor("new.py", HandoverNoteMs+1000, HandoverNoteMs); !ok {
+	if _, ok := c.HandoverNoteFor("new.py", []string{"me"}, HandoverNoteMs+1000, HandoverNoteMs); !ok {
 		t.Fatal("the fresh note must survive")
 	}
 }
@@ -424,5 +424,56 @@ func TestConflictPrefixMatchesEveryRegionKeyUnderTheSamePathExactly(t *testing.T
 	}
 	if held.Agent != "other-a" && held.Agent != "other-b" {
 		t.Fatalf("got unexpected holder %q", held.Agent)
+	}
+}
+
+// The cache is keyed on path alone, so a note recorded for one agent must
+// not surface for another. The scoping used to live at the write, where it
+// only ever matched the daemon's own relay identity — see HandoverNoteFor.
+func TestHandoverNoteIsScopedToItsOwnAgent(t *testing.T) {
+	c := New()
+	c.NoteHandover("a.py", HandoverNote{From: "session-1", To: "other", AtMs: 1_000})
+
+	if _, ok := c.HandoverNoteFor("a.py", []string{"session-2"}, 2_000, HandoverNoteMs); ok {
+		t.Fatal("a neighbour's handover must not be reported as mine")
+	}
+	if _, ok := c.HandoverNoteFor("a.py", []string{"presenced@host", "session-1"}, 2_000, HandoverNoteMs); !ok {
+		t.Fatal("my own handover must be reported, under either of my ids")
+	}
+}
+
+// A contended file changing hands twice — A loses it to B, then B loses it
+// to C — used to leave only C's note, because the map was keyed on path
+// alone. A's own note was overwritten before A ever read it, so A was never
+// told it lost the file: the exact signal this mechanism exists to deliver,
+// discarded by an unrelated later event on the same path.
+func TestSerialHandoversDoNotClobberEachOthersNotes(t *testing.T) {
+	c := New()
+	c.NoteHandover("app.py", HandoverNote{From: "A", To: "B", AtMs: 1_000})
+	c.NoteHandover("app.py", HandoverNote{From: "B", To: "C", AtMs: 2_000})
+
+	a, ok := c.HandoverNoteFor("app.py", []string{"A"}, 3_000, HandoverNoteMs)
+	if !ok || a.To != "B" {
+		t.Fatalf("A should still be told it lost app.py to B, got %+v ok=%v", a, ok)
+	}
+	b, ok := c.HandoverNoteFor("app.py", []string{"B"}, 3_000, HandoverNoteMs)
+	if !ok || b.To != "C" {
+		t.Fatalf("B should be told it lost app.py to C, got %+v ok=%v", b, ok)
+	}
+	if _, ok := c.HandoverNoteFor("app.py", []string{"C"}, 3_000, HandoverNoteMs); ok {
+		t.Fatal("C still holds the region; it has lost nothing")
+	}
+}
+
+// With both of a caller's identities carrying a note for one path, the
+// newer one wins rather than whichever map iteration reached first.
+func TestHandoverNoteForPrefersTheNewerOfMyIdentities(t *testing.T) {
+	c := New()
+	c.NoteHandover("app.py", HandoverNote{From: "presenced@host", To: "X", AtMs: 1_000})
+	c.NoteHandover("app.py", HandoverNote{From: "session-1", To: "Y", AtMs: 2_000})
+
+	n, ok := c.HandoverNoteFor("app.py", []string{"presenced@host", "session-1"}, 3_000, HandoverNoteMs)
+	if !ok || n.To != "Y" {
+		t.Fatalf("the newer of my own notes should win, got %+v ok=%v", n, ok)
 	}
 }

@@ -469,13 +469,16 @@ func TestDispatchLeaseHandoverOfOwnRegionRecordsLostNote(t *testing.T) {
 	if _, _, ok := lc.Conflict("a.py", []string{"someone-else"}, 0); ok {
 		t.Fatal("the erased lease must be gone")
 	}
-	note, ok := lc.HandoverNoteFor("a.py", 0, leases.HandoverNoteMs)
+	note, ok := lc.HandoverNoteFor("a.py", []string{"me"}, 0, leases.HandoverNoteMs)
 	if !ok || note.To != "other" || note.ToHuman != "sara" {
 		t.Fatalf("got %+v, ok=%v", note, ok)
 	}
 }
 
-func TestDispatchLeaseHandoverOfSomeoneElsesRegionRecordsNoNote(t *testing.T) {
+// A handover of a region this agent never held is still recorded — the
+// read side is what scopes it (see leases.Cache.HandoverNoteFor). What must
+// not happen is this agent being told it lost the region.
+func TestDispatchLeaseHandoverOfSomeoneElsesRegionIsNotReportedAsMine(t *testing.T) {
 	lc := leases.New()
 	c := New(Config{URL: "ws://x", Room: "r", Agent: "me"}, lc)
 
@@ -487,8 +490,12 @@ func TestDispatchLeaseHandoverOfSomeoneElsesRegionRecordsNoNote(t *testing.T) {
 	if err := c.dispatch(frame); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := lc.HandoverNoteFor("a.py", 0, leases.HandoverNoteMs); ok {
-		t.Fatal("a handover of a region this agent never held must not record a lost note")
+	if _, ok := lc.HandoverNoteFor("a.py", []string{"me"}, 0, leases.HandoverNoteMs); ok {
+		t.Fatal("a handover of a region this agent never held must not be reported as mine")
+	}
+	// It is recorded, though — the session that did hold it gets its note.
+	if _, ok := lc.HandoverNoteFor("a.py", []string{"other-agent"}, 0, leases.HandoverNoteMs); !ok {
+		t.Fatal("the note must reach the agent it was actually taken from")
 	}
 }
 
@@ -536,5 +543,134 @@ func TestDispatchPolicyFrameWrongLengthIsIgnored(t *testing.T) {
 	}
 	if called {
 		t.Fatal("a malformed policy frame must leave the floor untouched")
+	}
+}
+
+// A relay that keeps the socket open but stops reading used to park
+// writePump inside WriteMessage forever: readPump's deadline fired and
+// closed `stop`, the ctx watcher took its <-stop branch without closing
+// the connection, and the deferred conn.Close that would have unblocked
+// the write was itself waiting on wg.Wait, which was waiting on writePump.
+// The client leaked a goroutine and a socket, never reached backoff, and
+// went on reporting StateOpen forever.
+func TestStalledRelayDoesNotWedgeTheClient(t *testing.T) {
+	// A server that completes the handshake, reads the join, then stops
+	// reading entirely while holding the connection open.
+	stalled := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		up := websocket.Upgrader{}
+		ws, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		// Read the join, then never read again and never close.
+		_, _, _ = ws.ReadMessage()
+		close(stalled)
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	c := New(Config{
+		URL:          "ws" + strings.TrimPrefix(srv.URL, "http"),
+		Room:         "r1",
+		Agent:        "a1",
+		PingInterval: 20 * time.Millisecond,
+		IdleTimeout:  200 * time.Millisecond,
+		WriteTimeout: 50 * time.Millisecond,
+		BackoffMin:       10 * time.Millisecond,
+		BackoffMax:       20 * time.Millisecond,
+		OutboundCapacity: 500,
+	}, leases.New())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); c.Run(ctx) }()
+
+	<-stalled
+
+	// Push enough bytes that a write actually blocks. The stall alone is
+	// not enough: WriteMessage only parks once the kernel send buffer is
+	// full, so a client sending nothing but 20ms pings would drain to
+	// backoff on readPump's deadline without ever exercising this.
+	big := strings.Repeat("x", 256*1024)
+	for i := 0; i < 200; i++ {
+		c.SendText([]byte(big))
+	}
+
+	// The client must notice and fall through to backoff rather than
+	// sitting at StateOpen with a parked writer.
+	deadline := time.After(5 * time.Second)
+	for {
+		if c.State() == StateBackoff {
+			break
+		}
+		select {
+		case <-deadline:
+			// Don't wait on done here: if writePump really is parked, Run
+			// never returns and this would hang until the package timeout
+			// instead of reporting the failure.
+			cancel()
+			t.Fatalf("client never left %v — writePump is wedged", c.State())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after cancel — a pump is still parked")
+	}
+}
+
+// backoff was reset the instant a dial succeeded, before the connection
+// had proved anything. A relay that completes the handshake and then ends
+// the session immediately every time — join_refused, a mid-restart drain,
+// any policy path that closes after accept — therefore recomputed
+// nextBackoff(0) on every failure, and nextBackoff returns the floor for a
+// zero input. The result was a permanent retry spin at BackoffMin instead
+// of escalation toward BackoffMax.
+func TestHandshakeThenRejectStillEscalatesBackoff(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		up := websocket.Upgrader{}
+		ws, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		attempts.Add(1)
+		// Accept, then end the session at once — the shape that spun.
+		ws.Close()
+	}))
+	defer srv.Close()
+
+	c := New(Config{
+		URL:        "ws" + strings.TrimPrefix(srv.URL, "http"),
+		Room:       "r1",
+		Agent:      "a1",
+		BackoffMin: 20 * time.Millisecond,
+		BackoffMax: 400 * time.Millisecond,
+	}, leases.New())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); c.Run(ctx) }()
+
+	// Long enough that a floor-pinned client would rack up far more
+	// attempts than an escalating one. At a 20ms floor, 2s is ~100
+	// attempts; escalating 20/40/80/160/320/400... is under 15.
+	time.Sleep(2 * time.Second)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after cancel")
+	}
+
+	if got := attempts.Load(); got > 25 {
+		t.Fatalf("%d connect attempts in 2s — backoff is pinned at the floor instead of escalating", got)
+	}
+	if attempts.Load() == 0 {
+		t.Fatal("the test relay was never dialled")
 	}
 }

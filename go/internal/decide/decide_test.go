@@ -85,7 +85,7 @@ func TestDecideOwnHandoverRidesOnRung0(t *testing.T) {
 
 func TestDecideLostRegionNoteRidesOnRung0(t *testing.T) {
 	c := leases.New()
-	c.NoteHandover("a.py", leases.HandoverNote{To: "other", ToHuman: "sara", AtMs: 1_000})
+	c.NoteHandover("a.py", leases.HandoverNote{From: "me", To: "other", ToHuman: "sara", AtMs: 1_000})
 	resp := Decide(Request{Verb: "edit", Path: "a.py", Agent: "me"}, c, policy.New(), 2_000, "me", "")
 	if resp.Rung != 0 {
 		t.Fatalf("got %+v", resp)
@@ -151,7 +151,7 @@ func TestParseRequestNeverErrors(t *testing.T) {
 // stay *int64 so the two cases can't collapse into each other.
 func TestZeroLostMsAgoStillSerializes(t *testing.T) {
 	c := leases.New()
-	c.NoteHandover("a.py", leases.HandoverNote{To: "other", AtMs: 1_000})
+	c.NoteHandover("a.py", leases.HandoverNote{From: "me", To: "other", AtMs: 1_000})
 	resp := Decide(Request{Verb: "edit", Path: "a.py", Agent: "me"}, c, policy.New(), 1_000, "me", "")
 	if resp.Rung != 0 {
 		t.Fatalf("got %+v", resp)
@@ -416,7 +416,7 @@ func TestDecideResponseBoundedForAdversarialLease(t *testing.T) {
 		HasHandover: true, HandoverAtMs: 5_000,
 		HandoverTo: adversarial, HandoverToHuman: adversarial, HandoverToPriority: adversarial,
 	}, 0)
-	c.NoteHandover("a.py", leases.HandoverNote{To: adversarial, ToHuman: adversarial, ToPriority: adversarial, AtMs: 0})
+	c.NoteHandover("a.py", leases.HandoverNote{From: "me", To: adversarial, ToHuman: adversarial, ToPriority: adversarial, AtMs: 0})
 
 	resp := Decide(Request{Verb: "edit", Path: "a.py", Agent: "me"}, c, policy.New(), 0, "", "")
 	if resp.Rung != 3 {

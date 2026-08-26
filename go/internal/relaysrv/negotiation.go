@@ -92,6 +92,11 @@ func (n *Negotiator) Apply(room, requester string, scope Region, move, reason st
 	}
 	switch canonical {
 	case "DEFER":
+		// Withdraw the ask that opening the brief made. Open calls
+		// Contend, which records the requester and caps the holder's
+		// lease — so a DEFER that only returned an outcome left the region
+		// promised to the very agent that had just backed off.
+		n.registry.Withdraw(room, scope, requester, actor)
 		return NegotiationOutcome{Granted: false, Action: "defer"}
 	case "SPLIT":
 		return n.split(room, requester, scope, splitScope, requesterPriority, requesterHuman, actor)

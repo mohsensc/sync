@@ -65,6 +65,16 @@ from collections import Counter
 from functools import lru_cache
 from typing import Callable, Protocol, runtime_checkable
 
+# Rung 4 fires when two intents score at or above this. Tuned against the
+# corpus in tools/tune_rung4.py, and mirrored by relaysrv/similarity.go's
+# defaultRung4Threshold — the relay is what actually applies it now, so the
+# two have to agree.
+#
+# It lived in ladder.py, which went with the Python relay (#40). The tuning
+# tool still needs it and has nothing else left to import it from, so it
+# lives here with the scorer it tunes.
+DEFAULT_RUNG4_THRESHOLD = 0.82
+
 log = logging.getLogger("agent_presence.similarity")
 
 # -- the interface ----------------------------------------------------------
@@ -290,11 +300,13 @@ def weight(token: str) -> float:
     return DOMAIN_WEIGHT
 
 
-# redundant_peer (ladder.py) calls score(intent, o.intent) once per peer, and
+# redundant_peer calls score(intent, o.intent) once per peer, and
 # `intent` - the incoming side - is the same string on every one of those
 # calls. Cache the tokenizer so that constant side costs one regex pass per
 # room, not one per peer: ~0.34ms -> ~0.06ms at 5 peers, ~8.4ms -> ~0.4ms at
-# 200 peers, measured with tools/bench_redundant_peer.py. Bounded so a relay
+# 200 peers, measured when redundant_peer still lived here (the benchmark and
+# ladder.py both went with the Python relay; relaysrv/similarity.go carries
+# the caching decision now). Bounded so a relay
 # that lives for days doesn't grow this without limit; 4096 is generously
 # above any plausible room's worth of distinct declared intents.
 @lru_cache(maxsize=4096)

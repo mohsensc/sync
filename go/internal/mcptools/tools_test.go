@@ -366,10 +366,17 @@ func TestDispatchRejectsAMissingRequiredArgument(t *testing.T) {
 		{"release", map[string]any{}},
 		{"respond", map[string]any{"move": "DEFER"}},
 		{"respond", map[string]any{"path": "src/db.py"}},
+		// An empty path is a schema-conformant string, but RegionKey turns
+		// it into the empty region key — so it used to become a real lease
+		// that any other client making the same mistake collided with, and
+		// that a third could release without knowing what it freed.
+		{"claim_work", map[string]any{"path": "", "intent": "work"}},
+		{"release", map[string]any{"path": ""}},
+		{"respond", map[string]any{"path": "", "move": "PROCEED"}},
 	}
 	for _, c := range cases {
 		if _, err := Dispatch(context.Background(), tools, c.tool, c.args); err == nil {
-			t.Fatalf("%s%+v: expected an error for a missing required argument", c.tool, c.args)
+			t.Fatalf("%s%+v: expected an error for a missing or empty required argument", c.tool, c.args)
 		}
 	}
 

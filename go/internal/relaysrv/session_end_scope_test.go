@@ -20,6 +20,7 @@ type authConn struct {
 	principal, token   string
 	unattended         bool
 	sent               []Frame
+	evictions          []string
 }
 
 func (c *authConn) Agent() string     { return c.agent }
@@ -31,6 +32,8 @@ func (c *authConn) SetRoom(r string)  { c.room = r }
 func (c *authConn) Principal() string { return c.principal }
 func (c *authConn) Token() string     { return c.token }
 func (c *authConn) Unattended() bool  { return c.unattended }
+
+func (c *authConn) Evict(reason string) { c.evictions = append(c.evictions, reason) }
 func (c *authConn) Send(b []byte) {
 	var f Frame
 	if err := json.Unmarshal(b, &f); err != nil {

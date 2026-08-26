@@ -89,8 +89,14 @@ under the C++ baseline's own historical numbers, 0 isolation violations.
   sessions.
 - Rung 4 is off unless `AGENT_PRESENCE_RUNG4=1`; token-overlap, not
   embeddings.
-- `ap policy compile` puts `[[path]]` rules in the cache; the daemon (either
-  language, always) has only ever read the blanket table.
+- ~~`ap policy compile` puts `[[path]]` rules in the cache; the daemon (either
+  language, always) has only ever read the blanket table.~~ Fixed and never
+  struck through here (2026-08-25): `decide.Decide` calls
+  `policy.Cache.EffectForPath` on both the ambient and the conflict branch,
+  which is what `EffectForPath` was added for. Covered by decide_test.go's
+  `TestDecideAmbientBranchHonorsPathRule`,
+  `TestDecideConflictBranchHonorsPathRule` and
+  `TestDecideConflictBranchPathRuleDoesNotLeakToUnmatchedPath`.
 - 3D assets don't exist; the office scene is primitives.
 - Relay hosting and persistence are unaddressed — in-process asyncio, state
   in dicts, restart loses the lease table.
@@ -414,9 +420,13 @@ describes; `scripts/ci-local.sh` is what a PR gets checked against now.
 **The "Deleted, once nothing referenced it anymore" list is wrong about two
 entries.** It names `similarity.py` and `tools/tune_rung4.py` as deleted
 alongside `leases.py`/`wait_die.py`. Neither was: `python/src/agent_presence/similarity.py`
-exists today and is imported by `embedding_similarity.py`, `tools/tune_rung4.py`,
-`tools/bench_redundant_peer.py` and the test suite; `python/tools/tune_rung4.py`
-exists and is the offline corpus-scoring tool rung 4's threshold came from.
+exists today and is imported by `embedding_similarity.py`, `tools/tune_rung4.py`
+and the test suite; `python/tools/tune_rung4.py` exists and is the offline
+corpus-scoring tool rung 4's threshold came from. (Correction, 2026-08-25:
+`tools/bench_redundant_peer.py` was in that list too, and had been raising
+ModuleNotFoundError since #40 took `ladder.py` with it — it benchmarked
+`redundant_peer`, which is Go-only now, so it is deleted rather than
+resurrected. `tune_rung4.py` was broken the same way and is fixed.)
 What did leave with the Python relay is `similarity.go`'s Go port taking
 over the relay's own request path — `similarity.py` just isn't on it any
 more, which is a different claim than "deleted."
@@ -460,6 +470,8 @@ than trusting a number this old going forward.
 **Previously-undocumented env vars, now documented:** `AGENT_PRESENCE_PRINCIPALS`,
 `AGENT_PRESENCE_REPO_ROOT`, `AGENT_PRESENCE_RUNG4_THRESHOLD` and
 `AGENT_PRESENCE_LOG_LEVEL` are read by shipped code (`relaysrv`, `agent-presence-mcp`)
+— `LOG_LEVEL` was read and validated but never applied until it was wired to
+`agent-presence-mcp`'s one log line —
 and were documented nowhere; they're now listed in `docs/go-daemon.md` next
 to the vars `presenced` itself reads, with a note that they belong to other
 binaries. `AGENT_PRESENCE_GORELAY_BIN` is test-harness-only, documented in

@@ -70,6 +70,13 @@ type Config struct {
 	PingInterval time.Duration
 	IdleTimeout  time.Duration
 
+	// WriteTimeout bounds a single outbound write. Without one, a relay
+	// that keeps the socket open but stops reading parks writePump inside
+	// WriteMessage forever once the kernel send buffer fills — see
+	// writePump for why that wedges the whole client rather than just one
+	// frame.
+	WriteTimeout time.Duration
+
 	// Outbound queue capacity, in messages. Bounded and drop-oldest — see
 	// internal/outbound.
 	OutboundCapacity int
@@ -114,6 +121,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.IdleTimeout == 0 {
 		c.IdleTimeout = 90 * time.Second
+	}
+	if c.WriteTimeout == 0 {
+		c.WriteTimeout = 10 * time.Second
 	}
 	if c.OutboundCapacity == 0 {
 		c.OutboundCapacity = 1000
@@ -306,6 +316,7 @@ func (c *Client) Run(ctx context.Context) {
 		}
 
 		c.state.Store(int32(StateOpen))
+		connectedAt := time.Now()
 		if c.metrics != nil {
 			c.metrics.DaemonConnected.Set(1)
 		}
@@ -318,7 +329,6 @@ func (c *Client) Run(ctx context.Context) {
 			log.Printf("relay: connected to %s", c.cfg.URL)
 			everConnected = true
 		}
-		backoff = 0
 		err = c.runConnection(ctx, conn)
 		c.drops.Add(1)
 		reason := err.Error()
@@ -329,6 +339,21 @@ func (c *Client) Run(ctx context.Context) {
 		}
 		downSince = time.Now()
 
+		// Reset the backoff only for a connection that actually lasted.
+		// Resetting on a successful *dial* meant a relay that completes the
+		// handshake and then ends the session every time — join_refused, a
+		// mid-restart drain, any policy path that closes after accept
+		// instead of refusing before it — was hammered at BackoffMin
+		// forever, since every failure computed nextBackoff(0) and
+		// nextBackoff returns the floor for a zero input. The doubling its
+		// own comment describes never happened.
+		//
+		// A duration, not "did we receive a frame": join_refused is itself
+		// a received frame, so that heuristic would reset the backoff on
+		// exactly the case this fixes.
+		if time.Since(connectedAt) >= minDurableConnection {
+			backoff = 0
+		}
 		backoff = c.nextBackoff(backoff)
 		log.Printf("relay: connection lost: %s — backing off %v before retrying", reason, backoff)
 		if !c.sleepBackoff(ctx, backoff) {
@@ -373,6 +398,12 @@ func (c *Client) buildTLSConfig() (*tls.Config, error) {
 
 // nextBackoff mirrors RelayClient::drop's doubling: min on the first
 // failure, doubled and capped at max after that.
+// minDurableConnection is how long a connection has to last before it
+// counts as "this relay works", clearing the accrued backoff. Anything
+// shorter is treated as a failed attempt that happened to get past the
+// handshake.
+const minDurableConnection = time.Second
+
 func (c *Client) nextBackoff(cur time.Duration) time.Duration {
 	if cur == 0 {
 		return c.cfg.BackoffMin
@@ -507,6 +538,27 @@ func (c *Client) readPump(conn *websocket.Conn) error {
 // writePump is the connection's only writer: gorilla permits at most one
 // concurrent WriteMessage caller, so the join, every ping and every queued
 // frame all flow through this one goroutine.
+// writePump sets a write deadline before every write. Without one, a relay
+// that keeps the socket open but stops reading — an overloaded relay, a
+// half-open connection after a NAT or load-balancer hiccup, a machine
+// waking from sleep — parks this goroutine inside WriteMessage for good
+// once the kernel send buffer fills.
+//
+// That wedges the entire client, not just one frame. readPump's own
+// deadline fires, so it returns and closes `stop`; the ctx watcher then
+// takes its `<-stop` branch and returns without closing the connection;
+// and the `defer conn.Close()` that would have unblocked this write only
+// runs after wg.Wait(), which is waiting on this goroutine. The socket and
+// this goroutine leak for the life of the process, Run never reaches its
+// backoff path, and because state and DaemonConnected only flip after
+// runConnection returns, the daemon goes on reporting StateOpen and
+// connected=1 forever — squarely against this package's promise that every
+// failure ends at backoff.
+//
+// The join write in runConnection is deliberately left without one: it
+// runs before either pump exists, so a block there cannot deadlock against
+// wg.Wait, and the dial's own handshake timeout already bounds getting
+// that far.
 func (c *Client) writePump(conn *websocket.Conn, stop <-chan struct{}) error {
 	pingT := time.NewTicker(c.cfg.PingInterval)
 	defer pingT.Stop()
@@ -522,6 +574,7 @@ func (c *Client) writePump(conn *websocket.Conn, stop <-chan struct{}) error {
 		case <-stop:
 			return nil
 		case <-pingT.C:
+			conn.SetWriteDeadline(time.Now().Add(c.cfg.WriteTimeout))
 			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return err
 			}
@@ -546,6 +599,7 @@ func (c *Client) writePump(conn *websocket.Conn, stop <-chan struct{}) error {
 				if !ok {
 					break // drop-oldest can shrink the queue out from under us
 				}
+				conn.SetWriteDeadline(time.Now().Add(c.cfg.WriteTimeout))
 				if err := conn.WriteMessage(websocket.TextMessage, msg); err != nil {
 					return err
 				}
@@ -733,13 +787,22 @@ func (c *Client) applyLease(e wire.LeaseFrame) {
 			delete(c.believed, key)
 		}
 		c.believedMu.Unlock()
-		if e.State == "handover" && e.Agent == c.cfg.Agent {
-			// It was ours. Remember who has it now — this is the only
-			// frame that ever explains why a region stopped being this
-			// agent's, and the agent itself is not reading the socket;
-			// its hook is, on its next edit.
+		if e.State == "handover" {
+			// Record every handover in the room, whoever it was taken
+			// from, and let the read side decide whose it was.
+			//
+			// This used to be gated on e.Agent == c.cfg.Agent — the
+			// daemon's own relay identity, presenced@host. But a real
+			// claim is filed under the hook session's own id (mcptools'
+			// agent id), and the relay broadcasts departures to the whole
+			// room, so the gate almost never matched and the note was
+			// silently skipped for exactly the leases that have one. A
+			// session's region would vanish with no explanation on its
+			// next edit. See Cache.HandoverNoteFor for the scoping that
+			// moved to the read.
 			c.leases.NoteHandover(e.Region.Path, leases.HandoverNote{
-				To: e.To, ToHuman: e.ToHuman, ToPriority: e.ToPriority, AtMs: nowMs(),
+				From: e.Agent, To: e.To, ToHuman: e.ToHuman,
+				ToPriority: e.ToPriority, AtMs: nowMs(),
 			})
 		}
 		return

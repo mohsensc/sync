@@ -35,8 +35,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from agent_presence.ladder import DEFAULT_RUNG4_THRESHOLD  # noqa: E402
-from agent_presence.similarity import LexicalSimilarity  # noqa: E402
+# DEFAULT_RUNG4_THRESHOLD used to come from agent_presence.ladder, which
+# went with the Python relay (#40) — so this tool has raised
+# ModuleNotFoundError on every run since, while the docs went on calling it
+# live. It lives beside the scorer it tunes now.
+from agent_presence.similarity import (  # noqa: E402
+    DEFAULT_RUNG4_THRESHOLD,
+    LexicalSimilarity,
+)
 
 DUPLICATE: list[tuple[str, str]] = [
     ("add JWT refresh to auth",

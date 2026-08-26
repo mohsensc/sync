@@ -461,9 +461,41 @@ std::string resolve_sock_path(EnvLookup lookup) {
     return "/tmp/agent-presence.sock";
 }
 
+// path_of is the edited file, whichever key the tool spells it under.
+//
+// NotebookEdit is registered in install.sh's PreToolUse matcher and
+// verb_for classifies it as an edit, so it is meant to take part in
+// arbitration like any other edit — but it carries its path as
+// notebook_path, not file_path. Reading only file_path meant every
+// notebook edit went out with path "": decide's empty-path early return
+// means two agents editing the same notebook were silently allowed
+// through, the presence table folded every agent's notebook activity into
+// one shared empty region, and any message about it said "this file"
+// naming nothing.
+//
+// Grep and Glob spell theirs "path", and verb_for calls them "search".
+// install.sh registers both in the PostToolUse matcher, so they do reach
+// here, and reading only file_path meant every search went out with path
+// "". That costs twice: presence.Touch overwrites the agent's tracked
+// location with the empty string the moment it runs a search, so peers
+// lose its "editing X" while it is still mid-edit elsewhere; and
+// EventFrame drops any event with an empty path, so no search reaches the
+// relay or the room at all.
+//
+// Tool-agnostic rather than a per-tool table: field() is a flat scan with
+// no notion of nesting, so each fallback costs one extra pass only when
+// the earlier key is absent, and there is no list to keep in sync as
+// tools come and go.
+std::string path_of(const std::string& hook_json) {
+    std::string p = field(hook_json, "file_path");
+    if (p.empty()) p = field(hook_json, "notebook_path");
+    if (p.empty()) p = field(hook_json, "path");
+    return p;
+}
+
 std::string build_event(const std::string& hook_json) {
     const std::string tool = field(hook_json, "tool_name");
-    const std::string path = field(hook_json, "file_path");
+    const std::string path = path_of(hook_json);
     const std::string session = field(hook_json, "session_id");
 
     std::string out = "{\"verb\":\"";
@@ -813,7 +845,7 @@ std::string run_hook(const std::string& hook_json, const std::string& sock_path,
     // business telling us who we are, and the hook needs it to tell "the region
     // is queued for you" from "somebody is ahead of you".
     d.agent = field(hook_json, "session_id");
-    return hook_output(d, field(hook_json, "file_path"));
+    return hook_output(d, path_of(hook_json));
 }
 
 std::string read_bounded(int fd, std::size_t max_buffer, int timeout_ms) {

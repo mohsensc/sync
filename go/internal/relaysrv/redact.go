@@ -222,6 +222,21 @@ func EncodeFrame(payload Frame) []byte {
 	return b
 }
 
+// asFrame reads a nested frame body as Frame whichever concrete type it
+// arrived as. Frames this package builds nest the named Frame type, but
+// anything that has been through applyOpaqueMap comes back as a bare
+// map[string]any (see its own comment for why it converts). A caller that
+// asserts one of the two gets a silent nil for the other.
+func asFrame(v any) Frame {
+	switch f := v.(type) {
+	case Frame:
+		return f
+	case map[string]any:
+		return Frame(f)
+	}
+	return nil
+}
+
 func applyOpaqueMap(v any) any {
 	// Frame is map[string]any under the hood, but a type switch matches
 	// the concrete type, not what it's defined as — every frame built by

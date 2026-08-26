@@ -22,7 +22,7 @@ func Dispatch(ctx context.Context, tools *Tools, name string, args map[string]an
 	case "who_else_is_here":
 		return tools.WhoElseIsHere(ctx), nil
 	case "claim_work":
-		path, err := requireStr(args, "path")
+		path, err := requirePath(args)
 		if err != nil {
 			// The call never reaches ClaimWork, so it never records
 			// itself; this is the one place that gets to. The tool name
@@ -38,14 +38,14 @@ func Dispatch(ctx context.Context, tools *Tools, name string, args map[string]an
 		}
 		return tools.ClaimWork(ctx, path, symbolArg(args), intent), nil
 	case "release":
-		path, err := requireStr(args, "path")
+		path, err := requirePath(args)
 		if err != nil {
 			tools.recordCall(mcpToolRelease, mcpOutcomeError, start)
 			return nil, err
 		}
 		return tools.Release(ctx, path, symbolArg(args)), nil
 	case "respond":
-		path, err := requireStr(args, "path")
+		path, err := requirePath(args)
 		if err != nil {
 			tools.recordCall(mcpToolRespond, mcpOutcomeError, start)
 			return nil, err
@@ -78,6 +78,31 @@ func requireStr(args map[string]any, key string) (string, error) {
 	s, ok := v.(string)
 	if !ok {
 		return "", fmt.Errorf("argument %q must be a string, got %T", key, v)
+	}
+	return s, nil
+}
+
+// requirePath is requireStr for "path", with the empty string rejected too.
+//
+// "" passes a plain string check, and RegionKey returns "" for an empty
+// path, so an empty path used to become a real lease keyed on the empty
+// region — collidable with any other client that made the same mistake,
+// and releasable by a third that never knew what it was freeing. None of
+// those agents were talking about the same file. Dispatch's own doc
+// comment claims this is where that gets caught; this is what makes the
+// claim true.
+//
+// Scoped to "path" rather than every requireStr: "intent" is free text
+// with no keying role, and an empty "move" is already caught by
+// negotiation's normalize, so widening it would change their behaviour for
+// no safety gained.
+func requirePath(args map[string]any) (string, error) {
+	s, err := requireStr(args, "path")
+	if err != nil {
+		return "", err
+	}
+	if s == "" {
+		return "", fmt.Errorf("argument %q must not be empty", "path")
 	}
 	return s, nil
 }

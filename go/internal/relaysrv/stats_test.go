@@ -109,3 +109,4 @@ func (c *fakeConn) Principal() string { return "" }
 func (c *fakeConn) Token() string     { return "" }
 func (c *fakeConn) Unattended() bool  { return false }
 func (c *fakeConn) Send([]byte)       {}
+func (c *fakeConn) Evict(string)      {}
