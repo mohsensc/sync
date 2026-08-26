@@ -340,6 +340,25 @@ func (c *WsConn) shutdown() {
 // gorilla documents as callable concurrently with any other method, so
 // this doesn't need to route through the outbound channel the way a data
 // frame would.
+// evictCloseCode is the application close code for a forced identity
+// reclaim, distinct from the shed/shutdown codes so an operator reading a
+// client log can tell the two apart.
+const evictCloseCode = 4001
+
+// Evict takes the transport down and touches no relay-owned state. That
+// asymmetry is the point: identity, principal, room membership and the
+// registry's claims are all unwound exactly once, by this connection's own
+// session goroutine, when its read loop notices the closed socket and runs
+// the deferred relay.Leave. See bindAgent's eviction loop for the race
+// that comes from doing it any other way.
+//
+// Safe to call from a foreign goroutine for the same reason Close is —
+// gorilla documents WriteControl and Close as its two concurrency-safe
+// methods, and Server.closeConns already relies on exactly that.
+func (c *WsConn) Evict(reason string) {
+	c.Close(evictCloseCode, reason)
+}
+
 func (c *WsConn) Close(code int, reason string) {
 	c.shutdown()
 	_ = c.ws.WriteControl(websocket.CloseMessage,

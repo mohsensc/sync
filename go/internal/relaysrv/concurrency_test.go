@@ -174,6 +174,7 @@ type lockedConn struct {
 	mu                 sync.Mutex
 	agent, human, room string
 	frames             int
+	evicted            int
 }
 
 func (c *lockedConn) Agent() string { c.mu.Lock(); defer c.mu.Unlock(); return c.agent }
@@ -201,6 +202,11 @@ func (c *lockedConn) Send(b []byte) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.frames++
+}
+func (c *lockedConn) Evict(reason string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.evicted++
 }
 
 // TestConcurrentClaimAndContendOnOneRegion is the regression test for issue

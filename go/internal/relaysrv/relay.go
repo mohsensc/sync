@@ -31,6 +31,10 @@ type Conn interface {
 	Token() string
 	Unattended() bool
 	Send([]byte)
+	// Evict takes this connection's transport down, and nothing else. See
+	// bindAgent's eviction loop and WsConn.Evict for why the relay-owned
+	// state is deliberately left for the connection's own goroutine.
+	Evict(reason string)
 }
 
 // Refusal is why a join was refused, in a shape the client can act on.
@@ -46,6 +50,11 @@ func (r Refusal) frame(room string) Frame {
 
 type identityRecord struct {
 	agent, human string
+	// superseded is set when another connection has reclaimed this agent
+	// id and this one has been evicted for it. The record stays in the map
+	// so the collision check can still see it — see Leave for what the
+	// flag changes.
+	superseded bool
 }
 
 type principalRecord struct {
@@ -321,12 +330,15 @@ func (r *Relay) Join(room string, conn Conn) bool {
 	}
 
 	r.identityMu.Lock()
-	declared := identityRecord{conn.Agent(), conn.Human()}
+	declared := identityRecord{agent: conn.Agent(), human: conn.Human()}
 	latched, fresh := r.identity[conn]
 	isFresh := !fresh
 	if isFresh {
 		r.identity[conn] = declared
-	} else if declared != latched {
+	} else if declared.agent != latched.agent || declared.human != latched.human {
+		// Field-wise, not a struct compare: latched may carry the
+		// superseded flag, which says nothing about whether this
+		// connection is trying to re-identify.
 		conn.SetAgent(latched.agent)
 		conn.SetHuman(latched.human)
 		r.identityMu.Unlock()
@@ -526,8 +538,42 @@ func (r *Relay) bindAgent(conn Conn) *Refusal {
 		log.Printf("agent id %s reclaimed by principal %s; dropping the unauthenticated connection holding it", agent, grant.Principal)
 		toEvict = append(toEvict, other)
 	}
+	// Take the transport down and let each evicted connection's own
+	// goroutine run Leave, rather than calling Leave on it from here.
+	//
+	// Calling it from here was a real race. Join doesn't hold one lock for
+	// its whole body: a connection switching rooms sits between
+	// leaveAllRooms and SetRoom/joinRoom with nothing held, and an evicting
+	// goroutine landing in that window deleted its identity and principal
+	// records, reset its room to "", and cleared its wait-die age via
+	// ReleaseAllSessionEnd — the very age the room switch calls plain
+	// ReleaseAll to preserve. The target then finished its own Join and
+	// carried on as a working member of the new room with no identity
+	// record at all, which is exactly the state this function exists to
+	// prevent: the next collision check for that agent id can't see it.
+	//
+	// A closed socket ends the session through the one door that already
+	// runs on the right goroutine (server.go's `defer relay.Leave(conn)`),
+	// so relay-owned state is still only ever touched by its own
+	// connection. That leaves a short window where the evicted connection
+	// is still a member of its old room, bounded by socket teardown. That
+	// window is safe because every target here is unauthenticated —
+	// Authenticate zeroes Principal on failure, so two connections sharing
+	// an id with matching principal and tier are caught by heldByPeer
+	// above, and an authenticated `other` is refused outright — so there
+	// is nothing privileged left for it to do as this agent id.
 	for _, other := range toEvict {
-		r.Leave(other)
+		// Mark before closing. The id belongs to the claimant from here
+		// on, so when this connection's own goroutine eventually notices
+		// the closed socket, its Leave must not reach into the registry
+		// and release claims that are now somebody else's — see Leave.
+		r.identityMu.Lock()
+		if rec, ok := r.identity[other]; ok {
+			rec.superseded = true
+			r.identity[other] = rec
+		}
+		r.identityMu.Unlock()
+		other.Evict("agent id " + agent + " reclaimed by another principal")
 	}
 
 	if !heldByPeer {
@@ -657,11 +703,24 @@ func (r *Relay) Leave(conn Conn) {
 	}
 	r.forgetDaemonBaseline(conn)
 
-	if hadIdentity && room != "" {
+	if hadIdentity && room != "" && !identity.superseded {
 		// Session end, not an abort: the connection is gone, so the age it
 		// accrued shouldn't outlive it either (issue #163).
 		r.registry.ReleaseAllSessionEnd(room, identity.agent, nil)
 	}
+	// A superseded connection skips that call entirely, and this is the
+	// half of deferred eviction that is easy to miss. ReleaseAllSessionEnd
+	// is scoped by (room, agent id) and nothing else, so by the time an
+	// evicted connection's own goroutine gets here, those are the
+	// claimant's claims under that id — not this connection's. Running it
+	// would delete a live agent's leases and, through agentSessionEnded
+	// (which isn't room-scoped at all), reset its wait-die age as though
+	// it had just connected, changing who wins an unrelated contention in
+	// another room.
+	//
+	// Whatever this connection still held lapses through ordinary lazy
+	// expiry instead. Releasing it synchronously back in bindAgent is what
+	// the cross-goroutine race was in the first place.
 	conn.SetRoom("")
 }
 
@@ -858,11 +917,18 @@ func (r *Relay) onEvent(room string, conn Conn, msg map[string]any) Frame {
 	ri.hasLastTs = true
 	ri.mu.Unlock()
 
-	// regionPayload returns the named Frame type, not a bare map[string]any
-	// — a type assertion has to match the concrete type exactly, so this
-	// has to assert Frame, not the interface it happens to satisfy.
-	regionRaw, _ := clean["region"].(Frame)
-	region := regionFromPayload(regionRaw)
+	// Read as either concrete type, because RedactEvent returns both.
+	// It builds the region as the named Frame type (regionPayloadUnmarked),
+	// but under opaque mode it then walks the whole frame through
+	// applyOpaqueMap, which rebuilds every nested map as a bare
+	// map[string]any. A type assertion matches the concrete type, not the
+	// interface it satisfies, so asserting Frame alone succeeded in the
+	// clear and failed silently under opaque mode — leaving a nil Frame and
+	// an empty-path Region, which then fed collision classification, the
+	// room's activity log (so a joiner's presence snapshot showed path "")
+	// and the org policy lookup. Opaque mode is supposed to hash the path,
+	// not erase it.
+	region := regionFromPayload(asFrame(clean["region"]))
 	verb, _ := clean["verb"].(string)
 	// Hooks never carry one; only an MCP-sourced event does, and only that
 	// kind can reach rung 4.
