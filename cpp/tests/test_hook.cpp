@@ -128,6 +128,28 @@ TEST_CASE("build_event extracts only permitted fields") {
     REQUIRE(out.find("\"verb\":\"edit\"") != std::string::npos);
 }
 
+TEST_CASE("NotebookEdit carries its path under notebook_path") {
+    // install.sh registers NotebookEdit in the PreToolUse matcher and
+    // verb_for calls it an edit, so it takes part in arbitration — but it
+    // spells its path notebook_path. Reading only file_path sent every
+    // notebook edit out with path "", which decide treats as "nothing to
+    // arbitrate": two agents in the same notebook were silently allowed.
+    std::string out = ap::build_event(
+        R"({"tool_name":"NotebookEdit","tool_input":{"notebook_path":"/repo/nb/run.ipynb"},
+            "session_id":"s1"})");
+    REQUIRE(out.find("nb/run.ipynb") != std::string::npos);
+    REQUIRE(out.find("\"verb\":\"edit\"") != std::string::npos);
+    REQUIRE(out.find("\"path\":\"\"") == std::string::npos);
+}
+
+TEST_CASE("file_path still wins when a payload carries both") {
+    std::string out = ap::build_event(
+        R"({"tool_name":"Edit","tool_input":{"file_path":"/repo/src/a.py","notebook_path":"/repo/nb/x.ipynb"},
+            "session_id":"s1"})");
+    REQUIRE(out.find("src/a.py") != std::string::npos);
+    REQUIRE(out.find("x.ipynb") == std::string::npos);
+}
+
 TEST_CASE("unknown tools map to a think verb rather than being dropped") {
     std::string out = ap::build_event(R"({"tool_name":"Wibble","session_id":"s1"})");
     REQUIRE(out.find("\"verb\":\"think\"") != std::string::npos);
@@ -187,10 +209,21 @@ TEST_CASE("a path containing a newline stays valid json") {
     REQUIRE(out == R"({"verb":"edit","agent":"s1","path":"/repo/we\nird.py"})");
 }
 
+TEST_CASE("a Glob search carries the path it was given") {
+    // Grep and Glob spell the target "path", not "file_path". The escape
+    // fixture below used to assert the hook's own wrong expectation of that
+    // shape, which is why nothing caught every search going out empty.
+    std::string out = ap::build_event(
+        R"({"tool_name":"Glob","tool_input":{"path":"/repo/src"},"session_id":"s1"})");
+    REQUIRE(out.find("/repo/src") != std::string::npos);
+    REQUIRE(out.find("\"verb\":\"search\"") != std::string::npos);
+    REQUIRE(out.find("\"path\":\"\"") == std::string::npos);
+}
+
 TEST_CASE("control characters and \\u escapes survive as escapes") {
     // \u0007 has no short form, so it has to come back out as \u0007.
     const std::string out = ap::build_event(
-        R"({"tool_name":"Grep","tool_input":{"file_path":"/repo/a\u0007b.py"},"session_id":"s\t1"})");
+        R"({"tool_name":"Grep","tool_input":{"path":"/repo/a\u0007b.py"},"session_id":"s\t1"})");
     REQUIRE(well_formed_json_object(out));
     REQUIRE(out == R"({"verb":"search","agent":"s\t1","path":"/repo/a\u0007b.py"})");
 }
