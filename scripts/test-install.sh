@@ -241,6 +241,27 @@ assert "installs the stale binary anyway, nothing better to do" \
 assert_contains "installed binary is the stale stub" \
   "$(cat "$STALE_NOGO_BIN/gorelay" 2>/dev/null)" "stale-stub"
 
+# --- the PreToolUse matcher covers every tool verb_for calls an edit ------
+#
+# install.sh wires the hook up by tool name; verb_for decides which tools
+# arbitrate. Nothing kept the two in step, and MultiEdit fell through the
+# gap: verb_for called it an edit, wants_decision routed it to a decision,
+# and the matcher never named it — so Claude Code never invoked the hook
+# for it at all and every MultiEdit went unarbitrated. Derive the expected
+# list from hook.cpp rather than restating it, so a new edit tool cannot
+# ship wired into one and not the other.
+echo
+echo "-- PreToolUse matcher covers every edit-verb tool"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+EDIT_TOOLS="$(sed -n 's/.*if (tool == \(.*\)) {/\1/p' "$REPO_ROOT/cpp/hook/hook.cpp" | head -1 | grep -o '"[A-Za-z]*"' | tr -d '"')"
+MATCHER="$(sed -n 's/.*"matcher": "\(.*\)",/\1/p' "$REPO_ROOT/install.sh" | head -1)"
+for tool in $EDIT_TOOLS; do
+  case "|$MATCHER|" in
+    *"|$tool|"*) assert "matcher names $tool" "yes" "yes" ;;
+    *) assert "matcher names $tool (verb_for calls it an edit)" "no" "yes" ;;
+  esac
+done
+
 echo
 if [[ "$FAILS" -eq 0 ]]; then
   echo "all checks passed"
