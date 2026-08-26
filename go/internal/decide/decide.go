@@ -179,7 +179,7 @@ func ambientResponse(cache *leases.Cache, pol *policy.Cache, path string, myAgen
 		return boundResponse(r)
 	}
 
-	if lost, ok := cache.HandoverNoteFor(path, nowMs, leases.HandoverNoteMs); ok {
+	if lost, ok := cache.HandoverNoteFor(path, myAgents, nowMs, leases.HandoverNoteMs); ok {
 		appendLost(&r, lost, nowMs)
 	}
 	return boundResponse(r)
@@ -258,7 +258,7 @@ func Decide(req Request, cache *leases.Cache, pol *policy.Cache, nowMs int64, se
 		}
 	}
 
-	if lost, ok := cache.HandoverNoteFor(path, nowMs, leases.HandoverNoteMs); ok {
+	if lost, ok := cache.HandoverNoteFor(path, myAgents, nowMs, leases.HandoverNoteMs); ok {
 		appendLost(&r, lost, nowMs)
 	}
 	return boundResponse(r)
