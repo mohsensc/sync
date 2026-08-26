@@ -360,3 +360,33 @@ func newTestRelay(t *testing.T) testRelay {
 	t.Cleanup(func() { srv.Close() })
 	return testRelay{url: "ws://" + ln.Addr().String() + "/"}
 }
+
+// The level was parsed, validated, and then never read — --log-level ERROR
+// was accepted and changed nothing, while the docs said it set verbosity.
+func TestLogLevelActuallyGatesTheBanner(t *testing.T) {
+	for _, c := range []struct {
+		level string
+		info  bool
+	}{
+		{"DEBUG", true}, {"INFO", true}, {"info", true},
+		{"WARNING", false}, {"WARN", false}, {"ERROR", false},
+		{"CRITICAL", false}, {"FATAL", false},
+	} {
+		if got := logsInfo(c.level); got != c.info {
+			t.Errorf("logsInfo(%q) = %v, want %v", c.level, got, c.info)
+		}
+	}
+}
+
+// Every level the flag accepts has to have an answer here, or a level
+// could be valid and yet fall through to "silent" by accident.
+func TestEveryValidLevelIsClassified(t *testing.T) {
+	for _, level := range []string{"DEBUG", "INFO", "WARNING", "WARN", "ERROR", "CRITICAL", "FATAL"} {
+		if !validLogLevel(level) {
+			t.Fatalf("%q should be a valid level", level)
+		}
+	}
+	if logsInfo("nonsense") {
+		t.Fatal("an unrecognised level must not be treated as verbose")
+	}
+}

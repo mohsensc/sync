@@ -78,8 +78,10 @@ func run(args []string) int {
 	tools := mcptools.BuildTools(workdir, "", reg)
 	defer tools.Close()
 
-	log.Printf("serving mcp over stdio: room=%s agent=%s human=%s",
-		tools.Room(), tools.Agent(), tools.Human())
+	if logsInfo(*logLevel) {
+		log.Printf("serving mcp over stdio: room=%s agent=%s human=%s",
+			tools.Room(), tools.Agent(), tools.Human())
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -96,6 +98,27 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// logsInfo is whether the configured level emits INFO. The one log line
+// this binary has is informational, so that is the whole of the level's
+// job here.
+//
+// The level was parsed and validated and then never read: --log-level
+// ERROR was accepted and changed nothing, while docs/go-daemon.md
+// documented it as setting verbosity. Go's standard log package has no
+// notion of levels, so nothing was ever going to apply it on its own.
+//
+// Gated rather than deleted. The knob is documented, an operator may well
+// have it in a wrapper script, and dropping the flag would turn a silent
+// no-op into a hard startup error for them. Honouring it is three lines;
+// there is exactly one line to suppress.
+func logsInfo(level string) bool {
+	switch strings.ToUpper(level) {
+	case "DEBUG", "INFO":
+		return true
+	}
+	return false
 }
 
 func validLogLevel(level string) bool {
