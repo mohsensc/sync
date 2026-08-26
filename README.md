@@ -5,14 +5,14 @@ work and clobber edits. One stream: ambient for humans, claims for agents.
 
 Four binaries: `ap-hook` (C++) sits on Claude Code's tool calls, `presenced`
 (Go) coalesces and snapshots, `agent-presence-mcp` (Go) is the
-`claim_work`/`respond`/`who_else_is_here` surface, `gorelay` (Go) is the
-relay — leases, wait-die, the ladder, negotiation, fan-out, the org policy
-floor. 90s lease TTL: a dead agent never wedges a teammate.
+`claim_work`/`respond`/`who_else_is_here` surface, `gorelay` (Go) is the relay —
+leases, wait-die, the ladder, negotiation, fan-out, the org policy floor. 90s
+lease TTL: a dead agent never wedges a teammate.
 
 ## Run it
 
-Not on the npm registry yet — ships from tagged releases; for now, build the
-tarball with `scripts/build-npm-packages.sh --pack` and install it.
+Not on the npm registry yet — ships from tagged releases; for now build the
+tarball with `scripts/build-npm-packages.sh --pack`.
 ```
 npm i -g agent-presence
 agent-presence setup
@@ -28,22 +28,22 @@ Paste into your agent to get set up:
 > Install agent-presence for me using `npm i -g agent-presence`, then run
 > `agent-presence setup`. It self-registers with Claude Code.
 
-Packaging and self-registration details: `docs/install-plan.md`.
-
 ## Policy
 
 A TOML file sets how loudly a collision gets told; `ap` (Python) is the verb
 surface over it (`ap policy show --effective`, `ap policy set rung3=ask`,
-`ap why -n 20`, `ap doctor`), applied live, no restart. The relay carries an
-org-wide floor the same way; MCP stays read-only.
+`ap why -n 20`, `ap doctor`), applied live, no restart. The relay carries the
+org-wide floor; MCP stays read-only.
 
-Tests: `scripts/ci-local.sh` runs all five suites and checks every exit code
-— no CI does this for you any more, run it before finalizing a PR. More on
-ports, TLS, and metrics: `docs/`.
+Tests: `scripts/ci-local.sh` runs all five suites and checks every exit code —
+no CI does this for you, run it before finalizing a PR. Packaging, ports, TLS
+and metrics: `docs/`.
 
 ## What's broken
 
-Ladder tuning is guesswork, only run against scripted clients so far. Rung 4
-is off unless `AGENT_PRESENCE_RUNG4=1`, its scorer is a placeholder (#15), and
-`ap policy set rung4=...` is a no-op — the relay resolves that rung against
-the builtin and org layers only, so changing it takes an org file.
+Ladder tuning still rests on 23 hand-written pairs and scripted clients, so the
+thresholds are defensible, not evidence. Rung 4 is off unless
+`AGENT_PRESENCE_RUNG4=1`, and only the org layer sets it: the relay resolves
+that rung and reads builtin and org only. Its lexical scorer is the default
+because it won — the embedding backend caught 2/8 duplicates at a zero-FP
+threshold against lexical's 7/8 (`embedding_similarity.py`).
