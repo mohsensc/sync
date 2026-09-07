@@ -291,6 +291,11 @@ export function attachGhostAuthors(cfg = {}) {
     const mats = []
     figRoot.traverse(n => {
       if (!n.isMesh && !n.isSkinnedMesh) return
+      // The shadow map's depth pass ignores material opacity, so a ghost —
+      // built invisible and faded in toward GHOST_BODY_OPACITY — would throw
+      // a fully solid shadow before it's visible at all. makeCharacterRoot
+      // turns castShadow on for every real character; undo it here.
+      n.castShadow = false
       const list = Array.isArray(n.material) ? n.material : [n.material]
       for (const m of list) { m.transparent = true; m.depthWrite = false; m.opacity = 0; mats.push(m) }
     })
