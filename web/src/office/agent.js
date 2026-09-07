@@ -33,14 +33,15 @@
 // the walk action's timeScale — nowhere else should touch it, or the two
 // values fight and whichever wrote last wins for one frame.
 //
-// Turning in place (see pivot in #steer) has no ground speed to solve
-// against, so it isn't the no-slip equation above — it plays the same walk
-// clip at a cadence proportional to how far off-heading we still are, with
-// the body's world position held fixed. The walk clip's Hips.position track
-// is exactly periodic (first key == last key, verified directly off the
-// baked keyframe data) so holding position doesn't accumulate drift, just a
-// stepping-in-place wobble, which reads better than freezing to idle
-// mid-turn.
+// Turning in place (see pivot in #steer, and the same branch reused by
+// #settle for a big leftover heading error after arrival) has no ground
+// speed to solve against, so it isn't the no-slip equation above — it plays
+// the same walk clip at a cadence proportional to how far off-heading we
+// still are, with the body's world position held fixed. The walk clip's
+// Hips.position track is exactly periodic (first key == last key, verified
+// directly off the baked keyframe data) so holding position doesn't
+// accumulate drift, just a stepping-in-place wobble, which reads better than
+// freezing to idle mid-turn.
 // ---------------------------------------------------------------------------
 
 import * as THREE from 'three'
@@ -86,11 +87,15 @@ export const TUNING = {
   turnWalk: 2.6,       // rad/s while moving
   turnIdle: 2.4,       // rad/s standing still
   minTurnFactor: 0.35, // fraction of maxSpeed kept while turning hard
-  arrive: 0.07,        // m
+  arrive: 0.01,        // m — #steer's trigger radius; brakes to a literal stop here, not a buffer short of it
+  arriveSpeed: 0.16,   // m/s — speed must also be under this for #arrive to fire
   pivotDist: 1.0,      // inside this, a big turn is done on the spot
   pivotAngle: 1.0,
   pivotExit: 0.35,
-  settle: 0.28,        // s to ease the last bit of an arrival onto its exact mark + yaw
+  settle: 0.28,        // s — floor on the final glide's duration; only stretched longer when
+                       // glideSpeed/turnIdle below would otherwise be exceeded
+  glideSpeed: 0.045,   // m/s cap on #settle's position glide, so arrival doesn't read as a
+                       // foot slide under the idle clip
   greetRange: 2.6,     // two arrivals this close will high five
   greetCooldown: 8.0,  // s
 }
@@ -365,7 +370,12 @@ export class Agent {
 
   get doing() { return DOING[this.activity] || this.activity }
   get seated() { return !!(ACTS[this.activity] && ACTS[this.activity].seated) || this.activity === 'sitting' }
-  get moving() { return !!this._move }
+  /** In transit: still walking, or still ironing out the last few
+   *  centimetres and degrees of an arrival (#settle keeps gliding and
+   *  turning for up to ~1.4s after _move clears). Both read as motion on
+   *  screen, so anything picking a free agent or waiting for one to stop has
+   *  to wait out the settle too. */
+  get moving() { return !!(this._move || this._settle) }
 
   describe() {
     return {
@@ -468,14 +478,34 @@ export class Agent {
   }
 
   stop() {
-    this._move = null
+    this.#cancelMove()
     this._turn = null
-    this._settle = null   // a glide in progress must not fire its promise later
     this._timer = null
     this.speed = 0
     this.destination = null
     if (this.activity === 'walking') this.act('idle')
     return this
+  }
+
+  /** Settle a superseded goTo's promise with a falsy value instead of
+   *  leaving it pending forever. A new order (#startMove) or stop() calling
+   *  this while the old one is still mid-flight (walking OR easing onto its
+   *  mark in #settle) means the old arrival never really happened — resolve
+   *  it anyway, just with `null` instead of `this`, so a chained .then (see
+   *  sitAt) can tell the difference and bail instead of acting on a stale
+   *  order. opts.then is NOT run and World.onArrived is NOT called: both are
+   *  "what happens after this specific arrival", which a cancelled arrival
+   *  never had. */
+  #cancelMove() {
+    if (this._settle) {
+      const done = this._settle.m.done
+      this._settle = null
+      if (done) done(null)
+    } else if (this._move) {
+      const done = this._move.done
+      this._move = null
+      if (done) done(null)
+    }
   }
 
   // -- motion --------------------------------------------------------------
@@ -512,12 +542,18 @@ export class Agent {
 
   /** Sit down at (x, z) facing yaw, then run `act` (default typing). */
   sitAt(x, z, yaw, next = 'typing') {
-    return this.goTo(x, z, { yaw }).then(() => new Promise(res => {
-      this.act('sitting', { then: () => { this.act(next); res() } })
-    }))
+    return this.goTo(x, z, { yaw }).then(arrived => {
+      // A falsy resolve (#cancelMove) means some later order superseded this
+      // walk before it ever got here — don't sit down wherever that left us.
+      if (!arrived) return null
+      return new Promise(res => {
+        this.act('sitting', { then: () => { this.act(next); res(this) } })
+      })
+    })
   }
 
   #startMove(x, z, opts) {
+    this.#cancelMove()   // a fresh order supersedes whatever the last one was chasing
     return new Promise(res => {
       this._move = {
         x, z,
@@ -529,7 +565,6 @@ export class Agent {
       this.destination = opts.label || null
       this._pivot = false
       this._walkTs = null    // fresh walk: snap to the real speed, don't ease in from a stale rate
-      this._settle = null    // supersedes any glide left over from a previous arrival
       this.act('walking')
     })
   }
@@ -617,7 +652,11 @@ export class Agent {
     let vmax = 0
     if (!this._pivot) {
       const turnFactor = Math.max(TUNING.minTurnFactor, 1 - Math.abs(ang) / 1.5)
-      const stopping = Math.sqrt(2 * TUNING.decel * Math.max(0, dist - TUNING.arrive))
+      // Brakes to a literal stop at the target, not a buffer TUNING.arrive
+      // short of it — the old "- TUNING.arrive" here is what used to leave
+      // up to ~10cm for #settle to glide through at idle-clip foot-slide
+      // speeds. #settle now only has TUNING.arrive itself (1cm) left to close.
+      const stopping = Math.sqrt(2 * TUNING.decel * dist)
       vmax = Math.min(m.speed * turnFactor, stopping)
     }
     this.speed += clamp(vmax - this.speed, -TUNING.decel * dt, TUNING.accel * dt)
@@ -629,30 +668,37 @@ export class Agent {
     this.pos.z -= Math.cos(this.yaw) * this.speed * dt
 
     if (this.clip === 'walk') {
-      // One source of truth for walk timeScale — nothing else may set it
-      // (see the FEET note up top). Moving: the no-slip equation. Pivoting:
-      // there's no ground speed to solve against, so cadence tracks how far
-      // off-heading we still are instead, capped at a stepping-not-sprinting
-      // 0.6 — it only actually tapers below that in the last stretch as
-      // |ang| closes in on pivotExit, which is fine: most of a big turn
-      // SHOULD read as one steady cadence, only easing down right at the
-      // hand-off back to real walking. Either way the result is rate-limited
-      // so that hand-off eases instead of popping — 8/s is generous next to
-      // the ~0.06/frame the no-slip equation itself ever asks for under
-      // TUNING.accel/decel, so it never lags real acceleration (no added
-      // slide), but it does smooth the pivot<->walk seam, where the two
-      // formulas can otherwise disagree by a lot in one frame.
+      // Moving: the no-slip equation. Pivoting: there's no ground speed to
+      // solve against, so cadence tracks how far off-heading we still are
+      // instead, capped at a stepping-not-sprinting 0.6 — it only actually
+      // tapers below that in the last stretch as |ang| closes in on
+      // pivotExit, which is fine: most of a big turn SHOULD read as one
+      // steady cadence, only easing down right at the hand-off back to real
+      // walking. See #walkCadence for the rate limiting either way goes through.
       const target = this._pivot
         ? Math.min(0.6, Math.abs(ang) / TUNING.pivotAngle)
         : clamp(this.speed / this.natSpeed, 0.05, 1.8)
-      const maxStep = 8 * dt
-      this._walkTs = this._walkTs == null
-        ? target
-        : this._walkTs + clamp(target - this._walkTs, -maxStep, maxStep)
-      ANIM.makeAction(this.root, 'walk').timeScale = this._walkTs
+      this.#walkCadence(target, dt)
     }
 
-    if (dist <= TUNING.arrive + 0.03 && this.speed < 0.18) this.#arrive()
+    if (dist <= TUNING.arrive && this.speed < TUNING.arriveSpeed) this.#arrive()
+  }
+
+  /** Rate-limited walk timeScale, shared by #steer's pivot branch and
+   *  #settle's turn-in-place branch (see FEET, up top — this and #steer's
+   *  no-slip write above are the only two places that ever touch it, and
+   *  never both in the same frame since #steer and #settle are mutually
+   *  exclusive in update()). 8/s is generous next to the ~0.06/frame the
+   *  no-slip equation itself ever asks for under TUNING.accel/decel, so it
+   *  never lags real acceleration, but it does smooth the pivot<->walk and
+   *  walk<->settle seams, where the formulas on either side can disagree by
+   *  a lot in one frame. */
+  #walkCadence(target, dt) {
+    const maxStep = 8 * dt
+    this._walkTs = this._walkTs == null
+      ? target
+      : this._walkTs + clamp(target - this._walkTs, -maxStep, maxStep)
+    ANIM.makeAction(this.root, 'walk').timeScale = this._walkTs
   }
 
   #arrive() {
@@ -661,30 +707,65 @@ export class Agent {
     this._pivot = false
     this.speed = 0
     this.destination = null
-    this.act('idle')
 
-    // Arrival tolerance (TUNING.arrive) and the pivot rewrite above can both
-    // leave the agent up to ~10cm off its mark and off its final yaw. Ease
-    // both onto the exact values together instead of snapping position and
-    // separately turning — see #settle.
-    this._settle = {
-      from: [this.pos.x, this.pos.z],
-      to: [m.x, m.z],
-      fromYaw: this.yaw,
-      toYaw: m.endYaw != null ? m.endYaw : this.yaw,
-      t: 0,
-      m,
-    }
+    const toYaw = m.endYaw != null ? m.endYaw : this.yaw
+    // A big leftover heading error (sitAt seating someone facing away from
+    // the direction they walked in, say) gets walked off at turnIdle in
+    // #settle's turn-in-place branch before there's anything to glide — see
+    // there. Dropping to idle here would have to un-drop a frame later, and
+    // reads as a flicker; only do it now when there's no turn phase coming.
+    if (Math.abs(wrapPi(toYaw - this.yaw)) < TUNING.pivotExit) this.act('idle')
+
+    // TUNING.arrive/arriveSpeed leave at most ~1cm and a small yaw error for
+    // #settle to close — see #steer's braking comment.
+    this._settle = { to: [m.x, m.z], toYaw, gliding: false, m }
   }
 
-  /** Smoothstepped glide from wherever #steer's arrive tolerance stopped the
-   *  agent onto the exact target position and yaw. Generalises what used to
-   *  be a bespoke correction World.highfive ran after the fact (see there —
-   *  it now just waits on this instead of re-doing it). */
+  /**
+   * Closes whatever #steer's arrive tolerance left uncorrected: position
+   * onto the exact mark, yaw onto the exact final heading. Generalises what
+   * used to be a bespoke correction World.highfive ran after the fact (see
+   * there — it now just waits on this instead of re-doing it).
+   *
+   * Two phases, because a smoothstepped glide bounded to keep BOTH the
+   * position speed and the yaw rate under their idle caps would, for a big
+   * heading error (a pi flip from sitAt, say), need a multi-second glide —
+   * which is a character standing still and slowly rotating, not walking.
+   * So a big error is walked off first, same as #steer's pivot: live walk
+   * clip, cadence off the remaining angle, position held. Only once the
+   * error is down to pivotExit does the smoothstepped glide below run, and
+   * by then it's small enough that the caps cost it almost no time.
+   */
   #settle(dt) {
     const s = this._settle
+    const remaining = wrapPi(s.toYaw - this.yaw)
+
+    if (Math.abs(remaining) >= TUNING.pivotExit) {
+      // #arrive left the clip on 'walk' (it only drops to idle when this
+      // branch isn't needed), so there's nothing to (re)crossfade here.
+      this.yaw = wrapPi(this.yaw + clamp(remaining, -TUNING.turnIdle * dt, TUNING.turnIdle * dt))
+      this.#walkCadence(Math.min(0.6, Math.abs(remaining) / TUNING.pivotAngle), dt)
+      return
+    }
+
+    // First tick down here, whether we fell through from the turn above or
+    // never needed it: (re)base the glide off wherever we actually are now,
+    // and size its duration off what's actually left, so neither axis's
+    // peak rate can exceed the caps this whole method exists to enforce.
+    if (!s.gliding) {
+      s.gliding = true
+      s.from = [this.pos.x, this.pos.z]
+      s.fromYaw = this.yaw
+      s.t = 0
+      const dist = Math.hypot(s.to[0] - s.from[0], s.to[1] - s.from[1])
+      s.dur = Math.max(TUNING.settle,
+        1.5 * dist / TUNING.glideSpeed,
+        1.5 * Math.abs(remaining) / TUNING.turnIdle)
+      if (this.activity === 'walking') this.act('idle')
+    }
+
     s.t += dt
-    const k = Math.min(1, s.t / TUNING.settle)
+    const k = Math.min(1, s.t / s.dur)
     const e = k * k * (3 - 2 * k)
     this.pos.x = s.from[0] + (s.to[0] - s.from[0]) * e
     this.pos.z = s.from[1] + (s.to[1] - s.from[1]) * e
@@ -1358,10 +1439,9 @@ export class World {
       // Each agent's own #settle (see agent.js) now irons out the arrival
       // tolerance onto the exact mark and yaw, so there is nothing left for
       // this phase to correct — just wait for both to actually be done
-      // gliding (not just done walking — #settle keeps running after _move
-      // clears) before starting the paired clip.
-      if (!a.moving && !b.moving && !a._turn && !b._turn && !a._settle && !b._settle &&
-          !a.seated && !b.seated) {
+      // moving (`moving` covers the settle glide, not just the walk) before
+      // starting the paired clip.
+      if (!a.moving && !b.moving && !a._turn && !b._turn && !a.seated && !b.seated) {
         e.phase = 'active'; e.t = 0
         this.#beginActive(e)
       }
@@ -1474,8 +1554,11 @@ export class World {
     e.phase = 'done'
     e.a.busy = e.b.busy = false
     e.a.lastGreet = e.b.lastGreet = this.time
-    if (!e.a.moving && e.a.activity !== 'idle') e.a.act('idle')
-    if (!e.b.moving && e.b.activity !== 'idle') e.b.act('idle')
+    // _move, not `moving`: a settle is a glide onto a mark, and swapping the
+    // clip under it is fine. A walk is not — that agent has somewhere to be,
+    // and #end never runs again to retry.
+    if (!e.a._move && e.a.activity !== 'idle') e.a.act('idle')
+    if (!e.b._move && e.b.activity !== 'idle') e.b.act('idle')
   }
 }
 

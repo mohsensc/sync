@@ -143,7 +143,7 @@ async function _typecheckAgentMethods(a: Agent, b: Agent): Promise<void> {
   const turned: Agent = await a.turnTo(Math.PI)
   const faced: Agent = await a.faceTowards(1, 1)
   const goOpts: AgentGoToOpts = { speed: 1, yaw: 0, label: 'to desk', then: ag => { void ag } }
-  const arrived: Agent = await a.goTo(1, 1, goOpts)
+  const arrived: Agent | null = await a.goTo(1, 1, goOpts)
   await a.standUp()
   await a.sitAt(0, 0, 0, 'typing')
   a.update(1 / 60)

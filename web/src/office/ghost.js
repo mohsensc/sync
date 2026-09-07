@@ -271,7 +271,12 @@ export function attachGhostAuthors(cfg = {}) {
         yaw: yawToward(marks.b.pos.x, marks.b.pos.z, marks.a.pos.x, marks.a.pos.z),
         label: 'greeting ' + self.name,
       }),
-    ]).then(() => {
+    ]).then(([sa, sb]) => {
+      // A goTo resolves null instead of the agent when a later order
+      // supersedes it (agent.js's #cancelMove) — one of the pair got sent
+      // somewhere else mid-approach, so there's no arrival to play the
+      // handshake on. Just release both and skip the clip.
+      if (!sa || !sb) { release(); return }
       // Same frame, both of them, same clip — the sync story every paired
       // action in this app tells; see handshake.js's own header.
       playHandshake(self.root)
