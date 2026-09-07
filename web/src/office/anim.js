@@ -430,18 +430,24 @@ export const STANDING = STAND
 // --- idle ------------------------------------------------------------------
 // Slow weight shift on a 1x cycle, breathing on a 2x cycle so the two never
 // line up and it does not read as a metronome.
-function idlePose(t) {
-  const s = sin(t)                 // weight shift
-  const br = sin(t, 2)             // breath
+//
+// `sp` is a per-character SEED_PARAMS bundle (see setSeed near the bottom):
+// idleAmp scales the whole motion, idleHarmonics wobble the timing a little.
+// Both default to the identity bundle, so an unseeded call reproduces the
+// exact numbers this clip always had.
+function idlePose(t, sp = SEED_IDENTITY) {
+  const tn = t + idleNoise(t, sp)   // seed's slow timing wobble; still periodic in t
+  const s = sin(tn) * sp.idleAmp   // weight shift
+  const br = sin(tn, 2) * sp.idleAmp  // breath
   const sway = 2.2 * s
   return pose(STAND, {
-    hips:    [1.5 * s, -0.35 + 0.35 * cos(t, 2) * 0.5, 0],
+    hips:    [1.5 * s, -0.35 + 0.35 * cos(tn, 2) * 0.5, 0],
     Hips:    [0, 1.2 * s, sway],
     Spine02: [0.6 * br, -0.7 * s, -0.9 * s],
     Spine01: [-0.5 * br, -0.5 * s, -0.6 * s],
     Spine:   [-1.4 * br, -0.4 * s, -0.5 * s],   // chest lifts on the inhale
     neck:    [0.6 * br, 0.5 * s, 0],
-    Head:    [-0.8 + 1.0 * sin(t + 0.15), 1.8 * sin(t + 0.1), -0.8 * s],
+    Head:    [-0.8 + 1.0 * sin(tn + 0.15), 1.8 * sin(tn + 0.1), -0.8 * s],
     LeftArm:  [-4 + 1.6 * s, -8, -99 + 1.4 * s],
     RightArm: [-4 + 1.6 * s, 8, 99 + 1.4 * s],
     LeftForeArm:  [0, -16 - 2 * br, 0],
@@ -560,27 +566,33 @@ function legPose(p) {
   return { thigh, knee, foot, toe }
 }
 
-function walkPose(t) {
+function walkPose(t, sp = SEED_IDENTITY) {
+  // Stance/swing leg curves are seed-independent on purpose: they're what the
+  // no-slip stance solve is built on (see STANCE_Z0/STANCE_Z1 above), and
+  // WALK_CYCLE_METERS has to stay honest for every character.
   const L = legPose(t)             // left leg strikes at t=0
   const R = legPose(t + 0.5)       // right leg is half a cycle behind
 
   // Contralateral: the left arm swings back while the left leg swings forward.
-  const armL = 19 * cos(t)
-  const armR = -19 * cos(t)
+  // sp gives each side its own amplitude and a small phase offset, so two
+  // characters walking side by side don't swing their arms in lockstep.
+  const armL = 19 * sp.walkAmpL * cos(t + sp.walkPhaseL)
+  const armR = -19 * sp.walkAmpR * cos(t + sp.walkPhaseR)
   const elbowL = 18 + 9 * bump(t, 0.5, 0.5)
   const elbowR = 18 + 9 * bump(t, 0.0, 0.5)
+  const bob = sp.walkBob
 
   return pose(STAND, {
     // Two bobs per cycle, lowest at each double-support, plus weight shifting
     // laterally over whichever foot is planted.
-    hips: [1.7 * sin(t), -1.5 * cos(t, 2), 0],
-    Hips: [1.5, -4.5 * cos(t), 3.0 * cos(t)],
+    hips: [1.7 * sin(t), -1.5 * bob * cos(t, 2), 0],
+    Hips: [1.5, -4.5 * bob * cos(t), 3.0 * bob * cos(t)],
 
     // Torso counter-rotates against the pelvis, which is what stops a walk
     // from looking like a wind-up toy.
-    Spine02: [1.5, 2.2 * cos(t), -1.2 * cos(t)],
-    Spine01: [1.0, 2.6 * cos(t), -0.8 * cos(t)],
-    Spine:   [0.5, 3.0 * cos(t), -0.6 * cos(t)],
+    Spine02: [1.5, 2.2 * bob * cos(t), -1.2 * bob * cos(t)],
+    Spine01: [1.0, 2.6 * bob * cos(t), -0.8 * bob * cos(t)],
+    Spine:   [0.5, 3.0 * bob * cos(t), -0.6 * bob * cos(t)],
     neck:    [-1.0, -1.5 * cos(t), 0],
     Head:    [-1.5, -2.4 * cos(t), 0.8 * cos(t)],
 
@@ -924,6 +936,75 @@ function wavePose(t) {
 }
 
 // ---------------------------------------------------------------------------
+// Per-character seed
+// ---------------------------------------------------------------------------
+// LINEAR is the only interpolation QuaternionKeyframeTrack actually has in
+// r170 (setInterpolation(InterpolateSmooth) is a silent no-op on quaternion
+// tracks), so "smooth" for a sparse clip means more keys, not a fancier
+// curve — see the key counts below. Deterministic per-character variance is
+// the other half of not looking mechanical: two characters idling side by
+// side with the exact same amplitude and timing read as one puppet wearing
+// two skins.
+//
+// seed 0 is the identity — every multiplier 1, every offset 0, no harmonics —
+// so an unseeded call bakes exactly the numbers this file always had.
+const SEED_IDENTITY = {
+  walkAmpL: 1, walkAmpR: 1, walkPhaseL: 0, walkPhaseR: 0, walkBob: 1,
+  idleAmp: 1, idleHarmonics: [],
+}
+
+/** Deterministic PRNG (mulberry32) so a given seed always bakes the same
+ *  clips — no Math.random, or "cache clips per seed" would just cache noise. */
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0
+    let t = Math.imul(a ^ (a >>> 15), 1 | a)
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+const _seedParamsCache = new Map()
+
+/** Per-character variance bundle for a seed. A few percent of L/R asymmetry
+ *  on the walk's arm swing (amplitude and phase) and on idle's amplitude,
+ *  plus a couple of slow harmonics that wobble idle's timing. Deliberately
+ *  does not touch legPose/kneeCurve/ankleZ: the no-slip stance solve and
+ *  WALK_CYCLE_METERS have to stay true for every seed. */
+function seedParams(seed) {
+  if (!seed) return SEED_IDENTITY
+  let sp = _seedParamsCache.get(seed)
+  if (sp) return sp
+  const rnd = mulberry32(seed * 0x9e3779b1)
+  const jitter = amp => 1 + (rnd() * 2 - 1) * amp
+  const small = amp => (rnd() * 2 - 1) * amp
+  sp = {
+    walkAmpL: jitter(0.04), walkAmpR: jitter(0.04),
+    walkPhaseL: small(0.015), walkPhaseR: small(0.015),
+    walkBob: jitter(0.03),
+    idleAmp: jitter(0.05),
+    // low integer k's keep sin(TAU*(k*t+phase)) periodic over t in [0,1], so
+    // this stays a seamless loop no matter the phase — see idleNoise below.
+    idleHarmonics: [
+      { amp: 0.010 + rnd() * 0.010, k: 3, phase: rnd() },
+      { amp: 0.006 + rnd() * 0.008, k: 5, phase: rnd() },
+    ],
+  }
+  _seedParamsCache.set(seed, sp)
+  return sp
+}
+
+/** Slow, low-amplitude wobble added to idle's own clock. Sum of a couple of
+ *  fixed-integer-frequency sines: periodic in t by construction (see the
+ *  comment on idleHarmonics), so it can be baked into a looping clip without
+ *  putting a seam at t=0/1. */
+function idleNoise(t, sp) {
+  let n = 0
+  for (const h of sp.idleHarmonics) n += h.amp * Math.sin(TAU * (h.k * t + h.phase))
+  return n
+}
+
+// ---------------------------------------------------------------------------
 // Clip table
 // ---------------------------------------------------------------------------
 // Exported so a paired-action module can fold its own clips in — see
@@ -931,18 +1012,30 @@ function wavePose(t) {
 // own CLIPS table"). Merge before the first createClips() call: the table is
 // cached on first use, so a merge after some other clip has already played
 // is silently too late.
+//
+// A spec is { fn, dur, keys, loop } plus one optional flag:
+//   fn(t01, seed)  t01 in [0,1]; `seed` is the seedParams() bundle for the
+//                  character being baked. Ignore it and the clip comes out
+//                  identical for every character — which is what all but
+//                  idle/walk want, and what makes `seeded` below meaningful.
+//   seeded         fn reads the seed bundle, so this clip is baked per
+//                  character rather than shared (see createClips).
 export const CLIPS = {
-  idle:     { fn: idlePose,     dur: 4.6,  keys: 12, loop: true },
-  walk:     { fn: walkPose,     dur: 1.05, keys: 18, loop: true },
+  // idle and walk are the only two pose functions that read the seed bundle,
+  // so they are the only two baked per character — see createClips.
+  idle:     { fn: idlePose,     dur: 4.6,  keys: 48, loop: true, seeded: true },
+  walk:     { fn: walkPose,     dur: 1.05, keys: 18, loop: true, seeded: true },
   sit:      { fn: sitPose,      dur: 1.5,  keys: 14, loop: false },
   type:     { fn: typePose,     dur: 2.0,  keys: 20, loop: true },
   // 21 keys puts a sample exactly on 0.30, 0.50 and 0.60, which is where the
   // pose function changes segment. The contact frame has to BE a key: slerped
-  // between neighbours it lands a centimetre or two short.
+  // between neighbours it lands a centimetre or two short. Not raised with
+  // the other sparse clips below — the contact math is fitted to this exact
+  // key layout (see HF_CONTACT above).
   highfive: { fn: highfivePose, dur: 1.5,  keys: 21, loop: false },
-  drink:    { fn: drinkPose,    dur: 3.4,  keys: 16, loop: true },
-  read:     { fn: readPose,     dur: 5.0,  keys: 16, loop: true },
-  sleep:    { fn: sleepPose,    dur: 5.5,  keys: 10, loop: true },
+  drink:    { fn: drinkPose,    dur: 3.4,  keys: 48, loop: true },
+  read:     { fn: readPose,     dur: 5.0,  keys: 48, loop: true },
+  sleep:    { fn: sleepPose,    dur: 5.5,  keys: 48, loop: true },
   wave:     { fn: wavePose,     dur: 2.2,  keys: 18, loop: true },
 }
 
@@ -951,8 +1044,9 @@ export const ONE_SHOT = new Set(['sit', 'highfive'])
 /** Clips that leave the character seated. Useful for deciding what to play next. */
 export const SEATED_CLIPS = new Set(['sit', 'type', 'sleep'])
 
-function buildClip(name, spec, { mirror = false } = {}) {
+function buildClip(name, spec, { mirror = false, seed = 0 } = {}) {
   const { fn, dur, keys, loop } = spec
+  const sp = seedParams(seed)
   // A looping clip's last key repeats the first, so it needs one extra sample.
   const n = loop ? keys + 1 : keys
   const times = new Float32Array(n)
@@ -964,7 +1058,7 @@ function buildClip(name, spec, { mirror = false } = {}) {
   for (let i = 0; i < n; i++) {
     const t01 = loop ? i / keys : (n === 1 ? 0 : i / (n - 1))
     times[i] = t01 * dur
-    let p = fn(t01)
+    let p = fn(t01, sp)
     if (mirror) p = mirrorPose(p)
     p = resolvePose(p)
     for (const b of BONES) {
@@ -983,28 +1077,47 @@ function buildClip(name, spec, { mirror = false } = {}) {
   for (const b of BONES) tracks.push(new THREE.QuaternionKeyframeTrack(b + '.quaternion', times, rot[b]))
 
   const clip = new THREE.AnimationClip(mirror ? name + 'Mirror' : name, dur, tracks)
-  clip.userData = { loop, oneShot: !loop }
+  // `bake` keeps the raw per-bone quaternion arrays around (LINEAR, same as
+  // the track above) so crossfade() can sample an exact pose at an arbitrary
+  // phase — for phase matching and inertialization — without going through
+  // an AnimationMixer to do it.
+  clip.userData = { loop, oneShot: !loop, bake: { rot, n } }
   return clip
 }
 
-let _cache = null
-/** Build (and memoise) every clip. Returns { name: AnimationClip }. */
-export function createClips() {
-  if (_cache) return _cache
-  _cache = {}
-  for (const name in CLIPS) _cache[name] = buildClip(name, CLIPS[name])
+const _clipCacheBySeed = new Map()
+/** Build (and memoise) every clip for one character seed. Returns
+ *  { name: AnimationClip }.
+ *
+ *  Only the clips whose spec says `seeded` are baked per seed — everything
+ *  else ignores the seed bundle and bakes byte-identical keyframes for every
+ *  character, so they are built once for seed 0 and shared. Baking all of
+ *  them per seed cost ~400KB and ~10ms of keyframe work per new agent id,
+ *  none of it different from seed 0's copy. */
+export function createClips(seed = 0) {
+  seed = seed >>> 0
+  let cache = _clipCacheBySeed.get(seed)
+  if (cache) return cache
+  const shared = seed === 0 ? null : createClips(0)
+  cache = {}
+  for (const name in CLIPS) {
+    cache[name] = shared && !CLIPS[name].seeded ? shared[name] : buildClip(name, CLIPS[name], { seed })
+  }
   // Left-handed high five. NOT what a pair should play — two characters facing
   // each other are already mirrored by the facing, so both play `highfive` and
   // right meets right. This is here for a character that wants to five with the
   // other hand (someone approaching from the wrong side, say); it will not make
   // contact against `highfive`.
-  _cache.highfiveMirror = buildClip('highfive', CLIPS.highfive, { mirror: true })
-  return _cache
+  cache.highfiveMirror = shared && !CLIPS.highfive.seeded
+    ? shared.highfiveMirror
+    : buildClip('highfive', CLIPS.highfive, { mirror: true, seed })
+  _clipCacheBySeed.set(seed, cache)
+  return cache
 }
 
-export function getClip(name) {
-  const c = createClips()[name]
-  if (!c) throw new Error(`anim: no clip "${name}". Have: ${Object.keys(createClips()).join(', ')}`)
+export function getClip(name, seed = 0) {
+  const c = createClips(seed)[name]
+  if (!c) throw new Error(`anim: no clip "${name}". Have: ${Object.keys(createClips(seed)).join(', ')}`)
   return c
 }
 
@@ -1016,11 +1129,49 @@ const RIGS = new WeakMap()
 /** Mixer for a character, created on first use and cached on the object. */
 export function getMixer(obj) {
   let r = RIGS.get(obj)
-  if (!r) { r = { mixer: new THREE.AnimationMixer(obj), current: null, actions: new Map() }; RIGS.set(obj, r) }
+  if (!r) {
+    r = {
+      mixer: new THREE.AnimationMixer(obj), current: null, actions: new Map(), seed: 0,
+      fade: null,      // in-flight crossfade: { prev, next, dur, t }
+      inertia: null,   // in-flight pose correction: { offsets: Map(bone->Quaternion), dur, t }
+      bones: null,     // Map(name -> Object3D), filled in lazily
+      prevQuats: null, // for popMetric: Map(bone -> last frame's quaternion)
+      maxAngVel: 0,
+    }
+    RIGS.set(obj, r)
+  }
   return r.mixer
 }
 
 function rigOf(obj) { getMixer(obj); return RIGS.get(obj) }
+
+/** Bone name -> Object3D, built once per character and reused — bones don't
+ *  change identity after the rig is built, and this is looked up every
+ *  frame by update()'s inertia and velocity passes. */
+function boneMap(obj, rig) {
+  if (!rig.bones) {
+    rig.bones = {}
+    for (const n of BONES) rig.bones[n] = obj.getObjectByName(n)
+  }
+  return rig.bones
+}
+
+/** Give this character its own baked clip set: a seed of 0 (the default) is
+ *  the original unvaried motion; any other integer seed bakes a few percent
+ *  of L/R asymmetry into the walk and idle (see seedParams). Cached per seed,
+ *  so characters that share a seed share their clips.
+ *
+ *  Call it before the character's first crossfade. It drops the actions
+ *  cached for the old seed, but whatever is already playing, fading or being
+ *  corrected by inertia keeps running on the clips it was built from — this
+ *  is a constructor-time knob, not a live one. */
+export function setSeed(obj, seed) {
+  const rig = rigOf(obj)
+  seed = seed >>> 0
+  if (rig.seed === seed) return
+  rig.seed = seed
+  rig.actions.clear()
+}
 
 /**
  * Configured AnimationAction for a character + clip name.
@@ -1030,7 +1181,7 @@ export function makeAction(obj, name, { timeScale = 1 } = {}) {
   const rig = rigOf(obj)
   let a = rig.actions.get(name)
   if (!a) {
-    const clip = getClip(name)
+    const clip = getClip(name, rig.seed)
     a = rig.mixer.clipAction(clip)
     if (clip.userData.oneShot) { a.setLoop(THREE.LoopOnce, 1); a.clampWhenFinished = true }
     else a.setLoop(THREE.LoopRepeat, Infinity)
@@ -1040,6 +1191,112 @@ export function makeAction(obj, name, { timeScale = 1 } = {}) {
   return a
 }
 
+// -- crossfade: eased weight ramp + inertialization + phase-aware starts ----
+//
+// Three's own AnimationAction.crossFadeFrom schedules a LINEAR weight ramp
+// (see _updateWeight/_scheduleFading in AnimationAction.js) and there's no
+// hook to change the curve. So this drives both actions' weights itself,
+// once per update(), through `ease()` — the same smoothstep the one-shot
+// poses already use — instead of handing that off to the mixer.
+//
+// A genuine two-action fade (prev and next both playing, weights ramping
+// (1,0) -> (0,1)) is continuous at the seam by construction: at u=0 the
+// mixer's normalised blend of the two actions IS prev's own pose, no
+// interpolation error possible. There's exactly one case that isn't true —
+// retriggering the clip that's already current (prev === next, e.g.
+// re-playing highfive), which has only one action and so no ramp to be
+// continuous with: next.reset() cuts it straight back to its own frame 0.
+// That's where inertialization earns its keep: it captures a per-bone
+// rotation offset between whatever pose was on screen and the clip's own
+// pose at its restart phase, then decays that offset to identity over
+// `duration` as a post-mixer pass (see applyInertia) — so the retrigger
+// steps continuously out of wherever the clip was instead of snapping back
+// to frame 0.
+const BIG_BONES = ['Hips', 'LeftUpLeg', 'RightUpLeg', 'LeftArm', 'RightArm', 'Spine02']
+const PHASE_SAMPLES = 8
+const INERTIA_EPS = 0.5 * D2R   // sub-half-degree offsets aren't worth carrying
+
+const _bsA = new THREE.Quaternion(), _bsB = new THREE.Quaternion()
+
+/** Exact LINEAR-interpolated pose of one bone at a normalised phase, read
+ *  straight from a clip's baked keyframe arrays (clip.userData.bake) rather
+ *  than through a mixer/interpolant — used for phase matching and
+ *  inertialization, both of which need a pose from a clip that may not be
+ *  the one actually driving the mixer yet. */
+function bakeSample(clip, bone, phase, out) {
+  const bake = clip.userData.bake
+  const arr = bake.rot[bone]
+  const n = bake.n
+  const idx = Math.min(1, Math.max(0, phase)) * (n - 1)
+  const i0 = Math.floor(idx), i1 = Math.min(i0 + 1, n - 1)
+  _bsA.set(arr[i0 * 4], arr[i0 * 4 + 1], arr[i0 * 4 + 2], arr[i0 * 4 + 3])
+  _bsB.set(arr[i1 * 4], arr[i1 * 4 + 1], arr[i1 * 4 + 2], arr[i1 * 4 + 3])
+  return out.copy(_bsA).slerp(_bsB, idx - i0)
+}
+
+function quatAngle(a, b) {
+  const d = Math.min(1, Math.abs(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w))
+  return 2 * Math.acos(d)
+}
+
+const _pmQ = new THREE.Quaternion()
+
+/** Phase of `next`'s clip whose pose is closest (summed angular distance
+ *  over the big bones) to what's on screen right now. Used when fading into
+ *  a loop from a clip of a different shape, so the new cycle doesn't start
+ *  out of step with the body it's replacing — walk->walk instead reuses the
+ *  outgoing action's own time, which crossfade() handles separately. */
+function phaseMatch(obj, rig, next) {
+  const bones = boneMap(obj, rig)
+  const clip = next.getClip()
+  let best = 0, bestDist = Infinity
+  for (let i = 0; i < PHASE_SAMPLES; i++) {
+    const phase = i / PHASE_SAMPLES
+    let dist = 0
+    for (const name of BIG_BONES) {
+      const b = bones[name]
+      if (!b) continue
+      dist += quatAngle(b.quaternion, bakeSample(clip, name, phase, _pmQ))
+    }
+    if (dist < bestDist) { bestDist = dist; best = phase }
+  }
+  return best
+}
+
+/** Every bone's current local quaternion, for the outgoing side of an
+ *  inertialization offset. */
+function snapshotPose(obj, rig) {
+  const bones = boneMap(obj, rig)
+  const out = {}
+  for (const n of BONES) { const b = bones[n]; if (b) out[n] = b.quaternion.clone() }
+  return out
+}
+
+const _iqTarget = new THREE.Quaternion(), _iqInv = new THREE.Quaternion(), _iqOffset = new THREE.Quaternion()
+
+/** Arm rig.inertia from `outgoing` (the pose just before this transition) to
+ *  `next`'s own pose at its start phase. Stores, per bone, the rotation that
+ *  turns next's pose back into the outgoing one; applyInertia decays that to
+ *  identity over `duration`, recomputing next's own pose fresh every frame
+ *  from `action` rather than reading it off the bone (see applyInertia for
+ *  why). */
+function armInertia(obj, rig, next, outgoing, duration) {
+  const clip = next.getClip()
+  if (!clip.userData.bake) { rig.inertia = null; return }
+  const phase = clip.duration > 0 ? Math.min(1, Math.max(0, next.time / clip.duration)) : 0
+  const offsets = new Map()
+  for (const name in outgoing) {
+    if (!clip.userData.bake.rot[name]) continue
+    bakeSample(clip, name, phase, _iqTarget)
+    _iqInv.copy(_iqTarget).invert()
+    _iqOffset.copy(outgoing[name]).multiply(_iqInv)
+    if (quatAngle(_iqOffset, IDENTITY_Q) > INERTIA_EPS) offsets.set(name, _iqOffset.clone())
+  }
+  rig.inertia = offsets.size ? { action: next, offsets, dur: Math.max(duration, 1 / 60), t: 0 } : null
+}
+
+const IDENTITY_Q = new THREE.Quaternion()
+
 /**
  * Blend from whatever is playing into `name`. Returns the incoming action.
  * Restarts one-shots so sit/highfive can be re-triggered.
@@ -1047,26 +1304,144 @@ export function makeAction(obj, name, { timeScale = 1 } = {}) {
 export function crossfade(obj, name, duration = 0.35, opts = {}) {
   const rig = rigOf(obj)
   const next = makeAction(obj, name, opts)
-  const prev = rig.current
+  let prev = rig.current
 
   if (prev === next && !ONE_SHOT.has(name)) return next
 
-  next.enabled = true
-  next.setEffectiveWeight(1)
-  if (ONE_SHOT.has(name) || prev === next) next.reset()
-
-  if (prev && prev !== next) {
-    // Sync the phase on cycles of similar shape so the feet do not teleport.
-    if (name === 'walk' && prev.getClip().name === 'walk') next.time = prev.time
-    next.crossFadeFrom(prev, duration, false)
+  // A fade already in flight is finished on the spot rather than layering a
+  // third action on top of it: forcing its target to weight 1 is silent (see
+  // the continuity note below) and its target becomes this call's prev. The
+  // one case this changes the outcome for is a retrigger arriving mid-fade —
+  // recomputed below, after this, so it sees the finished state.
+  if (rig.fade) {
+    rig.fade.prev.enabled = false
+    rig.fade.prev.setEffectiveWeight(0)
+    rig.fade.next.setEffectiveWeight(1)
+    prev = rig.fade.next
+    rig.fade = null
   }
+
+  const retrigger = prev === next
+  const outgoing = prev ? snapshotPose(obj, rig) : null
+
+  next.enabled = true
+  if (retrigger || ONE_SHOT.has(name)) next.reset()
+
+  if (prev && !retrigger) {
+    // Sync the phase on cycles of similar shape so the feet do not teleport;
+    // otherwise start the loop wherever it already looks like the outgoing
+    // pose so the cut into it isn't out of step with the body.
+    if (name === 'walk' && prev.getClip().name === 'walk') next.time = prev.time
+    else if (next.getClip().userData.loop) next.time = phaseMatch(obj, rig, next) * next.getClip().duration
+  }
+
+  if (prev && !retrigger) {
+    // Two actions ramping from (1, 0) to (0, 1) are continuous at the seam by
+    // construction — at u=0 the mixer's normalised blend IS prev's own pose,
+    // no interpolation error possible — so there's nothing for inertia to
+    // paper over here. It's the retrigger below, with only one action and no
+    // ramp to be continuous with, that actually needs it.
+    prev.enabled = true
+    prev.setEffectiveWeight(1)
+    next.setEffectiveWeight(0)
+    rig.fade = { prev, next, dur: duration, t: 0 }
+  } else {
+    next.setEffectiveWeight(1)
+    if (outgoing) armInertia(obj, rig, next, outgoing, duration)
+  }
+
   next.play()
   rig.current = next
   return next
 }
 
-/** Advance one character's mixer. */
-export function update(obj, dt) { getMixer(obj).update(dt) }
+const _inTmp = new THREE.Quaternion(), _inAnimated = new THREE.Quaternion()
+
+/** Post-mixer correction: decays rig.inertia's per-bone offset to identity
+ *  (cubic ease-out) and composes it onto that bone's pose, so the pose steps
+ *  continuously out of whatever was on screen before the transition instead
+ *  of snapping onto the new clip's own pose.
+ *
+ *  This recomputes the clip's own pose itself (bakeSample against the live
+ *  action's current time) rather than reading bone.quaternion and
+ *  premultiplying in place. PropertyMixer.apply() only writes a bone's
+ *  quaternion when its newly-accumulated value differs from last frame's
+ *  (see apply() in PropertyMixer.js) — a retriggered one-shot often holds
+ *  the exact same pose for several frames in a row (see armInertia's caller:
+ *  it only fires on a retrigger, which starts most clips near a still
+ *  opening pose), so the mixer would silently skip its own write and leave
+ *  whatever this function last wrote sitting there. Premultiplying onto that
+ *  would compound the same correction into itself frame after frame. */
+function applyInertia(obj, rig, dt) {
+  const inertia = rig.inertia
+  if (!inertia) return
+  inertia.t += dt
+  const u = Math.min(1, inertia.t / inertia.dur)
+  const decay = (1 - u) ** 3
+  if (decay <= 1e-3) { rig.inertia = null; return }
+  const clip = inertia.action.getClip()
+  const bake = clip.userData.bake
+  const phase = clip.duration > 0 ? Math.min(1, Math.max(0, inertia.action.time / clip.duration)) : 0
+  const bones = boneMap(obj, rig)
+  for (const [name, offset] of inertia.offsets) {
+    const b = bones[name]
+    if (!b || !bake.rot[name]) continue
+    bakeSample(clip, name, phase, _inAnimated)
+    _inTmp.copy(IDENTITY_Q).slerp(offset, decay)
+    b.quaternion.copy(_inTmp).multiply(_inAnimated)
+  }
+}
+
+/** Per-bone angular velocity this frame, for popMetric. */
+function trackVelocity(obj, rig, dt) {
+  if (dt <= 0) return
+  const bones = boneMap(obj, rig)
+  if (!rig.prevQuats) rig.prevQuats = new Map()
+  let maxVel = 0
+  for (const n of BONES) {
+    const b = bones[n]
+    if (!b) continue
+    const prev = rig.prevQuats.get(n)
+    if (prev) {
+      const vel = quatAngle(prev, b.quaternion) / dt
+      if (vel > maxVel) maxVel = vel
+      prev.copy(b.quaternion)
+    } else {
+      rig.prevQuats.set(n, b.quaternion.clone())
+    }
+  }
+  rig.maxAngVel = maxVel
+}
+
+/** Advance one character's mixer, ramp any in-flight crossfade weight, and
+ *  apply the decaying inertialization offset on top. */
+export function update(obj, dt) {
+  const rig = rigOf(obj)
+  const f = rig.fade
+  if (f) {
+    f.t += dt
+    const u = f.dur > 0 ? Math.min(1, f.t / f.dur) : 1
+    const w = ease(u, 0, 1)   // smoothstep, not the linear ramp crossFadeFrom used
+    f.next.setEffectiveWeight(w)
+    f.prev.setEffectiveWeight(1 - w)
+    if (u >= 1) {
+      f.prev.enabled = false
+      f.prev.setEffectiveWeight(0)
+      rig.fade = null
+    }
+  }
+  rig.mixer.update(dt)
+  applyInertia(obj, rig, dt)
+  trackVelocity(obj, rig, dt)
+}
+
+/** Max per-bone angular velocity (rad/s) measured on this character's last
+ *  update() call. A transition popping should show up here as a spike well
+ *  past whatever the same clip's own peak looks like in steady state. */
+export function popMetric(obj) {
+  const rig = RIGS.get(obj)
+  return rig ? rig.maxAngVel : 0
+}
 
 /** Nudge a cached action's timeScale without touching what's currently
  *  playing or armed. Used by the churn signal (agent.js's setChurn) to make
