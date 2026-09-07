@@ -222,6 +222,63 @@ describe('crossfade: eased ramp + inertialization', () => {
     // interim fix (17.3) this replaced.
     expect(after).toBeLessThan(10)
   })
+
+  // A plain fade interrupted by another plain fade — act() called twice in
+  // quick succession, which is the common case, not an edge one. crossfade()
+  // finishes the in-flight fade on the spot, so the pose goes from
+  // blend(A, B, w) to B alone in one frame: the earlier the interrupt, the
+  // smaller w and the bigger the jump. Worst at one frame in, which is why
+  // this sweeps the interrupt point instead of picking one.
+  it('does not jump when a fade interrupts a fade', () => {
+    function run(driver, a, b, c, fadeDur, interruptFrames) {
+      const root = makeRig()
+      const cur = { action: null }
+      const start = (n, d) => driver === 'old' ? oldCrossfade(root, cur, n, d) : ANIM.crossfade(root, n, d)
+      start(a, 0)
+      for (let s = 0; s < 10; s++) ANIM.update(root, DT)
+      start(b, fadeDur)
+      for (let s = 0; s < interruptFrames; s++) ANIM.update(root, DT)
+      start(c, fadeDur)
+      let peak = 0
+      for (let s = 0, n = Math.round((fadeDur + 0.4) / DT); s < n; s++) {
+        ANIM.update(root, DT)
+        peak = Math.max(peak, ANIM.popMetric(root))
+      }
+      return peak
+    }
+
+    for (const [a, b, c] of [['idle', 'walk', 'sit'], ['walk', 'sit', 'idle']]) {
+      const rows = [1, 2, 3, 5, 10, 15, 20].map(f => ({
+        f, before: run('old', a, b, c, 0.35, f), after: run('new', a, b, c, 0.35, f),
+      }))
+      console.log(`\n${a} -> ${b} interrupted at frame N -> ${c}, peak rad/s:`)
+      for (const r of rows) console.log(`  N=${String(r.f).padStart(2)}  before ${r.before.toFixed(2)}  after ${r.after.toFixed(2)}`)
+      // The interrupted pose is carried as a decaying offset (armInertia on
+      // the `interrupted` branch in crossfade), so the new path should beat
+      // the old linear one everywhere, not just on average.
+      for (const r of rows) expect(r.after).toBeLessThanOrEqual(r.before)
+    }
+  })
+
+  // dur can be capped to exactly t when a zero-length crossfade interrupts a
+  // retrigger, and a frame can arrive with dt 0; 0/0 used to write NaN into
+  // the bones, and PropertyMixer's skip-unchanged-value write meant it stuck.
+  it('never writes NaN, even on a zero-length interrupt with a zero dt', () => {
+    const root = makeRig()
+    ANIM.crossfade(root, 'sit', 0.3)
+    for (let s = 0, n = Math.round(0.35 / DT); s < n; s++) ANIM.update(root, DT)
+    ANIM.crossfade(root, 'sit', 0.3)   // retrigger, arms inertia at t = 0
+    ANIM.crossfade(root, 'idle', 0)    // zero-length interrupt, before any update
+    ANIM.update(root, 0)
+    for (let s = 0; s < 30; s++) ANIM.update(root, DT)
+
+    const bad = []
+    root.traverse(o => {
+      const q = o.quaternion
+      if ([q.x, q.y, q.z, q.w].some(Number.isNaN)) bad.push(o.name)
+    })
+    expect(bad).toEqual([])
+  })
 })
 
 // createClips only bakes per seed the clips whose spec says `seeded`; the rest

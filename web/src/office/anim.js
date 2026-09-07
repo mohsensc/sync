@@ -1316,16 +1316,19 @@ export function crossfade(obj, name, duration = 0.35, opts = {}) {
   if (prev === next && !ONE_SHOT.has(name)) return next
 
   // A fade already in flight is finished on the spot rather than layering a
-  // third action on top of it: forcing its target to weight 1 is silent (see
-  // the continuity note below) and its target becomes this call's prev. The
-  // one case this changes the outcome for is a retrigger arriving mid-fade —
-  // recomputed below, after this, so it sees the finished state.
+  // third action on top of it, and its target becomes this call's prev. That
+  // is NOT free: what was on screen was blend(A, B, w) and what prev alone
+  // shows is B, so the pose jumps by (1 - w) of the distance between them in
+  // one frame. `interrupted` says so, and the branch below pays it off with
+  // the same inertia offset a retrigger uses.
+  let interrupted = false
   if (rig.fade) {
     rig.fade.prev.enabled = false
     rig.fade.prev.setEffectiveWeight(0)
     rig.fade.next.setEffectiveWeight(1)
     prev = rig.fade.next
     rig.fade = null
+    interrupted = true
   }
 
   const retrigger = prev === next
@@ -1345,10 +1348,13 @@ export function crossfade(obj, name, duration = 0.35, opts = {}) {
   if (prev && !retrigger) {
     // Two actions ramping from (1, 0) to (0, 1) are continuous at the seam by
     // construction — at u=0 the mixer's normalised blend IS prev's own pose,
-    // no interpolation error possible — so there's nothing for inertia to
-    // paper over here. It's the retrigger below, with only one action and no
-    // ramp to be continuous with, that actually needs it.
-    //
+    // no interpolation error possible — so a fade that starts from a settled
+    // pose needs no inertia. The exception is `interrupted`: prev is then the
+    // target of a fade that was still mid-ramp, so prev's own pose is NOT
+    // what was on screen. Same fix as the retrigger below — carry the real
+    // outgoing pose as a decaying offset — and the same cap, so it is spent
+    // before this fade ends and freezes prev.time.
+    if (interrupted) armInertia(obj, rig, prev, outgoing, 0.8 * duration)
     // Any inertia still correcting `prev` from an earlier retrigger has to
     // stop targeting prev in isolation once this fade starts blending prev
     // against next — applyInertia's target is only valid while prev is the
@@ -1404,7 +1410,11 @@ function applyInertia(obj, rig, dt) {
   const inertia = rig.inertia
   if (!inertia) return
   inertia.t += dt
-  const u = Math.min(1, inertia.t / inertia.dur)
+  // dur can be capped to exactly t by an interrupting zero-length fade, and
+  // dt can be 0 on a frame; t/dur is then 0/0, and a NaN written to a bone
+  // here sticks — PropertyMixer only rewrites a bone whose accumulated value
+  // changed, so the legs stay NaN for good.
+  const u = inertia.dur > 0 ? Math.min(1, inertia.t / inertia.dur) : 1
   const decay = (1 - u) ** 3
   if (decay <= 1e-3) { rig.inertia = null; return }
   const bones = boneMap(obj, rig)
@@ -1413,7 +1423,7 @@ function applyInertia(obj, rig, dt) {
     const clipA = fade.prev.getClip(), clipB = fade.next.getClip()
     const bakeA = clipA.userData.bake, bakeB = clipB.userData.bake
     const phaseA = actionPhase(fade.prev), phaseB = actionPhase(fade.next)
-    const w = ease(Math.min(1, fade.t / fade.dur), 0, 1)   // same curve update() drove the weights with this frame
+    const w = fade.dur > 0 ? ease(fade.t / fade.dur, 0, 1) : 1   // same curve update() drove the weights with this frame
     for (const [name, offset] of inertia.offsets) {
       const b = bones[name]
       if (!b || !bakeA.rot[name] || !bakeB.rot[name]) continue
