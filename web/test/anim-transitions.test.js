@@ -176,6 +176,52 @@ describe('crossfade: eased ramp + inertialization', () => {
     // instead, which should read as meaningfully calmer.
     expect(after).toBeLessThan(before * 0.5)
   })
+
+  // A retrigger's inertia offset is only valid while that one action is the
+  // sole thing driving those bones (applyInertia recomputes its target pose
+  // from that action's own clip/time — see applyInertia's comment). A second
+  // crossfade landing mid-decay switches it to targeting the fade's own
+  // blend instead (same function, see the `fade` branch), capped to finish
+  // before the fade does so it's never left correcting a pose that's
+  // stopped updating once the fade completes and disables prev.
+  //
+  // Honesty check, not a green check: composing with the blend removes the
+  // stomp-then-jump this replaced (33.9 rad/s for this exact scenario,
+  // before either fix), but the offset itself is still a real correction —
+  // the old linear-crossFadeFrom system never had inertia to begin with, so
+  // it does very slightly better than even the fixed version on this one
+  // narrow case (a second crossfade landing inside a retrigger's decay
+  // window). Measured below and left un-asserted rather than papered over.
+  it('composes with an interrupting fade instead of stomping or snapping', () => {
+    function interrupted(driver) {
+      const root = makeRig()
+      const cur = { action: null }
+      const start = (n, d) => driver === 'old' ? oldCrossfade(root, cur, n, d) : ANIM.crossfade(root, n, d)
+      start('idle', 0)
+      for (let s = 0; s < 5; s++) ANIM.update(root, DT)
+      start('sit', 0.3)
+      for (let s = 0, n = Math.round(1.6 / DT); s < n; s++) ANIM.update(root, DT)
+      start('sit', 0.25)                                        // retrigger
+      for (let s = 0, n = Math.round(0.1 / DT); s < n; s++) ANIM.update(root, DT)   // land inside its decay window
+      start('type', 0.3)                                        // interrupt with a real fade
+      let peak = 0
+      for (let s = 0, n = Math.round(0.9 / DT); s < n; s++) {
+        ANIM.update(root, DT)
+        peak = Math.max(peak, ANIM.popMetric(root))
+      }
+      return peak
+    }
+
+    const before = interrupted('old')
+    const after = interrupted('new')
+    console.log(`\ninterrupted-retrigger peak (rad/s): before (old, no inertia to compose) ${before.toFixed(2)}, after (composed with the fade) ${after.toFixed(2)}`)
+
+    // Within shouting distance of old's own number (no fixed-point identity
+    // to hold it to — old never had this offset in the first place) and
+    // nowhere near the stomp-then-jump bug (33.9) or the drop-in-one-step
+    // interim fix (17.3) this replaced.
+    expect(after).toBeLessThan(10)
+  })
 })
 
 // createClips only bakes per seed the clips whose spec says `seeded`; the rest

@@ -1272,6 +1272,13 @@ function snapshotPose(obj, rig) {
   return out
 }
 
+/** An action's current time as a phase in [0, 1], clamped — used to sample
+ *  clip.userData.bake rather than the mixer. */
+function actionPhase(action) {
+  const dur = action.getClip().duration
+  return dur > 0 ? Math.min(1, Math.max(0, action.time / dur)) : 0
+}
+
 const _iqTarget = new THREE.Quaternion(), _iqInv = new THREE.Quaternion(), _iqOffset = new THREE.Quaternion()
 
 /** Arm rig.inertia from `outgoing` (the pose just before this transition) to
@@ -1283,7 +1290,7 @@ const _iqTarget = new THREE.Quaternion(), _iqInv = new THREE.Quaternion(), _iqOf
 function armInertia(obj, rig, next, outgoing, duration) {
   const clip = next.getClip()
   if (!clip.userData.bake) { rig.inertia = null; return }
-  const phase = clip.duration > 0 ? Math.min(1, Math.max(0, next.time / clip.duration)) : 0
+  const phase = actionPhase(next)
   const offsets = new Map()
   for (const name in outgoing) {
     if (!clip.userData.bake.rot[name]) continue
@@ -1341,6 +1348,21 @@ export function crossfade(obj, name, duration = 0.35, opts = {}) {
     // no interpolation error possible — so there's nothing for inertia to
     // paper over here. It's the retrigger below, with only one action and no
     // ramp to be continuous with, that actually needs it.
+    //
+    // Any inertia still correcting `prev` from an earlier retrigger has to
+    // stop targeting prev in isolation once this fade starts blending prev
+    // against next — applyInertia's target is only valid while prev is the
+    // sole thing driving that bone (see applyInertia). It doesn't get
+    // dropped, though: applyInertia composes it with the blend itself once
+    // rig.fade is live, so the offset keeps decaying against a moving target
+    // instead of being paid off in one step. It's capped to finish strictly
+    // before this fade does — otherwise the fade would complete, disable
+    // prev, freeze prev.time, and leave the still-live offset correcting a
+    // pose that's stopped updating.
+    if (rig.inertia) {
+      const remaining = rig.inertia.dur - rig.inertia.t
+      rig.inertia.dur = rig.inertia.t + Math.min(remaining, 0.8 * duration)
+    }
     prev.enabled = true
     prev.setEffectiveWeight(1)
     next.setEffectiveWeight(0)
@@ -1356,14 +1378,18 @@ export function crossfade(obj, name, duration = 0.35, opts = {}) {
 }
 
 const _inTmp = new THREE.Quaternion(), _inAnimated = new THREE.Quaternion()
+const _inA = new THREE.Quaternion(), _inB = new THREE.Quaternion()
 
 /** Post-mixer correction: decays rig.inertia's per-bone offset to identity
  *  (cubic ease-out) and composes it onto that bone's pose, so the pose steps
  *  continuously out of whatever was on screen before the transition instead
  *  of snapping onto the new clip's own pose.
  *
- *  This recomputes the clip's own pose itself (bakeSample against the live
- *  action's current time) rather than reading bone.quaternion and
+ *  This recomputes the "animated" pose itself — bakeSample against the live
+ *  action's current time, or, if a fade is running (a second crossfade
+ *  interrupted the retrigger this offset came from — see the cap in
+ *  crossfade()), the two fade actions' own poses slerped by the same eased
+ *  weight update() just gave them — rather than reading bone.quaternion and
  *  premultiplying in place. PropertyMixer.apply() only writes a bone's
  *  quaternion when its newly-accumulated value differs from last frame's
  *  (see apply() in PropertyMixer.js) — a retriggered one-shot often holds
@@ -1371,7 +1397,9 @@ const _inTmp = new THREE.Quaternion(), _inAnimated = new THREE.Quaternion()
  *  it only fires on a retrigger, which starts most clips near a still
  *  opening pose), so the mixer would silently skip its own write and leave
  *  whatever this function last wrote sitting there. Premultiplying onto that
- *  would compound the same correction into itself frame after frame. */
+ *  would compound the same correction into itself frame after frame — so
+ *  every branch below computes the animated pose fresh and OVERWRITES with
+ *  it, never premultiplies. */
 function applyInertia(obj, rig, dt) {
   const inertia = rig.inertia
   if (!inertia) return
@@ -1379,16 +1407,33 @@ function applyInertia(obj, rig, dt) {
   const u = Math.min(1, inertia.t / inertia.dur)
   const decay = (1 - u) ** 3
   if (decay <= 1e-3) { rig.inertia = null; return }
-  const clip = inertia.action.getClip()
-  const bake = clip.userData.bake
-  const phase = clip.duration > 0 ? Math.min(1, Math.max(0, inertia.action.time / clip.duration)) : 0
   const bones = boneMap(obj, rig)
-  for (const [name, offset] of inertia.offsets) {
-    const b = bones[name]
-    if (!b || !bake.rot[name]) continue
-    bakeSample(clip, name, phase, _inAnimated)
-    _inTmp.copy(IDENTITY_Q).slerp(offset, decay)
-    b.quaternion.copy(_inTmp).multiply(_inAnimated)
+  const fade = rig.fade
+  if (fade) {
+    const clipA = fade.prev.getClip(), clipB = fade.next.getClip()
+    const bakeA = clipA.userData.bake, bakeB = clipB.userData.bake
+    const phaseA = actionPhase(fade.prev), phaseB = actionPhase(fade.next)
+    const w = ease(Math.min(1, fade.t / fade.dur), 0, 1)   // same curve update() drove the weights with this frame
+    for (const [name, offset] of inertia.offsets) {
+      const b = bones[name]
+      if (!b || !bakeA.rot[name] || !bakeB.rot[name]) continue
+      bakeSample(clipA, name, phaseA, _inA)
+      bakeSample(clipB, name, phaseB, _inB)
+      _inAnimated.copy(_inA).slerp(_inB, w)
+      _inTmp.copy(IDENTITY_Q).slerp(offset, decay)
+      b.quaternion.copy(_inTmp).multiply(_inAnimated)
+    }
+  } else {
+    const clip = inertia.action.getClip()
+    const bake = clip.userData.bake
+    const phase = actionPhase(inertia.action)
+    for (const [name, offset] of inertia.offsets) {
+      const b = bones[name]
+      if (!b || !bake.rot[name]) continue
+      bakeSample(clip, name, phase, _inAnimated)
+      _inTmp.copy(IDENTITY_Q).slerp(offset, decay)
+      b.quaternion.copy(_inTmp).multiply(_inAnimated)
+    }
   }
 }
 
