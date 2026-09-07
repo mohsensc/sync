@@ -29,7 +29,18 @@
 // We drive it backwards: pick a speed, solve for timeScale, every frame. That
 // holds through acceleration and deceleration, which a fixed timeScale does
 // not. The clip still has a residual slide inside stance (see anim.js) — this
-// only guarantees the average is right.
+// only guarantees the average is right. #steer is the ONLY place that sets
+// the walk action's timeScale — nowhere else should touch it, or the two
+// values fight and whichever wrote last wins for one frame.
+//
+// Turning in place (see pivot in #steer) has no ground speed to solve
+// against, so it isn't the no-slip equation above — it plays the same walk
+// clip at a cadence proportional to how far off-heading we still are, with
+// the body's world position held fixed. The walk clip's Hips.position track
+// is exactly periodic (first key == last key, verified directly off the
+// baked keyframe data) so holding position doesn't accumulate drift, just a
+// stepping-in-place wobble, which reads better than freezing to idle
+// mid-turn.
 // ---------------------------------------------------------------------------
 
 import * as THREE from 'three'
@@ -79,8 +90,22 @@ export const TUNING = {
   pivotDist: 1.0,      // inside this, a big turn is done on the spot
   pivotAngle: 1.0,
   pivotExit: 0.35,
+  settle: 0.28,        // s to ease the last bit of an arrival onto its exact mark + yaw
   greetRange: 2.6,     // two arrivals this close will high five
   greetCooldown: 8.0,  // s
+}
+
+/** Stable per-agent seed for ANIM.setSeed, so characters sharing a clip don't
+ *  move in lockstep. FNV-1a over the id — deterministic across runs, not
+ *  just this session, since ids are assigned by the caller (office.html),
+ *  not sequentially here. */
+function seedFromId(id) {
+  let h = 0x811c9dc5
+  for (let i = 0; i < id.length; i++) {
+    h ^= id.charCodeAt(i)
+    h = Math.imul(h, 0x01000193)
+  }
+  return h >>> 0
 }
 
 // Each activity owns its clip, its blend time and where it goes when it ends.
@@ -264,9 +289,12 @@ export class Agent {
 
     this._move = null
     this._turn = null
+    this._settle = null                   // { from, to, fromYaw, toYaw, t, m }, see #settle
     this._timer = null                    // { t, fn }, frame-locked so stop() kills it
     this._pivot = false
+    this._walkTs = null                   // rate-limited walk timeScale, see #steer
     this._pulse = 0
+    this.seed = seedFromId(this.id)
 
     // Badge over the head and a halo under the feet. The halo is how a blocked
     // agent stays readable from any camera angle.
@@ -324,6 +352,7 @@ export class Agent {
     this.churnGroup.add(this.churnTray, this.churnPapers)
 
     if (root) {
+      ANIM.setSeed(root, this.seed)
       root.add(this.badge)
       root.add(this.halo)
       root.add(this.freshHalo)
@@ -350,12 +379,15 @@ export class Agent {
 
   // -- clips and labels ----------------------------------------------------
 
-  /** Low-level: swap the clip, arm nothing. The demo drives beats with this. */
+  /** Low-level: swap the clip, arm nothing. The demo drives beats with this.
+   *  Walk timeScale is NOT set here — #steer owns it, every frame, while an
+   *  agent is actually steering itself, and it writes the cached action's
+   *  timeScale directly. So a play('walk') outside a steer (a demo beat, say)
+   *  inherits whatever rate the last steer or pivot left on that action. */
   play(clip, fade = 0.3) {
     if (this.clip === clip && !ANIM.ONE_SHOT.has(clip)) return this
     this.clip = clip
-    const ts = clip === 'walk' ? Math.max(this.speed, 0.9 * this.natSpeed) / this.natSpeed : 1
-    ANIM.crossfade(this.root, clip, fade, { timeScale: ts })
+    ANIM.crossfade(this.root, clip, fade)
     // play() overrides the machine, so any transition it had armed is void.
     this._timer = null
     const a = ACT_OF_CLIP[clip]
@@ -373,7 +405,11 @@ export class Agent {
     const fade = opts.fade != null ? opts.fade : st.fade
 
     this.clip = clip
-    ANIM.crossfade(this.root, clip, fade, { timeScale: name === 'walking' ? 0.05 : 1 })
+    // No timeScale override for 'walking' here — #steer sets it every frame
+    // from the actual speed (see FEET, up top); this call runs the instant
+    // before #steer's first tick, so whatever crossfade's default (1) starts
+    // with is corrected within a frame.
+    ANIM.crossfade(this.root, clip, fade)
     if (st.reverse) {
       // There is no stand-up clip, so sit runs backwards. LoopOnce clamps at 0.
       const a = ANIM.makeAction(this.root, clip, { timeScale: -1 })
@@ -434,6 +470,7 @@ export class Agent {
   stop() {
     this._move = null
     this._turn = null
+    this._settle = null   // a glide in progress must not fire its promise later
     this._timer = null
     this.speed = 0
     this.destination = null
@@ -491,6 +528,8 @@ export class Agent {
       }
       this.destination = opts.label || null
       this._pivot = false
+      this._walkTs = null    // fresh walk: snap to the real speed, don't ease in from a stale rate
+      this._settle = null    // supersedes any glide left over from a previous arrival
       this.act('walking')
     })
   }
@@ -506,6 +545,7 @@ export class Agent {
     }
 
     if (this._move) this.#steer(dt)
+    else if (this._settle) this.#settle(dt)
     else if (this._turn) this.#turn(dt, TUNING.turnIdle)
 
     if (this.state === 'blocked') {
@@ -561,13 +601,13 @@ export class Agent {
     let ang = wrapPi(want - this.yaw)
 
     // A tight target behind us cannot be reached on an arc — the turn circle is
-    // wider than the distance and the agent orbits it forever. Pivot instead.
+    // wider than the distance and the agent orbits it forever. Pivot instead:
+    // keep the clip on 'walk' (never idle) and let the timeScale block below
+    // turn the stepping cadence down instead of freezing the legs.
     if (!this._pivot && dist < TUNING.pivotDist && Math.abs(ang) > TUNING.pivotAngle) {
       this._pivot = true
-      this.play('idle', 0.2)
     } else if (this._pivot && Math.abs(ang) < TUNING.pivotExit) {
       this._pivot = false
-      this.act('walking')
     }
 
     const rate = this._pivot ? TUNING.turnIdle : TUNING.turnWalk
@@ -589,9 +629,27 @@ export class Agent {
     this.pos.z -= Math.cos(this.yaw) * this.speed * dt
 
     if (this.clip === 'walk') {
-      // The no-foot-slide equation.
-      ANIM.makeAction(this.root, 'walk').timeScale =
-        clamp(this.speed / this.natSpeed, 0.05, 1.8)
+      // One source of truth for walk timeScale — nothing else may set it
+      // (see the FEET note up top). Moving: the no-slip equation. Pivoting:
+      // there's no ground speed to solve against, so cadence tracks how far
+      // off-heading we still are instead, capped at a stepping-not-sprinting
+      // 0.6 — it only actually tapers below that in the last stretch as
+      // |ang| closes in on pivotExit, which is fine: most of a big turn
+      // SHOULD read as one steady cadence, only easing down right at the
+      // hand-off back to real walking. Either way the result is rate-limited
+      // so that hand-off eases instead of popping — 8/s is generous next to
+      // the ~0.06/frame the no-slip equation itself ever asks for under
+      // TUNING.accel/decel, so it never lags real acceleration (no added
+      // slide), but it does smooth the pivot<->walk seam, where the two
+      // formulas can otherwise disagree by a lot in one frame.
+      const target = this._pivot
+        ? Math.min(0.6, Math.abs(ang) / TUNING.pivotAngle)
+        : clamp(this.speed / this.natSpeed, 0.05, 1.8)
+      const maxStep = 8 * dt
+      this._walkTs = this._walkTs == null
+        ? target
+        : this._walkTs + clamp(target - this._walkTs, -maxStep, maxStep)
+      ANIM.makeAction(this.root, 'walk').timeScale = this._walkTs
     }
 
     if (dist <= TUNING.arrive + 0.03 && this.speed < 0.18) this.#arrive()
@@ -605,13 +663,40 @@ export class Agent {
     this.destination = null
     this.act('idle')
 
-    const finish = () => {
+    // Arrival tolerance (TUNING.arrive) and the pivot rewrite above can both
+    // leave the agent up to ~10cm off its mark and off its final yaw. Ease
+    // both onto the exact values together instead of snapping position and
+    // separately turning — see #settle.
+    this._settle = {
+      from: [this.pos.x, this.pos.z],
+      to: [m.x, m.z],
+      fromYaw: this.yaw,
+      toYaw: m.endYaw != null ? m.endYaw : this.yaw,
+      t: 0,
+      m,
+    }
+  }
+
+  /** Smoothstepped glide from wherever #steer's arrive tolerance stopped the
+   *  agent onto the exact target position and yaw. Generalises what used to
+   *  be a bespoke correction World.highfive ran after the fact (see there —
+   *  it now just waits on this instead of re-doing it). */
+  #settle(dt) {
+    const s = this._settle
+    s.t += dt
+    const k = Math.min(1, s.t / TUNING.settle)
+    const e = k * k * (3 - 2 * k)
+    this.pos.x = s.from[0] + (s.to[0] - s.from[0]) * e
+    this.pos.z = s.from[1] + (s.to[1] - s.from[1]) * e
+    this.yaw = wrapPi(s.fromYaw + wrapPi(s.toYaw - s.fromYaw) * e)
+    if (k >= 1) {
+      this.pos.x = s.to[0]; this.pos.z = s.to[1]; this.yaw = wrapPi(s.toYaw)
+      const m = s.m
+      this._settle = null
       if (m.then) m.then(this)
       if (m.done) m.done(this)
       if (this.world) this.world.onArrived(this)
     }
-    if (m.endYaw != null) this.turnTo(m.endYaw).then(finish)
-    else finish()
   }
 
   #turn(dt, rate) {
@@ -1270,15 +1355,22 @@ export class World {
         console.warn(`replay approach timeout: ${e.a.name} + ${e.b.name} (${e.kind})`)
         return this.#end(e)
       }
-      if (!a.moving && !b.moving && !a._turn && !b._turn && !a.seated && !b.seated) {
-        // Arrival has a tolerance, so each of them can stop up to 10cm short.
-        // Two of those and the pair stands 20cm too far apart, which is enough
-        // to make the palms (or, for a contest, the marks) miss. Ease them
-        // onto the exact marks first.
-        e.phase = 'settle'; e.t = 0
-        e.from = { a:[a.pos.x, a.pos.z], b:[b.pos.x, b.pos.z] }
+      // Each agent's own #settle (see agent.js) now irons out the arrival
+      // tolerance onto the exact mark and yaw, so there is nothing left for
+      // this phase to correct — just wait for both to actually be done
+      // gliding (not just done walking — #settle keeps running after _move
+      // clears) before starting the paired clip.
+      if (!a.moving && !b.moving && !a._turn && !b._turn && !a._settle && !b._settle &&
+          !a.seated && !b.seated) {
+        e.phase = 'active'; e.t = 0
+        this.#beginActive(e)
       }
     } else if (e.phase === 'settle') {
+      // Only #advanceChain ever puts an encounter back into this phase — a
+      // chain stage's own marks differ from the previous stage's (different
+      // spacing, different facing), so re-settling here is a real in-place
+      // reposition, not the arrival-tolerance touch-up the 'approach' branch
+      // above used to do before agent.js grew its own #settle.
       const k = Math.min(1, e.t / 0.28)
       const s = k * k * (3 - 2 * k)
       for (const key of ['a', 'b']) {
@@ -1288,50 +1380,7 @@ export class World {
       }
       if (k >= 1) {
         e.phase = 'active'; e.t = 0
-        if (e.isChain) {
-          // A replay() stage owns its own act() calls (see REPLAY_CHAINS) —
-          // the role a given side plays (winner/loser, reader/editor) can
-          // differ from what the same kind means standalone, so this does
-          // not fall through to the kind-based dispatch below.
-          e.stage.start()
-        } else if (e.kind === 'contest') {
-          // Different bodies doing different things — one points, the other
-          // throws its hands up — but started the same frame, the same sync
-          // story highfive's SAME clip trick tells; see clips/argue.js.
-          a.act('arguing')
-          b.act('reacting')
-        } else if (e.kind === 'shove') {
-          // Asymmetric like contest — the winner shoves, the loser eats it —
-          // but this one has a fixed length; see clips/shove.js.
-          a.act('shoving')
-          b.act('shoveReacting')
-        } else if (e.kind === 'waveoff') {
-          // Same abort-family shape as shove — `a` always wins — different
-          // beat; see clips/waveoff.js.
-          a.act('wavingOff')
-          b.act('waveoffReacting')
-        } else if (e.kind === 'slap') {
-          // Same abort-family shape as shove — `a` always wins — different
-          // beat; see clips/slap.js.
-          a.act('slapping')
-          b.act('slapReacting')
-        } else if (e.kind === 'yield') {
-          // Asymmetric like shove — reader and editor play different
-          // clips — but neither one "wins"; see clips/yield.js.
-          a.act('yielding')
-          b.act('keeping')
-        } else {
-          // highfive, handshake, doubletake, chestbump, fistbump: same
-          // frame, same fade, both from time zero, both the SAME clip —
-          // facing each other is already the mirror. That is the whole
-          // sync story; see highfive.js.
-          const sameClipAct = {
-            handshake: 'handshaking', doubletake: 'doubletaking',
-            chestbump: 'chestbumping', fistbump: 'fistbumping',
-          }[e.kind] || 'highfiving'
-          a.act(sameClipAct)
-          b.act(sameClipAct)
-        }
+        e.stage.start()
       }
     } else if (e.phase === 'active') {
       if (e.isChain) {
@@ -1365,6 +1414,59 @@ export class World {
       if (clipName && e.t >= ANIM.getClip(clipName).duration + 0.2) {
         return this.#end(e)
       }
+    }
+  }
+
+  /** Fires the paired clip the instant a pair is exactly on its marks —
+   *  called from 'approach' once both sides finish steering AND settling,
+   *  and from 'settle' once a chain's in-place reposition finishes. Split
+   *  out of #step so both entry points share one dispatch instead of
+   *  duplicating the kind/stage branching. */
+  #beginActive(e) {
+    const { a, b } = e
+    if (e.isChain) {
+      // A replay() stage owns its own act() calls (see REPLAY_CHAINS) — the
+      // role a given side plays (winner/loser, reader/editor) can differ
+      // from what the same kind means standalone, so this does not fall
+      // through to the kind-based dispatch below.
+      e.stage.start()
+    } else if (e.kind === 'contest') {
+      // Different bodies doing different things — one points, the other
+      // throws its hands up — but started the same frame, the same sync
+      // story highfive's SAME clip trick tells; see clips/argue.js.
+      a.act('arguing')
+      b.act('reacting')
+    } else if (e.kind === 'shove') {
+      // Asymmetric like contest — the winner shoves, the loser eats it —
+      // but this one has a fixed length; see clips/shove.js.
+      a.act('shoving')
+      b.act('shoveReacting')
+    } else if (e.kind === 'waveoff') {
+      // Same abort-family shape as shove — `a` always wins — different
+      // beat; see clips/waveoff.js.
+      a.act('wavingOff')
+      b.act('waveoffReacting')
+    } else if (e.kind === 'slap') {
+      // Same abort-family shape as shove — `a` always wins — different
+      // beat; see clips/slap.js.
+      a.act('slapping')
+      b.act('slapReacting')
+    } else if (e.kind === 'yield') {
+      // Asymmetric like shove — reader and editor play different clips —
+      // but neither one "wins"; see clips/yield.js.
+      a.act('yielding')
+      b.act('keeping')
+    } else {
+      // highfive, handshake, doubletake, chestbump, fistbump: same frame,
+      // same fade, both from time zero, both the SAME clip — facing each
+      // other is already the mirror. That is the whole sync story; see
+      // highfive.js.
+      const sameClipAct = {
+        handshake: 'handshaking', doubletake: 'doubletaking',
+        chestbump: 'chestbumping', fistbump: 'fistbumping',
+      }[e.kind] || 'highfiving'
+      a.act(sameClipAct)
+      b.act(sameClipAct)
     }
   }
 

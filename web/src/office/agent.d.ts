@@ -85,6 +85,8 @@ export interface Tuning {
   pivotDist: number
   pivotAngle: number
   pivotExit: number
+  /** s to ease the last bit of an arrival onto its exact mark + yaw. */
+  settle: number
   greetRange: number
   greetCooldown: number
 }
