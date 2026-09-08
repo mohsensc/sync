@@ -6,11 +6,21 @@
     "verify-toolchain": "bash scripts/verify-toolchain.sh",
     "test": "bash scripts/verify-toolchain.sh && vitest run",
     "typecheck": "bash scripts/verify-toolchain.sh && tsc --noEmit",
-    "dev": "go -C ../go run ./cmd/webdev --worktree \"$PWD\""
+    "dev": "go -C ../go run ./cmd/webdev --worktree \"$PWD\"",
+    "optimize-glb": "node scripts/optimize-glb.mjs"
   },
-  "dependencies": { "three": "^0.170.0" },
+  "dependencies": {
+    "three": "^0.170.0"
+  },
   "devDependencies": {
-    "vite": "^5.4.0", "vitest": "^2.1.0",
-    "typescript": "^5.6.0", "@types/three": "^0.170.0"
+    "@gltf-transform/core": "^4.5.0",
+    "@gltf-transform/extensions": "^4.5.0",
+    "@gltf-transform/functions": "^4.5.0",
+    "@types/three": "^0.170.0",
+    "meshoptimizer": "^1.2.0",
+    "sharp": "^0.35.4",
+    "typescript": "^5.6.0",
+    "vite": "^5.4.0",
+    "vitest": "^2.1.0"
   }
 }
