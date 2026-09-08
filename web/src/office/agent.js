@@ -87,8 +87,9 @@ export const TUNING = {
   turnWalk: 2.6,       // rad/s while moving
   turnIdle: 2.4,       // rad/s standing still
   minTurnFactor: 0.35, // fraction of maxSpeed kept while turning hard
-  arrive: 0.01,        // m — #steer's trigger radius; brakes to a literal stop here, not a buffer short of it
-  arriveSpeed: 0.16,   // m/s — speed must also be under this for #arrive to fire
+  arrive: 0.01,        // m — #steer's trigger radius, tested against the distance at the TOP of the frame
+  arriveSpeed: 0.16,   // m/s — speed must also be under this for #arrive to fire, so #settle's
+                       // glide cap has a hand-off it can absorb. Both gates bind — see #arrive.
   pivotDist: 1.0,      // inside this, a big turn is done on the spot
   pivotAngle: 1.0,
   pivotExit: 0.35,
@@ -684,6 +685,10 @@ export class Agent {
       this.#walkCadence(target, dt)
     }
 
+    // `dist` is this frame's OPENING distance, deliberately: a frame of travel
+    // at 10fps is longer than the 1cm radius, so testing where the frame ended
+    // lets the agent step across the mark without ever landing inside it and
+    // orbit forever (measured: it never arrives at all from 4 m at 10fps).
     if (dist <= TUNING.arrive && this.speed < TUNING.arriveSpeed) this.#arrive()
   }
 
@@ -719,8 +724,13 @@ export class Agent {
     // reads as a flicker; only do it now when there's no turn phase coming.
     if (Math.abs(wrapPi(toYaw - this.yaw)) < TUNING.pivotExit) this.act('idle')
 
-    // TUNING.arrive/arriveSpeed leave at most ~1cm and a small yaw error for
-    // #settle to close — see #steer's braking comment.
+    // Both halves of #steer's gate bind, and neither is decorative: without
+    // the radius, speed alone fires on frame 1 of every move (speed starts at
+    // 0); without the speed test, the hand-off happens at the braking
+    // profile's own 0.21 m/s and #settle's 0.045 m/s glide cap turns that into
+    // a stop dead. What's left here is the radius plus however far the agent
+    // travelled during the frames it spent waiting on the speed — measured
+    // over 4 m / 0.5 m / 5 cm / 2 cm walks: ~1cm at 60fps, up to 2cm at 10fps.
     this._settle = { to: [m.x, m.z], toYaw, gliding: false, m }
   }
 
