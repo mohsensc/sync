@@ -107,8 +107,11 @@ func main() {
 		go ensureArbiterAfterForce(*owner, *worktree, pid, vitePort, &arbiterSrv, becameArbiterCh)
 	}
 
+	// --host pins vite to the same loopback the proxy dials. Without it
+	// vite binds "localhost", which newer Node resolves to [::1] first, and
+	// every proxied request 503s against an upstream that is only on v6.
 	vite := exec.Command("pnpm", "exec", "vite",
-		"--port", strconv.Itoa(vitePort), "--strictPort")
+		"--host", "127.0.0.1", "--port", strconv.Itoa(vitePort), "--strictPort")
 	vite.Dir = *worktree
 	vite.Stdout = os.Stdout
 	vite.Stderr = os.Stderr
