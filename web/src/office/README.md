@@ -43,7 +43,10 @@ collapses every copy onto the original. Call `updateMatrixWorld(true)` before
 measuring a clone with `Box3`, or a stale skeleton reads near-zero and blows up ~99x.
 Yaw at the module boundary is EXTERNAL (`atan2(-dx, -dz)`); the rig faces +Z and
 `agent.js` absorbs the gap with `YAW_OFFSET = PI`. Shadows are PCF at 1024 — the one
-type reading `shadow.radius` — and a prop casts (`cast:true`) only if it'd float.
+type reading `shadow.radius`. Casting is opted into per object, by two separate
+rules: `office.html`'s `PLAN` marks the big loaded props with `cast:true` (every
+one but the tortoise), and `dressing.js` wraps a primitive in `cast()` when the
+missing contact shadow would leave it floating. 69 of 409 meshes cast.
 
 ## Test pages
 

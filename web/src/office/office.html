@@ -403,9 +403,15 @@ reel.setFoot('idle')
 // cleared right after compositing and toDataURL comes back solid black.
 // Trivial GPU memory cost, no visible behavior change.
 const renderer = new THREE.WebGLRenderer({ canvas, antialias:true, preserveDrawingBuffer:true })
-// Measured render() at 232-1100ms with shadows on. The pixel-ratio cap and
-// the map-size cut below are what actually pay; the desk/prop count isn't
-// the problem.
+// The map-size cut below is the measured one: scratch/cost.py swept
+// shadowMap.type and mapSize and put render() at 232-1100ms with shadows on.
+// It never varied the pixel ratio (it pins it at 1), so this cap has no
+// measurement behind it either way, and SwiftShader can't supply one — it is
+// fill-rate dominated in a way no real GPU is. The scene is 154k triangles in
+// ~340 draw calls, so it may well be geometry-bound, in which case the cap
+// buys nothing and costs sharpness. 1.5 is also a non-integer backing store on
+// a 2x panel: blurrier than 2, dearer than 1, and picked by neither. Needs one
+// A/B on real hardware (1.0 / 2.0, frame time at the shipped camera).
 renderer.setPixelRatio(Math.min(devicePixelRatio,1.5))
 renderer.shadowMap.enabled = true
 // Not a cost cut — the two are within noise of each other (17 texture2DCompare
