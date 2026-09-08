@@ -448,6 +448,10 @@ key.shadow.mapSize.set(1024,1024)
 // just cover the floor plate.
 const S = 11.5
 Object.assign(key.shadow.camera, { left:-S, right:S, top:S, bottom:-S, near:1, far:44 })
+// Not scaled with the map, unlike normalBias: this one is a flat offset in the
+// shadow map's depth, and the acne it would fight is the slope term normalBias
+// already covers. Checked at the desk-1 floor: 0, -0.0004 and -0.0008 are the
+// same picture with normalBias on, and all three show the same acne with it off.
 key.shadow.bias = -0.0004
 key.shadow.normalBias = 0.044
 key.shadow.radius = 1.6   // texels, and only PCF reads it — see the shadowMap.type note above
