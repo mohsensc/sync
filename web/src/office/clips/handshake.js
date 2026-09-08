@@ -334,21 +334,15 @@ function walkScale(speed, height) {
 
 /** Start the handshake clip on `root`, crossfading in from whatever the
  *  character's mixer is currently playing. Not registered in anim.js, so it
- *  can't go through ANIM.crossfade by name — this does the same thing by
- *  hand: same mixer (ANIM.getMixer caches per-object), same crossFadeFrom. */
+ *  can't go through ANIM.crossfade by name — ANIM.crossfadeAction takes the
+ *  action instead, on the same per-object mixer ANIM.getMixer caches. Three's
+ *  own crossFadeFrom is not an option here: anim.js drives the weights on
+ *  that mixer itself, see crossfadeAction's header. */
 export function playHandshake(root, fade = 0.16) {
-  const idle = ANIM.makeAction(root, 'idle')  // whatever's "current" is one of anim.js's own actions
-  const mixer = ANIM.getMixer(root)
-  const clip = getClip()
-  const action = mixer.clipAction(clip)
+  const action = ANIM.getMixer(root).clipAction(getClip())
   action.setLoop(THREE.LoopOnce, 1)
   action.clampWhenFinished = true
-  action.reset()
-  action.enabled = true
-  action.setEffectiveWeight(1)
-  action.crossFadeFrom(idle, fade, false)
-  action.play()
-  return action
+  return ANIM.crossfadeAction(root, action, fade)
 }
 
 /**

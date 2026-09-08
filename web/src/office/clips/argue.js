@@ -291,20 +291,12 @@ function turn(g, yaw, max) {
 
 /** Start a clip built by this module on `root`, crossfading from whatever's
  *  currently playing. Not registered in anim.js, so ANIM.crossfade doesn't
- *  know its name — this does the same thing by hand, on the same per-object
- *  mixer ANIM.getMixer caches. */
+ *  know its name — ANIM.crossfadeAction takes the action instead, on the same
+ *  per-object mixer ANIM.getMixer caches. */
 function playLocal(root, name, fade) {
-  const mixer = ANIM.getMixer(root)
-  const clip = getClip(name)
-  const action = mixer.clipAction(clip)
+  const action = ANIM.getMixer(root).clipAction(getClip(name))
   action.setLoop(THREE.LoopRepeat, Infinity)
-  action.reset()
-  action.enabled = true
-  action.setEffectiveWeight(1)
-  const prevName = ANIM.currentClip(root)
-  if (prevName) action.crossFadeFrom(ANIM.makeAction(root, prevName), fade, false)
-  action.play()
-  return action
+  return ANIM.crossfadeAction(root, action, fade)
 }
 
 // Walk-phase leg-to-mark delta, reused across legs and frames — see

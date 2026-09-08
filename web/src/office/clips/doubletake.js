@@ -282,21 +282,13 @@ function turn(g, yaw, max) {
 }
 
 /** Start the doubletake clip on `root`, crossfading in from whatever the
- *  mixer is currently playing. Not registered in anim.js, so this does what
- *  ANIM.crossfade does but by hand, same per-object mixer cache. */
+ *  mixer is currently playing. Not registered in anim.js, so it goes in by
+ *  action rather than by name — see handshake.js's playHandshake. */
 export function playDoubletake(root, fade = 0.16, reg = registry) {
-  const idle = ANIM.makeAction(root, 'idle')
-  const mixer = ANIM.getMixer(root)
-  const clip = getClip(reg)
-  const action = mixer.clipAction(clip)
+  const action = ANIM.getMixer(root).clipAction(getClip(reg))
   action.setLoop(THREE.LoopOnce, 1)
   action.clampWhenFinished = true
-  action.reset()
-  action.enabled = true
-  action.setEffectiveWeight(1)
-  action.crossFadeFrom(idle, fade, false)
-  action.play()
-  return action
+  return ANIM.crossfadeAction(root, action, fade)
 }
 
 // Walk-phase leg-to-mark delta, reused across legs and frames — see

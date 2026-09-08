@@ -288,18 +288,10 @@ function turn(g, yaw, max) {
 }
 
 function playLocal(root, name, fade) {
-  const mixer = ANIM.getMixer(root)
-  const clip = getClip(name)
-  const action = mixer.clipAction(clip)
+  const action = ANIM.getMixer(root).clipAction(getClip(name))
   action.setLoop(THREE.LoopOnce, 1)
   action.clampWhenFinished = true
-  action.reset()
-  action.enabled = true
-  action.setEffectiveWeight(1)
-  const prevName = ANIM.currentClip(root)
-  if (prevName) action.crossFadeFrom(ANIM.makeAction(root, prevName), fade, false)
-  action.play()
-  return action
+  return ANIM.crossfadeAction(root, action, fade)
 }
 
 // Walk-phase leg-to-mark delta, reused across legs and frames — see
