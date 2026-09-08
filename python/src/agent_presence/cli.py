@@ -38,6 +38,8 @@ from .policy import (
     EFFECTS,
     FLOOR_LAYERS,
     LAYER_ORDER,
+    RELAY_LAYERS,
+    RELAY_RESOLVED_RUNGS,
     MODES,
     RANK,
     RUNGS,
@@ -422,6 +424,25 @@ def lint_policy_text(text: str, *, layer_name: str) -> list[Finding]:
                 is_floor=True, out=out,
             )
 
+    # `set` refuses to write these going forward, which does nothing for the
+    # files already on disk carrying one. This is where those get named — same
+    # shape as the [floor]-in-the-wrong-layer finding above, and for the same
+    # reason: it parses, it looks live, and it decides nothing.
+    if layer_name not in RELAY_LAYERS:
+        for rung in sorted(RELAY_RESOLVED_RUNGS):
+            key = f"rung{rung}"
+            for section, label in _rung_sections(data):
+                if key not in section:
+                    continue
+                out.append(Finding(
+                    index.get((label, key)) or index.get((label, None)) or 0,
+                    "warning",
+                    f"{key} is resolved by the relay, which reads the builtin "
+                    f"and org layers only; in the {layer_name} layer this "
+                    f"parses and decides nothing. Move it to the org layer "
+                    f"($AGENT_PRESENCE_ORG_POLICY) to have any effect",
+                ))
+
     if mode == "observer" and rule_count == 0:
         # The ceiling is applied to the layer that wins a rung. A layer with no
         # effect rules never wins one, so this file caps nothing. Worth saying:
@@ -435,6 +456,30 @@ def lint_policy_text(text: str, *, layer_name: str) -> list[Finding]:
 
     out.extend(_tie_findings(data, index))
     return out
+
+
+def _rung_sections(data: Mapping[str, object]) -> list[tuple[Mapping[str, object], str]]:
+    """Every table in a policy file that can carry a rung key, with the section
+    label the line index uses. [floor] included: a floor is still a rung the
+    relay would have to read to honour."""
+    found: list[tuple[Mapping[str, object], str]] = []
+    effects = data.get("effects")
+    if isinstance(effects, dict):
+        found.append((effects, "effects"))
+    entries = data.get("path")
+    if isinstance(entries, list):
+        for i, entry in enumerate(entries):
+            if isinstance(entry, dict):
+                found.append((entry, f"path[{i}]"))
+    floor = data.get("floor")
+    if isinstance(floor, dict):
+        found.append((floor, "floor"))
+        fpaths = floor.get("path")
+        if isinstance(fpaths, list):
+            for i, entry in enumerate(fpaths):
+                if isinstance(entry, dict):
+                    found.append((entry, f"floor.path[{i}]"))
+    return found
 
 
 def _lint_path_rules(
@@ -587,18 +632,40 @@ def _print_effective(ctx: Context, pol: Policy, path: str, unattended: bool) -> 
     out.say(f"{ink.bold('effective policy')}  {where}  ({supervision})")
     out.say()
 
+    # Rung 4 is resolved by the relay against builtin+org, so resolving it
+    # across the client layers like every other rung reported a repo/user/session
+    # value as live when the relay never reads those files. Resolve it the way
+    # the relay does instead — same layers, same order — and say where that
+    # answer comes from.
+    relay_pol = (
+        ctx.policy(policy_mod.RELAY_INCLUDE) if RELAY_RESOLVED_RUNGS else pol
+    )
+
     rows: list[list[str]] = []
     plain: list[list[str]] = []
     for rung in RUNGS:
-        res = pol.resolve(rung, path, unattended=unattended)
+        relay_rung = rung in RELAY_RESOLVED_RUNGS
+        res = (relay_pol if relay_rung else pol).resolve(
+            rung, path, unattended=unattended
+        )
         ceiling = res.ceiling or "-"
         floor = f"{res.floor} ({res.floor_layer or 'builtin'})"
+        source = f"relay: {res.source}" if relay_rung else res.source
         rows.append([str(rung), ink.effect(res.effect), res.winning_layer,
-                     res.winning_rule, ceiling, floor, res.source])
+                     res.winning_rule, ceiling, floor, source])
         plain.append([str(rung), res.effect, res.winning_layer,
-                      res.winning_rule, ceiling, floor, res.source])
+                      res.winning_rule, ceiling, floor, source])
     out.table(["rung", "effect", "from", "rule", "ceiling", "floor", "source"],
               rows, plain=plain)
+
+    if RELAY_RESOLVED_RUNGS:
+        rungs = ", ".join(f"rung{r}" for r in sorted(RELAY_RESOLVED_RUNGS))
+        out.say()
+        out.say(ink.dim(
+            f"{rungs} is resolved by the relay from the builtin and org layers "
+            f"only. This row is this machine's reading of that; the relay's own "
+            f"org file decides, and it may differ."
+        ))
 
     out.say()
     out.say(f"{ink.bold('layers')}  least authority first")
@@ -644,17 +711,28 @@ def cmd_policy_show(ctx: Context) -> int:
         return OK
 
     if args.json:
+        # Same relay-scoped resolution the table below uses. The JSON is what
+        # scripts read, so leaving it resolving rung 4 across client layers
+        # would keep the exact lie the human output just stopped telling.
+        relay_pol = ctx.policy(policy_mod.RELAY_INCLUDE)
+        resolved = [
+            (relay_pol if r in RELAY_RESOLVED_RUNGS else pol)
+            .resolve(r, path, unattended=unattended)
+            for r in RUNGS
+        ]
+        # Built from `resolved` rather than pol.table_for, which resolves every
+        # rung against the client layers. table_for is right for the daemon
+        # cache it was written for and stays untouched; it is this report that
+        # needs rung 4 to say what the relay will do.
         out.json({
             "path": path,
             "unattended": unattended,
             "digest": pol.digest,
             "degraded": pol.degraded,
-            "table": pol.table_for(path, unattended=unattended).names(),
+            "table": [r.effect for r in resolved],
             "floor": pol.floor_table(path).names(),
-            "rungs": [
-                _resolution_json(pol.resolve(r, path, unattended=unattended))
-                for r in RUNGS
-            ],
+            "rungs": [_resolution_json(r) for r in resolved],
+            "relay_resolved_rungs": sorted(RELAY_RESOLVED_RUNGS),
             "layers": [_layer_json(lyr) for lyr in pol.layers],
             "problems": list(pol.problems),
         })
@@ -776,6 +854,25 @@ def _now_and_apply(ctx: Context, rung: int, path: str | None) -> int:
     return _apply(ctx)
 
 
+def _relay_rung_message(rung: int, layer: str, verb: str) -> str:
+    """Why a rung the relay owns cannot be written to a client layer.
+
+    Says which layer would have to change rather than only refusing: the whole
+    complaint this fixes is that the old behaviour reported success and left
+    the operator with no idea where the value was actually being read from.
+    """
+    return (
+        f"rung{rung} is resolved by the relay, not the daemon — it compares "
+        f"declared intent across different files, which only the relay can "
+        f"see. The relay reads the builtin and org layers only, so a rung{rung} "
+        f"in the {layer} layer would parse, compile, and change nothing.\n"
+        f"  {verb} it in the org layer instead:  "
+        f"ap policy {verb} rung{rung}{'=EFFECT' if verb == 'set' else ''} --layer org\n"
+        f"  the relay reads that file from $AGENT_PRESENCE_ORG_POLICY "
+        f"(default /etc/agent-presence/policy.toml), live, no restart."
+    )
+
+
 def cmd_policy_set(ctx: Context) -> int:
     args, out = ctx.args, ctx.out
     key, sep, value = args.assignment.partition("=")
@@ -811,6 +908,9 @@ def cmd_policy_set(ctx: Context) -> int:
             f"no-op; write it as a plain effect instead"
         )
         return PROBLEM
+    if rung in RELAY_RESOLVED_RUNGS and args.layer not in RELAY_LAYERS:
+        out.error(_relay_rung_message(rung, args.layer, "set"))
+        return PROBLEM
 
     what = policy_edit.set_effect(
         path, rung=rung, effect=value, match=args.path, is_floor=args.floor
@@ -828,6 +928,10 @@ def cmd_policy_unset(ctx: Context) -> int:
     except ValueError as exc:
         out.error(str(exc))
         return USAGE
+
+    if rung in RELAY_RESOLVED_RUNGS and args.layer not in RELAY_LAYERS:
+        out.error(_relay_rung_message(rung, args.layer, "unset"))
+        return PROBLEM
 
     path = _writable_layer(ctx, args.layer)
     if path is None:

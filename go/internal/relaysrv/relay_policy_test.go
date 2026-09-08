@@ -323,3 +323,21 @@ func TestAPathScopedOrgFloorIsOnTheFrame(t *testing.T) {
 		t.Fatalf("got match %v, want src/pay.py", entry["match"])
 	}
 }
+
+// The CLI now refuses `ap policy set rung4=...` outside the org layer and
+// tells the operator the org file is the way to change it. That instruction is
+// only honest if this holds, so it is asserted rather than assumed.
+func TestOrgLayerDrivesRung4(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "policy.toml")
+	if err := os.WriteFile(p, []byte("schema = 1\n[effects]\nrung4 = \"ask\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(orgPolicyEnv, p)
+
+	got := NewPolicyFileForRelay(RealClock{}, metrics.New()).
+		Current().Resolve(4, "any/path", false).Effect
+	if got != "ask" {
+		t.Fatalf("org rung4=ask resolved to %q, want ask", got)
+	}
+}

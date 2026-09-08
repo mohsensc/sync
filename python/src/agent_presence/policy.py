@@ -1263,6 +1263,17 @@ def build_policy(layers: Sequence[Layer], *, loaded_at: float = 0.0) -> Policy:
 DEFAULT_INCLUDE: tuple[LayerName, ...] = ("builtin", "repo", "user", "session")
 RELAY_INCLUDE: tuple[LayerName, ...] = ("builtin", "org")
 
+# Rungs 0-3 are decided by the daemon off the compiled client cache. Rung 4
+# is not: it is declared-intent similarity across different files, which only
+# the relay can see, so `redundant_peer` runs there and resolves against
+# RELAY_INCLUDE. A rung4 written into repo/user/session parses, lints clean,
+# compiles into the client cache, and changes nothing — the layer it landed in
+# is not one the relay reads. That silence is the bug these two names exist to
+# close: `ap policy set` refuses it, `check` flags it, and `show --effective`
+# stops reporting a client-side rung4 as though it were live.
+RELAY_RESOLVED_RUNGS: frozenset[int] = frozenset({4})
+RELAY_LAYERS: frozenset[str] = frozenset(RELAY_INCLUDE) - {"builtin"}
+
 
 def discover(
     repo_root: str | None = None,

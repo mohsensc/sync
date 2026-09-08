@@ -290,6 +290,55 @@ def test_set_refuses_a_floor_in_a_layer_that_would_ignore_it(box):
     assert not box.user_policy.exists()
 
 
+# -- rung 4 belongs to the relay -------------------------------------------
+#
+# The relay resolves rung 4 against builtin+org, so a rung4 in a client layer
+# parses, compiles, and decides nothing. It used to report success anyway.
+
+
+def test_set_refuses_rung4_in_a_layer_the_relay_never_reads(box):
+    done = box.ap("policy", "set", "rung4=ask", "--layer", "user")
+    assert done.returncode != 0
+    assert "resolved by the relay" in done.stderr
+    # names the way out, not just the refusal
+    assert "--layer org" in done.stderr
+    assert not box.user_policy.exists()
+
+
+def test_unset_refuses_rung4_in_a_layer_the_relay_never_reads(box):
+    done = box.ap("policy", "unset", "rung4", "--layer", "user")
+    assert done.returncode != 0
+    assert "resolved by the relay" in done.stderr
+
+
+def test_set_allows_rung4_in_the_org_layer(box, tmp_path):
+    org = tmp_path / "org-policy.toml"
+    env = {**box.env, "AGENT_PRESENCE_ORG_POLICY": str(org)}
+    done = box.ap("policy", "set", "rung4=ask", "--layer", "org", env=env)
+    assert done.returncode == 0, done.stderr
+    assert 'rung4 = "ask"' in org.read_text()
+
+
+def test_check_flags_a_rung4_already_sitting_in_a_client_layer(box):
+    box.write_user_policy('schema = 1\n[effects]\nrung4 = "deny"\n')
+    done = box.ap("policy", "check", "--layer", "user")
+    assert "resolved by the relay" in done.stdout + done.stderr
+
+
+def test_effective_resolves_rung4_the_way_the_relay_does(box, tmp_path):
+    org = tmp_path / "org-policy.toml"
+    org.write_text('schema = 1\n[effects]\nrung4 = "ask"\n', encoding="utf-8")
+    env = {**box.env, "AGENT_PRESENCE_ORG_POLICY": str(org)}
+    # a client-layer rung4 that the relay will never read
+    box.write_user_policy('schema = 1\n[effects]\nrung4 = "deny"\n')
+
+    blob = json.loads(box.ap("policy", "show", "--effective", "--json",
+                             env=env).stdout)
+    assert blob["rungs"][4]["layer"] == "org"
+    assert blob["table"][4] == "ask"
+    assert 4 in blob["relay_resolved_rungs"]
+
+
 def test_a_repo_floor_beats_a_quieter_personal_setting(box):
     box.write_repo_policy('schema = 1\n[floor]\nrung3 = "deny"\n')
     box.write_user_policy('schema = 1\n[effects]\nrung3 = "notify"\n')
