@@ -549,31 +549,33 @@ scene.add(zoneUI.group)
 const DESK_TOP = 0.76
 const DESK_SX = 1.15
 
-// cast:true marks the "big prop" tier from the render-cost pass. The only one
-// left off it is the tortoise, at 0.55 m the one piece here that is genuinely
-// decor-scale; the phone wall is 2 m tall and the cable ball is the widest
-// thing in its corner, so both keep their contact shadow.
+// glb-lite/ (scripts/optimize-glb.mjs) is the only path now: no ?glb= flag,
+// no fallback to the source glb/ tree, which stays put only as that script's
+// input. cast:true marks the "big prop" tier from the render-cost pass. The
+// only one left off it is the tortoise, at 0.55 m the one piece here that is
+// genuinely decor-scale; the phone wall is 2 m tall and the cable ball is the
+// widest thing in its corner, so both keep their contact shadow.
 const PLAN = [
   // The vault is deliberately half-buried in the back wall so it reads as set
   // into it rather than parked in front of it. Front face lands near z = -5.2.
   // Faces +X in mesh space (bbox x=0.566 y=1.000 z=0.998), so it needs -PI/2
   // to look into the room. Centre sits half its depth off the wall plane
   // (-6.625) so the back touches rather than intersects: 0.566*2.6/2 = 0.736.
-  { id:'vault',   url:'/glb/vault-door.glb',   h:2.6,  pos:[-6.0,0,-5.889], rot:-Math.PI/2, facing:'+z', cast:true },
+  { id:'vault',   url:'/glb-lite/vault-door.glb',   h:2.6,  pos:[-6.0,0,-5.889], rot:-Math.PI/2, facing:'+z', cast:true },
   // bbox x=0.247 y=1.000 z=0.645. Same -PI/2; depth 0.247*2.0/2 = 0.247.
-  { id:'phones',  url:'/glb/phone-wall.glb',   h:2.0,  pos:[ 5.4,1.1,-6.378], rot:-Math.PI/2, facing:'+z', air:true, cast:true },
-  { id:'cables',  url:'/glb/cable-ball.glb',   h:1.1,  pos:[-7.3,0, 4.7], rot:0.6, cast:true },
-  { id:'tortoise',url:'/glb/tortoise-v2.glb',  h:0.55, pos:[ 2.0,0, 4.3], rot:-0.9         },
+  { id:'phones',  url:'/glb-lite/phone-wall.glb',   h:2.0,  pos:[ 5.4,1.1,-6.378], rot:-Math.PI/2, facing:'+z', air:true, cast:true },
+  { id:'cables',  url:'/glb-lite/cable-ball.glb',   h:1.1,  pos:[-7.3,0, 4.7], rot:0.6, cast:true },
+  { id:'tortoise',url:'/glb-lite/tortoise-v2.glb',  h:0.55, pos:[ 2.0,0, 4.3], rot:-0.9         },
   // Desks are click targets. The seat is the zone slot in front of the desk,
   // pulled SEAT_PULL closer so the knees end up under it: the sit clip walks
   // the pelvis 22cm back on the way down (anim.js SEAT_SETBACK).
-  { url:'/glb/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[-2.6,0,-2.4], rot:0, desk:'desk 1', slot:Z.ZONES.desks.slots[0], cast:true },
-  { url:'/glb/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[ 0.4,0,-2.4], rot:0, desk:'desk 2', slot:Z.ZONES.desks.slots[1], cast:true },
-  { url:'/glb/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[ 3.4,0,-2.4], rot:0, desk:'desk 3', slot:Z.ZONES.desks.slots[2], cast:true },
-  { url:'/glb/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[-2.6,0, 1.4], rot:Math.PI, desk:'desk 4', slot:Z.ZONES.desks.slots[3], cast:true },
-  { url:'/glb/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[ 0.4,0, 1.4], rot:Math.PI, desk:'desk 5', slot:Z.ZONES.desks.slots[4], cast:true },
-  { url:'/glb/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[ 3.4,0, 1.4], rot:Math.PI, desk:'desk 6', slot:Z.ZONES.desks.slots[5], cast:true },
-  { url:'/glb/desk-tripo-12k.glb', h:0.95, pos:[-6.9,0, 1.0], rot:Math.PI/2, sx:1.45,
+  { url:'/glb-lite/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[-2.6,0,-2.4], rot:0, desk:'desk 1', slot:Z.ZONES.desks.slots[0], cast:true },
+  { url:'/glb-lite/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[ 0.4,0,-2.4], rot:0, desk:'desk 2', slot:Z.ZONES.desks.slots[1], cast:true },
+  { url:'/glb-lite/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[ 3.4,0,-2.4], rot:0, desk:'desk 3', slot:Z.ZONES.desks.slots[2], cast:true },
+  { url:'/glb-lite/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[-2.6,0, 1.4], rot:Math.PI, desk:'desk 4', slot:Z.ZONES.desks.slots[3], cast:true },
+  { url:'/glb-lite/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[ 0.4,0, 1.4], rot:Math.PI, desk:'desk 5', slot:Z.ZONES.desks.slots[4], cast:true },
+  { url:'/glb-lite/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[ 3.4,0, 1.4], rot:Math.PI, desk:'desk 6', slot:Z.ZONES.desks.slots[5], cast:true },
+  { url:'/glb-lite/desk-tripo-12k.glb', h:0.95, pos:[-6.9,0, 1.0], rot:Math.PI/2, sx:1.45,
     desk:'reception', slot:Z.ZONES.reception.slots[0], cast:true },
   // Three coffee cups used to sit here (#59): coffee-cup-v2.glb was never
   // committed, so all three 404'd on every load and the loader warned three
@@ -827,7 +829,7 @@ function setupCast() {
 }
 
 pending++
-loader.load('/glb/character.glb', gltf => {
+loader.load('/glb-lite/character.glb', gltf => {
   charGLTF = gltf
   done++; tally()
 }, undefined, (e) => { console.warn('character failed', e); done++; tally() })

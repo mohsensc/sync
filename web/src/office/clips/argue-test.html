@@ -101,7 +101,7 @@ function place(src, x, z, rotY) {
 let chars = []
 let SRC = null
 const loader = new GLTFLoader()
-loader.load('../glb/character.glb', gltf => {
+loader.load('/glb-lite/character.glb', gltf => {
   SRC = gltf.scene
   // Marks first, so the two characters are placed exactly where argueRoutine
   // would put them, not just "somewhere facing each other".
