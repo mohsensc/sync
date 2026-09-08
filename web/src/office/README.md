@@ -23,8 +23,7 @@ The GLB ships no usable motion, so every clip is authored from keyframe tracks.
 - `caption.js` — one arbiter over the caption so replay and demo can't clobber it.
 - `../../gitapi.mjs` (web root) — dev-only `/api/git/*`, real `git` shelled
   server-side, never reachable outside `pnpm dev`.
-- `history-viz.js` — pure helpers every git-data panel shares (colour, age, axis).
-- `blamecard.js` — panel on click-to-zoom: ownership bar + commit timeline.
+- `history-viz.js` (shared colour/age/axis helpers), `blamecard.js` (click-to-zoom panel).
 - `gitsignals.js` — ambient per-zone git stat/churn polling (typing, paper stacks).
 - `histshelf.js` — selected agent's file history as book spines (B: 3D/DOM).
 - `zoneowner.js` — per-zone `git shortlog` as dressing: plaque or rug (U).
@@ -45,8 +44,6 @@ Yaw at the module boundary is EXTERNAL (`atan2(-dx, -dz)`); the rig faces +Z and
 absorbs the gap with `YAW_OFFSET = PI`. Shadows are PCF at 1024, the one type reading
 `shadow.radius`; `addMesh` is the one rule — a mesh casts if it's a character or measures
 `CAST_SIZE` across, else it only receives, and overlays never reach it so they do neither.
-
-## Test pages
 
 One `*-test.html` harness per major piece — canned data, no dev server needed for
 the git-data ones. `office.html` needs `pnpm dev` and `?room=<name>` for a relay.
