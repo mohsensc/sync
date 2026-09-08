@@ -1162,14 +1162,18 @@ function boneMap(obj, rig) {
  *  of L/R asymmetry into the walk and idle (see seedParams). Cached per seed,
  *  so characters that share a seed share their clips.
  *
- *  Call it before the character's first crossfade. It drops the actions
- *  cached for the old seed, but whatever is already playing, fading or being
- *  corrected by inertia keeps running on the clips it was built from — this
- *  is a constructor-time knob, not a live one. */
+ *  Constructor-time only, and it throws rather than asking: all this can do
+ *  is drop the actions cached for the old seed. Whatever is already playing,
+ *  fading or being corrected by inertia holds a direct reference to an action
+ *  built from the old seed's clips, which rig.actions.clear() cannot reach —
+ *  #steer would then write walk cadence into a fresh, silent action while the
+ *  old one still drives the bones. Half-applying that quietly is worse than
+ *  refusing. */
 export function setSeed(obj, seed) {
   const rig = rigOf(obj)
   seed = seed >>> 0
   if (rig.seed === seed) return
+  if (rig.current || rig.fade) throw new Error('anim: setSeed after this character has started playing')
   rig.seed = seed
   rig.actions.clear()
 }
