@@ -36,4 +36,3 @@ export function facepalmMarks(
   bPos: THREE.Vector3 | [number, number?, number?],
   spacing?: number
 ): Marks
-export function getClip(name: 'facepalm' | 'shrug'): THREE.AnimationClip

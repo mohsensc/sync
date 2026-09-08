@@ -55,8 +55,6 @@ export function yieldMarks(
   bPos: THREE.Vector3 | [number, number?, number?],
   spacing?: number
 ): Marks
-export function getClip(name: 'yieldStep' | 'yieldKeep', reg?: YieldRegistry): THREE.AnimationClip
-
 export interface RigPuppet {
   group: THREE.Object3D
   root: THREE.Object3D

@@ -39,8 +39,6 @@ export function slapMarks(
   bPos: THREE.Vector3 | [number, number?, number?],
   spacing?: number
 ): Marks
-export function getClip(name: 'slap' | 'slapReact'): THREE.AnimationClip
-
 export function measureContact(): THREE.Vector3
 export function palmPoint(root: THREE.Object3D, side?: 'Left' | 'Right', height?: number): THREE.Vector3
 export function handPoint(root: THREE.Object3D, side?: 'Left' | 'Right'): THREE.Vector3

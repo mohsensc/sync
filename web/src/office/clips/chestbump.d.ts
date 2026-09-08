@@ -41,7 +41,6 @@ export function chestbumpMarks(
   bPos: THREE.Vector3 | [number, number?, number?],
   spacing?: number
 ): Marks
-export function getClip(): THREE.AnimationClip
 export function chestPoint(root: THREE.Object3D, height?: number): THREE.Vector3 | null
 export function measureContact(): THREE.Vector3 | null
 

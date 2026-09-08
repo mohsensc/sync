@@ -47,9 +47,13 @@ import * as THREE from 'three'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 import { clone as skinnedClone } from 'three/addons/utils/SkeletonUtils.js'
 // Cache-busted so an edit to either module always shows up on reload.
-const ANIM = await import('../anim.js?v=' + Date.now())
-const ARGUE = await import('./argue.js?v=' + Date.now())
-const { CHARACTER_HEIGHT } = await import('../highfive.js?v=' + Date.now())
+// Static imports, no ?v= cache-buster: a per-import Date.now() gave anim.js
+// one module instance here and another inside argue.js, so the clips argue.js
+// folds into ANIM.CLIPS landed in a table this page never reads. Vite already
+// invalidates its own modules in dev.
+import * as ANIM from '../anim.js'
+import * as ARGUE from './argue.js'
+import { CHARACTER_HEIGHT } from '../highfive.js'
 
 const canvas = document.getElementById('c')
 const logEl = document.getElementById('log')
@@ -116,7 +120,7 @@ loader.load('/glb-lite/character.glb', gltf => {
 
 function startClip(root, name) {
   const mixer = ANIM.getMixer(root)
-  const clip = ARGUE.getClip(name)
+  const clip = ANIM.getClip(name)
   const action = mixer.clipAction(clip)
   action.setLoop(THREE.LoopRepeat, Infinity)
   action.reset(); action.enabled = true; action.setEffectiveWeight(1)
@@ -163,8 +167,8 @@ window.__probe = () => {
 /** Min toe height across a whole clip, sampled at N points, in WORLD metres
  *  on the actually-placed/scaled character (not the scratch rig's own cm). */
 window.__minToe = (name, n = 240) => {
-  const dur = ARGUE.getClip(name).duration
-  const action = ANIM.getMixer(chars[0].root).clipAction(ARGUE.getClip(name))
+  const dur = ANIM.getClip(name).duration
+  const action = ANIM.getMixer(chars[0].root).clipAction(ANIM.getClip(name))
   action.play(); action.paused = true
   let min = Infinity
   for (let i = 0; i <= n; i++) {
@@ -181,7 +185,7 @@ window.__minToe = (name, n = 240) => {
 /** Max loop-seam delta on the built clip's own tracks (Float32, same
  *  precision the real integrated clip would carry). */
 window.__seamDelta = (name) => {
-  const clip = ARGUE.getClip(name)
+  const clip = ANIM.getClip(name)
   let maxd = 0
   for (const tr of clip.tracks) {
     const n = tr.times.length
@@ -198,9 +202,9 @@ window.__seamDelta = (name) => {
  *  across one full loop, in world metres — the "nobody touches anybody"
  *  check. Samples both clips together since they're meant to run paired. */
 window.__minHandGap = (nameA, nameB, n = 240) => {
-  const dur = ARGUE.getClip(nameA).duration
-  const aAct = ANIM.getMixer(chars[0].root).clipAction(ARGUE.getClip(nameA))
-  const bAct = ANIM.getMixer(chars[1].root).clipAction(ARGUE.getClip(nameB))
+  const dur = ANIM.getClip(nameA).duration
+  const aAct = ANIM.getMixer(chars[0].root).clipAction(ANIM.getClip(nameA))
+  const bAct = ANIM.getMixer(chars[1].root).clipAction(ANIM.getClip(nameB))
   aAct.play(); aAct.paused = true
   bAct.play(); bAct.paused = true
   let min = Infinity

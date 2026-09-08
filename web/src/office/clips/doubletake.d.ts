@@ -51,9 +51,6 @@ export function doubletakeMarks(
   bPos: THREE.Vector3 | [number, number?, number?],
   spacing?: number
 ): Marks
-export function getClip(reg?: DoubletakeRegistry): THREE.AnimationClip
-export function playDoubletake(root: THREE.Object3D, fade?: number, reg?: DoubletakeRegistry): THREE.AnimationAction
-
 export interface RigPuppet {
   group: THREE.Object3D
   root: THREE.Object3D

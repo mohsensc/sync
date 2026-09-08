@@ -47,33 +47,20 @@
 import * as THREE from 'three'
 import * as ANIM from './anim.js'
 import { highfiveMarks, spacingFor } from './highfive.js'
-import { argueMarks, spacingFor as argueSpacingFor, registry as ARGUE_CLIPS } from './clips/argue.js'
-import { handshakeMarks, spacingFor as handshakeSpacingFor, registry as HANDSHAKE_CLIPS } from './clips/handshake.js'
-import { shoveMarks, spacingFor as shoveSpacingFor, registry as SHOVE_CLIPS } from './clips/shove.js'
-import { yieldMarks, spacingFor as yieldSpacingFor, registry as YIELD_CLIPS } from './clips/yield.js'
-import { doubletakeMarks, spacingFor as doubletakeSpacingFor, registry as DOUBLETAKE_CLIPS } from './clips/doubletake.js'
+import { argueMarks, spacingFor as argueSpacingFor } from './clips/argue.js'
+import { handshakeMarks, spacingFor as handshakeSpacingFor } from './clips/handshake.js'
+import { shoveMarks, spacingFor as shoveSpacingFor } from './clips/shove.js'
+import { yieldMarks, spacingFor as yieldSpacingFor } from './clips/yield.js'
+import { doubletakeMarks, spacingFor as doubletakeSpacingFor } from './clips/doubletake.js'
 // Rung-2 "collaboration" beat family — alternates to highfive. See
 // clips/chestbump.js / clips/fistbump.js headers.
-import { chestbumpMarks, spacingFor as chestbumpSpacingFor, registry as CHESTBUMP_CLIPS } from './clips/chestbump.js'
-import { fistbumpMarks, spacingFor as fistbumpSpacingFor, registry as FISTBUMP_CLIPS } from './clips/fistbump.js'
+import { chestbumpMarks, spacingFor as chestbumpSpacingFor } from './clips/chestbump.js'
+import { fistbumpMarks, spacingFor as fistbumpSpacingFor } from './clips/fistbump.js'
 // Rung-3 "abort"/out-authoritied beat family — alternates to shove. See
 // clips/waveoff.js / clips/slap.js headers.
-import { waveoffMarks, spacingFor as waveoffSpacingFor, registry as WAVEOFF_CLIPS } from './clips/waveoff.js'
-import { slapMarks, spacingFor as slapSpacingFor, registry as SLAP_CLIPS } from './clips/slap.js'
+import { waveoffMarks, spacingFor as waveoffSpacingFor } from './clips/waveoff.js'
+import { slapMarks, spacingFor as slapSpacingFor } from './clips/slap.js'
 import * as Z from './zones.js'
-
-// Fold the paired-action clips into anim.js's own table, once, at import
-// time — before any agent has crossfaded into anything and cached the clip
-// list. See anim.js's CLIPS export and each clip module's own header.
-Object.assign(ANIM.CLIPS, ARGUE_CLIPS)
-Object.assign(ANIM.CLIPS, HANDSHAKE_CLIPS)
-Object.assign(ANIM.CLIPS, SHOVE_CLIPS)
-Object.assign(ANIM.CLIPS, YIELD_CLIPS)
-Object.assign(ANIM.CLIPS, DOUBLETAKE_CLIPS)
-Object.assign(ANIM.CLIPS, CHESTBUMP_CLIPS)
-Object.assign(ANIM.CLIPS, FISTBUMP_CLIPS)
-Object.assign(ANIM.CLIPS, WAVEOFF_CLIPS)
-Object.assign(ANIM.CLIPS, SLAP_CLIPS)
 
 export const YAW_OFFSET = Math.PI
 

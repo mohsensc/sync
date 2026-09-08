@@ -36,8 +36,6 @@ export function waveoffMarks(
   bPos: THREE.Vector3 | [number, number?, number?],
   spacing?: number
 ): Marks
-export function getClip(name: 'waveoff' | 'waveoffReact'): THREE.AnimationClip
-
 export function palmPoint(root: THREE.Object3D, side?: 'Left' | 'Right', height?: number): THREE.Vector3
 export function handPoint(root: THREE.Object3D, side?: 'Left' | 'Right'): THREE.Vector3
 export function boneAt(clipName: 'waveoff' | 'waveoffReact', t: number, boneName: string): THREE.Vector3

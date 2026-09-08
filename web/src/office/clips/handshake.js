@@ -19,11 +19,10 @@
 // against a live rig. So instead of duplicating the math, this file builds a
 // tiny scratch skeleton straight from anim.js's own BIND data and repeatedly
 // calls applyPose on it, once per sample, reading the resulting bone
-// quaternions into keyframe tracks. That is exactly what anim.js's internal
-// buildClip does — same resolvePose, same palm-roll solve, same localQuat —
-// just driven from outside instead of from inside. The exported `registry`
-// is in the {fn, dur, keys, loop} shape anim.js's own CLIPS table uses, so
-// an integrator can fold it in directly without touching this file.
+// quaternions into keyframe tracks — which is what anim.js's buildClip already
+// does. So this file authors the pose function and nothing else: the exported
+// `registry` is in the {fn, dur, keys, loop} shape anim.js's CLIPS table takes,
+// and it is folded in below, at import time. One builder, one clip table.
 //
 // See the note at the bottom of the office README: no IK anywhere in this
 // codebase. Marks and canned clips only.
@@ -65,38 +64,6 @@ function makeRig() {
   return bones
 }
 
-/** Build a THREE.AnimationClip from a {fn, dur, keys, loop} spec, the same
- *  shape anim.js's internal CLIPS table uses. `fn(t01) -> pose`. */
-function buildClipFromSpec(name, { fn, dur, keys, loop }) {
-  const n = loop ? keys + 1 : keys
-  const times = new Float32Array(n)
-  const rot = {}
-  for (const b of ANIM.BONES) rot[b] = new Float32Array(n * 4)
-  const hips = new Float32Array(n * 3)
-  const rig = makeRig()
-
-  for (let i = 0; i < n; i++) {
-    const t01 = loop ? i / keys : (n === 1 ? 0 : i / (n - 1))
-    times[i] = t01 * dur
-    ANIM.applyPose(rig.Hips, fn(t01))
-    for (const b of ANIM.BONES) {
-      const bone = rig[b]
-      rot[b][i * 4 + 0] = bone.quaternion.x
-      rot[b][i * 4 + 1] = bone.quaternion.y
-      rot[b][i * 4 + 2] = bone.quaternion.z
-      rot[b][i * 4 + 3] = bone.quaternion.w
-    }
-    hips[i * 3 + 0] = rig.Hips.position.x
-    hips[i * 3 + 1] = rig.Hips.position.y
-    hips[i * 3 + 2] = rig.Hips.position.z
-  }
-
-  const tracks = [new THREE.VectorKeyframeTrack('Hips.position', times, hips)]
-  for (const b of ANIM.BONES) tracks.push(new THREE.QuaternionKeyframeTrack(b + '.quaternion', times, rot[b]))
-  const clip = new THREE.AnimationClip(name, dur, tracks)
-  clip.userData = { loop, oneShot: !loop }
-  return clip
-}
 
 // ---------------------------------------------------------------------------
 // handshake pose
@@ -253,15 +220,15 @@ function handshakePose(t) {
 const HANDSHAKE_SPEC = { fn: handshakePose, dur: 2.6, keys: 126, loop: false }
 
 /** Registry in the {fn, dur, keys, loop} shape anim.js's own CLIPS table
- *  uses. An integrator can fold this straight in. */
+ *  uses. Folded into that table below. */
 export const registry = { handshake: HANDSHAKE_SPEC }
 
-let _clip = null
-/** Build (and memoise) the handshake AnimationClip. */
-export function getClip() {
-  if (!_clip) _clip = buildClipFromSpec('handshake', HANDSHAKE_SPEC)
-  return _clip
-}
+// Folded into anim.js's own CLIPS table at import time, so these play by name
+// through ANIM.crossfade like every other clip — one clip table, one owner of
+// the mixer's weights. See anim.js's CLIPS header for the timing rule (the
+// merge has to happen before the first createClips(), which import time is).
+Object.assign(ANIM.CLIPS, registry)
+
 
 // ---------------------------------------------------------------------------
 // The spacing the clip is authored for — same derivation highfive.js uses.
@@ -332,18 +299,6 @@ function walkScale(speed, height) {
   return speed * ANIM.getClip('walk').duration / perCycle
 }
 
-/** Start the handshake clip on `root`, crossfading in from whatever the
- *  character's mixer is currently playing. Not registered in anim.js, so it
- *  can't go through ANIM.crossfade by name — ANIM.crossfadeAction takes the
- *  action instead, on the same per-object mixer ANIM.getMixer caches. Three's
- *  own crossFadeFrom is not an option here: anim.js drives the weights on
- *  that mixer itself, see crossfadeAction's header. */
-export function playHandshake(root, fade = 0.16) {
-  const action = ANIM.getMixer(root).clipAction(getClip())
-  action.setLoop(THREE.LoopOnce, 1)
-  action.clampWhenFinished = true
-  return ANIM.crossfadeAction(root, action, fade)
-}
 
 /**
  * @param {{group:THREE.Object3D, root:THREE.Object3D, height:number}} a
@@ -390,12 +345,12 @@ export function handshakeRoutine(a, b, {
       clock += dt
       if (clock >= settle) {
         // Same frame, both of them — the whole sync story.
-        for (const l of legs) playHandshake(l.c.root)
+        for (const l of legs) ANIM.crossfade(l.c.root, 'handshake', 0.16)
         phase = 'shake'; clock = 0
       }
     } else if (phase === 'shake') {
       clock += dt
-      if (clock >= getClip().duration) phase = 'done'
+      if (clock >= ANIM.getClip('handshake').duration) phase = 'done'
     }
     for (const l of legs) ANIM.update(l.c.root, dt)
     return phase
@@ -406,7 +361,7 @@ export function handshakeRoutine(a, b, {
     marks,
     spacing,
     get phase() { return phase },
-    contactAt: getClip().duration * HANDSHAKE_CONTACT_T,
+    contactAt: ANIM.getClip('handshake').duration * HANDSHAKE_CONTACT_T,
   }
 }
 

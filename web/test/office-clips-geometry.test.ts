@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import * as THREE from 'three'
+import * as ANIM from '../src/office/anim.js'
 import * as YIELD from '../src/office/clips/yield.js'
 import * as DT from '../src/office/clips/doubletake.js'
 
@@ -84,7 +85,7 @@ describe('yield clips', () => {
 
   it('builds real AnimationClips with matching track/value lengths', () => {
     for (const name of ['yieldStep', 'yieldKeep'] as const) {
-      const clip = YIELD.getClip(name)
+      const clip = ANIM.getClip(name)
       expect(clip.duration).toBeCloseTo(YIELD.YIELD_DUR, 6)
       checkTrackShapes(clip)
     }
@@ -145,7 +146,7 @@ describe('doubletake clip', () => {
   })
 
   it('builds a real AnimationClip with matching track/value lengths', () => {
-    const clip = DT.getClip()
+    const clip = ANIM.getClip('doubletake')
     expect(clip.duration).toBeCloseTo(DT.DOUBLETAKE_DUR, 6)
     checkTrackShapes(clip)
   })

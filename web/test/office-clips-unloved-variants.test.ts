@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import * as THREE from 'three'
+import * as ANIM from '../src/office/anim.js'
 import * as TIPTOE from '../src/office/clips/tiptoe.js'
 import * as FACEPALM from '../src/office/clips/facepalm.js'
 
@@ -83,7 +84,7 @@ describe('tiptoe clips', () => {
 
   it('builds real AnimationClips with matching track/value lengths', () => {
     for (const name of ['tiptoe', 'tiptoeOblivious'] as const) {
-      checkTrackShapes(TIPTOE.getClip(name))
+      checkTrackShapes(ANIM.getClip(name))
     }
   })
 
@@ -132,7 +133,7 @@ describe('facepalm clips', () => {
 
   it('builds real AnimationClips with matching track/value lengths', () => {
     for (const name of ['facepalm', 'shrug'] as const) {
-      checkTrackShapes(FACEPALM.getClip(name))
+      checkTrackShapes(ANIM.getClip(name))
     }
   })
 

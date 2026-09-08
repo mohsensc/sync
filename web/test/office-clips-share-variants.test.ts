@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import * as THREE from 'three'
+import * as ANIM from '../src/office/anim.js'
 import * as CHESTBUMP from '../src/office/clips/chestbump.js'
 import * as FISTBUMP from '../src/office/clips/fistbump.js'
 
@@ -80,7 +81,7 @@ describe('chestbump clip', () => {
   })
 
   it('builds a real AnimationClip with matching track/value lengths', () => {
-    const clip = CHESTBUMP.getClip()
+    const clip = ANIM.getClip('chestbump')
     expect(clip.duration).toBeCloseTo(CHESTBUMP.CHESTBUMP_SPEC.dur, 6)
     checkTrackShapes(clip)
   })
@@ -157,7 +158,7 @@ describe('fistbump clip', () => {
   })
 
   it('builds a real AnimationClip with matching track/value lengths', () => {
-    const clip = FISTBUMP.getClip()
+    const clip = ANIM.getClip('fistbump')
     expect(clip.duration).toBeCloseTo(FISTBUMP.FISTBUMP_SPEC.dur, 6)
     checkTrackShapes(clip)
   })

@@ -181,8 +181,8 @@ function toeMinAt(root) {
 }
 
 function currentT() {
-  const act = ANIM.getMixer(a.root).clipAction(CB.getClip())
-  return act.time / CB.getClip().duration
+  const act = ANIM.getMixer(a.root).clipAction(ANIM.getClip('chestbump'))
+  return act.time / ANIM.getClip('chestbump').duration
 }
 
 function report() {
@@ -210,7 +210,7 @@ window.__play = () => {
   scrubMode = false; running = true
   for (const c of [a, b]) {
     ANIM.crossfade(c.root, 'idle', 0)
-    const act = ANIM.getMixer(c.root).clipAction(CB.getClip())
+    const act = ANIM.getMixer(c.root).clipAction(ANIM.getClip('chestbump'))
     act.setLoop(THREE.LoopOnce, 1); act.clampWhenFinished = true; act.reset(); act.play()
   }
   nowEl.textContent = 'playing'
@@ -222,9 +222,9 @@ window.__setT = (t01) => {
   for (const c of [a, b]) {
     const mixer = ANIM.getMixer(c.root)
     mixer.stopAllAction()
-    const act = mixer.clipAction(CB.getClip())
+    const act = mixer.clipAction(ANIM.getClip('chestbump'))
     act.reset(); act.play(); act.paused = true
-    act.time = t01 * CB.getClip().duration
+    act.time = t01 * ANIM.getClip('chestbump').duration
     ANIM.update(c.root, 0)
     c.root.updateMatrixWorld(true)
   }
@@ -233,7 +233,7 @@ window.__setT = (t01) => {
 
 /** Scan the whole clip and report the numbers the task wants. */
 window.__scanClip = (steps = 100) => {
-  const dur = CB.getClip().duration
+  const dur = ANIM.getClip('chestbump').duration
   const rows = []
   for (let i = 0; i <= steps; i++) {
     const t = i / steps

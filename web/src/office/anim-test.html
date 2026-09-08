@@ -46,8 +46,10 @@
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 import { clone as skinnedClone } from 'three/addons/utils/SkeletonUtils.js'
-// Cache-busted so an edit to anim.js always shows up on reload.
-const ANIM = await import('./anim.js?v=' + Date.now())
+// Static, no ?v= cache-buster: a query string makes a second module instance,
+// and CLIPS is a table the clips/ modules fold themselves into — two instances
+// means two tables. Vite already invalidates its own modules in dev.
+import * as ANIM from './anim.js'
 
 const canvas = document.getElementById('c')
 const logEl = document.getElementById('log')
@@ -143,7 +145,9 @@ function play(name) {
 
 function buildButtons() {
   const wrap = document.getElementById('clips')
-  ANIM.CLIP_NAMES.forEach(n => {
+  // Read off CLIPS itself, not a snapshot of its keys: the clips/ modules
+  // fold their own in at import time, after anim.js has finished loading.
+  Object.keys(ANIM.CLIPS).forEach(n => {
     const b = document.createElement('button')
     b.textContent = n; b.dataset.n = n
     b.onclick = () => play(n)
@@ -229,7 +233,7 @@ window.__freeze = (clip0, clip1, t01, cam) => {
       const a = A.makeAction(C[i].root, name)
       a.reset(); a.play(); a.setEffectiveWeight(1)
       a.paused = true
-      a.time = t01 * A.getClip(name).duration
+      a.time = t01 * ANIM.getClip(name).duration
       A.update(C[i].root, 0)
     }
     // Keep the readout honest — it reads currentName, not the label element.

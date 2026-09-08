@@ -180,10 +180,17 @@ const ARGUE_KEYS = 30
 const ARGUE_SPEC = { fn: arguePose, dur: ARGUE_DUR, keys: ARGUE_KEYS, loop: true, paired: true }
 const ARGUE_REACT_SPEC = { fn: argueReactPose, dur: ARGUE_DUR, keys: ARGUE_KEYS, loop: true, paired: true }
 
-/** Registry an integrator can fold straight into anim.js's own CLIPS table
+/** Registry in the shape anim.js's own CLIPS table takes, folded in below
  *  (`Object.assign(CLIPS, registry)` or a spread) — this file never touches
  *  anim.js itself. */
 export const registry = { argue: ARGUE_SPEC, argueReact: ARGUE_REACT_SPEC }
+
+// Folded into anim.js's own CLIPS table at import time, so these play by name
+// through ANIM.crossfade like every other clip — one clip table, one owner of
+// the mixer's weights. See anim.js's CLIPS header for the timing rule (the
+// merge has to happen before the first createClips(), which import time is).
+Object.assign(ANIM.CLIPS, registry)
+
 
 // ---------------------------------------------------------------------------
 // Scratch rig, real hierarchy this time (not a flat bag) — measuring toe
@@ -216,45 +223,6 @@ function makeRig() {
   return bones
 }
 
-/** Build a THREE.AnimationClip from a {fn, dur, keys, loop} spec. */
-function buildClipFromSpec(name, { fn, dur, keys, loop }) {
-  const n = loop ? keys + 1 : keys
-  const times = new Float32Array(n)
-  const rot = {}
-  for (const b of ANIM.BONES) rot[b] = new Float32Array(n * 4)
-  const hips = new Float32Array(n * 3)
-  const rig = makeRig()
-
-  for (let i = 0; i < n; i++) {
-    const t01 = loop ? i / keys : (n === 1 ? 0 : i / (n - 1))
-    times[i] = t01 * dur
-    ANIM.applyPose(rig.Hips, fn(t01))
-    for (const b of ANIM.BONES) {
-      const bone = rig[b]
-      rot[b][i * 4 + 0] = bone.quaternion.x
-      rot[b][i * 4 + 1] = bone.quaternion.y
-      rot[b][i * 4 + 2] = bone.quaternion.z
-      rot[b][i * 4 + 3] = bone.quaternion.w
-    }
-    hips[i * 3 + 0] = rig.Hips.position.x
-    hips[i * 3 + 1] = rig.Hips.position.y
-    hips[i * 3 + 2] = rig.Hips.position.z
-  }
-
-  const tracks = [new THREE.VectorKeyframeTrack('Hips.position', times, hips)]
-  for (const b of ANIM.BONES) tracks.push(new THREE.QuaternionKeyframeTrack(b + '.quaternion', times, rot[b]))
-  const clip = new THREE.AnimationClip(name, dur, tracks)
-  clip.userData = { loop, oneShot: !loop }
-  return clip
-}
-
-const _clips = {}
-/** Build (and memoise) one of this module's clips: 'argue' or 'argueReact'. */
-export function getClip(name) {
-  if (!registry[name]) throw new Error(`argue: no clip "${name}". Have: ${Object.keys(registry).join(', ')}`)
-  if (!_clips[name]) _clips[name] = buildClipFromSpec(name, registry[name])
-  return _clips[name]
-}
 
 // ---------------------------------------------------------------------------
 // Spacing and marks
@@ -293,15 +261,6 @@ function turn(g, yaw, max) {
   return false
 }
 
-/** Start a clip built by this module on `root`, crossfading from whatever's
- *  currently playing. Not registered in anim.js, so ANIM.crossfade doesn't
- *  know its name — ANIM.crossfadeAction takes the action instead, on the same
- *  per-object mixer ANIM.getMixer caches. */
-function playLocal(root, name, fade) {
-  const action = ANIM.getMixer(root).clipAction(getClip(name))
-  action.setLoop(THREE.LoopRepeat, Infinity)
-  return ANIM.crossfadeAction(root, action, fade)
-}
 
 // Walk-phase leg-to-mark delta, reused across legs and frames — see
 // handshake.js's _ab. Each leg's use starts and ends within one loop
@@ -356,10 +315,7 @@ export function argueRoutine(a, b, {
         // highfive.js. Loops are timed off wall clock (not clip length), so
         // starting both actions at time=0 on the same tick is all it takes
         // for arguePose/argueReactPose's own phase offsets to stay meaningful.
-        for (const l of legs) {
-          const act = playLocal(l.c.root, l.clip, 0.16)
-          act.time = 0
-        }
+        for (const l of legs) ANIM.crossfade(l.c.root, l.clip, 0.16).time = 0
         phase = 'argue'; clock = 0
       }
     } else if (phase === 'argue') {

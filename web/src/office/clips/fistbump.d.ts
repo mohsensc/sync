@@ -37,7 +37,6 @@ export function fistbumpMarks(
   bPos: THREE.Vector3 | [number, number?, number?],
   spacing?: number
 ): Marks
-export function getClip(): THREE.AnimationClip
 export function measureContact(): THREE.Vector3 | null
 
 export function yawTowards(dir: THREE.Vector3): number

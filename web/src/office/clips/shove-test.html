@@ -62,9 +62,13 @@ import * as THREE from 'three'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 import { clone as skinnedClone } from 'three/addons/utils/SkeletonUtils.js'
 // Cache-busted so an edit to either module always shows up on reload.
-const ANIM = await import('../anim.js?v=' + Date.now())
-const SHOVE = await import('./shove.js?v=' + Date.now())
-const HF = await import('../highfive.js?v=' + Date.now())
+// Static imports, no ?v= cache-buster: a per-import Date.now() gave anim.js
+// one module instance here and another inside shove.js, so the clips shove.js
+// folds into ANIM.CLIPS landed in a table this page never reads. Vite already
+// invalidates its own modules in dev.
+import * as ANIM from '../anim.js'
+import * as SHOVE from './shove.js'
+import * as HF from '../highfive.js'
 
 const canvas = document.getElementById('c')
 const tabEl = document.getElementById('tab')
@@ -165,21 +169,17 @@ function shoveRoutine(a, b, { speed = 1.15, turnRate = 5.0, settle = 0.28, arriv
     } else if (phase === 'settle') {
       clock += dt
       if (clock >= settle) {
-        for (const l of legs) {
-          const action = ANIM.getMixer(l.c.root).clipAction(SHOVE.getClip(l.clip))
-          action.setLoop(THREE.LoopOnce, 1); action.clampWhenFinished = true
-          ANIM.crossfadeAction(l.c.root, action, 0.16)
-        }
+        for (const l of legs) ANIM.crossfade(l.c.root, l.clip, 0.16)
         phase = 'shove'; clock = 0
       }
     } else if (phase === 'shove') {
       clock += dt
-      if (clock >= SHOVE.getClip('shove').duration) phase = 'done'
+      if (clock >= ANIM.getClip('shove').duration) phase = 'done'
     }
     for (const l of legs) ANIM.update(l.c.root, dt)
     return phase
   }
-  return { step, marks, spacing, get phase() { return phase }, contactAt: SHOVE.getClip('shove').duration * SHOVE.SHOVE_CONTACT_T }
+  return { step, marks, spacing, get phase() { return phase }, contactAt: ANIM.getClip('shove').duration * SHOVE.SHOVE_CONTACT_T }
 }
 
 let src = null
@@ -271,7 +271,7 @@ window.__SHOVE = SHOVE
  *  geometry frame by frame — the assertion the design rests on. */
 window.__scanClip = (idx = 0, steps = 40) => {
   const p = pairs[idx]
-  const dur = SHOVE.getClip('shove').duration
+  const dur = ANIM.getClip('shove').duration
   const acts = [
     { c: p.a, clip: 'shove' },
     { c: p.b, clip: 'shoveReact' },
@@ -279,7 +279,7 @@ window.__scanClip = (idx = 0, steps = 40) => {
     c.group.position.copy(p.routine.marks[c === p.a ? 'a' : 'b'].pos)
     c.group.rotation.y = p.routine.marks[c === p.a ? 'a' : 'b'].yaw
     const mixer = ANIM.getMixer(c.root)
-    const action = mixer.clipAction(SHOVE.getClip(clip))
+    const action = mixer.clipAction(ANIM.getClip(clip))
     action.reset(); action.play(); action.paused = true
     return { c, a: action }
   })
@@ -303,9 +303,9 @@ function holdContact() {
       c.group.rotation.y = p.routine.marks[key].yaw
       const clipName = key === 'a' ? 'shove' : 'shoveReact'
       const mixer = ANIM.getMixer(c.root)
-      const act = mixer.clipAction(SHOVE.getClip(clipName))
+      const act = mixer.clipAction(ANIM.getClip(clipName))
       act.reset(); act.play(); act.paused = true
-      act.time = SHOVE.getClip('shove').duration * SHOVE.SHOVE_CONTACT_T
+      act.time = ANIM.getClip('shove').duration * SHOVE.SHOVE_CONTACT_T
       ANIM.update(c.root, 0)
       c.root.updateMatrixWorld(true)
       c.group.updateMatrixWorld(true)

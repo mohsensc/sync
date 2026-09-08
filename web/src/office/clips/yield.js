@@ -168,7 +168,7 @@ const YIELD_KEYS = 24
 const YIELD_STEP_SPEC = { fn: t => yieldStepPose(t, DEFAULT_TIMING), dur: YIELD_DUR, keys: YIELD_KEYS, loop: false }
 const YIELD_KEEP_SPEC = { fn: t => yieldKeepPose(t, DEFAULT_TIMING), dur: YIELD_DUR, keys: YIELD_KEYS, loop: false }
 
-/** Registry an integrator can fold straight into anim.js's own CLIPS table.
+/** Registry in the shape anim.js's own CLIPS table takes, folded in below.
  *  This is the picked take — the only one World ever sees. */
 export const registry = { yieldStep: YIELD_STEP_SPEC, yieldKeep: YIELD_KEEP_SPEC }
 
@@ -183,77 +183,21 @@ export const variants = {
   emphatic: { yieldStep: YIELD_STEP_SPEC_EMPHATIC, yieldKeep: YIELD_KEEP_SPEC_EMPHATIC },
 }
 
-// ---------------------------------------------------------------------------
-// Scratch rig — identical topology to handshake.js/argue.js's copy. Each
-// paired-clip file keeps its own; see handshake.js's header for why.
-// ---------------------------------------------------------------------------
-const PARENT = {
-  Hips: null,
-  Spine02: 'Hips', Spine01: 'Spine02', Spine: 'Spine01', neck: 'Spine', Head: 'neck',
-  LeftShoulder: 'Spine', LeftArm: 'LeftShoulder', LeftForeArm: 'LeftArm', LeftHand: 'LeftForeArm',
-  RightShoulder: 'Spine', RightArm: 'RightShoulder', RightForeArm: 'RightArm', RightHand: 'RightForeArm',
-  LeftUpLeg: 'Hips', LeftLeg: 'LeftUpLeg', LeftFoot: 'LeftLeg', LeftToeBase: 'LeftFoot',
-  RightUpLeg: 'Hips', RightLeg: 'RightUpLeg', RightFoot: 'RightLeg', RightToeBase: 'RightFoot',
+// Folded into anim.js's own CLIPS table at import time, so these play by name
+// through ANIM.crossfade like every other clip — one clip table, one owner of
+// the mixer's weights. See anim.js's CLIPS header for the timing rule (the
+// merge has to happen before the first createClips(), which import time is).
+Object.assign(ANIM.CLIPS, registry)
+
+// The alternate takes fold in too, under `<clip><Variant>` — derived from the
+// variant key, not a second hand-kept table. yield-test.html's picker
+// plays them by those names; nothing else ever asks for them.
+for (const [key, reg] of Object.entries(variants)) {
+  if (key === 'default') continue
+  const suffix = key[0].toUpperCase() + key.slice(1)
+  for (const [name, spec] of Object.entries(reg)) ANIM.CLIPS[name + suffix] = spec
 }
 
-function makeRig() {
-  const bones = {}
-  for (const name of ANIM.BONES) {
-    const o = new THREE.Object3D()
-    o.name = name
-    const bd = ANIM.BIND[name]
-    o.position.set(bd.t[0], bd.t[1], bd.t[2])
-    o.quaternion.set(bd.q[0], bd.q[1], bd.q[2], bd.q[3])
-    bones[name] = o
-  }
-  for (const name of ANIM.BONES) { const p = PARENT[name]; if (p) bones[p].add(bones[name]) }
-  bones.Hips.updateMatrixWorld(true)
-  return bones
-}
-
-function buildClipFromSpec(name, { fn, dur, keys, loop }) {
-  const n = loop ? keys + 1 : keys
-  const times = new Float32Array(n)
-  const rot = {}
-  for (const b of ANIM.BONES) rot[b] = new Float32Array(n * 4)
-  const hips = new Float32Array(n * 3)
-  const rig = makeRig()
-
-  for (let i = 0; i < n; i++) {
-    const t01 = loop ? i / keys : (n === 1 ? 0 : i / (n - 1))
-    times[i] = t01 * dur
-    ANIM.applyPose(rig.Hips, fn(t01))
-    for (const b of ANIM.BONES) {
-      const bone = rig[b]
-      rot[b][i * 4 + 0] = bone.quaternion.x
-      rot[b][i * 4 + 1] = bone.quaternion.y
-      rot[b][i * 4 + 2] = bone.quaternion.z
-      rot[b][i * 4 + 3] = bone.quaternion.w
-    }
-    hips[i * 3 + 0] = rig.Hips.position.x
-    hips[i * 3 + 1] = rig.Hips.position.y
-    hips[i * 3 + 2] = rig.Hips.position.z
-  }
-
-  const tracks = [new THREE.VectorKeyframeTrack('Hips.position', times, hips)]
-  for (const b of ANIM.BONES) tracks.push(new THREE.QuaternionKeyframeTrack(b + '.quaternion', times, rot[b]))
-  const clip = new THREE.AnimationClip(name, dur, tracks)
-  clip.userData = { loop, oneShot: !loop }
-  return clip
-}
-
-const _clipsByRegistry = new WeakMap()
-/** Build (and memoise) one of this module's clips: 'yieldStep' or 'yieldKeep'.
- *  Takes an optional registry ('variants.emphatic' etc) so the test harness
- *  can scrub an alternate take without this file growing a second getClip. */
-export function getClip(name, reg = registry) {
-  const spec = reg[name]
-  if (!spec) throw new Error(`yield: no clip "${name}" in that registry. Have: ${Object.keys(reg).join(', ')}`)
-  let cache = _clipsByRegistry.get(reg)
-  if (!cache) { cache = {}; _clipsByRegistry.set(reg, cache) }
-  if (!cache[name]) cache[name] = buildClipFromSpec(name, spec)
-  return cache[name]
-}
 
 // ---------------------------------------------------------------------------
 // Spacing and marks
@@ -287,12 +231,6 @@ function turn(g, yaw, max) {
   return false
 }
 
-function playLocal(root, name, fade) {
-  const action = ANIM.getMixer(root).clipAction(getClip(name))
-  action.setLoop(THREE.LoopOnce, 1)
-  action.clampWhenFinished = true
-  return ANIM.crossfadeAction(root, action, fade)
-}
 
 // Walk-phase leg-to-mark delta, reused across legs and frames — see
 // handshake.js's _ab. Each leg's use starts and ends within one loop
@@ -343,7 +281,7 @@ export function yieldRoutine(a, b, {
     } else if (phase === 'settle') {
       clock += dt
       if (clock >= settle) {
-        for (const l of legs) playLocal(l.c.root, l.clip, 0.14)
+        for (const l of legs) ANIM.crossfade(l.c.root, l.clip, 0.14)
         phase = 'beat'; clock = 0
       }
     } else if (phase === 'beat') {

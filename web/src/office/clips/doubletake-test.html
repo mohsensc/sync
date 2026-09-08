@@ -122,7 +122,11 @@ let marks = null
 const markDots = new THREE.Group(); markDots.visible = false; scene.add(markDots)
 let scrubMode = false
 let curVariant = 'default'
-let curReg = DT.variants.default
+// The clip NAME for the loaded take. doubletake.js folds every variant into
+// ANIM.CLIPS under `<clip><Variant>`, so a take is picked the same way any
+// other clip is: by name.
+const clipFor = v => v === 'default' ? 'doubletake' : 'doubletake' + v[0].toUpperCase() + v.slice(1)
+let curClip = clipFor('default')
 
 function buildRun() {
   if (a) { scene.remove(a.group); ANIM.dispose(a.root) }
@@ -162,14 +166,14 @@ loader.load('/glb-lite/character.glb', gltf => {
 }, undefined, e => { tabEl.textContent = 'load failed: ' + e })
 
 function currentT(root) {
-  const act = ANIM.getMixer(root).clipAction(DT.getClip(curReg))
-  return act.time / DT.getClip(curReg).duration
+  const act = ANIM.getMixer(root).clipAction(ANIM.getClip(curClip))
+  return act.time / ANIM.getClip(curClip).duration
 }
 
 function report() {
   if (!a || !b) return
   const t = currentT(a.root)
-  const spec = curReg.doubletake
+  const spec = DT.variants[curVariant].doubletake
   tabEl.innerHTML =
     `take      ${curVariant}\n` +
     `t = ${t.toFixed(3)}\n` +
@@ -188,7 +192,7 @@ window.__play = () => {
   scrubMode = false; running = true
   for (const c of [a, b]) {
     ANIM.crossfade(c.root, 'idle', 0)
-    const act = ANIM.getMixer(c.root).clipAction(DT.getClip(curReg))
+    const act = ANIM.getMixer(c.root).clipAction(ANIM.getClip(curClip))
     act.setLoop(THREE.LoopOnce, 1); act.clampWhenFinished = true; act.reset(); act.play()
   }
 }
@@ -199,9 +203,9 @@ window.__setT = (t01) => {
   for (const c of [a, b]) {
     const mixer = ANIM.getMixer(c.root)
     mixer.stopAllAction()
-    const act = mixer.clipAction(DT.getClip(curReg))
+    const act = mixer.clipAction(ANIM.getClip(curClip))
     act.reset(); act.play(); act.paused = true
-    act.time = t01 * DT.getClip(curReg).duration
+    act.time = t01 * ANIM.getClip(curClip).duration
     ANIM.update(c.root, 0)
     c.root.updateMatrixWorld(true)
   }
@@ -213,7 +217,7 @@ window.__setT = (t01) => {
  *  rest so a mid-scrub switch doesn't leave a stale pose from the old take. */
 window.__setVariant = (name) => {
   curVariant = name
-  curReg = DT.variants[name]
+  curClip = clipFor(name)
   for (const [id, n] of [['vDefault','default'],['vLongPause','longPause'],['vBigShrug','bigShrug']])
     document.getElementById(id).setAttribute('aria-pressed', String(n === name))
   if (a && b) window.__setT(scrubMode ? +document.getElementById('tScrub').value : 0)
@@ -223,7 +227,7 @@ window.__setVariant = (name) => {
 /** Loop-seam delta on the raw pose arrays. Doubletake is a one-shot, but
  *  authored to return to rest at both ends anyway, so this should read ~0. */
 window.__seamDelta = () => {
-  const spec = curReg.doubletake
+  const spec = DT.variants[curVariant].doubletake
   const p0 = spec.fn(0), p1 = spec.fn(1)
   let max = 0
   for (const k in p0) {
@@ -237,7 +241,7 @@ window.__seamDelta = () => {
 
 /** Non-finite scan across every sampled key of the clip. */
 window.__finiteCheck = () => {
-  const spec = curReg.doubletake
+  const spec = DT.variants[curVariant].doubletake
   for (let i = 0; i < spec.keys; i++) {
     const t = i / (spec.keys - 1)
     const p = spec.fn(t)

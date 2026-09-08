@@ -39,10 +39,7 @@
 import * as THREE from 'three'
 import * as ANIM from './anim.js'
 import { yawToward } from './agent.js'
-import {
-  handshakeMarks, spacingFor as handshakeSpacingFor,
-  playHandshake, getClip as getHandshakeClip,
-} from './clips/handshake.js'
+import { handshakeMarks, spacingFor as handshakeSpacingFor } from './clips/handshake.js'
 import { makeAmbientThrottle } from './frame-throttle.js'
 
 // ---------------------------------------------------------------------
@@ -279,9 +276,9 @@ export function attachGhostAuthors(cfg = {}) {
       if (!sa || !sb) { release(); return }
       // Same frame, both of them, same clip — the sync story every paired
       // action in this app tells; see handshake.js's own header.
-      playHandshake(self.root)
-      playHandshake(partner.root)
-      setTimeout(release, getHandshakeClip().duration * 1000 + 250)
+      ANIM.crossfade(self.root, 'handshake', 0.16)
+      ANIM.crossfade(partner.root, 'handshake', 0.16)
+      setTimeout(release, ANIM.getClip('handshake').duration * 1000 + 250)
     }).catch(release)
     return true
   }

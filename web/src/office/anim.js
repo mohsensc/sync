@@ -1007,11 +1007,12 @@ function idleNoise(t, sp) {
 // ---------------------------------------------------------------------------
 // Clip table
 // ---------------------------------------------------------------------------
-// Exported so a paired-action module can fold its own clips in — see
-// clips/argue.js's header ("an integrator can fold straight into anim.js's
-// own CLIPS table"). Merge before the first createClips() call: the table is
-// cached on first use, so a merge after some other clip has already played
-// is silently too late.
+// The one clip table. Exported so a paired-action module can fold its own
+// specs in, which every clips/*.js does at its own import time — that is the
+// only way a clip gets played, so there is no second builder and no second
+// path onto the mixer. Merge before the first createClips() call: the table
+// is cached on first use, so a merge after some other clip has already played
+// is silently too late. Import time is always early enough.
 //
 // A spec is { fn, dur, keys, loop } plus two optional flags:
 //   fn(t01, seed)  t01 in [0,1]; `seed` is the seedParams() bundle for the
@@ -1043,7 +1044,6 @@ export const CLIPS = {
   wave:     { fn: wavePose,     dur: 2.2,  keys: 18, loop: true },
 }
 
-export const CLIP_NAMES = Object.keys(CLIPS)
 /** Clips that leave the character seated. Useful for deciding what to play next. */
 export const SEATED_CLIPS = new Set(['sit', 'type', 'sleep'])
 
@@ -1300,7 +1300,6 @@ const _iqTarget = new THREE.Quaternion(), _iqInv = new THREE.Quaternion(), _iqOf
  *  why). */
 function armInertia(obj, rig, next, outgoing, duration) {
   const clip = next.getClip()
-  if (!clip.userData.bake) { rig.inertia = null; return }
   const phase = actionPhase(next)
   const offsets = new Map()
   for (const name in outgoing) {
@@ -1329,24 +1328,6 @@ export function crossfade(obj, name, duration = 0.35, opts = {}) {
   const oneShot = next.getClip().userData.oneShot
   if (rig.current === next && !oneShot) return next
   return fadeInto(obj, rig, next, duration, oneShot)
-}
-
-/** Same fade, for an action the caller built itself off this character's
- *  mixer — the paired-routine modules in clips/ author their own
- *  AnimationClips, so they have no name in CLIPS to crossfade() by.
- *
- *  They cannot use three's own action.crossFadeFrom() either: update() below
- *  writes both fade actions' weights every frame, and setEffectiveWeight
- *  ends in stopFading(), so a fade three scheduled on one of them is torn
- *  down on the next frame — the outgoing action stays pinned at full weight
- *  and blends 50/50 with the routine forever. Going through here keeps every
- *  weight on this mixer under one owner.
- *
- *  The action always starts at its own frame 0: these clips are fired on both
- *  characters on the same frame and phase-matching would desync the pair. */
-export function crossfadeAction(obj, next, duration = 0.35) {
-  const rig = rigOf(obj)
-  return fadeInto(obj, rig, next, duration, true)
 }
 
 /** The fade itself. `reset` cuts the incoming action back to its frame 0
@@ -1406,11 +1387,6 @@ function fadeInto(obj, rig, next, duration, reset) {
     // before this fade does — otherwise the fade would complete, disable
     // prev, freeze prev.time, and leave the still-live offset correcting a
     // pose that's stopped updating.
-    // ...but only if both sides of the blend can still be sampled. A clip
-    // authored outside anim.js (clips/argue.js and friends build their own
-    // AnimationClip) carries no userData.bake, so applyInertia's fade branch
-    // has nothing to recompute the blended pose from. Drop the offset instead.
-    if (rig.inertia && !(prev.getClip().userData.bake && next.getClip().userData.bake)) rig.inertia = null
     if (rig.inertia) {
       const remaining = rig.inertia.dur - rig.inertia.t
       rig.inertia.dur = rig.inertia.t + Math.min(remaining, 0.8 * duration)
