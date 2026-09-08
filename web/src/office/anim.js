@@ -1013,13 +1013,17 @@ function idleNoise(t, sp) {
 // cached on first use, so a merge after some other clip has already played
 // is silently too late.
 //
-// A spec is { fn, dur, keys, loop } plus one optional flag:
+// A spec is { fn, dur, keys, loop } plus two optional flags:
 //   fn(t01, seed)  t01 in [0,1]; `seed` is the seedParams() bundle for the
 //                  character being baked. Ignore it and the clip comes out
 //                  identical for every character — which is what all but
 //                  idle/walk want, and what makes `seeded` below meaningful.
 //   seeded         fn reads the seed bundle, so this clip is baked per
 //                  character rather than shared (see createClips).
+//   paired         started on the same frame as a partner's clip, and
+//                  authored phase-offset against it (clips/argue.js), so
+//                  crossfade starts it at its own frame 0 rather than
+//                  phase-matching it to the pose it is replacing.
 export const CLIPS = {
   // idle and walk are the only two pose functions that read the seed bundle,
   // so they are the only two baked per character — see createClips.
@@ -1081,7 +1085,7 @@ function buildClip(name, spec, { mirror = false, seed = 0 } = {}) {
   // the track above) so crossfade() can sample an exact pose at an arbitrary
   // phase — for phase matching and inertialization — without going through
   // an AnimationMixer to do it.
-  clip.userData = { loop, oneShot: !loop, bake: { rot, n } }
+  clip.userData = { loop, oneShot: !loop, paired: !!spec.paired, bake: { rot, n } }
   return clip
 }
 
@@ -1365,7 +1369,8 @@ function fadeInto(obj, rig, next, duration, reset) {
     // otherwise start the loop wherever it already looks like the outgoing
     // pose so the cut into it isn't out of step with the body.
     const clip = next.getClip()
-    if (clip.name === 'walk' && prev.getClip().name === 'walk') next.time = prev.time
+    if (clip.userData.paired) next.time = 0
+    else if (clip.name === 'walk' && prev.getClip().name === 'walk') next.time = prev.time
     else if (clip.userData.loop) next.time = phaseMatch(obj, rig, next) * clip.duration
   }
 

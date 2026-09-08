@@ -173,8 +173,12 @@ export const ARGUE_DUR = 2.4
 // that's comfortably enough to not facet the jab/throw.
 const ARGUE_KEYS = 30
 
-const ARGUE_SPEC = { fn: arguePose, dur: ARGUE_DUR, keys: ARGUE_KEYS, loop: true }
-const ARGUE_REACT_SPEC = { fn: argueReactPose, dur: ARGUE_DUR, keys: ARGUE_KEYS, loop: true }
+// `paired` is anim.js's flag for "started on the same frame as a partner's
+// clip": crossfade starts these at their own frame 0 instead of phase-matching
+// each side to the pose it happens to be replacing, which would pick two
+// unrelated phases and flatten the offset the two poses are authored around.
+const ARGUE_SPEC = { fn: arguePose, dur: ARGUE_DUR, keys: ARGUE_KEYS, loop: true, paired: true }
+const ARGUE_REACT_SPEC = { fn: argueReactPose, dur: ARGUE_DUR, keys: ARGUE_KEYS, loop: true, paired: true }
 
 /** Registry an integrator can fold straight into anim.js's own CLIPS table
  *  (`Object.assign(CLIPS, registry)` or a spread) — this file never touches
