@@ -67,16 +67,26 @@ export const YAW_OFFSET = Math.PI
 const clamp = (v, a, b) => v < a ? a : v > b ? b : v
 const wrapPi = a => Math.atan2(Math.sin(a), Math.cos(a))
 
+// The fastest hand-off #settle's 0.045 m/s glide cap can absorb without the
+// last centimetre reading as a stop dead, and the braking rate #steer uses to
+// get there. TUNING.arrive falls out of the pair: see below.
+const ARRIVE_SPEED = 0.16
+const DECEL = 2.2
+
 export const TUNING = {
   maxSpeed: 1.15,      // m/s
   accel: 2.8,
-  decel: 2.2,
+  decel: DECEL,
   turnWalk: 2.6,       // rad/s while moving
   turnIdle: 2.4,       // rad/s standing still
   minTurnFactor: 0.35, // fraction of maxSpeed kept while turning hard
-  arrive: 0.01,        // m — #steer's trigger radius, tested against the distance at the TOP of the frame
-  arriveSpeed: 0.16,   // m/s — speed must also be under this for #arrive to fire, so #settle's
-                       // glide cap has a hand-off it can absorb. Both gates bind — see #arrive.
+  // #steer's trigger radius, tested against the distance at the TOP of the
+  // frame. Derived, not picked: #steer brakes on sqrt(2*decel*dist), so this
+  // is the one radius where that profile has already come down to arriveSpeed
+  // and both halves of #arrive's gate can fire on the same frame. Any other
+  // radius leaves one gate waiting on the other. 5.8 mm.
+  arrive: ARRIVE_SPEED ** 2 / (2 * DECEL),
+  arriveSpeed: ARRIVE_SPEED,   // m/s — see #arrive for why the speed half still binds
   pivotDist: 1.0,      // inside this, a big turn is done on the spot
   pivotAngle: 1.0,
   pivotExit: 0.35,
@@ -646,7 +656,7 @@ export class Agent {
       // Brakes to a literal stop at the target, not a buffer TUNING.arrive
       // short of it — the old "- TUNING.arrive" here is what used to leave
       // up to ~10cm for #settle to glide through at idle-clip foot-slide
-      // speeds. #settle now only has TUNING.arrive itself (1cm) left to close.
+      // speeds. #settle now only has TUNING.arrive itself (6mm) left to close.
       const stopping = Math.sqrt(2 * TUNING.decel * dist)
       vmax = Math.min(m.speed * turnFactor, stopping)
     }
@@ -673,7 +683,7 @@ export class Agent {
     }
 
     // `dist` is this frame's OPENING distance, deliberately: a frame of travel
-    // at 10fps is longer than the 1cm radius, so testing where the frame ended
+    // at 10fps is longer than the 6mm radius, so testing where the frame ended
     // lets the agent step across the mark without ever landing inside it and
     // orbit forever (measured: it never arrives at all from 4 m at 10fps).
     if (dist <= TUNING.arrive && this.speed < TUNING.arriveSpeed) this.#arrive()
@@ -713,11 +723,12 @@ export class Agent {
 
     // Both halves of #steer's gate bind, and neither is decorative: without
     // the radius, speed alone fires on frame 1 of every move (speed starts at
-    // 0); without the speed test, the hand-off happens at the braking
-    // profile's own 0.21 m/s and #settle's 0.045 m/s glide cap turns that into
-    // a stop dead. What's left here is the radius plus however far the agent
-    // travelled during the frames it spent waiting on the speed — measured
-    // over 4 m / 0.5 m / 5 cm / 2 cm walks: ~1cm at 60fps, up to 2cm at 10fps.
+    // 0); without the speed test, a frame long enough to leave the agent above
+    // its braking profile hands off at whatever it was still carrying, and
+    // #settle's 0.045 m/s glide cap turns that into a stop dead. TUNING.arrive
+    // is derived so the two coincide on a tracked approach — what's left here
+    // is the radius plus whatever a long frame carried past it, measured over
+    // 4 m / 0.5 m / 5 cm / 2 cm walks: 6mm at 60fps, 8mm at the 0.05 s dt cap.
     this._settle = { to: [m.x, m.z], toYaw, gliding: false, m }
   }
 
