@@ -1284,10 +1284,10 @@ function snapshotPose(obj, rig) {
 }
 
 /** An action's current time as a phase in [0, 1], clamped — used to sample
- *  clip.userData.bake rather than the mixer. */
+ *  clip.userData.bake rather than the mixer. Every clip's duration is a
+ *  positive constant off its spec, so there is no zero to divide by. */
 function actionPhase(action) {
-  const dur = action.getClip().duration
-  return dur > 0 ? Math.min(1, Math.max(0, action.time / dur)) : 0
+  return Math.min(1, Math.max(0, action.time / action.getClip().duration))
 }
 
 const _iqTarget = new THREE.Quaternion(), _iqInv = new THREE.Quaternion(), _iqOffset = new THREE.Quaternion()
@@ -1386,7 +1386,7 @@ function fadeInto(obj, rig, next, duration, reset) {
     else if (clip.userData.loop) next.time = phaseMatch(obj, rig, next) * clip.duration
   }
 
-  if (prev && !retrigger) {
+  if (prev && !retrigger && duration > 0) {
     // Two actions ramping from (1, 0) to (0, 1) are continuous at the seam by
     // construction — at u=0 the mixer's normalised blend IS prev's own pose,
     // no interpolation error possible — so a fade that starts from a settled
@@ -1415,11 +1415,18 @@ function fadeInto(obj, rig, next, duration, reset) {
       const remaining = rig.inertia.dur - rig.inertia.t
       rig.inertia.dur = rig.inertia.t + Math.min(remaining, 0.8 * duration)
     }
+
     prev.enabled = true
     prev.setEffectiveWeight(1)
     next.setEffectiveWeight(0)
     rig.fade = { prev, next, dur: duration, t: 0 }
   } else {
+    // No ramp to run: either there is nothing to fade from, or the caller
+    // asked for a zero-length one. A zero-length fade is finished HERE rather
+    // than parked in rig.fade with dur 0 for update() to special-case — a
+    // duration of 0 has one meaning, and it isn't "one frame". armInertia's
+    // own one-frame floor then carries the outgoing pose across the cut.
+    if (prev && prev !== next) { prev.enabled = false; prev.setEffectiveWeight(0) }
     next.setEffectiveWeight(1)
     if (outgoing) armInertia(obj, rig, next, outgoing, duration)
   }
@@ -1456,11 +1463,7 @@ function applyInertia(obj, rig, dt) {
   const inertia = rig.inertia
   if (!inertia) return
   inertia.t += dt
-  // dur can be capped to exactly t by an interrupting zero-length fade, and
-  // dt can be 0 on a frame; t/dur is then 0/0, and a NaN written to a bone
-  // here sticks — PropertyMixer only rewrites a bone whose accumulated value
-  // changed, so the legs stay NaN for good.
-  const u = inertia.dur > 0 ? Math.min(1, inertia.t / inertia.dur) : 1
+  const u = Math.min(1, inertia.t / inertia.dur)
   const decay = (1 - u) ** 3
   if (decay <= 1e-3) { rig.inertia = null; return }
   const bones = boneMap(obj, rig)
@@ -1469,7 +1472,7 @@ function applyInertia(obj, rig, dt) {
     const clipA = fade.prev.getClip(), clipB = fade.next.getClip()
     const bakeA = clipA.userData.bake, bakeB = clipB.userData.bake
     const phaseA = actionPhase(fade.prev), phaseB = actionPhase(fade.next)
-    const w = fade.dur > 0 ? ease(fade.t / fade.dur, 0, 1) : 1   // same curve update() drove the weights with this frame
+    const w = ease(fade.t / fade.dur, 0, 1)   // same curve update() drove the weights with this frame
     for (const [name, offset] of inertia.offsets) {
       const b = bones[name]
       if (!b || !bakeA.rot[name] || !bakeB.rot[name]) continue
@@ -1500,7 +1503,7 @@ export function update(obj, dt) {
   const f = rig.fade
   if (f) {
     f.t += dt
-    const u = f.dur > 0 ? Math.min(1, f.t / f.dur) : 1
+    const u = Math.min(1, f.t / f.dur)
     const w = ease(u, 0, 1)   // smoothstep, not the linear ramp crossFadeFrom used
     f.next.setEffectiveWeight(w)
     f.prev.setEffectiveWeight(1 - w)
