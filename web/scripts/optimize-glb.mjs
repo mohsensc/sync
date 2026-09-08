@@ -65,6 +65,15 @@ const COMPRESSIBLE_SLOTS = /color|metallicRoughness|emissive|occlusion/i
 // 0.005 is the first that clears at 0.0004% -- 9328 source tris down to 7295,
 // 453KB. That is most of its reduction given back, and it is what the budget
 // costs on this asset. Anything looser eats a whole cable loop off the ball.
+// character.glb's ratio is the biggest triangle lever left (12,487 tris x 8
+// agents is most of the main pass), so the whole interval is measured, not
+// just the endpoints. Head rendered at framing.js's HEAD_DIST of 0.24 m --
+// the closest the camera ever gets -- against the source glb, share of pixels
+// differing by more than 8/255:
+//   ratio 0.4  12,487 tris  0.868%      ratio 0.6  18,733 tris  0.604%
+//   ratio 0.5  15,611 tris  0.723%      ratio 0.7  21,855 tris  0.539%
+// That is a straight line, ~21,500 triangles per point of difference at every
+// step, with no knee to buy. So it stays at the cheap end.
 // tex overrides the shared texture budget below. Only the character needs one:
 // it's the only asset the camera ever gets close to (framing.js HEAD_DIST is
 // 0.24 m), and at 1024/q82 webp mottled the flat hair colour and chewed the
