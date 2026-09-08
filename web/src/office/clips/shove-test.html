@@ -166,14 +166,9 @@ function shoveRoutine(a, b, { speed = 1.15, turnRate = 5.0, settle = 0.28, arriv
       clock += dt
       if (clock >= settle) {
         for (const l of legs) {
-          const mixer = ANIM.getMixer(l.c.root)
-          const clip = SHOVE.getClip(l.clip)
-          const action = mixer.clipAction(clip)
+          const action = ANIM.getMixer(l.c.root).clipAction(SHOVE.getClip(l.clip))
           action.setLoop(THREE.LoopOnce, 1); action.clampWhenFinished = true
-          action.reset(); action.enabled = true; action.setEffectiveWeight(1)
-          const prevName = ANIM.currentClip(l.c.root)
-          if (prevName) action.crossFadeFrom(ANIM.makeAction(l.c.root, prevName), 0.16, false)
-          action.play(); action.time = 0
+          ANIM.crossfadeAction(l.c.root, action, 0.16)
         }
         phase = 'shove'; clock = 0
       }
@@ -221,7 +216,7 @@ function buildRun() {
 }
 
 const loader = new GLTFLoader()
-loader.load('/glb/character.glb', gltf => {
+loader.load('/glb-lite/character.glb', gltf => {
   src = gltf.scene
   buildRun()
   window.__ready = true

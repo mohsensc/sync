@@ -110,7 +110,7 @@ function place(src, x, rotY) {
 
 let SRC = null
 const loader = new GLTFLoader()
-loader.load('glb/character.glb', gltf => {
+loader.load('/glb-lite/character.glb', gltf => {
   SRC = gltf.scene
   chars.push(place(gltf.scene, 0, 0))
   chars.push(place(gltf.scene, 1.05, 0))

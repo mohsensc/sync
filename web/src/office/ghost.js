@@ -271,7 +271,12 @@ export function attachGhostAuthors(cfg = {}) {
         yaw: yawToward(marks.b.pos.x, marks.b.pos.z, marks.a.pos.x, marks.a.pos.z),
         label: 'greeting ' + self.name,
       }),
-    ]).then(() => {
+    ]).then(([sa, sb]) => {
+      // A goTo resolves null instead of the agent when a later order
+      // supersedes it (agent.js's #cancelMove) — one of the pair got sent
+      // somewhere else mid-approach, so there's no arrival to play the
+      // handshake on. Just release both and skip the clip.
+      if (!sa || !sb) { release(); return }
       // Same frame, both of them, same clip — the sync story every paired
       // action in this app tells; see handshake.js's own header.
       playHandshake(self.root)
@@ -291,6 +296,11 @@ export function attachGhostAuthors(cfg = {}) {
     const mats = []
     figRoot.traverse(n => {
       if (!n.isMesh && !n.isSkinnedMesh) return
+      // The shadow map's depth pass ignores material opacity, so a ghost —
+      // built invisible and faded in toward GHOST_BODY_OPACITY — would throw
+      // a fully solid shadow before it's visible at all. makeCharacterRoot
+      // turns castShadow on for every real character; undo it here.
+      n.castShadow = false
       const list = Array.isArray(n.material) ? n.material : [n.material]
       for (const m of list) { m.transparent = true; m.depthWrite = false; m.opacity = 0; mats.push(m) }
     })

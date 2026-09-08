@@ -81,10 +81,19 @@ export interface Tuning {
   turnWalk: number
   turnIdle: number
   minTurnFactor: number
+  /** m — #steer's trigger radius; brakes to a literal stop here, not a
+   *  buffer short of it. */
   arrive: number
+  /** m/s — speed must also be under this for #arrive to fire. */
+  arriveSpeed: number
   pivotDist: number
   pivotAngle: number
   pivotExit: number
+  /** s — floor on #settle's final glide duration; only stretched longer
+   *  when glideSpeed/turnIdle below would otherwise be exceeded. */
+  settle: number
+  /** m/s cap on #settle's position glide. */
+  glideSpeed: number
   greetRange: number
   greetCooldown: number
 }
@@ -171,6 +180,9 @@ export class Agent {
   lastGreet: number
   /** Set by say(); absent until the first call. */
   note?: string | null
+  /** FNV-1a of id — feeds ANIM.setSeed so agents sharing a clip don't move
+   *  in lockstep. */
+  seed: number
 
   speed: number
   metersPerCycle: number
@@ -186,6 +198,7 @@ export class Agent {
 
   get doing(): string
   get seated(): boolean
+  /** Walking, or still settling onto the exact mark and yaw after one. */
   get moving(): boolean
 
   describe(): AgentDescribe
@@ -203,12 +216,16 @@ export class Agent {
   /** Turn in place to an absolute (external-convention) yaw. */
   turnTo(targetYaw: number): Promise<this>
   faceTowards(tx: number, tz: number): Promise<this>
-  /** Walk to (x, z). Resolves once arrived and settled to opts.yaw. */
-  goTo(x: number, z: number, opts?: AgentGoToOpts): Promise<this>
+  /** Walk to (x, z). Resolves once arrived and settled to opts.yaw, or with
+   *  `null` if a later order (a fresh goTo, or stop()) supersedes this one
+   *  before it gets there — see #cancelMove in agent.js. */
+  goTo(x: number, z: number, opts?: AgentGoToOpts): Promise<this | null>
   /** Reverse-plays sit. Resolves standing. */
   standUp(): Promise<void>
-  /** Sit down at (x, z) facing yaw, then run `act` (default typing). */
-  sitAt(x: number, z: number, yaw: number, next?: Activity): Promise<void>
+  /** Sit down at (x, z) facing yaw, then run `act` (default typing).
+   *  Resolves `null` instead of sitting down if the goTo underneath it is
+   *  superseded before arrival. */
+  sitAt(x: number, z: number, yaw: number, next?: Activity): Promise<this | null>
 
   update(dt: number): void
 }
