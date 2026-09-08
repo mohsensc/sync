@@ -31,8 +31,9 @@ The GLB ships no usable motion, so every clip is authored from keyframe tracks.
   Argues or shakes hands if that author is in the room.
 - `reel.js`, `replay-card.js`, `seed.js` — the highlight reel: clashes ranked and
   filterable, click a row to replay the beat in-scene.
-- `../../scripts/optimize-glb.mjs` — gltf-transform, `public/glb/` -> `glb-lite/`,
-  the only path the scene loads. Skin kept, never quantized, `EXT_texture_webp`.
+- `../../scripts/optimize-glb.mjs` — gltf-transform, `assets-src/glb/` (outside
+  `public/`, so the sources never ship) -> `glb-lite/`, the only path the scene
+  loads. Skin kept, skinned meshes unquantized, `EXT_texture_webp`.
 
 ## Traps
 

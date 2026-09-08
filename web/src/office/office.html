@@ -550,8 +550,8 @@ const DESK_TOP = 0.76
 const DESK_SX = 1.15
 
 // glb-lite/ (scripts/optimize-glb.mjs) is the only path now: no ?glb= flag,
-// no fallback to the source glb/ tree, which stays put only as that script's
-// input. cast:true marks the "big prop" tier from the render-cost pass. The
+// no fallback to the source tree, which lives in assets-src/glb outside
+// public/ so a build ships only what the scene asks for. cast:true marks the "big prop" tier from the render-cost pass. The
 // only one left off it is the tortoise, at 0.55 m the one piece here that is
 // genuinely decor-scale; the phone wall is 2 m tall and the cable ball is the
 // widest thing in its corner, so both keep their contact shadow.

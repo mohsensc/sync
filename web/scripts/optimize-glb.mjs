@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Slims the GLBs in public/glb into public/glb-lite with gltf-transform's JS API
+// Slims the GLBs in assets-src/glb into public/glb-lite with gltf-transform's
+// JS API
 // (not the CLI binary, so ratios/errors live in one place and are easy to retune).
 //
 // Blender is deliberately not part of this: not installed here, it runs the same
@@ -43,7 +44,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const SRC_DIR = path.resolve(__dirname, '../public/glb')
+const SRC_DIR = path.resolve(__dirname, '../assets-src/glb')
 const OUT_DIR = path.resolve(__dirname, '../public/glb-lite')
 
 const BBOX_TOLERANCE = 0.001 // 0.1%, measured against the source bbox diagonal
