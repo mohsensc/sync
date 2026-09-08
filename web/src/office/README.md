@@ -8,7 +8,7 @@ The GLB ships no usable motion, so every clip is authored from keyframe tracks.
 - `anim.js` — procedural clips against the rig's 24 bones (`BIND` has the table).
   Mixamo naming, root `Hips`, spine inverted (Spine02 is the belly). `crossfade`
   owns every weight on the mixer, so clips built elsewhere come in through
-  `crossfadeAction`. `setSeed` varies idle/walk per agent, `popMetric` scores it.
+  `crossfadeAction`. `setSeed` varies idle/walk per agent.
 - `highfive.js`, `handshake.js`, `clips/*.js` — paired-agent routines, one per
   ladder beat and its variants, each with a `*-test.html` harness.
 - `agent.js` — `Agent` (activity machine plus steering) and `World` (owns agents,

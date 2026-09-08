@@ -1138,8 +1138,6 @@ export function getMixer(obj) {
       fade: null,      // in-flight crossfade: { prev, next, dur, t }
       inertia: null,   // in-flight pose correction: { offsets: Map(bone->Quaternion), dur, t }
       bones: null,     // Map(name -> Object3D), filled in lazily
-      prevQuats: null, // for popMetric: Map(bone -> last frame's quaternion)
-      maxAngVel: 0,
     }
     RIGS.set(obj, r)
   }
@@ -1495,27 +1493,6 @@ function applyInertia(obj, rig, dt) {
   }
 }
 
-/** Per-bone angular velocity this frame, for popMetric. */
-function trackVelocity(obj, rig, dt) {
-  if (dt <= 0) return
-  const bones = boneMap(obj, rig)
-  if (!rig.prevQuats) rig.prevQuats = new Map()
-  let maxVel = 0
-  for (const n of BONES) {
-    const b = bones[n]
-    if (!b) continue
-    const prev = rig.prevQuats.get(n)
-    if (prev) {
-      const vel = quatAngle(prev, b.quaternion) / dt
-      if (vel > maxVel) maxVel = vel
-      prev.copy(b.quaternion)
-    } else {
-      rig.prevQuats.set(n, b.quaternion.clone())
-    }
-  }
-  rig.maxAngVel = maxVel
-}
-
 /** Advance one character's mixer, ramp any in-flight crossfade weight, and
  *  apply the decaying inertialization offset on top. */
 export function update(obj, dt) {
@@ -1535,15 +1512,6 @@ export function update(obj, dt) {
   }
   rig.mixer.update(dt)
   applyInertia(obj, rig, dt)
-  trackVelocity(obj, rig, dt)
-}
-
-/** Max per-bone angular velocity (rad/s) measured on this character's last
- *  update() call. A transition popping should show up here as a spike well
- *  past whatever the same clip's own peak looks like in steady state. */
-export function popMetric(obj) {
-  const rig = RIGS.get(obj)
-  return rig ? rig.maxAngVel : 0
 }
 
 /** Nudge a cached action's timeScale without touching what's currently

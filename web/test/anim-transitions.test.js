@@ -36,6 +36,53 @@ function makeRig() {
 
 const DT = 1 / 60
 
+// Peak per-bone angular velocity — the instrument this whole file is built
+// around. It lives here, not in anim.js: nothing in the scene reads it, and
+// walking 24 bones with an acos apiece on every agent on every frame is not
+// something a shipped render should pay for a number only a test looks at.
+const _bones = new WeakMap()   // root -> { name: Object3D }
+const _prev = new WeakMap()    // root -> Map(name -> last sample's quaternion)
+const _peak = new WeakMap()    // root -> last sample's max angular velocity
+
+function quatAngle(a, b) {
+  const d = Math.min(1, Math.abs(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w))
+  return 2 * Math.acos(d)
+}
+
+/** ANIM.update() and then the velocity sample, in that order — the order
+ *  anim.js itself used when it ran this pass at the end of update(). Every
+ *  update in this file goes through here so the per-bone history stays in
+ *  step with the frames, warmups included. */
+function step(root, dt) {
+  ANIM.update(root, dt)
+  if (dt <= 0) return
+  let bones = _bones.get(root)
+  if (!bones) {
+    bones = {}
+    for (const n of ANIM.BONES) bones[n] = root.getObjectByName(n)
+    _bones.set(root, bones)
+  }
+  let prev = _prev.get(root)
+  if (!prev) { prev = new Map(); _prev.set(root, prev) }
+  let maxVel = 0
+  for (const n of ANIM.BONES) {
+    const b = bones[n]
+    if (!b) continue
+    const q = prev.get(n)
+    if (q) {
+      const vel = quatAngle(q, b.quaternion) / dt
+      if (vel > maxVel) maxVel = vel
+      q.copy(b.quaternion)
+    } else {
+      prev.set(n, b.quaternion.clone())
+    }
+  }
+  _peak.set(root, maxVel)
+}
+
+/** Max per-bone angular velocity (rad/s) from this root's last step(). */
+function popMetric(root) { return _peak.get(root) || 0 }
+
 /** anim.js's crossfade(), before this branch: a plain linear crossFadeFrom,
  *  no phase matching, no inertia. `cur` is `{ action }`, mutated in place —
  *  this driver's only state, since everything else lives on the shared rig
@@ -61,7 +108,7 @@ function oldCrossfade(root, cur, name, duration) {
  *  starts here, it isn't a transition) and then `seq`, an array of
  *  [clip, fadeDuration, holdSeconds]. Returns the peak popMetric() seen
  *  during each entry's hold window. `driver` is 'old' or 'new'; both step
- *  through ANIM.update()/ANIM.popMetric(), so the only difference is which
+ *  through the same step()/popMetric() pair, so the only difference is which
  *  crossfade function drove the transition. */
 function runSequence(driver, spawnClip, seq) {
   const root = makeRig()
@@ -69,7 +116,7 @@ function runSequence(driver, spawnClip, seq) {
   const start = (name, dur) => driver === 'old' ? oldCrossfade(root, cur, name, dur) : ANIM.crossfade(root, name, dur)
 
   start(spawnClip, 0)
-  for (let s = 0; s < 5; s++) ANIM.update(root, DT)   // let the spawn pose settle before measuring anything
+  for (let s = 0; s < 5; s++) step(root, DT)   // let the spawn pose settle before measuring anything
 
   const peaks = []
   let from = spawnClip
@@ -77,8 +124,8 @@ function runSequence(driver, spawnClip, seq) {
     start(name, fadeDur)
     let peak = 0
     for (let s = 0, n = Math.round(holdDur / DT); s < n; s++) {
-      ANIM.update(root, DT)
-      peak = Math.max(peak, ANIM.popMetric(root))
+      step(root, DT)
+      peak = Math.max(peak, popMetric(root))
     }
     peaks.push({ from, to: name, peak })
     from = name
@@ -98,8 +145,8 @@ function steadyPeak(name, cycles = 2) {
   const totalSteps = Math.round(cycles * dur / DT)
   let peak = 0
   for (let s = 0; s < totalSteps; s++) {
-    ANIM.update(root, DT)
-    if (s > warmupSteps) peak = Math.max(peak, ANIM.popMetric(root))
+    step(root, DT)
+    if (s > warmupSteps) peak = Math.max(peak, popMetric(root))
   }
   return peak
 }
@@ -155,14 +202,14 @@ describe('crossfade: eased ramp + inertialization', () => {
       const cur = { action: null }
       const start = (n, d) => driver === 'old' ? oldCrossfade(root, cur, n, d) : ANIM.crossfade(root, n, d)
       start('idle', 0)
-      for (let s = 0; s < 5; s++) ANIM.update(root, DT)
+      for (let s = 0; s < 5; s++) step(root, DT)
       start('sit', 0.3)
-      for (let s = 0, n = Math.round(1.6 / DT); s < n; s++) ANIM.update(root, DT)   // let it clamp and hold seated
+      for (let s = 0, n = Math.round(1.6 / DT); s < n; s++) step(root, DT)   // let it clamp and hold seated
       start('sit', 0.25)   // retrigger, mid-hold
       let peak = 0
       for (let s = 0, n = Math.round(0.6 / DT); s < n; s++) {
-        ANIM.update(root, DT)
-        peak = Math.max(peak, ANIM.popMetric(root))
+        step(root, DT)
+        peak = Math.max(peak, popMetric(root))
       }
       return peak
     }
@@ -199,16 +246,16 @@ describe('crossfade: eased ramp + inertialization', () => {
       const cur = { action: null }
       const start = (n, d) => driver === 'old' ? oldCrossfade(root, cur, n, d) : ANIM.crossfade(root, n, d)
       start('idle', 0)
-      for (let s = 0; s < 5; s++) ANIM.update(root, DT)
+      for (let s = 0; s < 5; s++) step(root, DT)
       start('sit', 0.3)
-      for (let s = 0, n = Math.round(1.6 / DT); s < n; s++) ANIM.update(root, DT)
+      for (let s = 0, n = Math.round(1.6 / DT); s < n; s++) step(root, DT)
       start('sit', 0.25)                                        // retrigger
-      for (let s = 0, n = Math.round(0.1 / DT); s < n; s++) ANIM.update(root, DT)   // land inside its decay window
+      for (let s = 0, n = Math.round(0.1 / DT); s < n; s++) step(root, DT)   // land inside its decay window
       start('type', 0.3)                                        // interrupt with a real fade
       let peak = 0
       for (let s = 0, n = Math.round(0.9 / DT); s < n; s++) {
-        ANIM.update(root, DT)
-        peak = Math.max(peak, ANIM.popMetric(root))
+        step(root, DT)
+        peak = Math.max(peak, popMetric(root))
       }
       return peak
     }
@@ -236,14 +283,14 @@ describe('crossfade: eased ramp + inertialization', () => {
       const cur = { action: null }
       const start = (n, d) => driver === 'old' ? oldCrossfade(root, cur, n, d) : ANIM.crossfade(root, n, d)
       start(a, 0)
-      for (let s = 0; s < 10; s++) ANIM.update(root, DT)
+      for (let s = 0; s < 10; s++) step(root, DT)
       start(b, fadeDur)
-      for (let s = 0; s < interruptFrames; s++) ANIM.update(root, DT)
+      for (let s = 0; s < interruptFrames; s++) step(root, DT)
       start(c, fadeDur)
       let peak = 0
       for (let s = 0, n = Math.round((fadeDur + 0.4) / DT); s < n; s++) {
-        ANIM.update(root, DT)
-        peak = Math.max(peak, ANIM.popMetric(root))
+        step(root, DT)
+        peak = Math.max(peak, popMetric(root))
       }
       return peak
     }
@@ -267,11 +314,11 @@ describe('crossfade: eased ramp + inertialization', () => {
   it('never writes NaN, even on a zero-length interrupt with a zero dt', () => {
     const root = makeRig()
     ANIM.crossfade(root, 'sit', 0.3)
-    for (let s = 0, n = Math.round(0.35 / DT); s < n; s++) ANIM.update(root, DT)
+    for (let s = 0, n = Math.round(0.35 / DT); s < n; s++) step(root, DT)
     ANIM.crossfade(root, 'sit', 0.3)   // retrigger, arms inertia at t = 0
     ANIM.crossfade(root, 'idle', 0)    // zero-length interrupt, before any update
-    ANIM.update(root, 0)
-    for (let s = 0; s < 30; s++) ANIM.update(root, DT)
+    step(root, 0)
+    for (let s = 0; s < 30; s++) step(root, DT)
 
     const bad = []
     root.traverse(o => {
