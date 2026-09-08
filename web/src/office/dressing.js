@@ -37,35 +37,26 @@ const BOX = new THREE.BoxGeometry(1, 1, 1)
 const CYL = new THREE.CylinderGeometry(0.5, 0.5, 1, 12)
 const SPH = new THREE.SphereGeometry(0.5, 14, 10)
 
-// Everything here is "small dressing" by default: it receives so it doesn't
-// float free of its own shadow, but doesn't cast. Costing every chair leg,
-// drawer pull and binder spine as a shadow caster bought nothing visible at
-// this prop density. The pieces big enough that the missing contact shadow
-// left them floating — seats, table and cabinet tops, monitor panels, the
-// shelf carcass — opt back in through cast() below.
+// Nothing here decides its own shadows: everything returned lands in
+// office.html's addMesh, which tiers by size. Chair legs, drawer pulls and
+// binder spines come out under the threshold and only receive; seats, table
+// and cabinet tops, monitor panels and the shelf carcass come out over it.
 /** One box. Sizes and positions in metres, so the call sites read as furniture. */
 function box(out, m, w, h, d, x, y, z, ry = 0) {
   const o = new THREE.Mesh(BOX, m)
   o.scale.set(w, h, d); o.position.set(x, y, z); o.rotation.y = ry
-  o.receiveShadow = true
   out.push(o); return o
 }
 function cyl(out, m, r, h, x, y, z) {
   const o = new THREE.Mesh(CYL, m)
   o.scale.set(r * 2, h, r * 2); o.position.set(x, y, z)
-  o.receiveShadow = true
   out.push(o); return o
 }
 function sph(out, m, r, x, y, z) {
   const o = new THREE.Mesh(SPH, m)
   o.scale.setScalar(r * 2); o.position.set(x, y, z)
-  o.receiveShadow = true
   out.push(o); return o
 }
-/** Opt one piece back into casting. Wraps a box()/cyl() call so the size and
- *  the decision read on the same line. */
-function cast(o) { o.castShadow = true; return o }
-
 /**
  * A chair at a desk seat.
  *
@@ -85,8 +76,8 @@ export function chair(group, x, z, yaw, color = P.taupe) {
   // Pad top is 0.38. The seated clip puts the Hips joint at 0.433 and the butt
   // surface roughly 8 cm under that, so a 0.46 pad — the obvious "chair height"
   // — actually cut up through the figure's thighs. Measured, then lowered.
-  cast(box(out, seatM, 0.46, 0.08, 0.46, 0, 0.34, 0))
-  cast(box(out, seatM, 0.46, 0.44, 0.08, 0, 0.60, 0.19))
+  box(out, seatM, 0.46, 0.08, 0.46, 0, 0.34, 0)
+  box(out, seatM, 0.46, 0.44, 0.08, 0, 0.60, 0.19)
   for (const [lx, lz] of [[-0.18, -0.18], [0.18, -0.18], [-0.18, 0.18], [0.18, 0.18]])
     cyl(out, legM, 0.028, 0.34, lx, 0.17, lz)
   out.forEach(o => g.add(o))
@@ -111,13 +102,12 @@ export function monitor(group, x, z, yaw, deskTop, tint = P.slate) {
   box(out, mat('monFoot', P.taupe), 0.26, 0.025, 0.16, 0, deskTop + 0.012, 0)
   cyl(out, mat('monNeck', P.taupe), 0.028, 0.17, 0, deskTop + 0.10, 0)
   // Panel tilted back a touch. Screen face is local +z.
-  const panel = cast(box(out, shell, 0.56, 0.36, 0.035, 0, deskTop + 0.36, 0.01))
+  const panel = box(out, shell, 0.56, 0.36, 0.035, 0, deskTop + 0.36, 0.01)
   panel.rotation.x = -0.08
   const face = new THREE.Mesh(BOX, screen)
   face.scale.set(0.50, 0.30, 0.012)
   face.position.set(0, deskTop + 0.36, 0.032)
   face.rotation.x = -0.08
-  face.castShadow = false; face.receiveShadow = false
   out.push(face)
   // keyboard
   box(out, mat('kbd', P.sand), 0.42, 0.022, 0.15, 0, deskTop + 0.011, -0.30)
@@ -149,12 +139,12 @@ export function shelf(group, x, z, yaw, w = 1.6, h = 1.9) {
   const g = new THREE.Group()
   const body = mat('shelfBody', P.coffee)
   const t = 0.06
-  cast(box(out, body, t, h, 0.42, -w / 2, h / 2, 0))
-  cast(box(out, body, t, h, 0.42, w / 2, h / 2, 0))
+  box(out, body, t, h, 0.42, -w / 2, h / 2, 0)
+  box(out, body, t, h, 0.42, w / 2, h / 2, 0)
   const levels = 4
   for (let i = 0; i <= levels; i++) {
     const y = (h / levels) * i
-    cast(box(out, body, w, t, 0.42, 0, Math.min(y, h - t / 2), 0))
+    box(out, body, w, t, 0.42, 0, Math.min(y, h - t / 2), 0)
   }
   // Contents: a few boxes and binders in the palette, deterministic so the
   // scene looks the same every reload.
@@ -183,8 +173,8 @@ export function console_(group, x, z, yaw, w = 1.8, h = 0.72) {
   const out = []
   const g = new THREE.Group()
   const body = mat('cabBody', P.taupe)
-  cast(box(out, body, w, h, 0.46, 0, h / 2, 0))
-  cast(box(out, mat('cabTop', P.sand), w + 0.08, 0.05, 0.52, 0, h + 0.02, 0))
+  box(out, body, w, h, 0.46, 0, h / 2, 0)
+  box(out, mat('cabTop', P.sand), w + 0.08, 0.05, 0.52, 0, h + 0.02, 0)
   const n = Math.max(2, Math.round(w / 0.6))
   for (let i = 0; i < n; i++) {
     const dx = -w / 2 + w * (i + 0.5) / n
@@ -287,7 +277,7 @@ export function lounge(group, x, z) {
   const g = new THREE.Group()
   const topM = mat('loungeTop', P.coffee)
   const legM = mat('loungeLeg', P.taupe)
-  cast(box(out, topM, 1.15, 0.07, 0.70, 0, 0.40, 0))
+  box(out, topM, 1.15, 0.07, 0.70, 0, 0.40, 0)
   for (const [lx, lz] of [[-0.48, -0.26], [0.48, -0.26], [-0.48, 0.26], [0.48, 0.26]])
     cyl(out, legM, 0.035, 0.40, lx, 0.20, lz)
   // A couple of books and a mug so the top isn't an empty slab.
@@ -296,7 +286,7 @@ export function lounge(group, x, z) {
   cyl(out, mat('loungeMug', P.cream), 0.05, 0.10, 0.30, 0.49, 0.06)
   // Stools either side.
   for (const [sx2, sz2] of [[-1.05, 0.30], [1.05, -0.30]]) {
-    cast(cyl(out, mat('stoolTop', P.mustard), 0.24, 0.10, sx2, 0.43, sz2))
+    cyl(out, mat('stoolTop', P.mustard), 0.24, 0.10, sx2, 0.43, sz2)
     for (const [ox, oz] of [[-0.13, -0.13], [0.13, -0.13], [-0.13, 0.13], [0.13, 0.13]])
       cyl(out, legM, 0.028, 0.38, sx2 + ox, 0.19, sz2 + oz)
   }
