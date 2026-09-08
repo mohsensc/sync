@@ -1044,7 +1044,6 @@ export const CLIPS = {
 }
 
 export const CLIP_NAMES = Object.keys(CLIPS)
-export const ONE_SHOT = new Set(['sit', 'highfive'])
 /** Clips that leave the character seated. Useful for deciding what to play next. */
 export const SEATED_CLIPS = new Set(['sit', 'type', 'sleep'])
 
@@ -1315,8 +1314,13 @@ const IDENTITY_Q = new THREE.Quaternion()
 export function crossfade(obj, name, duration = 0.35, opts = {}) {
   const rig = rigOf(obj)
   const next = makeAction(obj, name, opts)
-  if (rig.current === next && !ONE_SHOT.has(name)) return next
-  return fadeInto(obj, rig, next, duration, ONE_SHOT.has(name))
+  // buildClip derives oneShot from the spec's `loop`, and makeAction already
+  // reads it to pick LoopOnce/clampWhenFinished. Read the same flag here so a
+  // clip folded in from clips/ gets restarted on retrigger without anyone
+  // having to remember a second list.
+  const oneShot = next.getClip().userData.oneShot
+  if (rig.current === next && !oneShot) return next
+  return fadeInto(obj, rig, next, duration, oneShot)
 }
 
 /** Same fade, for an action the caller built itself off this character's

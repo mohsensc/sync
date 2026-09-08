@@ -114,18 +114,20 @@ function seedFromId(id) {
 }
 
 // Each activity owns its clip, its blend time and where it goes when it ends.
-// oneShot activities are timed off the clip length.
+// Whether a clip is a one-shot is the clip's own business — anim.js's buildClip
+// derives it from the spec's `loop` — so it isn't restated here. `next` is only
+// read for the ones that are, and they're timed off the clip length.
 const ACTS = {
   idle:       { clip: 'idle',     fade: 0.35 },
   walking:    { clip: 'walk',     fade: 0.28 },
-  sitting:    { clip: 'sit',      fade: 0.30, oneShot: true, next: 'typing' },
-  standing:   { clip: 'sit',      fade: 0.30, oneShot: true, next: 'idle', reverse: true },
+  sitting:    { clip: 'sit',      fade: 0.30, next: 'typing' },
+  standing:   { clip: 'sit',      fade: 0.30, next: 'idle', reverse: true },
   typing:     { clip: 'type',     fade: 0.45, seated: true },
   sleeping:   { clip: 'sleep',    fade: 0.60, seated: true },
   reading:    { clip: 'read',     fade: 0.45 },
   drinking:   { clip: 'drink',    fade: 0.45 },
   waving:     { clip: 'wave',     fade: 0.30 },
-  highfiving: { clip: 'highfive', fade: 0.20, oneShot: true, next: 'idle' },
+  highfiving: { clip: 'highfive', fade: 0.20, next: 'idle' },
   // The contested-write pair. Not a one-shot: it loops until World.resolveContest()
   // ends it, because unlike a high five a real collision has no fixed length —
   // it lasts until the region is free. clips/argue.js supplies 'argue' and
@@ -134,30 +136,30 @@ const ACTS = {
   reacting:   { clip: 'argueReact', fade: 0.25 },
   // Resolution beats — the reel plays these once a rung-3 collision clears.
   // Rung 3, decision "wait": the requester agreed to hold off. clips/handshake.js.
-  handshaking: { clip: 'handshake', fade: 0.20, oneShot: true, next: 'idle' },
+  handshaking: { clip: 'handshake', fade: 0.20, next: 'idle' },
   // Rung 3, decision "abort": wait-die or a straight priority-tier win.
   // clips/shove.js — `shoving` is the winner, `shoveReacting` the loser.
-  shoving:        { clip: 'shove',      fade: 0.18, oneShot: true, next: 'idle' },
-  shoveReacting:  { clip: 'shoveReact', fade: 0.18, oneShot: true, next: 'idle' },
+  shoving:        { clip: 'shove',      fade: 0.18, next: 'idle' },
+  shoveReacting:  { clip: 'shoveReact', fade: 0.18, next: 'idle' },
   // Rung 3 "abort" beat family, alternates to shoving/shoveReacting above:
   // same asymmetric a-wins convention, different beats. clips/waveoff.js
   // (no contact, all contempt) / clips/slap.js (cartoon wind-up and hit).
-  wavingOff:       { clip: 'waveoff',      fade: 0.20, oneShot: true, next: 'idle' },
-  waveoffReacting: { clip: 'waveoffReact', fade: 0.20, oneShot: true, next: 'idle' },
-  slapping:        { clip: 'slap',         fade: 0.14, oneShot: true, next: 'idle' },
-  slapReacting:    { clip: 'slapReact',    fade: 0.14, oneShot: true, next: 'idle' },
+  wavingOff:       { clip: 'waveoff',      fade: 0.20, next: 'idle' },
+  waveoffReacting: { clip: 'waveoffReact', fade: 0.20, next: 'idle' },
+  slapping:        { clip: 'slap',         fade: 0.14, next: 'idle' },
+  slapReacting:    { clip: 'slapReact',    fade: 0.14, next: 'idle' },
   // Rung 1: the reader notices the editor is already in there and steps
   // back. clips/yield.js — `yielding` is the reader, `keeping` the editor.
-  yielding: { clip: 'yieldStep', fade: 0.18, oneShot: true, next: 'idle' },
-  keeping:  { clip: 'yieldKeep', fade: 0.18, oneShot: true, next: 'idle' },
+  yielding: { clip: 'yieldStep', fade: 0.18, next: 'idle' },
+  keeping:  { clip: 'yieldKeep', fade: 0.18, next: 'idle' },
   // Rung 4: redundant work caught by similarity — same beat both sides,
   // mirrored. clips/doubletake.js.
-  doubletaking: { clip: 'doubletake', fade: 0.16, oneShot: true, next: 'idle' },
+  doubletaking: { clip: 'doubletake', fade: 0.16, next: 'idle' },
   // Rung 2 collaboration beat family, alternates to highfiving above: both
   // sides play the same clip, same "facing each other is the mirror" trick.
   // clips/chestbump.js (bigger, weightier) / clips/fistbump.js (understated).
-  chestbumping: { clip: 'chestbump', fade: 0.20, oneShot: true, next: 'idle' },
-  fistbumping:  { clip: 'fistbump',  fade: 0.16, oneShot: true, next: 'idle' },
+  chestbumping: { clip: 'chestbump', fade: 0.20, next: 'idle' },
+  fistbumping:  { clip: 'fistbump',  fade: 0.16, next: 'idle' },
 }
 export const ACTIVITIES = Object.keys(ACTS)
 
@@ -395,7 +397,7 @@ export class Agent {
    *  timeScale directly. So a play('walk') outside a steer (a demo beat, say)
    *  inherits whatever rate the last steer or pivot left on that action. */
   play(clip, fade = 0.3) {
-    if (this.clip === clip && !ANIM.ONE_SHOT.has(clip)) return this
+    if (this.clip === clip && !ANIM.getClip(clip).userData.oneShot) return this
     this.clip = clip
     ANIM.crossfade(this.root, clip, fade)
     // play() overrides the machine, so any transition it had armed is void.
@@ -427,9 +429,10 @@ export class Agent {
     }
     this.activity = name
     if (name !== 'walking') this.speed = 0
-    if (st.oneShot) {
+    const c = ANIM.getClip(clip)
+    if (c.userData.oneShot) {
       const next = opts.next !== undefined ? opts.next : st.next
-      this._timer = { t: ANIM.getClip(clip).duration, fn: () => {
+      this._timer = { t: c.duration, fn: () => {
         if (opts.then) opts.then(this)
         else if (next) this.act(next)
       } }

@@ -43,10 +43,11 @@ const DT = 1 / 60
 function oldCrossfade(root, cur, name, duration) {
   const next = ANIM.makeAction(root, name)
   const prev = cur.action
-  if (prev === next && !ANIM.ONE_SHOT.has(name)) return next
+  const oneShot = next.getClip().userData.oneShot
+  if (prev === next && !oneShot) return next
   next.enabled = true
   next.setEffectiveWeight(1)
-  if (ANIM.ONE_SHOT.has(name) || prev === next) next.reset()
+  if (oneShot || prev === next) next.reset()
   if (prev && prev !== next) {
     if (name === 'walk' && prev.getClip().name === 'walk') next.time = prev.time
     next.crossFadeFrom(prev, duration, false)
