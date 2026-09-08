@@ -61,8 +61,14 @@ const COMPRESSIBLE_SLOTS = /color|metallicRoughness|emissive|occlusion/i
 // only clears 0.1% by giving back almost all the reduction (7295+ tris, error
 // <= 0.005) -- there's no error tolerance that both decimates it and holds
 // its bbox, so it keeps 0.02 and the loud (non-fatal) warning.
+// tex overrides the shared texture budget below. Only the character needs one:
+// it's the only asset the camera ever gets close to (framing.js HEAD_DIST is
+// 0.24 m), and at 1024/q82 webp mottled the flat hair colour and chewed the
+// hair/skin edge -- obvious at that distance, invisible on a prop across the
+// room. The prop budget is unchanged.
 const ASSETS = {
-  'character.glb': { ratio: 0.4, error: 0.002, skinned: true, allowQuantize: false },
+  'character.glb': { ratio: 0.4, error: 0.002, skinned: true, allowQuantize: false,
+                     tex: { size: 2048, quality: 92 } },
   'desk-tripo-12k.glb': { ratio: 0.3, error: 0.01, skinned: false, allowQuantize: true },
   'phone-wall.glb': { ratio: 0.3, error: 0.005, skinned: false, allowQuantize: true },
   'tortoise-v2.glb': { ratio: 0.3, error: 0.002, skinned: false, allowQuantize: true },
@@ -172,12 +178,14 @@ async function processAsset(name, cfg) {
   const boundsAfterSimplify = getBounds(document.getRoot().listScenes()[0])
   const scale = Math.max(bboxDiagonal(before.bounds), 1e-6)
 
+  const texSize = (cfg.tex && cfg.tex.size) || TEXTURE_SIZE
+  const texQuality = (cfg.tex && cfg.tex.quality) || TEXTURE_QUALITY
   await document.transform(
     textureCompress({
       encoder: sharp,
       targetFormat: 'webp',
-      resize: [TEXTURE_SIZE, TEXTURE_SIZE],
-      quality: TEXTURE_QUALITY,
+      resize: [texSize, texSize],
+      quality: texQuality,
       slots: COMPRESSIBLE_SLOTS,
     }),
   )
