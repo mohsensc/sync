@@ -180,6 +180,9 @@ export class Agent {
   lastGreet: number
   /** Set by say(); absent until the first call. */
   note?: string | null
+  /** FNV-1a of id — feeds ANIM.setSeed so agents sharing a clip don't move
+   *  in lockstep. */
+  seed: number
 
   speed: number
   metersPerCycle: number
