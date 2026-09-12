@@ -90,6 +90,15 @@ existing mode-0600 config, and the MCP shim passes both to the local binary.
   dropped during a database outage. Coordination continues in memory.
 - Token revocation takes effect on the next connection. Existing authenticated
   WebSocket sessions are not forcibly disconnected by rotation.
+- Account tokens do not expire. `account_tokens` has no `expires_at`; a token
+  is valid until its owner rotates or revokes it from the dashboard. Rotation
+  and revocation are immediate (the previous section's caveat aside) and only
+  one token is ever live per account, but there is no automatic time-based
+  expiry on top of that.
+- `POST /api/tokens` has no rate limit. Nothing bounds how often a signed-in
+  user can mint a token, and every call inserts a new `account_tokens` row —
+  the old one is revoked, not deleted, so a fast retry loop grows that table
+  without limit rather than just replacing a row in place.
 - The npm packages must be installed from a real tagged release before using the
   pasted setup commands; the dashboard does not claim an unpublished package is
   available.
