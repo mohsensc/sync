@@ -1,0 +1,18 @@
+.auth-home{align-self:flex-start;margin-bottom:8px}
+.account-dialog{width:min(580px,calc(100% - 32px));max-height:calc(100dvh - 32px);overflow:auto;margin:auto;padding:28px;border:1px solid #d8cebf;border-radius:18px;background:#fffdf8;color:#29384d;box-shadow:0 24px 80px #29384d26}
+.account-dialog::backdrop{background:#29384d66}
+.account-dialog-heading{display:flex;align-items:center;justify-content:space-between;gap:16px}
+.account-dialog h2{margin:6px 0 0;font-size:25px;letter-spacing:-.03em}
+.account-action{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:20px 0;border-top:1px solid #eee7dd}
+.account-action h3{font-size:14px;margin:0 0 6px}
+.account-action p{font-size:13px;line-height:1.6;color:#6b7280;margin:0;max-width:35ch}
+.account-action button{flex-shrink:0}
+.account-danger h3,.account-danger button{color:#a33c32}
+.account-confirm{display:grid;gap:12px;padding:16px;background:#fbeae6;border:1px solid #edc9c2;border-radius:10px}
+.account-confirm label{font-size:13px;font-weight:700}
+.account-confirm input{width:100%;padding:10px 12px;border:1px solid #cfc4b2;border-radius:8px;font:inherit;background:#fffdf8;color:#29384d}
+.account-confirm-actions{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:10px}
+.account-confirm .primary-button{background:#a33c32;border-color:#a33c32}
+.account-dialog button:disabled{opacity:.55;cursor:wait}
+@media(max-width:760px){.account div{display:grid}.account strong{display:none}.account img{display:none}.account .link-button{font-size:12px}.account{gap:10px}}
+@media(max-width:480px){.account-dialog{padding:20px}.account-action{align-items:flex-start;flex-direction:column;gap:12px}.account-action p{max-width:none}}
