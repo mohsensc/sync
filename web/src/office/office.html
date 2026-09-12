@@ -25,6 +25,7 @@
   button[aria-pressed="true"]{background:#35455C;color:#F0ECE6;border-color:#35455C}
   #log{position:fixed;left:18px;bottom:16px;font:11px ui-monospace,monospace;color:#6b5f56;
     background:#fffdfacc;border-radius:8px;padding:7px 10px;max-width:36vw}
+  #log:empty{display:none}
   #caption{position:fixed;left:50%;transform:translateX(-50%);bottom:34px;
     max-width:min(720px,86vw);text-align:center;
     background:#35455Cf2;color:#F0ECE6;border-radius:10px;
@@ -334,7 +335,7 @@
 <div id="mode" class="connecting">connecting…</div>
 <div id="caption"></div>
 <div id="replayCard"></div>
-<div id="log">loading…</div>
+<div id="log"></div>
 </div>
 
 <script type="importmap">
@@ -712,12 +713,8 @@ function load(spec) {
     const g = place(gltf, spec)
     if (spec.id) props[spec.id] = g
     if (spec.desk) desks.push({ label:spec.desk, group:g, seat:seatFor(spec.slot, spec.pos) })
-    done++; tally()
-  }, undefined, e => { done++; console.warn('failed', spec.url, e); tally() })
-}
-function tally(){
-  logEl.textContent = `${done}/${pending} objects loaded`
-  setupCast()
+    done++; setupCast()
+  }, undefined, e => { done++; console.warn('failed', spec.url, e); setupCast() })
 }
 PLAN.forEach(load)
 
@@ -825,8 +822,8 @@ function setupCast() {
 pending++
 loader.load('/glb-lite/character.glb', gltf => {
   charGLTF = gltf
-  done++; tally()
-}, undefined, (e) => { console.warn('character failed', e); done++; tally() })
+  done++; setupCast()
+}, undefined, (e) => { console.warn('character failed', e); done++; setupCast() })
 
 // ---- camera / interaction --------------------------------------------
 // Default framing shows the whole floor plate. At pitch 0.42 with the target on
