@@ -232,10 +232,14 @@ async function boot() {
   inject()
 
   // Unauthenticated, non-tenant-scoped warm-up: nudge the browser to fetch
-  // the office's static document ahead of the "Open the 3D office" link.
-  // Never touches /api/dashboard, /api/bootstrap, or any other tenant-scoped
-  // route before a real Clerk session exists.
+  // the office's static document ahead of the "Open the 3D office" link, and
+  // hit /api/health in parallel to force the serverless cold-start chain
+  // (Lambda module graph + Neon compute) to happen now instead of after
+  // Clerk hands back a session. Neither call ever touches /api/dashboard,
+  // /api/bootstrap, or any other tenant-scoped route before a real Clerk
+  // session exists.
   void fetch('/office/', { credentials: 'omit' }).catch(() => {})
+  void fetch('/api/health', { credentials: 'omit' }).catch(() => {})
 
   if (!clerkKey) {
     loginCta.hidden = true
