@@ -55,7 +55,7 @@ func (n *Negotiator) Open(room, requester string, requesterAcquiredAt float64, s
 	if held == nil || held.Agent == requester {
 		return nil
 	}
-	tier := n.registry.PriorityOf(requester, requesterPriority)
+	tier := n.registry.PriorityOfIn(hostedWorkspaceFromRoom(room), requester, requesterPriority)
 	human := requesterHuman
 	if human == "" {
 		human = requester

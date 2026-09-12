@@ -63,9 +63,58 @@ type principalRecord struct {
 	grant      Grant
 }
 
+type hostedConn interface {
+	hostedIdentity() (HostedIdentity, bool)
+}
+
+func hostedIdentityOf(conn Conn) (HostedIdentity, bool) {
+	hc, ok := conn.(hostedConn)
+	if !ok {
+		return HostedIdentity{}, false
+	}
+	return hc.hostedIdentity()
+}
+
+func connectionWorkspace(conn Conn) string {
+	identity, ok := hostedIdentityOf(conn)
+	if !ok {
+		return ""
+	}
+	return identity.WorkspaceID
+}
+
 type timedActivity struct {
 	t float64
 	a Activity
+}
+
+// PresenceProjection and ResolutionProjection are the deliberately small,
+// policy-free records a hosted dashboard may persist. In particular, a
+// resolution never contains the requester-specific effect, priority, or
+// policy layer carried by point-to-point negotiation replies.
+type PresenceProjection struct {
+	WorkspaceID, UserID, RepositoryID, RoomKey   string
+	AgentID, HumanID, Verb, Path, Intent, Source string
+	Symbol                                       *string
+	SeenAt                                       float64
+}
+
+type ResolutionProjection struct {
+	WorkspaceID, RoomKey      string
+	Rung                      int
+	Kind, Outcome             string
+	FromAgent, FromHuman      string
+	ToAgent, ToHuman, Path    string
+	Symbol                    *string
+	WaitedSeconds, OccurredAt float64
+}
+
+// ProjectionSink must return immediately. The hosted implementation owns a
+// bounded queue and drops projections when Postgres is slow; relay traffic is
+// never allowed to wait for dashboard persistence.
+type ProjectionSink interface {
+	ObservePresence(PresenceProjection)
+	ObserveResolution(ResolutionProjection)
 }
 
 // roomInfo is everything the relay tracks about a room besides the lease
@@ -130,7 +179,10 @@ type Relay struct {
 	policy       *PolicyFile
 	policyMu     sync.Mutex
 	policyDigest string
+	projection   ProjectionSink
 }
+
+func (r *Relay) SetProjectionSink(sink ProjectionSink) { r.projection = sink }
 
 func NewRelay(clock Clock, roster Roster, m *metrics.Registry) *Relay {
 	r := &Relay{
@@ -470,11 +522,22 @@ func (r *Relay) refuse(conn Conn, room string, refusal Refusal) bool {
 func (r *Relay) latchGrant(conn Conn, room string) *Refusal {
 	principal := strings.TrimSpace(conn.Principal())
 	unattended := conn.Unattended()
+	identity, hosted := hostedIdentityOf(conn)
+	if hosted {
+		// Hosted identity was already verified by Server before Relay.Join.
+		// The client-supplied principal is deliberately ignored: an account
+		// token names its user and workspace without a second identity field.
+		principal = identity.UserID
+	}
 
 	r.identityMu.Lock()
 	latched, ok := r.principal[conn]
 	if !ok {
 		grant := r.roster.Authenticate(principal, conn.Token())
+		if hosted {
+			grant = Grant{Principal: identity.UserID, Attended: PriorityNormal,
+				Unattended: PriorityNormal, Reason: ReasonRoster}
+		}
 		r.principal[conn] = principalRecord{principal, unattended, grant}
 		r.identityMu.Unlock()
 		if grant.Authenticated() {
@@ -519,6 +582,9 @@ func (r *Relay) bindAgent(conn Conn) *Refusal {
 
 	var toEvict []Conn
 	for _, other := range others {
+		if connectionWorkspace(other) != connectionWorkspace(conn) {
+			continue
+		}
 		r.identityMu.Lock()
 		mine, ok := r.identity[other]
 		r.identityMu.Unlock()
@@ -577,18 +643,18 @@ func (r *Relay) bindAgent(conn Conn) *Refusal {
 	}
 
 	if !heldByPeer {
-		r.dropStrandedClaims(agent, tier)
+		r.dropStrandedClaims(connectionWorkspace(conn), agent, tier)
 	}
 	return nil
 }
 
-func (r *Relay) dropStrandedClaims(agent string, tier int) {
-	stranded := r.registry.PriorityOf(agent, tier)
+func (r *Relay) dropStrandedClaims(workspace, agent string, tier int) {
+	stranded := r.registry.PriorityOfIn(workspace, agent, tier)
 	if stranded == tier {
 		return
 	}
 	log.Printf("agent id %s changed hands at %s while claims taken at %s were still live; dropping them", agent, PriorityName(tier), PriorityName(stranded))
-	r.registry.ReleaseEverywhere(agent, nil)
+	r.registry.ReleaseEverywhereIn(workspace, agent, nil)
 }
 
 func (r *Relay) grantOf(conn Conn) Grant {
@@ -626,6 +692,9 @@ func (r *Relay) grantOf(conn Conn) Grant {
 // (identityMu's own critical sections are map reads and writes that never
 // call into the registry, so there is no reverse edge to deadlock against).
 func (r *Relay) armsDeadline(conn Conn) bool {
+	if _, hosted := hostedIdentityOf(conn); hosted {
+		return true
+	}
 	if !r.roster.Enforcing() {
 		return true
 	}
@@ -760,11 +829,32 @@ func (r *Relay) Broadcast(room string, payload Frame, exclude Conn) []Conn {
 // leases only — it already gets its answer on the same socket. Mirrors
 // relay.py's publish.
 func (r *Relay) Publish(room string, frame Frame, actor Conn) {
+	r.observePublishedResolution(room, frame)
 	var exclude Conn
 	if actor != nil && actor.Agent() == frameAgent(frame) {
 		exclude = actor
 	}
 	r.Broadcast(room, frame, exclude)
+}
+
+func (r *Relay) observePublishedResolution(room string, frame Frame) {
+	if r.projection == nil || frame["type"] != "lease" || frame["state"] != "handover" {
+		return
+	}
+	workspace := hostedWorkspaceFromRoom(room)
+	roomKey, hosted := hostedRoomKeyFromScoped(room)
+	if !hosted {
+		return
+	}
+	region := regionFromPayload(asFrame(frame["region"]))
+	waited, _ := frame["waited_s"].(float64)
+	r.projection.ObserveResolution(ResolutionProjection{
+		WorkspaceID: workspace, RoomKey: roomKey, Rung: 3, Kind: "handover", Outcome: "handover",
+		FromAgent: cleanString(frame["from"]), FromHuman: cleanString(frame["from_human"]),
+		ToAgent: cleanString(frame["to"]), ToHuman: cleanString(frame["to_human"]),
+		Path: region.Path, Symbol: region.Symbol, WaitedSeconds: waited,
+		OccurredAt: r.clock.Now(),
+	})
 }
 
 func frameAgent(f Frame) string {
@@ -1020,6 +1110,11 @@ func (r *Relay) onEvent(room string, conn Conn, msg map[string]any) Frame {
 	if human == "" {
 		human = conn.Human()
 	}
+	if identity, hosted := hostedIdentityOf(conn); hosted {
+		// A daemon may multiplex agent session ids, but it never gets to
+		// choose the account those sessions appear under in hosted mode.
+		human = identity.HumanID
+	}
 
 	event := AgentEvent{Room: room, Human: human, Agent: agent, Kind: "touch",
 		Source: ParseSource(cleanString(clean["source"])), Verb: verb, Region: region, Ts: now}
@@ -1048,6 +1143,17 @@ func (r *Relay) onEvent(room string, conn Conn, msg map[string]any) Frame {
 			"type": "presence", "agent": agent, "human": human,
 			"verb": verb, "region": clean["region"], "rung": rung, "ts": now,
 		}, conn)
+		if r.projection != nil {
+			if identity, hosted := hostedIdentityOf(conn); hosted {
+				roomKey, _ := hostedRoomKeyFromScoped(room)
+				r.projection.ObservePresence(PresenceProjection{
+					WorkspaceID: identity.WorkspaceID, UserID: identity.UserID,
+					RepositoryID: identity.RepositoryID, RoomKey: roomKey,
+					AgentID: agent, HumanID: human, Verb: verb, Path: region.Path,
+					Symbol: region.Symbol, Intent: intent, Source: string(event.Source), SeenAt: now,
+				})
+			}
+		}
 	}
 
 	// Policy decides how loudly this rung is told. It does not decide the
@@ -1065,11 +1171,12 @@ func (r *Relay) onEvent(room string, conn Conn, msg map[string]any) Frame {
 		return Frame{"type": "ack", "rung": rung, "effect": string(effect)}
 	}
 
-	brief := r.negotiator.Open(room, conn.Agent(), r.registry.AgeOf(conn.Agent()), region, r.priorityOf(conn), conn.Human(), conn)
+	brief := r.negotiator.Open(room, conn.Agent(), r.registry.AgeOfIn(hostedWorkspaceFromRoom(room), conn.Agent()), region, r.priorityOf(conn), conn.Human(), conn)
 	if brief == nil {
 		if rung == 4 && effect != EffectSilent {
 			if red := redundantPeer(event, others, intent); red != nil {
 				r.metrics.RedundantWork.Inc()
+				r.observeRedundancy(room, conn, event, *red)
 				frame := Frame{
 					"type": "redundant_work", "rung": 4,
 					"effect": string(effect), "effect_source": string(resolution.WinningLayer),
@@ -1133,6 +1240,23 @@ func redundancyPayload(red Redundancy) Frame {
 	}
 }
 
+func (r *Relay) observeRedundancy(room string, conn Conn, incoming AgentEvent, peer Redundancy) {
+	if r.projection == nil {
+		return
+	}
+	identity, hosted := hostedIdentityOf(conn)
+	roomKey, scoped := hostedRoomKeyFromScoped(room)
+	if !hosted || !scoped {
+		return
+	}
+	r.projection.ObserveResolution(ResolutionProjection{
+		WorkspaceID: identity.WorkspaceID, RoomKey: roomKey, Rung: 4, Kind: "redundant", Outcome: "redundant",
+		FromAgent: incoming.Agent, FromHuman: identity.HumanID,
+		ToAgent: peer.Agent, ToHuman: peer.Human, Path: incoming.Region.Path,
+		Symbol: incoming.Region.Symbol, OccurredAt: incoming.Ts,
+	})
+}
+
 // declaredWork is every live MCP-declared intent in the room. Live claims,
 // not presence activity, because a claim is the only thing an agent ever
 // attaches an intent to. Mirrors relay.py's Relay.declared_work.
@@ -1185,6 +1309,18 @@ func (r *Relay) onClaim(room string, conn Conn, msg map[string]any, region Regio
 	intent := CleanIntent(msg["intent"])
 	result := r.registry.Acquire(room, conn.Human(), conn.Agent(), region, intent, nil, r.priorityOf(conn), conn)
 	now := r.clock.Now()
+	if r.projection != nil {
+		if identity, hosted := hostedIdentityOf(conn); hosted {
+			roomKey, _ := hostedRoomKeyFromScoped(room)
+			r.projection.ObservePresence(PresenceProjection{
+				WorkspaceID: identity.WorkspaceID, UserID: identity.UserID,
+				RepositoryID: identity.RepositoryID, RoomKey: roomKey,
+				AgentID: conn.Agent(), HumanID: identity.HumanID, Verb: "edit",
+				Path: region.Path, Symbol: region.Symbol, Intent: intent,
+				Source: string(SourceMCP), SeenAt: now,
+			})
+		}
+	}
 
 	if result.Ok {
 		granted := Frame{"type": "claim_result", "granted": true}
@@ -1200,6 +1336,10 @@ func (r *Relay) onClaim(room string, conn Conn, msg map[string]any, region Regio
 		if rung4Effect != EffectSilent {
 			if red := r.checkRedundancy(room, conn.Agent(), conn.Human(), region, intent); red != nil {
 				r.metrics.RedundantWork.Inc()
+				r.observeRedundancy(room, conn, AgentEvent{
+					Room: room, Human: conn.Human(), Agent: conn.Agent(), Kind: "claim",
+					Source: SourceMCP, Verb: "edit", Region: region, Ts: now,
+				}, *red)
 				granted["rung"] = 4
 				granted["redundant"] = redundancyPayload(*red)
 			}
@@ -1207,7 +1347,7 @@ func (r *Relay) onClaim(room string, conn Conn, msg map[string]any, region Regio
 		return granted
 	}
 
-	requesterPriority := r.registry.PriorityOf(conn.Agent(), r.priorityOf(conn))
+	requesterPriority := r.registry.PriorityOfIn(hostedWorkspaceFromRoom(room), conn.Agent(), r.priorityOf(conn))
 
 	if result.Decision == decisionAbort {
 		r.registry.ReleaseAll(room, conn.Agent(), conn)
@@ -1219,6 +1359,24 @@ func (r *Relay) onClaim(room string, conn Conn, msg map[string]any, region Regio
 	// surfaces render, so it travels.
 	resolution := r.resolvePolicy(conn, 3, region.Path)
 	r.metrics.Decision(3, string(resolution.Effect))
+	if r.projection != nil {
+		if identity, hosted := hostedIdentityOf(conn); hosted {
+			roomKey, _ := hostedRoomKeyFromScoped(room)
+			peerAgent, peerHuman := "", ""
+			if result.HeldBy != nil {
+				peerAgent, peerHuman = result.HeldBy.Agent, result.HeldBy.Human
+			} else if result.ReservedBy != nil {
+				peerAgent, peerHuman = result.ReservedBy.Agent, result.ReservedBy.Human
+			}
+			r.projection.ObserveResolution(ResolutionProjection{
+				WorkspaceID: identity.WorkspaceID, RoomKey: roomKey, Rung: 3,
+				Kind: "contention", Outcome: string(result.Decision),
+				FromAgent: conn.Agent(), FromHuman: identity.HumanID,
+				ToAgent: peerAgent, ToHuman: peerHuman, Path: region.Path,
+				Symbol: region.Symbol, OccurredAt: now,
+			})
+		}
+	}
 
 	reply := Frame{
 		"type": "claim_result", "granted": false,

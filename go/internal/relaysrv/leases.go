@@ -289,10 +289,18 @@ func (r *Registry) lockLiveShard(room, path string) *shard {
 // ageOf is the agent's wait-die age. Mutates on first sight of an
 // empty-handed agent (latches firstSeen), exactly like python's age_of
 // post-#37.
-func (r *Registry) ageOf(agent string) float64 {
+func agentIndexKey(workspace, agent string) string {
+	if workspace == "" {
+		return agent
+	}
+	return workspace + "\x00" + agent
+}
+
+func (r *Registry) ageOfIn(workspace, agent string) float64 {
 	r.agentMu.Lock()
 	defer r.agentMu.Unlock()
-	e := r.agents[agent]
+	key := agentIndexKey(workspace, agent)
+	e := r.agents[key]
 	if e != nil && e.liveCount > 0 {
 		return e.claimAge
 	}
@@ -302,31 +310,47 @@ func (r *Registry) ageOf(agent string) float64 {
 	now := r.clock.Now()
 	if e == nil {
 		e = &agentEntry{}
-		r.agents[agent] = e
+		r.agents[key] = e
 	}
 	e.firstSeen = now
 	e.firstSeenSet = true
 	return now
 }
 
-func (r *Registry) AgeOf(agent string) float64 { return r.ageOf(agent) }
+func (r *Registry) AgeOf(agent string) float64 { return r.ageOfIn("", agent) }
 
-func (r *Registry) priorityOf(agent string, def int) int {
+// ageOf is retained for the self-hosted package tests and internal callers
+// that intentionally use the original relay-global identity namespace.
+func (r *Registry) ageOf(agent string) float64 { return r.ageOfIn("", agent) }
+
+// AgeOfIn scopes the global wait-die identity to one hosted workspace.
+// An empty workspace preserves the original self-hosted cross-room behavior.
+func (r *Registry) AgeOfIn(workspace, agent string) float64 {
+	return r.ageOfIn(workspace, agent)
+}
+
+func (r *Registry) priorityOfIn(workspace, agent string, def int) int {
 	r.agentMu.Lock()
 	defer r.agentMu.Unlock()
-	e := r.agents[agent]
+	e := r.agents[agentIndexKey(workspace, agent)]
 	if e != nil && e.liveCount > 0 {
 		return e.claimTier
 	}
 	return def
 }
 
-func (r *Registry) PriorityOf(agent string, def int) int { return r.priorityOf(agent, def) }
+func (r *Registry) PriorityOf(agent string, def int) int {
+	return r.priorityOfIn("", agent, def)
+}
+
+func (r *Registry) PriorityOfIn(workspace, agent string, def int) int {
+	return r.priorityOfIn(workspace, agent, def)
+}
 
 // KeyOf is this agent's position in the one total order — exposed for
 // tests, mirroring leases.py's key_of.
 func (r *Registry) KeyOf(agent string, def int) orderKey {
-	return newOrderKey(r.priorityOf(agent, def), r.ageOf(agent), agent)
+	return newOrderKey(r.priorityOfIn("", agent, def), r.ageOfIn("", agent), agent)
 }
 
 // latchClaimAge is ageOf and agentClaimAdded fused into one agentMu
@@ -352,13 +376,14 @@ func (r *Registry) KeyOf(agent string, def int) orderKey {
 // §5.3, and §5.4's invariant that key_of(agent) equals every live claim's
 // own key). An agent presenting two ages can sit in a wait cycle where
 // nobody is ever told abort.
-func (r *Registry) latchClaimAge(agent string, tier int) float64 {
+func (r *Registry) latchClaimAge(room, agent string, tier int) float64 {
 	r.agentMu.Lock()
 	defer r.agentMu.Unlock()
-	e := r.agents[agent]
+	key := agentIndexKey(hostedWorkspaceFromRoom(room), agent)
+	e := r.agents[key]
 	if e == nil {
 		e = &agentEntry{}
-		r.agents[agent] = e
+		r.agents[key] = e
 	}
 
 	// Same three-way read ageOf does, inlined so the answer cannot change
@@ -390,10 +415,10 @@ func (r *Registry) latchClaimAge(agent string, tier int) float64 {
 // agentSessionEnded, which clears the entry instead of preserving it, or
 // an agent's priority would survive a disconnect/reconnect forever. See
 // agentEntry's doc comment for the full three-way split.
-func (r *Registry) agentClaimRemoved(agent string, now float64) {
+func (r *Registry) agentClaimRemoved(room, agent string, now float64) {
 	r.agentMu.Lock()
 	defer r.agentMu.Unlock()
-	e := r.agents[agent]
+	e := r.agents[agentIndexKey(hostedWorkspaceFromRoom(room), agent)]
 	if e == nil {
 		return
 	}
@@ -413,10 +438,10 @@ func (r *Registry) agentClaimRemoved(agent string, now float64) {
 // holding nothing anywhere, its accrued age is cleared, not reset to
 // `now` here: ageOf re-latches lazily, on its own next call, exactly like
 // python's release() popping `_first_seen` rather than setting it.
-func (r *Registry) agentClaimRemovedByRelease(agent string, now float64) {
+func (r *Registry) agentClaimRemovedByRelease(room, agent string, now float64) {
 	r.agentMu.Lock()
 	defer r.agentMu.Unlock()
-	e := r.agents[agent]
+	e := r.agents[agentIndexKey(hostedWorkspaceFromRoom(room), agent)]
 	if e == nil {
 		return
 	}
@@ -431,10 +456,10 @@ func (r *Registry) agentClaimRemovedByRelease(agent string, now float64) {
 // agentIdentityReset is release_everywhere's other half: the id has
 // changed hands, so its accrued age must not carry over to whoever takes
 // the name next, any more than its tier does.
-func (r *Registry) agentIdentityReset(agent string) {
+func (r *Registry) agentIdentityReset(workspace, agent string) {
 	r.agentMu.Lock()
 	defer r.agentMu.Unlock()
-	delete(r.agents, agent)
+	delete(r.agents, agentIndexKey(workspace, agent))
 }
 
 // agentSessionEnded is ReleaseAllSessionEnd's other half, shaped exactly
@@ -453,13 +478,14 @@ func (r *Registry) agentIdentityReset(agent string) {
 // already the global, cross-room count latchClaimAge/agentClaimRemoved maintain
 // for exactly this reason (issue #173): only a session ending with
 // nothing left live anywhere should erase the identity.
-func (r *Registry) agentSessionEnded(agent string) {
+func (r *Registry) agentSessionEnded(room, agent string) {
 	r.agentMu.Lock()
 	defer r.agentMu.Unlock()
-	if e := r.agents[agent]; e != nil && e.liveCount > 0 {
+	key := agentIndexKey(hostedWorkspaceFromRoom(room), agent)
+	if e := r.agents[key]; e != nil && e.liveCount > 0 {
 		return
 	}
-	delete(r.agents, agent)
+	delete(r.agents, key)
 }
 
 // -- shard-local helpers, caller holds s.mu ------------------------------
@@ -478,7 +504,7 @@ func (r *Registry) pruneExpired(room string, s *shard, now float64, actor Conn) 
 		}
 		winner := c.handoverWinner()
 		delete(s.claims, key)
-		r.agentClaimRemoved(c.Agent, now)
+		r.agentClaimRemoved(c.Room, c.Agent, now)
 		reservation := r.handOver(s, c, now)
 		// departureFrame only says "expired" when handOver didn't just
 		// upgrade this departure to a handover (see its own doc comment) —
@@ -890,7 +916,7 @@ func (r *Registry) Contend(room string, scope Region, agent, human string, tier 
 	age := requesterAcquiredAt
 	var ageVal float64
 	if age == nil {
-		ageVal = r.ageOf(agent)
+		ageVal = r.ageOfIn(hostedWorkspaceFromRoom(room), agent)
 	} else {
 		ageVal = *age
 	}
@@ -950,7 +976,7 @@ func (r *Registry) Withdraw(room string, scope Region, requester string, actor C
 // reservation, so an agent already holding a region is never refused its
 // own renewal by a neighbour's reservation).
 func (r *Registry) Acquire(room, human, agent string, scope Region, intent string, requesterAcquiredAt *float64, priority int, actor Conn) AcquireResult {
-	tier := r.priorityOf(agent, priority)
+	tier := r.priorityOfIn(hostedWorkspaceFromRoom(room), agent, priority)
 	now := r.clock.Now()
 
 	s := r.lockLiveShard(room, scope.Path)
@@ -961,7 +987,7 @@ func (r *Registry) Acquire(room, human, agent string, scope Region, intent strin
 	if held != nil && held.Agent != agent {
 		var ageVal float64
 		if requesterAcquiredAt == nil {
-			ageVal = r.ageOf(agent)
+			ageVal = r.ageOfIn(hostedWorkspaceFromRoom(room), agent)
 		} else {
 			ageVal = *requesterAcquiredAt
 		}
@@ -1006,7 +1032,7 @@ func (r *Registry) Acquire(room, human, agent string, scope Region, intent strin
 	// decided and recorded under a single agentMu hold. See latchClaimAge.
 	claim := &Claim{
 		Room: room, Human: human, Agent: agent, Scope: scope, Intent: intent,
-		AcquiredAt: r.latchClaimAge(agent, tier), ExpiresAt: now + LeaseTTLS, Priority: tier,
+		AcquiredAt: r.latchClaimAge(room, agent, tier), ExpiresAt: now + LeaseTTLS, Priority: tier,
 	}
 	r.resumeCarry(s, claim, now)
 	s.claims[claimKey(scope)] = claim
@@ -1042,7 +1068,7 @@ func (r *Registry) Release(room, agent string, scope Region, actor Conn) {
 	}
 	winner := c.handoverWinner()
 	delete(s.claims, key)
-	r.agentClaimRemovedByRelease(c.Agent, now)
+	r.agentClaimRemovedByRelease(c.Room, c.Agent, now)
 	reservation := r.handOver(s, c, now)
 	frame := departureFrame(c.Room, c.Human, c.Agent, c.Scope, now, "released", winner, reservation)
 	r.pub.Publish(room, frame, actor)
@@ -1069,7 +1095,7 @@ func (r *Registry) ReleaseAll(room, agent string, actor Conn) {
 // why that pruning belongs here and not in ReleaseAll.
 func (r *Registry) ReleaseAllSessionEnd(room, agent string, actor Conn) {
 	r.releaseAllInRoom(room, agent, actor, true)
-	r.agentSessionEnded(agent)
+	r.agentSessionEnded(room, agent)
 }
 
 // releaseAllInRoom is ReleaseAll's body, shared with ReleaseAllSessionEnd.
@@ -1093,7 +1119,7 @@ func (r *Registry) releaseAllInRoom(room, agent string, actor Conn, pruneAsks bo
 			}
 			winner := c.handoverWinner()
 			delete(s.claims, key)
-			r.agentClaimRemoved(c.Agent, now)
+			r.agentClaimRemoved(c.Room, c.Agent, now)
 			reservation := r.handOver(s, c, now)
 			frame := departureFrame(c.Room, c.Human, c.Agent, c.Scope, now, "released", winner, reservation)
 			r.pub.Publish(room, frame, actor)
@@ -1126,6 +1152,13 @@ func (r *Registry) pruneContendersLocked(room string, s *shard, agent string, no
 // ReleaseEverywhere drops every lease this agent id holds, in every room —
 // the identity-handoff path (Relay._bind_agent's drop_stranded_claims).
 func (r *Registry) ReleaseEverywhere(agent string, actor Conn) {
+	r.ReleaseEverywhereIn("", agent, actor)
+}
+
+// ReleaseEverywhereIn is the hosted identity-handoff path.  It only scans
+// rooms in the authenticated workspace, so a colliding session id in another
+// tenant cannot lose claims or wait-die age.
+func (r *Registry) ReleaseEverywhereIn(workspace, agent string, actor Conn) {
 	// Held for the whole sweep, not just to snapshot the room list: this is
 	// rare (identity reclaim only, see relay.go's dropStrandedClaims), so
 	// blocking a concurrent room *creation* for its duration is cheap, and
@@ -1139,6 +1172,9 @@ func (r *Registry) ReleaseEverywhere(agent string, actor Conn) {
 
 	now := r.clock.Now()
 	for room, rs := range r.rooms {
+		if hostedWorkspaceFromRoom(room) != workspace {
+			continue
+		}
 		for _, s := range rs.shards {
 			s.mu.Lock()
 			r.pruneExpired(room, s, now, actor)
@@ -1148,7 +1184,7 @@ func (r *Registry) ReleaseEverywhere(agent string, actor Conn) {
 				}
 				winner := c.handoverWinner()
 				delete(s.claims, key)
-				r.agentClaimRemoved(c.Agent, now)
+				r.agentClaimRemoved(c.Room, c.Agent, now)
 				reservation := r.handOver(s, c, now)
 				frame := departureFrame(c.Room, c.Human, c.Agent, c.Scope, now, "released", winner, reservation)
 				r.pub.Publish(room, frame, actor)
@@ -1160,7 +1196,7 @@ func (r *Registry) ReleaseEverywhere(agent string, actor Conn) {
 			s.mu.Unlock()
 		}
 	}
-	r.agentIdentityReset(agent)
+	r.agentIdentityReset(workspace, agent)
 }
 
 // -- fan-out --------------------------------------------------------------

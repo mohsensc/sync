@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"regexp"
 	"sync"
 	"time"
 
@@ -16,6 +17,27 @@ import (
 )
 
 var errTLSPairRequired = errors.New("TLSCert and TLSKey must be given together")
+
+var hostedRoomKey = regexp.MustCompile(`^[0-9a-f]{16}$`)
+
+// HostedIdentity is the server-side identity established by an account token.
+// None of these fields come from the join frame.  The opaque IDs are used to
+// scope the relay's in-memory authority and dashboard projection without
+// exposing the account token to browser clients.
+type HostedIdentity struct {
+	WorkspaceID  string
+	UserID       string
+	RepositoryID string
+	HumanID      string
+}
+
+// HostedAuthenticator turns a durable account token plus a git-remote room
+// hash into an authorized tenant/repository scope.  It is only consulted at
+// join; failures refuse hosted membership instead of degrading to the
+// self-hosted relay's anonymous mode.
+type HostedAuthenticator interface {
+	AuthenticateAgent(ctx context.Context, token, roomKey string) (HostedIdentity, error)
+}
 
 // Backpressure tuning. Identical values to serve.py's module constants —
 // see there for the reasoning behind each number; these are not ours to
@@ -110,6 +132,7 @@ type WsConn struct {
 	principal  string
 	token      string
 	unattended bool
+	hosted     *HostedIdentity
 
 	out            chan []byte
 	closeOnce      sync.Once
@@ -149,6 +172,25 @@ func (c *WsConn) SetRoom(r string)  { c.mu.Lock(); c.room = r; c.mu.Unlock() }
 func (c *WsConn) Principal() string { c.mu.Lock(); defer c.mu.Unlock(); return c.principal }
 func (c *WsConn) Token() string     { c.mu.Lock(); defer c.mu.Unlock(); return c.token }
 func (c *WsConn) Unattended() bool  { c.mu.Lock(); defer c.mu.Unlock(); return c.unattended }
+
+func (c *WsConn) setHosted(identity HostedIdentity) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.hosted != nil {
+		return *c.hosted == identity
+	}
+	c.hosted = &identity
+	return true
+}
+
+func (c *WsConn) hostedIdentity() (HostedIdentity, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.hosted == nil {
+		return HostedIdentity{}, false
+	}
+	return *c.hosted, true
+}
 
 // Send queues an already-encoded frame. Never blocks, never panics, never
 // waits on the peer: a full channel drops the oldest queued frame to make
@@ -450,6 +492,10 @@ func (s *Server) session(ws *websocket.Conn) {
 		_ = ws.Close()
 	}()
 
+	joined := false
+	if s.HostedAuth != nil {
+		_ = ws.SetReadDeadline(time.Now().Add(s.JoinTimeout))
+	}
 	for {
 		_, raw, err := ws.ReadMessage()
 		if err != nil {
@@ -478,6 +524,34 @@ func (s *Server) session(ws *websocket.Conn) {
 			}
 			agent, _ := msg["agent"].(string)
 			human, _ := msg["human"].(string)
+			if s.HostedAuth != nil {
+				if !hostedRoomKey.MatchString(roomVal) {
+					conn.Send(EncodeFrame(Refusal{Reason: "invalid-room", Detail: "hosted rooms are git-remote hashes"}.frame(roomVal)))
+					return
+				}
+				token, _ := msg["token"].(string)
+				ctx, cancel := context.WithTimeout(context.Background(), s.AuthTimeout)
+				identity, authErr := s.HostedAuth.AuthenticateAgent(ctx, token, roomVal)
+				cancel()
+				if authErr != nil {
+					log.Printf("hosted join refused for room %s: %v", roomVal, authErr)
+					conn.Send(EncodeFrame(Refusal{Reason: "unauthorized", Detail: "the account token is invalid, revoked, or unavailable"}.frame(roomVal)))
+					return
+				}
+				if identity.WorkspaceID == "" || identity.UserID == "" || identity.RepositoryID == "" {
+					log.Printf("hosted join refused for room %s: authenticator returned incomplete identity", roomVal)
+					return
+				}
+				if identity.HumanID == "" {
+					identity.HumanID = identity.UserID
+				}
+				if !conn.setHosted(identity) {
+					conn.Send(EncodeFrame(Refusal{Reason: "hosted-identity-latched", Detail: "open a new connection to change account or repository"}.frame(roomVal)))
+					continue
+				}
+				human = identity.HumanID
+				roomVal = scopedHostedRoom(identity.WorkspaceID, roomVal)
+			}
 			conn.SetAgent(agent)
 			conn.SetHuman(human)
 			conn.mu.Lock()
@@ -493,10 +567,16 @@ func (s *Server) session(ws *websocket.Conn) {
 			}
 			conn.unattended = msg["unattended"] == true
 			conn.mu.Unlock()
-			relay.Join(roomVal, conn)
+			if relay.Join(roomVal, conn) {
+				joined = true
+				_ = ws.SetReadDeadline(time.Time{})
+			}
 			conn.mu.Lock()
 			conn.token = ""
 			conn.mu.Unlock()
+			continue
+		}
+		if !joined {
 			continue
 		}
 
@@ -520,6 +600,13 @@ type Server struct {
 	Addr  string
 	Relay *Relay
 
+	// HostedAuth switches the listener from permissive self-hosted joins to
+	// fail-closed account-token authentication.  Nil preserves the existing
+	// local/self-hosted protocol exactly.
+	HostedAuth  HostedAuthenticator
+	AuthTimeout time.Duration
+	JoinTimeout time.Duration
+
 	// TLSCert/TLSKey terminate wss:// instead of ws:// when both are set,
 	// mirroring serve.py's build_tls_context: same PEM cert-chain-plus-key
 	// shape, loaded once at Listen time. Unset by default — plaintext
@@ -540,6 +627,38 @@ type Server struct {
 	// same two points RelayConnections is, in session.
 	connsMu sync.Mutex
 	conns   map[*WsConn]struct{}
+}
+
+func scopedHostedRoom(workspaceID, roomKey string) string {
+	return "hosted:" + workspaceID + ":" + roomKey
+}
+
+func hostedWorkspaceFromRoom(room string) string {
+	if len(room) <= len("hosted:")+16 || room[:len("hosted:")] != "hosted:" {
+		return ""
+	}
+	last := len(room) - 17
+	if last <= len("hosted:") || room[last] != ':' || !hostedRoomKey.MatchString(room[last+1:]) {
+		return ""
+	}
+	return room[len("hosted:"):last]
+}
+
+func hostedRoomKeyFromScoped(room string) (string, bool) {
+	workspace := hostedWorkspaceFromRoom(room)
+	if workspace == "" {
+		return "", false
+	}
+	return room[len(room)-16:], true
+}
+
+func (s *Server) withHostedDefaults() {
+	if s.AuthTimeout <= 0 {
+		s.AuthTimeout = 2 * time.Second
+	}
+	if s.JoinTimeout <= 0 {
+		s.JoinTimeout = 5 * time.Second
+	}
 }
 
 // closeDeadline bounds one connection's close handshake: how long
@@ -626,6 +745,7 @@ func (s *Server) closeConns() {
 // accept connections. Splitting bind from accept is what lets tests use
 // port 0 and read back the real port before any client tries to connect.
 func (s *Server) Listen() (string, error) {
+	s.withHostedDefaults()
 	if (s.TLSCert == "") != (s.TLSKey == "") {
 		return "", errTLSPairRequired
 	}
@@ -655,15 +775,34 @@ func (s *Server) Listen() (string, error) {
 }
 
 func (s *Server) Serve(ctx context.Context) error {
+	s.withHostedDefaults()
 	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if s.HostedAuth != nil && r.Header.Get("Origin") != "" {
+			// Durable agent tokens are not browser credentials. The hosted
+			// dashboard reads Clerk-protected HTTP APIs instead of joining the
+			// relay directly; rejecting browser-originated upgrades closes the
+			// easiest path to accidentally exposing a machine token to JS.
+			http.Error(w, "browser websocket clients are not accepted", http.StatusForbidden)
+			return
+		}
 		ws, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			return
 		}
 		go s.session(ws)
 	})
-	srv := &http.Server{Handler: mux}
+	srv := &http.Server{
+		Handler: mux, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second,
+	}
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(s.ln) }()
 

@@ -515,6 +515,11 @@ func (c *Client) buildJoin() []byte {
 	// the wire it always did.
 	if c.cfg.Principal != "" {
 		j.Principal = c.cfg.Principal
+	}
+	// Hosted account tokens identify their user and workspace without a
+	// client-declared principal. Self-hosted clients still send the same
+	// principal/token pair when both are configured.
+	if c.cfg.Token != "" {
 		j.Token = c.cfg.Token
 	}
 	return wire.Marshal(j)
