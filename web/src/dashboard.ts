@@ -15,12 +15,48 @@ declare global {
 const byId = <T extends HTMLElement>(id: string) => document.getElementById(id) as T
 const clerkKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY
 const configError = byId<HTMLElement>('configuration-error')
+const loginCta = byId<HTMLElement>('login-cta')
 const authGate = byId<HTMLElement>('auth-gate')
 const dashboard = byId<HTMLElement>('dashboard')
 const dashboardError = byId<HTMLElement>('dashboard-error')
 const repoList = byId<HTMLElement>('repo-list')
 const agentList = byId<HTMLElement>('agent-list')
 const resolutionList = byId<HTMLElement>('resolution-list')
+
+// Mirrors dashboard.css's own palette exactly (ink text/primary, card and
+// page backgrounds, danger/success, border radius, font stack) so Clerk's
+// mounted components read as part of the site instead of Clerk's default
+// indigo. Passed once at `clerk.load()` — per Clerk's docs a load-level
+// appearance applies globally to every component mounted afterwards,
+// including the User Profile modal opened from account settings, but that
+// hasn't been confirmed against a live key in this environment. Spot-check
+// the actual profile modal once real Clerk credentials are available; add a
+// per-call override on `clerk.openUserProfile()` if it doesn't inherit this.
+const clerkAppearance = {
+  variables: {
+    colorPrimary: '#29384d',
+    colorBackground: '#fffdf8',
+    colorText: '#29384d',
+    colorTextSecondary: '#6b7280',
+    colorDanger: '#a33c32',
+    colorSuccess: '#287247',
+    borderRadius: '10px',
+    fontFamily: 'Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif',
+  },
+}
+
+// The website no longer prints its own "sign in" heading above the mounted
+// SignIn card (see #auth-gate in index.html) — this is the one heading the
+// signed-out visitor sees, so it carries the site's own name instead of
+// Clerk's generic default.
+const clerkLocalization = {
+  signIn: {
+    start: {
+      title: 'Sign in to Agent Sync',
+      subtitle: 'Connect an agent and see its live work.',
+    },
+  },
+}
 
 let payload: DashboardPayload | null = null
 let selectedRepoId: string | null = null
@@ -171,6 +207,7 @@ async function loadClerkUi(key: string): Promise<unknown> {
 
 async function showDashboard(clerk: Clerk) {
   if (!clerk.user) return
+  loginCta.hidden = true
   authGate.hidden = true
   dashboard.hidden = false
   const name = clerk.user.fullName || clerk.user.primaryEmailAddress?.emailAddress || 'Your account'
@@ -185,36 +222,97 @@ async function showDashboard(clerk: Clerk) {
   byId<HTMLButtonElement>('sign-out').onclick = () => void clerk.signOut({ redirectUrl: '/' })
 }
 
+function showAuthError() {
+  loginCta.hidden = true
+  authGate.hidden = false
+  byId('auth-error').hidden = false
+}
+
 async function boot() {
   inject()
+
+  // Unauthenticated, non-tenant-scoped warm-up: nudge the browser to fetch
+  // the office's static document ahead of the "Open the 3D office" link, and
+  // hit /api/health in parallel to force the serverless cold-start chain
+  // (Lambda module graph + Neon compute) to happen now instead of after
+  // Clerk hands back a session. Neither call ever touches /api/dashboard,
+  // /api/bootstrap, or any other tenant-scoped route before a real Clerk
+  // session exists.
+  void fetch('/office/', { credentials: 'omit' }).catch(() => {})
+  void fetch('/api/health', { credentials: 'omit' }).catch(() => {})
+
   if (!clerkKey) {
+    loginCta.hidden = true
     configError.hidden = false
     return
   }
-  try {
+
+  // Clerk's own script load and clerk.load() handshake are the two network
+  // round trips that make a bare sign-in screen feel slow. Kick both off
+  // immediately behind the CTA card below instead of waiting for the visitor
+  // to click through first, so "Okay, log in" reveals a card that mounts
+  // instantly instead of one still waiting on the network.
+  const ready = (async () => {
     const ClerkUI = await loadClerkUi(clerkKey)
     const clerk = new Clerk(clerkKey)
-    await clerk.load({ ui: { ClerkUI: ClerkUI as never } })
+    await clerk.load({
+      ui: { ClerkUI: ClerkUI as never },
+      appearance: clerkAppearance,
+      localization: clerkLocalization,
+    })
+    return clerk
+  })()
+
+  const ctaButton = byId<HTMLButtonElement>('cta-continue')
+  ctaButton.onclick = async () => {
+    ctaButton.disabled = true
+    try {
+      const clerk = await ready
+      loginCta.hidden = true
+      authGate.hidden = false
+      clerk.mountSignIn(byId('clerk-signin'))
+    } catch (error) {
+      console.error('dashboard auth unavailable:', error)
+      showAuthError()
+    }
+  }
+
+  try {
+    const clerk = await ready
     if (clerk.isSignedIn) {
       await showDashboard(clerk)
       return
     }
-    authGate.hidden = false
-    clerk.mountSignIn(byId('clerk-signin'))
     clerk.addListener(({ user }) => { if (user) void showDashboard(clerk) })
   } catch (error) {
     console.error('dashboard auth unavailable:', error)
-    authGate.hidden = false
-    byId('auth-error').hidden = false
+    showAuthError()
   }
+}
+
+// Ids match the <input value=""> attributes in index.html's .setup-card and
+// the SetupTarget union in api/_lib/tokens.ts. Kept as plain string literals
+// here (not imported from api/) so the web package's typecheck doesn't reach
+// across that boundary — see api/_lib/tokens.ts for what each id means and
+// which targets get real hook/MCP enforcement vs. an AGENTS.md-only block.
+function selectedSetupTargets(): string[] {
+  const boxes = document.querySelectorAll<HTMLInputElement>('input[name="setup-target"]:checked')
+  return Array.from(boxes, (box) => box.value)
 }
 
 byId<HTMLButtonElement>('rotate-token').onclick = async () => {
   const button = byId<HTMLButtonElement>('rotate-token')
+  const targets = selectedSetupTargets()
+  const targetError = byId('setup-target-error')
+  if (targets.length === 0) {
+    targetError.hidden = false
+    return
+  }
+  targetError.hidden = true
   button.disabled = true
   try {
     const result = await api<{ id: string; instructions: string }>('/api/tokens', {
-      method: 'POST', body: JSON.stringify({ label: 'dashboard setup' }),
+      method: 'POST', body: JSON.stringify({ label: 'dashboard setup', targets }),
     })
     visibleTokenId = result.id
     setText(byId('setup-instructions'), result.instructions)

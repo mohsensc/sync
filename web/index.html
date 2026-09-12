@@ -5,7 +5,24 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="description" content="See every active Agent Sync session and conflict across your repositories." />
   <title>Agent Sync dashboard</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="stylesheet" href="/src/dashboard.css" />
+  <!--
+    Scoped styles for the install-target picker only. Deliberately not in
+    dashboard.css — that file (and web/src/office/*) is owned by a parallel
+    change right now; keeping these rules here avoids stepping on it.
+  -->
+  <style>
+    .target-picker { display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 12px 0 6px; padding: 0; border: 0; }
+    .target-picker legend { padding: 0; margin-bottom: 6px; }
+    .target-row { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: #29384d; cursor: pointer; }
+    .target-row input { margin: 0; }
+    .target-tier { font: 700 10px ui-monospace, SFMono-Regular, monospace; text-transform: uppercase; letter-spacing: .04em; padding: 2px 6px; border-radius: 6px; }
+    .tier-enforced { background: #29384d; color: #eef2f5; }
+    .tier-voluntary { background: #d2c6b3; color: #5b4d38; }
+    .target-tier-note { margin-top: 6px; font-size: 12px; max-width: 52ch; }
+    #setup-target-error { margin-top: 6px; }
+  </style>
 </head>
 <body>
   <main class="shell">
@@ -15,10 +32,14 @@
       <p>The sign-in service is not configured for this deployment.</p>
     </section>
 
-    <section id="auth-gate" class="center-card" hidden>
+    <section id="login-cta" class="center-card">
       <p class="eyebrow">Agent Sync</p>
-      <h1>Your agents, in one place.</h1>
-      <p class="lede">Sign in to connect an agent and see its live work.</p>
+      <h1>See your agents, live.</h1>
+      <p class="lede">Watch every coding agent's activity across your repos as it happens, and see conflicts get resolved.</p>
+      <button id="cta-continue" class="primary-button" type="button">Okay, log in</button>
+    </section>
+
+    <section id="auth-gate" class="auth-shell" hidden>
       <p id="auth-error" class="error" hidden>Sign-in is unavailable right now. Please reload and try again.</p>
       <div id="clerk-signin"></div>
     </section>
@@ -50,6 +71,36 @@
           <p class="eyebrow">Connect an agent</p>
           <h2>Paste one instruction into your coding session.</h2>
           <p class="muted">A new token replaces your previous setup token. The secret is shown once.</p>
+          <fieldset id="setup-targets" class="target-picker">
+            <legend class="eyebrow">Coding agent</legend>
+            <label class="target-row">
+              <input type="checkbox" name="setup-target" value="claude-code" checked>
+              <span>Claude Code</span>
+              <span class="target-tier tier-enforced">hook-enforced</span>
+            </label>
+            <label class="target-row">
+              <input type="checkbox" name="setup-target" value="codex">
+              <span>Codex</span>
+              <span class="target-tier tier-voluntary">instructions-only</span>
+            </label>
+            <label class="target-row">
+              <input type="checkbox" name="setup-target" value="grok">
+              <span>Grok</span>
+              <span class="target-tier tier-voluntary">instructions-only</span>
+            </label>
+            <label class="target-row">
+              <input type="checkbox" name="setup-target" value="gemini-cli">
+              <span>Gemini CLI (Google)</span>
+              <span class="target-tier tier-voluntary">instructions-only</span>
+            </label>
+            <label class="target-row">
+              <input type="checkbox" name="setup-target" value="muse">
+              <span>Muse</span>
+              <span class="target-tier tier-voluntary">instructions-only</span>
+            </label>
+          </fieldset>
+          <p class="muted target-tier-note">"Hook-enforced" wires a real PreToolUse hook that arbitrates tool calls automatically. "Instructions-only" drops an AGENTS.md block for the agent to follow voluntarily — nothing blocks or enforces it.</p>
+          <p id="setup-target-error" class="error" hidden>Select at least one coding agent first.</p>
         </div>
         <button id="rotate-token" class="primary-button" type="button">Create setup instructions</button>
         <div id="setup-result" class="setup-result" hidden>

@@ -1,7 +1,7 @@
 {
   "name": "agent-sync",
   "version": "0.1.0",
-  "description": "Multi-agent presence and coordination for Claude Code. One install, one command.",
+  "description": "Multi-agent presence and coordination. Hook-enforced in Claude Code; an AGENTS.md instructions block elsewhere.",
   "license": "MIT",
   "bin": {
     "agent-sync": "./bin/agent-sync.js"
