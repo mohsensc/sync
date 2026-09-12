@@ -326,8 +326,6 @@
     <button id="bZones" aria-pressed="true">Zones</button>
   </div>
   <div class="row">
-    <button id="bSpin" aria-pressed="false">Auto-rotate</button>
-    <button id="bTop" aria-pressed="false">Top down</button>
     <button id="bWire" aria-pressed="false">Wireframe</button>
   </div>
 </div>
@@ -833,11 +831,10 @@ loader.load('/glb-lite/character.glb', gltf => {
 // ---- camera / interaction --------------------------------------------
 // Default framing shows the whole floor plate. At pitch 0.42 with the target on
 // the desk bank the open +z edge fell off the bottom of the frame.
-let yaw = 0.78, pitch = 0.46, dist = 1.14, spin = false, top = false, wire = false
+let yaw = 0.78, pitch = 0.46, dist = 1.14, wire = false
 // YAW_MIN/MAX, YAW_MID and clampYaw live in framing.js now — the room's orbit
 // arc and the head-zoom framing that has to fit inside it are one thing, not
 // two copies of the same wrap math.
-let spinDir = 1
 const target = new THREE.Vector3(0.2, 1.0, 0.7)
 const goal = { target: target.clone(), dist: 1.14, yaw: 0.78, active: false }
 // Down from 21 with the room. At the old radius the shrunken office sat in the
@@ -942,8 +939,8 @@ let priorFraming = null   // { target, dist, yaw, pitch } to restore to on desel
 // end and a duration, which is what lets it carry an arc and a distinct feel
 // per mode, neither of which a per-frame "close 0.15% of the gap" loop can
 // express. `focus()`/goal is untouched and still drives every other camera
-// move in the file (the top/spin buttons and replay framing) — this
-// is additive, only zoomToAgent/zoomRestore start a flight.
+// move in the file (replay framing) — this is additive, only
+// zoomToAgent/zoomRestore start a flight.
 //
 // Z toggles between two feels, so both are sitting in the room to compare
 // rather than argued about from memory:
@@ -1050,20 +1047,18 @@ addEventListener('keydown', e => {
   logEl.textContent = `zoom feel: ${zoomMode}`
 })
 
-// No free-drag orbit: the office presents a fixed default framing rather
-// than something a visitor can grab and spin. A click still stops
-// auto-rotate and cancels any in-flight camera move (interact.js's own
-// pointerdown, registered separately on this same canvas, still handles
-// click-to-select/send).
-canvas.addEventListener('pointerdown', () => { spin=false; setB(bSpin,false); goal.active=false; flight=null })
-canvas.addEventListener('wheel', e => { e.preventDefault(); goal.active=false; flight=null
-  dist = Math.max(0.35, Math.min(2.2, dist + e.deltaY*0.0012)) }, {passive:false})
+// Fully locked default framing: no drag, no scroll-zoom, no auto-rotate, no
+// top-down toggle. The office camera only ever moves via the head-zoom
+// flight when a visitor selects an agent (zoomToAgent/zoomRestore below) —
+// that's a contextual reaction to real content, not free navigation, and it
+// stays dormant with nothing to click in the empty room. A click still
+// cancels any in-flight camera move (interact.js's own pointerdown,
+// registered separately on this same canvas, still handles click-to-select).
+canvas.addEventListener('pointerdown', () => { goal.active=false; flight=null })
+canvas.addEventListener('wheel', e => { e.preventDefault() }, {passive:false})
 
-const bSpin=document.getElementById('bSpin'), bTop=document.getElementById('bTop')
 const bWire=document.getElementById('bWire'), bZones=document.getElementById('bZones')
 const setB=(b,v)=>b.setAttribute('aria-pressed',String(v))
-bSpin.onclick=()=>{spin=!spin; setB(bSpin,spin); if(spin) goal.active=false}
-bTop.onclick=()=>{top=!top; setB(bTop,top); pitch = top?1.35:0.42; dist = top?1.15:1; goal.active=false}
 bWire.onclick=()=>{wire=!wire; setB(bWire,wire); meshes.forEach(m=>{m.material.wireframe=wire})}
 let zonesOn = true
 bZones.onclick=()=>{zonesOn=!zonesOn; setB(bZones,zonesOn); zoneUI.setVisible(zonesOn)}
@@ -1514,10 +1509,6 @@ const clock = new THREE.Clock()
 function tick(){
   resize()
   const dt = Math.min(clock.getDelta(), 0.05)
-
-  if(spin){ yaw += 0.0016*spinDir
-    if(yaw>YAW_MAX){ yaw=YAW_MAX; spinDir=-1 }
-    if(yaw<YAW_MIN){ yaw=YAW_MIN; spinDir=1 } }
 
   if (flight) {
     flight.t += dt
