@@ -1,1 +1,3 @@
 desk-check.html
+# generated at build time by scripts/build-git-snapshot.mjs, see vercel.json
+public/api/

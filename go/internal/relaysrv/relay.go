@@ -802,6 +802,72 @@ func (r *Relay) PublishTo(room, agent string, frame Frame, actor Conn) {
 
 // -- presence ---------------------------------------------------------------
 
+// PresenceAgentCap is the most distinct Agent ids the presence buffer keeps
+// for one Human at once. Org-wide and display-only, not a protocol timing
+// like PresenceTTLS above — it exists so one human running a pile of
+// sessions can't crowd everyone else's agents out of the "who else is here"
+// roster and the office visualization's character count.
+//
+// Enforcement: onEvent below checks presenceCapAllows right where an event
+// would otherwise join the room's activity buffer and go out on the live
+// "presence" broadcast. First 5 distinct agents seen for a human keep their
+// slot for as long as they stay active; a 6th simply never gets one,
+// silently, until one of the five goes quiet past PresenceTTLS and its
+// entries age out of the buffer. No separate eviction bookkeeping — the
+// existing TTL trim in presence()/presenceSnapshot() already frees a slot
+// the moment an entry stops being recent, so the cap needs nothing more.
+//
+// This gates two things only: whether the event lands in ri.activity, and
+// whether the live "presence" broadcast for it goes out. Both are the
+// display surface. It does not touch conn.Agent()/conn.Human(), the lease
+// registry, or the negotiator — a capped-out agent's own claims and
+// negotiated replies are computed and returned exactly as they would be
+// with no cap at all (see presence_identity_test.go's
+// TestPresenceCapDoesNotBlockClaimForCappedAgent).
+//
+// One deliberate side effect, worth stating rather than leaving for a
+// reader to find: both Classify's collision detection (ladder.go) and
+// redundantPeer (also ladder.go, behind AGENT_SYNC_RUNG4 and off by
+// default) read their "others"/activity argument from this same buffer, so
+// a capped-out agent's edits stop showing up as something the *other* five
+// can collide with, or match as redundant work. That is unchanged for the
+// capped-out agent's own requests (its own "others" list — captured before
+// this gate runs — still contains the five it's actually contending with),
+// and it never blocks, delays, or errors anyone's tool call either way; it
+// just means a human's 6th-and-beyond session is invisible to presence the
+// same way it's invisible to the roster.
+const PresenceAgentCap = 5
+
+// presenceCapAllows reports whether agent should get a presence slot for
+// human, given activity. An agent already represented in activity always
+// keeps updating — the cap limits how many distinct agents a human can
+// occupy, not how often a tracked one is heard from. A human with no
+// identity at all (human == "") is never capped: there's nothing to
+// attribute the count to, and that is the same as today's uncapped
+// behavior for an unconfigured install.
+//
+// Precondition, not enforced here: the caller trims activity to the live
+// PresenceTTLS window first. onEvent's one call site gets that for free —
+// it reads ri.activity right after r.presence(room) already trimmed and
+// wrote it back — so this stays a plain membership count rather than
+// duplicating that cutoff logic a third time.
+func presenceCapAllows(activity []timedActivity, human, agent string) bool {
+	if human == "" {
+		return true
+	}
+	seen := make(map[string]struct{})
+	for _, ta := range activity {
+		if ta.a.Human != human {
+			continue
+		}
+		if ta.a.Agent == agent {
+			return true
+		}
+		seen[ta.a.Agent] = struct{}{}
+	}
+	return len(seen) < PresenceAgentCap
+}
+
 func (r *Relay) presence(room string) []Activity {
 	ri := r.roomOf(room)
 	cutoff := r.clock.Now() - PresenceTTLS
@@ -961,17 +1027,28 @@ func (r *Relay) onEvent(room string, conn Conn, msg map[string]any) Frame {
 	others := r.presence(room)
 	rung := Classify(event, others, intent)
 
+	// See PresenceAgentCap's doc comment: a human already tracking 5
+	// distinct agents doesn't get a 6th added to the display buffer, and
+	// (below) doesn't get a live "presence" broadcast for it either.
+	// Computed and applied inside one lock so two events for the same new
+	// agent landing on different connections at once can't both slip past
+	// the check before either appends.
 	ri.mu.Lock()
-	ri.activity = append(ri.activity, timedActivity{now, Activity{
-		Agent: agent, Human: human, Verb: verb, Region: region,
-		Intent: intent, Source: event.Source,
-	}})
+	tracked := presenceCapAllows(ri.activity, human, agent)
+	if tracked {
+		ri.activity = append(ri.activity, timedActivity{now, Activity{
+			Agent: agent, Human: human, Verb: verb, Region: region,
+			Intent: intent, Source: event.Source,
+		}})
+	}
 	ri.mu.Unlock()
 
-	r.Broadcast(room, Frame{
-		"type": "presence", "agent": agent, "human": human,
-		"verb": verb, "region": clean["region"], "rung": rung, "ts": now,
-	}, conn)
+	if tracked {
+		r.Broadcast(room, Frame{
+			"type": "presence", "agent": agent, "human": human,
+			"verb": verb, "region": clean["region"], "rung": rung, "ts": now,
+		}, conn)
+	}
 
 	// Policy decides how loudly this rung is told. It does not decide the
 	// rung, and it never reaches the lease table: Classify above and

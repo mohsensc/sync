@@ -1,6 +1,7 @@
 package relaysrv
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/mohsensc/sync/go/internal/metrics"
@@ -132,5 +133,179 @@ func TestClaimFrameCannotForgeItsAgentIdentity(t *testing.T) {
 	held := rel.registry.HolderOf("r1", Region{Path: "src/pay.py"}, nil)
 	if held == nil || held.Agent != "a1" {
 		t.Fatalf("lease table must record the connection's real agent, got %+v", held)
+	}
+}
+
+// -- presence cap -------------------------------------------------------
+
+// presenceHumans pulls the distinct agent ids for one human out of a
+// "leases" join reply's presence array — the actual "who else is here"
+// roster a joiner sees, per PresenceAgentCap's doc comment in relay.go.
+func presenceAgentsFor(t *testing.T, leasesFrame Frame, human string) []string {
+	t.Helper()
+	raw, ok := leasesFrame["presence"].([]any)
+	if !ok {
+		t.Fatalf("leases frame carried no presence array: %+v", leasesFrame)
+	}
+	var agents []string
+	for _, e := range raw {
+		entry, ok := e.(map[string]any)
+		if !ok {
+			t.Fatalf("presence entry wasn't an object: %+v", e)
+		}
+		if entry["human"] == human {
+			agents = append(agents, entry["agent"].(string))
+		}
+	}
+	return agents
+}
+
+// A human gets at most PresenceAgentCap distinct agents in the tracked
+// presence roster — the join-snapshot path a newly connecting client
+// actually reads, not just the live broadcast. First 5 seen for Alice keep
+// their slots; the 6th never gets one.
+func TestPresenceCapLimitsDistinctAgentsPerHuman(t *testing.T) {
+	clock := NewVirtualClock(1000.0)
+	rel := NewRelay(clock, InertRoster(), metrics.New())
+	daemon := &recorder{agent: "presenced@host", human: "mohsen-agentai"}
+	watcher := &recorder{agent: "watcher", human: "dev"}
+	rel.Join("r1", daemon)
+	rel.Join("r1", watcher)
+	watcher.sent = nil
+
+	for i := 1; i <= 6; i++ {
+		rel.Handle(daemon, map[string]any{
+			"type": "event", "agent": fmt.Sprintf("sess-%d", i), "human": "Alice",
+			"verb": "edit", "region": goldenRegion(fmt.Sprintf("src/%d.py", i), ""),
+		})
+	}
+
+	// The live broadcast to an already-joined watcher must skip the 6th too
+	// — LiveDirector on the web side spawns one character per distinct
+	// agent id straight off this frame, with no cap of its own.
+	var broadcastAgents []string
+	for _, f := range watcher.sent {
+		if f["type"] == "presence" {
+			broadcastAgents = append(broadcastAgents, f["agent"].(string))
+		}
+	}
+	if len(broadcastAgents) != PresenceAgentCap {
+		t.Fatalf("expected %d live presence broadcasts, got %d: %+v", PresenceAgentCap, len(broadcastAgents), broadcastAgents)
+	}
+	for _, a := range broadcastAgents {
+		if a == "sess-6" {
+			t.Fatalf("6th distinct agent for a human should never reach the live broadcast, got %+v", broadcastAgents)
+		}
+	}
+
+	// The actual deliverable: a client joining now sees at most 5 of
+	// Alice's agents in its own join snapshot, and never sess-6.
+	latecomer := &recorder{agent: "latecomer", human: "dev"}
+	rel.Join("r1", latecomer)
+	var leasesFrame Frame
+	for _, f := range latecomer.sent {
+		if f["type"] == "leases" {
+			leasesFrame = f
+		}
+	}
+	if leasesFrame == nil {
+		t.Fatalf("latecomer never got a leases/join reply: %+v", latecomer.sent)
+	}
+	aliceAgents := presenceAgentsFor(t, leasesFrame, "Alice")
+	if len(aliceAgents) > PresenceAgentCap {
+		t.Fatalf("expected at most %d tracked agents for Alice, got %d: %+v", PresenceAgentCap, len(aliceAgents), aliceAgents)
+	}
+	for _, a := range aliceAgents {
+		if a == "sess-6" {
+			t.Fatalf("6th distinct agent for a human should not get a presence slot, got %+v", aliceAgents)
+		}
+	}
+}
+
+// The cap limits how many distinct agents a human occupies, not how often
+// an already-tracked one is heard from: once the cap is full, one of the
+// five originals must still broadcast normally.
+func TestPresenceCapKeepsTrackedAgentsUpdating(t *testing.T) {
+	clock := NewVirtualClock(1000.0)
+	rel := NewRelay(clock, InertRoster(), metrics.New())
+	daemon := &recorder{agent: "presenced@host", human: "mohsen-agentai"}
+	watcher := &recorder{agent: "watcher", human: "dev"}
+	rel.Join("r1", daemon)
+	rel.Join("r1", watcher)
+
+	for i := 1; i <= 5; i++ {
+		rel.Handle(daemon, map[string]any{
+			"type": "event", "agent": fmt.Sprintf("sess-%d", i), "human": "Alice",
+			"verb": "edit", "region": goldenRegion(fmt.Sprintf("src/%d.py", i), ""),
+		})
+	}
+	watcher.sent = nil
+
+	rel.Handle(daemon, map[string]any{
+		"type": "event", "agent": "sess-1", "human": "Alice",
+		"verb": "edit", "region": goldenRegion("src/1-again.py", ""),
+	})
+
+	if len(watcher.sent) != 1 || watcher.sent[0]["type"] != "presence" || watcher.sent[0]["agent"] != "sess-1" {
+		t.Fatalf("an already-tracked agent must keep broadcasting once the cap is full, got %+v", watcher.sent)
+	}
+}
+
+// The fail-open half of the deliverable: a 6th session's own claim is
+// arbitrated on the connection's latched identity (conn.Agent()/Human()),
+// never on the presence buffer, so it must be granted exactly as normally
+// as any other claim regardless of whether its human is already at the
+// presence cap.
+func TestPresenceCapDoesNotBlockClaimForCappedAgent(t *testing.T) {
+	clock := NewVirtualClock(1000.0)
+	rel := NewRelay(clock, InertRoster(), metrics.New())
+	daemon := &recorder{agent: "presenced@host", human: "mohsen-agentai"}
+	rel.Join("r1", daemon)
+
+	for i := 1; i <= 5; i++ {
+		rel.Handle(daemon, map[string]any{
+			"type": "event", "agent": fmt.Sprintf("sess-%d", i), "human": "Alice",
+			"verb": "edit", "region": goldenRegion(fmt.Sprintf("src/%d.py", i), ""),
+		})
+	}
+
+	sixth := &recorder{agent: "sess-6", human: "Alice"}
+	rel.Join("r1", sixth)
+	reply := rel.Handle(sixth, map[string]any{
+		"type": "claim", "region": goldenRegion("src/6.py", ""), "intent": "work",
+	})
+	if reply["granted"] != true || reply["agent"] != "sess-6" {
+		t.Fatalf("a capped-out agent's own claim must still be granted normally, got %+v", reply)
+	}
+	held := rel.registry.HolderOf("r1", Region{Path: "src/6.py"}, nil)
+	if held == nil || held.Agent != "sess-6" {
+		t.Fatalf("lease table must record the 6th agent's claim despite the presence cap, got %+v", held)
+	}
+}
+
+// One human's full cap must not spill over onto another human's agents.
+func TestPresenceCapIsPerHuman(t *testing.T) {
+	clock := NewVirtualClock(1000.0)
+	rel := NewRelay(clock, InertRoster(), metrics.New())
+	daemon := &recorder{agent: "presenced@host", human: "mohsen-agentai"}
+	watcher := &recorder{agent: "watcher", human: "dev"}
+	rel.Join("r1", daemon)
+	rel.Join("r1", watcher)
+
+	for i := 1; i <= 5; i++ {
+		rel.Handle(daemon, map[string]any{
+			"type": "event", "agent": fmt.Sprintf("sess-%d", i), "human": "Alice",
+			"verb": "edit", "region": goldenRegion(fmt.Sprintf("src/%d.py", i), ""),
+		})
+	}
+	watcher.sent = nil
+
+	rel.Handle(daemon, map[string]any{
+		"type": "event", "agent": "bob-1", "human": "Bob",
+		"verb": "edit", "region": goldenRegion("src/bob.py", ""),
+	})
+
+	if len(watcher.sent) != 1 || watcher.sent[0]["agent"] != "bob-1" || watcher.sent[0]["human"] != "Bob" {
+		t.Fatalf("a different human's first agent must not be capped by another human's tracked agents, got %+v", watcher.sent)
 	}
 }

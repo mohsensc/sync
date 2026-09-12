@@ -616,7 +616,7 @@ std::string blocked_message(const Decision& d, const std::string& where) {
         m += d.intent;
         m += "\"";
     }
-    m += ". This edit is blocked by agent presence so the two of you do not overwrite each "
+    m += ". This edit is blocked by agent sync so the two of you do not overwrite each "
          "other.";
 
     if (!d.lost_to.empty()) {
@@ -732,7 +732,7 @@ std::string near_message(const Decision& d, const std::string& where) {
 /// a configuration, so say it is one: inventing a holder to blame would send a
 /// model looking for an agent that is not there.
 std::string policy_message(const std::string& where, Effect e) {
-    std::string m = "Agent presence ";
+    std::string m = "Agent sync ";
     m += e == Effect::Deny ? "blocks" : "asks before allowing";
     m += " edits to ";
     m += where;

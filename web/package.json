@@ -7,9 +7,12 @@
     "test": "bash scripts/verify-toolchain.sh && vitest run",
     "typecheck": "bash scripts/verify-toolchain.sh && tsc --noEmit",
     "dev": "go -C ../go run ./cmd/webdev --worktree \"$PWD\"",
+    "build": "node scripts/build-git-snapshot.mjs && vite build && node scripts/promote-office.mjs",
     "optimize-glb": "node scripts/optimize-glb.mjs"
   },
   "dependencies": {
+    "@clerk/clerk-js": "^6.31.1",
+    "@vercel/analytics": "^2.0.1",
     "three": "^0.170.0"
   },
   "devDependencies": {

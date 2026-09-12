@@ -1,0 +1,6 @@
+{
+  "installCommand": "cd web && pnpm install --frozen-lockfile",
+  "buildCommand": "cd web && pnpm run build",
+  "outputDirectory": "web/dist",
+  "framework": null
+}
