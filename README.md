@@ -27,6 +27,14 @@ agent-sync setup
 (#212). Joining instead: `agent-sync join <blob>` (blob comes from
 `agent-sync invite`).
 
+**Other coding agents:** the hosted dashboard's setup-instructions picker
+covers Claude Code, Codex, Grok, Gemini CLI, and Muse. All five get the same
+local build step above and an `AGENTS.md` section describing Agent Sync as a
+convention. Only Claude Code gets more than that — a real PreToolUse hook and
+MCP registration wired by `agent-sync setup`; the rest is instructions the
+agent follows if it chooses to, not anything Agent Sync enforces. See
+`api/_lib/tokens.ts`'s `setupInstructions`.
+
 Packaging and self-registration details: `docs/install-plan.md`.
 
 ## Policy

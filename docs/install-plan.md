@@ -195,3 +195,50 @@ A `node:22-slim` container (no Go, no cmake, no `cc`) on Docker/colima,
 `--ignore-scripts` installs and runs with no degradation, which is the claim
 the optionalDependencies choice rests on. Not verified: `npm publish` and the
 registry install path, and `release.yml` — no tag was pushed.
+
+## Multi-agent targets: hook vs. AGENTS.md-only
+
+The dashboard's setup-instructions flow (`api/_lib/tokens.ts`'s
+`setupInstructions`) picked up a target picker: Claude Code, Codex, Grok,
+Gemini CLI, and Muse. This section is the design note for why the copy those
+targets produce isn't uniform.
+
+`agent-sync setup` (`npm/agent-sync/lib/setup.js`) is Claude-Code-specific
+code, not a coincidence of what got built first: it shells out to `claude
+mcp add` and writes `~/.claude/settings.json`'s `PreToolUse`/`PostToolUse`
+arrays with the `ap-hook` binary (the safety rails above — backup, merge,
+idempotent — apply to exactly this write). There is no equivalent for
+Codex/Grok/Gemini CLI/Muse anywhere in this repo: no hook protocol adapter,
+no scripted MCP registration. `ap-hook` itself only speaks Claude Code's
+PreToolUse/PostToolUse hook JSON — even a coding agent whose own settings
+happen to have a general-purpose hooks block (several do) isn't running the
+protocol `ap-hook` implements, so pointing it there wouldn't do anything.
+
+`AGENTS.md` is the one thing all five targets share — it's the convention
+several coding-agent CLIs are converging on for repo-local instructions.
+Every selected target gets a generated `## Agent Sync` section for it,
+phrased conditionally ("if the agent-sync MCP tools are available in this
+session, call ..."), because unlike Claude Code, nothing in this codebase
+registers those tools for the others — an unconditional instruction to call
+tools that were never wired up would be a checkbox that silently does
+nothing while looking like it works.
+
+Two precedence traps this has to call out explicitly in the generated copy,
+both about a file with equal or higher priority silently shadowing
+`AGENTS.md`:
+- **Claude Code** reads `CLAUDE.md` as the primary file in a directory and
+  only falls back to `AGENTS.md` when no `CLAUDE.md` is present there
+  (behavior as of 2026-09) — so for this target the instructions write the
+  identical section to both files, not `AGENTS.md` alone.
+- **Gemini CLI** reads `AGENTS.md`, but a `GEMINI.md` in the same directory
+  wins if both exist. There's no dual-write fix here (Google's own
+  precedence, not something this repo's setup step controls) — the
+  generated copy just says so, so a repo that already has a `GEMINI.md`
+  doesn't end up silently unheard.
+
+Net effect: three tiers, not two. Claude Code (hook + MCP + CLAUDE.md +
+AGENTS.md), everything else (AGENTS.md only, MCP registration left as a
+manual step in that CLI's own config if it supports one), and no hook
+surface at all outside Claude Code. The picker's copy for the non-Claude
+targets is intentionally near-identical across all four — the honest thing
+to say about what Agent Sync does for them today doesn't vary by vendor.
