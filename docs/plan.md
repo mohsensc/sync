@@ -7,8 +7,6 @@ relay are both gone — `cpp/daemon/` was deleted and the relay is Go-only now
 architecture. Kept for the original design reasoning, not as a description
 of what's running.
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** Build a system where multiple people's coding agents in a shared repo are mutually aware — rendered as an ambient animated world for humans, and as claims and negotiation for agents — preventing redundant work and conflicting edits.
 
 **Architecture:** A C++ hook binary observes every tool call and writes events to a unix socket. A C++ daemon (`presenced`) coalesces, redacts, and forwards them over one WebSocket per machine to a Python relay. The relay is the sole authority on leases and arbitrates collisions via a five-rung ladder with wait-die deadlock resolution. A Python MCP server carries deliberate intent. A TypeScript/Three.js dashboard and a statusline segment subscribe read-only.
