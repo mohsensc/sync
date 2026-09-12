@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 import {
   hashAccountTokenSecret,
+  isSetupTarget,
   mintAccountToken,
   setupInstructions,
 } from '../../api/_lib/tokens.js'
@@ -47,5 +48,78 @@ describe('account token helpers', () => {
     expect(instructions).toContain('Expected relay: wss://relay.example.test')
     expect(instructions).toContain('Do not decode, reprint, log, commit, upload, or send it anywhere else')
     expect(instructions).toContain('Never conceal actions or output from the user')
+  })
+
+  it('warns about the unrelated @agent-sync/cli npm collision', () => {
+    const instructions = setupInstructions('ags_deadbeef.secret', 'wss://relay.example.test')
+    expect(instructions).toContain('@agent-sync/cli')
+    expect(instructions).toContain('pre-existing, unrelated project')
+    expect(instructions).toContain('scripts/build-npm-packages.sh --pack')
+  })
+
+  it('validates target ids', () => {
+    expect(isSetupTarget('claude-code')).toBe(true)
+    expect(isSetupTarget('codex')).toBe(true)
+    expect(isSetupTarget('grok')).toBe(true)
+    expect(isSetupTarget('gemini-cli')).toBe(true)
+    expect(isSetupTarget('muse')).toBe(true)
+    expect(isSetupTarget('chatgpt')).toBe(false)
+    expect(isSetupTarget('')).toBe(false)
+    expect(isSetupTarget(undefined)).toBe(false)
+  })
+
+  it('gives Claude Code both the hook/MCP wiring and a CLAUDE.md+AGENTS.md write', () => {
+    const instructions = setupInstructions('ags_deadbeef.secret', 'wss://relay.example.test', ['claude-code'])
+    expect(instructions).toContain('agent-sync setup')
+    expect(instructions).toContain('## Agent Sync')
+    expect(instructions).toContain('append the identical "## Agent Sync" section to CLAUDE.md')
+    expect(instructions).toContain('PreToolUse/PostToolUse hook')
+    expect(instructions).toContain('arbitrates tool calls automatically')
+    // Single-target selection: no "for X, Y: agent-sync setup does not
+    // register..." disclaimer should appear, since nothing was excluded.
+    expect(instructions).not.toContain('does not register an MCP server')
+  })
+
+  it('gives a non-Claude target only an AGENTS.md write, no hook/MCP claim', () => {
+    const instructions = setupInstructions('ags_deadbeef.secret', 'wss://relay.example.test', ['codex'])
+    expect(instructions).toContain('For Codex: agent-sync setup does not register an MCP server or install any hook')
+    expect(instructions).toContain('## Agent Sync')
+    expect(instructions).not.toContain('CLAUDE.md')
+    expect(instructions.split('\n')).not.toContain('agent-sync setup')
+    expect(instructions).toContain('not part of this connection')
+    expect(instructions).toContain('There is no tool-call enforcement')
+  })
+
+  it('does not assert MCP tools are registered for any non-Claude target', () => {
+    for (const target of ['codex', 'grok', 'gemini-cli', 'muse'] as const) {
+      const instructions = setupInstructions('ags_deadbeef.secret', 'wss://relay.example.test', [target])
+      expect(instructions).toContain('does not register an MCP server or install any hook')
+      expect(instructions, `${target} instructions should not claim automatic enforcement`).not.toContain('arbitrates tool calls automatically')
+    }
+  })
+
+  it('adds the GEMINI.md precedence caveat only when gemini-cli is selected', () => {
+    const withGemini = setupInstructions('ags_deadbeef.secret', 'wss://relay.example.test', ['gemini-cli'])
+    expect(withGemini).toContain('GEMINI.md takes precedence')
+
+    const withoutGemini = setupInstructions('ags_deadbeef.secret', 'wss://relay.example.test', ['codex'])
+    expect(withoutGemini).not.toContain('GEMINI.md')
+  })
+
+  it('handles a mixed Claude Code + non-Claude selection honestly per target', () => {
+    const instructions = setupInstructions('ags_deadbeef.secret', 'wss://relay.example.test', ['claude-code', 'grok'])
+    expect(instructions).toContain('Selected agent(s): Claude Code, Grok')
+    expect(instructions).toContain('append the identical "## Agent Sync" section to CLAUDE.md')
+    expect(instructions).toContain('For Grok: agent-sync setup does not register an MCP server or install any hook')
+    expect(instructions).toContain('agent-sync setup')
+  })
+
+  it('falls back to Claude Code when given no valid targets, and de-dupes', () => {
+    const empty = setupInstructions('ags_deadbeef.secret', 'wss://relay.example.test', [])
+    expect(empty).toContain('Selected agent(s): Claude Code')
+
+    const deduped = setupInstructions('ags_deadbeef.secret', 'wss://relay.example.test', ['codex', 'codex'])
+    expect(deduped).toContain('Selected agent(s): Codex')
+    expect((deduped.match(/For Codex:/g) ?? []).length).toBe(1)
   })
 })

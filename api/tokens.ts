@@ -2,7 +2,7 @@ import { ensurePersonalAccount } from './_lib/account.js'
 import { requireUser } from './_lib/auth.js'
 import { database } from './_lib/db.js'
 import { endpoint, HttpError, json, readJson } from './_lib/http.js'
-import { mintAccountToken, relayUrl, setupInstructions } from './_lib/tokens.js'
+import { isSetupTarget, mintAccountToken, relayUrl, setupInstructions, type SetupTarget } from './_lib/tokens.js'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
@@ -14,11 +14,28 @@ function cleanLabel(value: unknown): string | null {
   return label
 }
 
+// `targets` is new; older cached dashboard bundles won't send it at all, so
+// that case defaults to the pre-picker behavior (Claude Code only). Once the
+// field is present, though, it's a deliberate selection from the picker's
+// checkboxes — an empty array there is a client bug, not "give me the
+// default," so it's rejected rather than silently backfilled.
+function cleanTargets(value: unknown): SetupTarget[] {
+  if (value === undefined) return ['claude-code']
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new HttpError(400, 'At least one setup target must be selected.')
+  }
+  if (!value.every(isSetupTarget)) {
+    throw new HttpError(400, 'Unknown setup target.')
+  }
+  return Array.from(new Set(value))
+}
+
 async function createToken(request: Request): Promise<Response> {
   const user = await requireUser(request)
   const account = await ensurePersonalAccount(user.clerkUserId)
   const body = await readJson(request)
   const label = cleanLabel(body.label)
+  const targets = cleanTargets(body.targets)
   const minted = mintAccountToken()
   const relay = relayUrl()
   const sql = database()
@@ -50,7 +67,7 @@ async function createToken(request: Request): Promise<Response> {
     id: created.id,
     prefix: created.token_prefix,
     token: minted.raw,
-    instructions: setupInstructions(minted.raw, relay),
+    instructions: setupInstructions(minted.raw, relay, targets),
     createdAt: created.created_at,
   }, 201)
 }

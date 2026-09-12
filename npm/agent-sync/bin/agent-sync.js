@@ -10,7 +10,8 @@
 // lib/start.js uses for start/stop/status. If join.js turns out not to
 // switch on argv[0], this needs a one-line fix here, not a redesign.
 
-const USAGE = `agent-sync - multi-agent presence for Claude Code
+const USAGE = `agent-sync - multi-agent presence and coordination
+  (hook-enforced in Claude Code; AGENTS.md-only elsewhere - see README)
 
 Usage:
   agent-sync setup            wire hooks + MCP into Claude Code, then start

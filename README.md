@@ -23,9 +23,21 @@ scripts/build-npm-packages.sh --pack
 # then the `npm i -g <wrapper>.tgz <platform>.tgz` line it prints
 agent-sync setup
 ```
-`setup` writes both Claude config files directly, no confirm or undo yet
-(#212). Joining instead: `agent-sync join <blob>` (blob comes from
-`agent-sync invite`).
+`setup` writes `~/.claude/settings.json` (the hook) and registers the MCP
+server via `claude mcp add` directly, no confirm or undo yet (#212). Joining
+instead: `agent-sync join <blob>` (blob comes from `agent-sync invite`).
+
+**Other coding agents:** the hosted dashboard's setup-instructions picker
+covers Claude Code, Codex, Grok, Gemini CLI, and Muse. All five get the same
+local build step above, plus an `AGENTS.md` section (and, for Claude Code,
+the identical section in `CLAUDE.md` too) — but no code in this repo writes
+either file. That's an instruction *in* the generated setup text, telling
+whichever agent is connecting to add it itself; `agent-sync setup` never
+touches AGENTS.md/CLAUDE.md. Only Claude Code gets more than that
+instruction — a real PreToolUse hook and MCP registration, wired by `setup`
+as described above; the rest is a convention the agent follows if it
+chooses to, not anything Agent Sync enforces. See `api/_lib/tokens.ts`'s
+`setupInstructions`.
 
 Packaging and self-registration details: `docs/install-plan.md`.
 
