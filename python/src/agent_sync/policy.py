@@ -45,14 +45,14 @@ from typing import Literal
 
 from .clock import Clock
 
-log = logging.getLogger("agent_presence.policy")
+log = logging.getLogger("agent_sync.policy")
 
 # Mirrors what redact.py used to export as OPAQUE_ENV, back when this
 # module imported it from there. redact.py existed to serve the Python
 # relay, which is gone (#40) — this is the one thing this file still
 # needs from it, so it's inlined here rather than keeping a whole module
 # alive for one constant.
-OPAQUE_ENV = "AGENT_PRESENCE_OPAQUE"
+OPAQUE_ENV = "AGENT_SYNC_OPAQUE"
 
 SCHEMA_VERSION = 1
 # How often a PolicyFile is allowed to stat its inputs. Live reload is worth a
@@ -85,14 +85,14 @@ MODES: tuple[Mode, ...] = ("normal", "observer")
 # own agent stricter, so there is no way to cap anybody else.
 OBSERVER_CEILING: Effect = "notify"
 
-ORG_POLICY_ENV = "AGENT_PRESENCE_ORG_POLICY"
-ORG_POLICY_DEFAULT = "/etc/agent-presence/policy.toml"
-SESSION_POLICY_ENV = "AGENT_PRESENCE_POLICY"
-SESSION_RUNG_ENV = "AGENT_PRESENCE_POLICY_RUNG"
-REPO_ROOT_ENV = "AGENT_PRESENCE_REPO_ROOT"
-REPO_POLICY_RELPATH = ".agent-presence/policy.toml"
-USER_POLICY_RELPATH = "agent-presence/policy.toml"
-RUNTIME_CACHE_NAME = "agent-presence.policy.json"
+ORG_POLICY_ENV = "AGENT_SYNC_ORG_POLICY"
+ORG_POLICY_DEFAULT = "/etc/agent-sync/policy.toml"
+SESSION_POLICY_ENV = "AGENT_SYNC_POLICY"
+SESSION_RUNG_ENV = "AGENT_SYNC_POLICY_RUNG"
+REPO_ROOT_ENV = "AGENT_SYNC_REPO_ROOT"
+REPO_POLICY_RELPATH = ".agent-sync/policy.toml"
+USER_POLICY_RELPATH = "agent-sync/policy.toml"
+RUNTIME_CACHE_NAME = "agent-sync.policy.json"
 
 
 def stricter(a: Effect, b: Effect) -> Effect:
@@ -144,7 +144,7 @@ class EffectTable:
 # unattended agents this feature exists to serve there is nobody to ask.
 #
 # Rung 4 defaults to `context`, not `silent`. It has its own off switch already
-# - AGENT_PRESENCE_RUNG4, off unless you set it - and a second one here would
+# - AGENT_SYNC_RUNG4, off unless you set it - and a second one here would
 # mean turning the feature on and getting silence with nothing to say why. So
 # the flag decides whether rung 4 runs and this decides how loudly a hit is
 # reported: `context` tells the agent without spending anybody's attention.

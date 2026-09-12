@@ -389,29 +389,48 @@ export function deskHeat(parent, x, y, z) {
     return mesh
   })
 
+  // additive so the glow reads as light against the scene's warm-beige
+  // floor instead of a flat translucent tint that just mixes toward
+  // whatever colour is already there — the thing that made round 5's
+  // 0.02-0.27 opacity range disappear at normal camera distance.
+  glowMat.blending = THREE.AdditiveBlending
+  wisps.forEach(w => { w.material.blending = THREE.AdditiveBlending })
+
   g.position.set(x, y, z)
   parent.add(g)
 
-  let target = 0, level = 0, t = 0
+  let target = 0, level = 0, t = 0, loud = false
 
   return {
     group: g,
     set(intensity) {
       target = Math.max(0, Math.min(1, Number.isFinite(intensity) ? intensity : 0))
     },
+    /** Swaps between the two loudness steps of the 'C' cycle ('heat' vs
+     *  'heat-loud') without rebuilding anything — same numbers, bigger
+     *  swing. See gitsignals.js's CHURN_MODES. */
+    setLoud(v) { loud = !!v },
     update(dt) {
       level += (target - level) * Math.min(1, dt * FX_EASE)
       t += dt
       const on = level > 0.01
       g.visible = on
       if (!on) return
-      glowMat.opacity = level * (0.14 + 0.10 * Math.sin(t * 2.6))
-      glow.scale.setScalar(0.7 + 0.6 * level)
+      // 'heat': base 0.34, pulse +/-0.16 — materially louder than round 5's
+      // 0.14 base. 'heat-loud': base 0.6, pulse +/-0.22, plus a bigger
+      // glow disc and brighter wisps, so the two steps are genuinely two
+      // different volumes and not a rounding error apart.
+      const glowBase = loud ? 0.60 : 0.34
+      const glowPulse = loud ? 0.22 : 0.16
+      glowMat.opacity = level * (glowBase + glowPulse * Math.sin(t * 2.6))
+      glow.scale.setScalar((loud ? 1.05 : 0.75) + (loud ? 0.85 : 0.65) * level)
+      const wispOpacity = loud ? 0.62 : 0.42
+      const wispScale = loud ? 0.30 : 0.0
       wisps.forEach(w => {
         const p = (t * 0.32 + w.userData.phase) % 1
         w.position.set(w.userData.xOff, 0.05 + p * 0.32, 0)
-        w.material.opacity = level * 0.30 * Math.sin(p * Math.PI)
-        w.scale.setScalar(0.55 + p * 0.75)
+        w.material.opacity = level * wispOpacity * Math.sin(p * Math.PI)
+        w.scale.setScalar(0.55 + p * 0.75 + wispScale * p)
       })
     },
     dispose() {

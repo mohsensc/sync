@@ -9,7 +9,7 @@
 # regex, not a YAML-aware PromQL parser, to avoid a dependency this repo
 # doesn't otherwise need.
 groups:
-  - name: agent-presence
+  - name: agent-sync
     rules:
       - alert: AbsoluteRegionKeysDetected
         expr: increase(ap_region_keys_total{shape="absolute"}[5m]) > 0

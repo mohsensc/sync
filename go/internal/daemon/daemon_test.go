@@ -426,7 +426,7 @@ func TestRoundTripSpecialCharsHookToDaemon(t *testing.T) {
 	}
 
 	cmd := exec.CommandContext(ctx, bin)
-	cmd.Env = append(os.Environ(), "AGENT_PRESENCE_SOCK="+sock)
+	cmd.Env = append(os.Environ(), "AGENT_SYNC_SOCK="+sock)
 	cmd.Stdin = bytes.NewReader(payload)
 	out, err := cmd.Output()
 	if err != nil {

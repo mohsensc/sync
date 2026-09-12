@@ -592,7 +592,7 @@ def hook_payload(path: str, session: str) -> str:
 def _hook_says_blocked(p: DaemonProc, path: str) -> bool:
     """Ask the daemon the same question a PreToolUse hook would."""
     payload = hook_payload(path, "probe-session")
-    env = dict(os.environ, AGENT_PRESENCE_SOCK=str(p.sock))
+    env = dict(os.environ, AGENT_SYNC_SOCK=str(p.sock))
     try:
         out = subprocess.run([str(AP_HOOK)], input=payload, capture_output=True,
                              text=True, timeout=10, env=env)
@@ -654,7 +654,7 @@ async def daemon_kill(threads: int, iters: int) -> Result:
             t0 = time.perf_counter()
             p = subprocess.run(
                 [str(AP_HOOK)], input=payload, capture_output=True, text=True,
-                timeout=30, env=dict(os.environ, AGENT_PRESENCE_SOCK=str(d.sock)),
+                timeout=30, env=dict(os.environ, AGENT_SYNC_SOCK=str(d.sock)),
             )
             walls.append((time.perf_counter() - t0) * 1000)
             exits.append(p.returncode)

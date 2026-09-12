@@ -22,14 +22,14 @@ import (
 )
 
 const (
-	AgentEnv = "AGENT_PRESENCE_AGENT"
-	HumanEnv = "AGENT_PRESENCE_HUMAN"
-	RoomEnv  = "AGENT_PRESENCE_ROOM"
+	AgentEnv = "AGENT_SYNC_AGENT"
+	HumanEnv = "AGENT_SYNC_HUMAN"
+	RoomEnv  = "AGENT_SYNC_ROOM"
 
-	principalEnv  = "AGENT_PRESENCE_PRINCIPAL"
-	tokenEnv      = "AGENT_PRESENCE_TOKEN"
-	unattendedEnv = "AGENT_PRESENCE_UNATTENDED"
-	tokenRelpath  = "agent-presence/token"
+	principalEnv  = "AGENT_SYNC_PRINCIPAL"
+	tokenEnv      = "AGENT_SYNC_TOKEN"
+	unattendedEnv = "AGENT_SYNC_UNATTENDED"
+	tokenRelpath  = "agent-sync/token"
 
 	// maxTokenBytes: secrets.token_urlsafe(32) is 43 characters; this is
 	// orders of magnitude above that and still small enough that being
@@ -174,7 +174,7 @@ func LocalIdentityFromEnv() LocalIdentity {
 // DEFAULT_RELAY_URL — one name for "where the relay is" across the whole
 // system, not an MCP-specific one; cpp/daemon and presenced read the same
 // var.
-const RelayEnv = "AGENT_PRESENCE_RELAY"
+const RelayEnv = "AGENT_SYNC_RELAY"
 
 const DefaultRelayURL = "ws://127.0.0.1:8799"
 

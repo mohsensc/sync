@@ -29,7 +29,7 @@ const defaultPort = 8799
 //
 // It used to print and os.Exit(2) inline, which was a problem of ordering
 // rather than of policy: a flag default is evaluated where it is written,
-// before flag.Parse runs, so `AGENT_PRESENCE_PORT=abc gorelay --port 9000`
+// before flag.Parse runs, so `AGENT_SYNC_PORT=abc gorelay --port 9000`
 // died on the environment before it ever read the flag that was there to
 // override it. The flag's own help calls the env var the default, which
 // implies an explicit --port wins.
@@ -62,22 +62,22 @@ func explicitlySet(name string) bool {
 }
 
 func main() {
-	host := flag.String("host", envOr("AGENT_PRESENCE_HOST", defaultHost),
-		"interface to bind (env AGENT_PRESENCE_HOST). Traffic is unencrypted "+
+	host := flag.String("host", envOr("AGENT_SYNC_HOST", defaultHost),
+		"interface to bind (env AGENT_SYNC_HOST). Traffic is unencrypted "+
 			"unless --tls-cert/--tls-key are set; see docs/threat-model.md "+
 			"before binding anything but loopback.")
 	port := flag.Int("port", defaultPort,
-		"port to bind, 0 picks a free one (env AGENT_PRESENCE_PORT)")
-	tlsCert := flag.String("tls-cert", os.Getenv("AGENT_PRESENCE_TLS_CERT"),
-		"PEM certificate (env AGENT_PRESENCE_TLS_CERT). Terminates wss:// "+
+		"port to bind, 0 picks a free one (env AGENT_SYNC_PORT)")
+	tlsCert := flag.String("tls-cert", os.Getenv("AGENT_SYNC_TLS_CERT"),
+		"PEM certificate (env AGENT_SYNC_TLS_CERT). Terminates wss:// "+
 			"instead of ws:// when set together with --tls-key. Unset by "+
 			"default: plaintext ws:// on loopback needs nothing here. See "+
 			"docs/tls-dev-cert.md for a self-signed dev cert.")
-	tlsKey := flag.String("tls-key", os.Getenv("AGENT_PRESENCE_TLS_KEY"),
-		"private key matching --tls-cert (env AGENT_PRESENCE_TLS_KEY)")
-	metricsAddr := flag.String("metrics-addr", os.Getenv("AGENT_PRESENCE_METRICS_ADDR"),
-		"address to serve /metrics on (env AGENT_PRESENCE_METRICS_ADDR), e.g. "+
-			"127.0.0.1:9090. Unset by default: presenced and agent-presence-mcp "+
+	tlsKey := flag.String("tls-key", os.Getenv("AGENT_SYNC_TLS_KEY"),
+		"private key matching --tls-cert (env AGENT_SYNC_TLS_KEY)")
+	metricsAddr := flag.String("metrics-addr", os.Getenv("AGENT_SYNC_METRICS_ADDR"),
+		"address to serve /metrics on (env AGENT_SYNC_METRICS_ADDR), e.g. "+
+			"127.0.0.1:9090. Unset by default: presenced and agent-sync-mcp "+
 			"run on developer laptops Prometheus cannot reach, so this relay is "+
 			"the one place their counters (pushed up the connection they already "+
 			"hold — see internal/metrics's package doc) become scrapeable, and an "+
@@ -88,7 +88,7 @@ func main() {
 	// The env var supplies the default, so an explicit --port wins and a
 	// malformed env var is only fatal when nothing overrode it.
 	if !explicitlySet("port") {
-		n, set, err := envPort("AGENT_PRESENCE_PORT")
+		n, set, err := envPort("AGENT_SYNC_PORT")
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(2)

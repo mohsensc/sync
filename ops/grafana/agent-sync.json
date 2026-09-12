@@ -1,10 +1,10 @@
 {
   "id": null,
-  "uid": "agent-presence",
-  "title": "Agent Presence",
+  "uid": "agent-sync",
+  "title": "Agent Sync",
   "description": "Availability, latency against the hook's 5ms budget, ladder throughput, consistency (ways the system can lie to itself), and saturation.",
   "tags": [
-    "agent-presence"
+    "agent-sync"
   ],
   "timezone": "browser",
   "schemaVersion": 39,

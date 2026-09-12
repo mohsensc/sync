@@ -100,9 +100,9 @@ py_install() {
 
 py_pytest() {
   # The black-box relay suite spawns this binary, same as the old CI
-  # workflow's python job set AGENT_PRESENCE_GORELAY_BIN.
+  # workflow's python job set AGENT_SYNC_GORELAY_BIN.
   ( cd "$REPO/python" &&
-    AGENT_PRESENCE_GORELAY_BIN="$REPO/go/bin/gorelay" "$PY" -m pytest -q )
+    AGENT_SYNC_GORELAY_BIN="$REPO/go/bin/gorelay" "$PY" -m pytest -q )
 }
 
 py_test_preflight() {

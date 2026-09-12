@@ -68,12 +68,12 @@ class Daemon:
 
     def start(self) -> None:
         env = dict(os.environ)
-        env["AGENT_PRESENCE_SOCK"] = str(self.sock)
-        env["AGENT_PRESENCE_SNAPSHOT"] = str(self.dir / "d.json")
-        env["AGENT_PRESENCE_JOURNAL"] = str(self.dir / "d.jsonl")
+        env["AGENT_SYNC_SOCK"] = str(self.sock)
+        env["AGENT_SYNC_SNAPSHOT"] = str(self.dir / "d.json")
+        env["AGENT_SYNC_JOURNAL"] = str(self.dir / "d.jsonl")
         # Unroutable: the daemon's relay client fails to connect and keeps
         # retrying off the hot path, same as a laptop with no relay running.
-        env["AGENT_PRESENCE_RELAY"] = "ws://127.0.0.1:1"
+        env["AGENT_SYNC_RELAY"] = "ws://127.0.0.1:1"
         self.proc = subprocess.Popen(
             [str(PRESENCED)], env=env, cwd=self.dir,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -97,7 +97,7 @@ class Daemon:
 
 def run_hook_once(binary: Path, sock: Path, path: str, session: str) -> float:
     env = dict(os.environ)
-    env["AGENT_PRESENCE_SOCK"] = str(sock)
+    env["AGENT_SYNC_SOCK"] = str(sock)
     t0 = time.perf_counter()
     subprocess.run(
         [str(binary)], input=payload(path, session), env=env,

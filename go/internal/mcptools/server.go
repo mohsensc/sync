@@ -14,7 +14,7 @@ import (
 // argument becomes part of the tool's own reply (an unknown move, an
 // empty path) rather than a protocol-level error.
 func BuildServer(tools *Tools) *mcp.Server {
-	server := mcp.NewServer(&mcp.Implementation{Name: "agent-presence"}, nil)
+	server := mcp.NewServer(&mcp.Implementation{Name: "agent-sync"}, nil)
 	for _, d := range ToolDescriptors() {
 		name := d.Name
 		server.AddTool(&mcp.Tool{

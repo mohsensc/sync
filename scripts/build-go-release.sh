@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Cross-compiles presenced, agent-presence-mcp and gorelay for every target
+# Cross-compiles presenced, agent-sync-mcp and gorelay for every target
 # platform (#21, #32, #40). No cgo, so no per-target toolchain: one machine
 # with `go` on PATH produces all fifteen.
 set -euo pipefail
@@ -21,7 +21,7 @@ TARGETS=(
   "windows amd64"
 )
 
-BINARIES=(presenced agent-presence-mcp gorelay)
+BINARIES=(presenced agent-sync-mcp gorelay)
 
 cd "$ROOT/go"
 for t in "${TARGETS[@]}"; do

@@ -21,7 +21,7 @@ import json
 import re
 from pathlib import Path
 
-from agent_presence.policy import (
+from agent_sync.policy import (
     BUILTIN,
     BUILTIN_FLOOR,
     EFFECTS,
@@ -105,7 +105,7 @@ def test_both_halves_agree_on_where_the_compiled_cache_lives():
     keep matching."""
     main = (GO / "cmd" / "presenced" / "main.go").read_text()
 
-    sock = re.search(r'"AGENT_PRESENCE_SOCK",\s*runtime\+"/([^"]+)"', main)
+    sock = re.search(r'"AGENT_SYNC_SOCK",\s*runtime\+"/([^"]+)"', main)
     assert sock is not None, "cmd/presenced/main.go's default socket name moved"
     suffix = re.search(r'siblingPath\(sock, "(policy\.[^"]+)"\)', main)
     assert suffix is not None, "cmd/presenced/main.go stopped deriving the policy cache path"

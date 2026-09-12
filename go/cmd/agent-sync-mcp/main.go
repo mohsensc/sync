@@ -1,6 +1,6 @@
-// agent-presence-mcp serves the agent-presence MCP tools over stdio — the
-// Go port of python/src/agent_presence/mcp_server.py (#32). One process
-// per Claude Code session; `claude mcp add agent-presence -- <this binary>`
+// agent-sync-mcp serves the agent-sync MCP tools over stdio — the
+// Go port of python/src/agent_sync/mcp_server.py (#32). One process
+// per Claude Code session; `claude mcp add agent-sync -- <this binary>`
 // is the whole install.
 package main
 
@@ -23,21 +23,21 @@ func main() {
 }
 
 func run(args []string) int {
-	fs := flag.NewFlagSet("agent-presence-mcp", flag.ContinueOnError)
+	fs := flag.NewFlagSet("agent-sync-mcp", flag.ContinueOnError)
 	cwd := fs.String("cwd", "", "repo to derive room and human from (default: current directory)")
 	fs.StringVar(cwd, "C", "", "shorthand for -cwd")
 	room := fs.String("room", "", fmt.Sprintf("override the derived room id (env %s)", mcptools.RoomEnv))
 	agent := fs.String("agent", "", fmt.Sprintf("override the session id (env %s)", mcptools.AgentEnv))
 	human := fs.String("human", "", fmt.Sprintf("override the name from git config user.email (env %s)", mcptools.HumanEnv))
 	relayURL := fs.String("relay", "", fmt.Sprintf("relay url to connect to (env %s, default %s)", mcptools.RelayEnv, mcptools.DefaultRelayURL))
-	logLevel := fs.String("log-level", envOr("AGENT_PRESENCE_LOG_LEVEL", "INFO"), "log level (env AGENT_PRESENCE_LOG_LEVEL, default INFO)")
+	logLevel := fs.String("log-level", envOr("AGENT_SYNC_LOG_LEVEL", "INFO"), "log level (env AGENT_SYNC_LOG_LEVEL, default INFO)")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 
 	if !validLogLevel(*logLevel) {
-		fmt.Fprintf(os.Stderr, "agent-presence-mcp: unknown log level %q\n", *logLevel)
+		fmt.Fprintf(os.Stderr, "agent-sync-mcp: unknown log level %q\n", *logLevel)
 		return 2
 	}
 
@@ -63,7 +63,7 @@ func run(args []string) int {
 	if workdir == "" {
 		wd, err := os.Getwd()
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "agent-presence-mcp: cannot read cwd:", err)
+			fmt.Fprintln(os.Stderr, "agent-sync-mcp: cannot read cwd:", err)
 			return 1
 		}
 		workdir = wd
@@ -87,7 +87,7 @@ func run(args []string) int {
 	defer stop()
 
 	if err := mcptools.RunStdio(ctx, tools); err != nil && ctx.Err() == nil {
-		fmt.Fprintln(os.Stderr, "agent-presence-mcp:", err)
+		fmt.Fprintln(os.Stderr, "agent-sync-mcp:", err)
 		return 1
 	}
 	return 0

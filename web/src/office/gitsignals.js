@@ -60,6 +60,15 @@ export function shortlogToOwner(data) {
   return top && top.author ? top.author : null
 }
 
+/** {ok:true, owners:[...]} -> true when the shortlog is a single deduped
+ *  author, false otherwise (including "no signal") — the fact zones.js
+ *  needs to pick "all <name>" over "mostly <name>". See zoneowner.js's
+ *  ownerLine for the same distinction on the rug/plaque surface; this is
+ *  the paired half so both surfaces agree without one importing the other. */
+export function shortlogIsSole(data) {
+  return !!(data && data.ok === true && Array.isArray(data.owners) && data.owners.length === 1)
+}
+
 const num = n => (typeof n === 'number' && Number.isFinite(n) ? n : 0)
 
 /** {ok:true, recent:{commits,added,deleted,windowDays}, working:{added,deleted}}
@@ -108,7 +117,11 @@ export function churnToIntensity(data) {
 // rides that instead. See attachGitSignals's own tick(dt) below.
 // ---------------------------------------------------------------------
 
-export const CHURN_MODES = ['stack', 'heat', 'cold']
+// 'heat-loud' is the same signal as 'heat' through a bigger, brighter
+// dressing.js deskHeat() render — see that file's set(intensity, loud) —
+// so the room can show a subtle pass and an unmistakable one back to
+// back rather than picking one and hoping it lands.
+export const CHURN_MODES = ['stack', 'heat', 'heat-loud', 'cold']
 
 function initialChurnMode() {
   try {
@@ -129,12 +142,33 @@ const STALE_CEIL_DAYS = 365
 
 /** ageDays -> 0..1 "how abandoned does this feel", for the 'cold'
  *  treatment. Pure, same "no signal reads as 0, not NaN" contract as
- *  churnToIntensity/freshnessBucket. */
-export function staleToIntensity(ageDays) {
+ *  churnToIntensity/freshnessBucket. floorDays/ceilDays default to the
+ *  real 60/365-day thresholds but are overridable — see `?coldDays=`
+ *  below: the age itself always stays real git data, only the
+ *  presentation cutoff moves, so a young repo can still demo the
+ *  treatment without faking history. */
+export function staleToIntensity(ageDays, floorDays = STALE_FLOOR_DAYS, ceilDays = STALE_CEIL_DAYS) {
   if (ageDays == null || !Number.isFinite(ageDays) || ageDays < 0) return 0
-  if (ageDays <= STALE_FLOOR_DAYS) return 0
-  if (ageDays >= STALE_CEIL_DAYS) return 1
-  return (ageDays - STALE_FLOOR_DAYS) / (STALE_CEIL_DAYS - STALE_FLOOR_DAYS)
+  if (ageDays <= floorDays) return 0
+  if (ageDays >= ceilDays) return 1
+  return (ageDays - floorDays) / (ceilDays - floorDays)
+}
+
+// `?coldDays=N` moves the cold treatment's floor to N days (ceiling scales
+// with it, keeping the same floor:ceiling ratio as the real 60:365
+// thresholds) so the treatment has something to show on a repo that isn't
+// old enough yet for the real 60-day floor to ever trip. Absent or
+// non-positive: real thresholds, unchanged.
+function initialColdThresholds() {
+  try {
+    const v = Number(new URLSearchParams(location.search).get('coldDays'))
+    if (Number.isFinite(v) && v > 0) {
+      return { floor: v, ceil: v * (STALE_CEIL_DAYS / STALE_FLOOR_DAYS) }
+    }
+  } catch {
+    // no `location` outside a browser
+  }
+  return { floor: STALE_FLOOR_DAYS, ceil: STALE_CEIL_DAYS }
 }
 
 /**
@@ -156,6 +190,7 @@ export function attachGitSignals({ world, zones, ownership, fetchFn = fetch, int
   // -- churn-vis: desk-level 'heat'/'cold' treatments, see the comment
   // above staleToIntensity for what they are and why they live here.
   let churnMode = initialChurnMode()
+  const coldThresholds = initialColdThresholds()
   const fxByAgent = new Map()   // agent -> { heat, cold } (dressing.js instances)
   const gitByAgent = new Map()  // agent -> { ageDays, intensity } — last known, for reapplying on a mode switch
 
@@ -188,10 +223,11 @@ export function attachGitSignals({ world, zones, ownership, fetchFn = fetch, int
     const st = stateFor(a)
     const fx = fxFor(a)
     if (!fx) return
-    if (churnMode === 'heat') {
+    if (churnMode === 'heat' || churnMode === 'heat-loud') {
+      fx.heat.setLoud?.(churnMode === 'heat-loud')
       fx.heat.set(st.intensity); fx.cold.set(0)
     } else if (churnMode === 'cold') {
-      fx.heat.set(0); fx.cold.set(staleToIntensity(st.ageDays))
+      fx.heat.set(0); fx.cold.set(staleToIntensity(st.ageDays, coldThresholds.floor, coldThresholds.ceil))
     } else {
       fx.heat.set(0); fx.cold.set(0) // 'stack' — agent.js's own paper stack carries this signal
     }
@@ -264,15 +300,16 @@ export function attachGitSignals({ world, zones, ownership, fetchFn = fetch, int
   async function pollZone(zoneName, dir) {
     const cached = ownerCache.get(dir)
     if (cached && Date.now() - cached.t < intervalMs * 3) {
-      if (cached.owner) zones.setOwner?.(zoneName, cached.owner)
+      if (cached.owner) zones.setOwner?.(zoneName, cached.owner, cached.sole)
       ownership?.set?.(zoneName, cached.data)
       return
     }
     try {
       const data = await getJson(`/api/git/shortlog?dir=${encodeURIComponent(dir)}`)
       const owner = shortlogToOwner(data)
-      ownerCache.set(dir, { t: Date.now(), owner, data })
-      if (owner) zones.setOwner?.(zoneName, owner)
+      const sole = shortlogIsSole(data)
+      ownerCache.set(dir, { t: Date.now(), owner, sole, data })
+      if (owner) zones.setOwner?.(zoneName, owner, sole)
       // `ownership` gets the whole body (shares, runner-up, author count),
       // not just the top name zones.setOwner wants — zoneowner.js's
       // pickOwnership() is what turns that into plaque/rug/flourish
@@ -321,7 +358,7 @@ export function attachGitSignals({ world, zones, ownership, fetchFn = fetch, int
   poll()
   const timer = setInterval(() => { poll() }, intervalMs)
 
-  // 'C' cycles stack -> heat -> cold -> stack. Re-renders every known
+  // 'C' cycles stack -> heat -> heat-loud -> cold -> stack. Re-renders every known
   // agent immediately from its last-known numbers rather than waiting
   // for the next poll, so the switch reads instantly.
   function setChurnMode(mode) {

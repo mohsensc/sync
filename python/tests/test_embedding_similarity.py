@@ -11,9 +11,9 @@ import pytest
 
 pytest.importorskip("fastembed", reason="pip install -e '.[dev,embedding]'")
 
-from agent_presence import embedding_similarity
-from agent_presence.embedding_similarity import EmbeddingSimilarity
-from agent_presence.similarity import (
+from agent_sync import embedding_similarity
+from agent_sync.embedding_similarity import EmbeddingSimilarity
+from agent_sync.similarity import (
     BACKEND_ENV,
     IntentSimilarity,
     LexicalSimilarity,

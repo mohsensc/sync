@@ -31,17 +31,22 @@ export interface GitChurnBody {
 
 export function statToAgeDays(data: GitStatBody | null | undefined): number | null
 export function shortlogToOwner(data: GitShortlogBody | null | undefined): string | null
+/** True only for an exactly-one-author shortlog — the "all <name>" vs
+ *  "mostly <name>" fork zones.js and zoneowner.js both key off of. */
+export function shortlogIsSole(data: GitShortlogBody | null | undefined): boolean
 export function churnToIntensity(data: GitChurnBody | null | undefined): number | null
 
-/** The three churn-vis treatments cycled by the 'C' key / ?churnMode= —
- *  see attachGitSignals's own comment for what each one looks like. */
-export const CHURN_MODES: readonly ['stack', 'heat', 'cold']
+/** The four churn-vis treatments cycled by the 'C' key / ?churnMode= —
+ *  see attachGitSignals's own comment for what each one looks like.
+ *  'heat-loud' is 'heat' through a bigger, brighter render. */
+export const CHURN_MODES: readonly ['stack', 'heat', 'heat-loud', 'cold']
 export type ChurnMode = (typeof CHURN_MODES)[number]
 
 /** ageDays -> 0..1 "how abandoned does this feel", for the 'cold' churn
  *  treatment (dust/cobweb). 0 below the fresh floor, 1 at/above the
- *  ancient ceiling, linear between. */
-export function staleToIntensity(ageDays: number | null | undefined): number
+ *  ancient ceiling, linear between. floorDays/ceilDays default to the
+ *  real 60/365-day thresholds but are overridable — see `?coldDays=`. */
+export function staleToIntensity(ageDays: number | null | undefined, floorDays?: number, ceilDays?: number): number
 
 export interface AttachGitSignalsOptions {
   world: { agents: Array<{
@@ -55,7 +60,7 @@ export interface AttachGitSignalsOptions {
     root?: { add: (...o: unknown[]) => unknown; remove: (...o: unknown[]) => unknown }
     scale?: number
   }> }
-  zones: { setOwner?: (zoneName: string, owner: string) => void }
+  zones: { setOwner?: (zoneName: string, owner: string, sole?: boolean) => void }
   /** Optional sink for the full shortlog body per zone (shares, runner-up),
    *  not just the top name `zones.setOwner` gets. See zoneowner.js. */
   ownership?: { set?: (zoneName: string, data: GitShortlogBody | null | undefined) => void }

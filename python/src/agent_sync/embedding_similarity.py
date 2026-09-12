@@ -2,11 +2,11 @@
 
 Registers itself as "embedding" against the seam `similarity.py` describes.
 Nothing in the default install imports this module - `similarity.py`'s
-`default_similarity()` only reaches for it when `AGENT_PRESENCE_SIMILARITY`
+`default_similarity()` only reaches for it when `AGENT_SYNC_SIMILARITY`
 is actually set to "embedding" - so `fastembed` and its dependencies never
 land on a machine that hasn't asked for them. Requires the optional extra:
 
-    pip install 'agent-presence[embedding]'
+    pip install 'agent-sync[embedding]'
 
 ## What this is
 
@@ -73,7 +73,7 @@ corpus is supposed to catch, done to itself:
   entity-sensitive paraphrase rather than general STS - might not share this
   failure mode. Untested and out of scope here.
 
-If `AGENT_PRESENCE_SIMILARITY=embedding` is set anyway, `AGENT_PRESENCE_RUNG4_THRESHOLD`
+If `AGENT_SYNC_SIMILARITY=embedding` is set anyway, `AGENT_SYNC_RUNG4_THRESHOLD`
 still applies (it's a ladder-level setting, not per-backend) and 0.82 was
 tuned for the lexical backend's score distribution, not this one - expect to
 need a different value, and treat whatever you pick as provisional until it
@@ -97,7 +97,7 @@ from fastembed import TextEmbedding
 
 from .similarity import register_backend
 
-log = logging.getLogger("agent_presence.embedding_similarity")
+log = logging.getLogger("agent_sync.embedding_similarity")
 
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 
@@ -136,7 +136,7 @@ class EmbeddingSimilarity:
     symmetric, empty/whitespace input scores 0.0, never raises. A model load
     or inference failure - no network on first use, a corrupt cache, an
     unsupported platform - is caught and scored 0.0 rather than taking the
-    relay down; this sits behind AGENT_PRESENCE_RUNG4, a path that must fail
+    relay down; this sits behind AGENT_SYNC_RUNG4, a path that must fail
     open. See the module docstring for what this backend does and does not
     buy over the lexical one, measured rather than assumed.
     """

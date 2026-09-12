@@ -7,8 +7,8 @@ import pathlib
 import pytest
 from hypothesis import given, settings, strategies as st
 
-from agent_presence.clock import VirtualClock
-from agent_presence.policy import (
+from agent_sync.clock import VirtualClock
+from agent_sync.policy import (
     BUILTIN,
     BUILTIN_FLOOR,
     EFFECTS,
@@ -63,7 +63,7 @@ def test_an_empty_config_file_changes_nothing():
 
 
 def test_rung_4_defaults_to_context_because_the_env_flag_is_the_off_switch():
-    # Rung 4 shipped (AGENT_PRESENCE_RUNG4) after this table was written, and it
+    # Rung 4 shipped (AGENT_SYNC_RUNG4) after this table was written, and it
     # arrived with its own off switch. Two off switches would mean setting the
     # flag and getting silence with nothing to say why, so the flag decides
     # whether rung 4 runs and the effect decides how loudly a hit is reported.
@@ -134,7 +134,7 @@ def test_one_bad_key_leaves_the_rest_of_the_file_working():
 def test_a_bad_file_is_logged_not_swallowed(caplog, tmp_path, monkeypatch):
     bad = tmp_path / "policy.toml"
     bad.write_text('[effects]\nrung3 = "explode"\n')
-    monkeypatch.setenv("AGENT_PRESENCE_ORG_POLICY", str(bad))
+    monkeypatch.setenv("AGENT_SYNC_ORG_POLICY", str(bad))
     with caplog.at_level(logging.WARNING):
         policy = discover(include=("builtin", "org"))
     assert policy.degraded
@@ -508,12 +508,12 @@ def test_writing_the_cache_leaves_no_temp_files_behind(tmp_path):
 
 def test_the_cache_path_follows_xdg_runtime_dir():
     assert runtime_cache_path({"XDG_RUNTIME_DIR": "/run/user/1000"}) == pathlib.Path(
-        "/run/user/1000/agent-presence.policy.json"
+        "/run/user/1000/agent-sync.policy.json"
     )
 
 
 def test_the_cache_path_still_has_somewhere_to_go_with_no_xdg_runtime_dir():
-    assert runtime_cache_path({}).name == "agent-presence.policy.json"
+    assert runtime_cache_path({}).name == "agent-sync.policy.json"
 
 
 def test_the_digest_moves_when_a_rule_changes_and_not_otherwise():
@@ -529,13 +529,13 @@ def test_the_digest_moves_when_a_rule_changes_and_not_otherwise():
 
 def test_discover_reads_each_layer_from_its_documented_place(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
-    (repo / ".agent-presence").mkdir(parents=True)
-    (repo / ".agent-presence" / "policy.toml").write_text(
+    (repo / ".agent-sync").mkdir(parents=True)
+    (repo / ".agent-sync" / "policy.toml").write_text(
         '[effects]\nrung1 = "ask"\n'
     )
     config = tmp_path / "config"
-    (config / "agent-presence").mkdir(parents=True)
-    (config / "agent-presence" / "policy.toml").write_text(
+    (config / "agent-sync").mkdir(parents=True)
+    (config / "agent-sync" / "policy.toml").write_text(
         '[effects]\nrung2 = "ask"\n'
     )
     session = tmp_path / "session.toml"
@@ -545,7 +545,7 @@ def test_discover_reads_each_layer_from_its_documented_place(tmp_path, monkeypat
         str(repo),
         env={
             "XDG_CONFIG_HOME": str(config),
-            "AGENT_PRESENCE_POLICY": str(session),
+            "AGENT_SYNC_POLICY": str(session),
         },
     )
     assert policy.resolve(1, ANY).winning_layer == "repo"
@@ -559,8 +559,8 @@ def test_a_session_env_var_beats_the_session_file(tmp_path):
     policy = discover(
         str(tmp_path),
         env={
-            "AGENT_PRESENCE_POLICY": str(session),
-            "AGENT_PRESENCE_POLICY_RUNG3": "ask",
+            "AGENT_SYNC_POLICY": str(session),
+            "AGENT_SYNC_POLICY_RUNG3": "ask",
             "XDG_CONFIG_HOME": str(tmp_path / "nothing"),
         },
     )
@@ -571,7 +571,7 @@ def test_a_session_env_var_works_with_no_session_file(tmp_path):
     policy = discover(
         str(tmp_path),
         env={
-            "AGENT_PRESENCE_POLICY_RUNG2": "ask",
+            "AGENT_SYNC_POLICY_RUNG2": "ask",
             "XDG_CONFIG_HOME": str(tmp_path / "nothing"),
         },
     )
@@ -582,7 +582,7 @@ def test_a_bad_session_env_var_is_reported_not_obeyed(tmp_path):
     policy = discover(
         str(tmp_path),
         env={
-            "AGENT_PRESENCE_POLICY_RUNG2": "explode",
+            "AGENT_SYNC_POLICY_RUNG2": "explode",
             "XDG_CONFIG_HOME": str(tmp_path / "nothing"),
         },
     )
@@ -667,7 +667,7 @@ def test_the_relay_stack_is_builtin_plus_org_only(tmp_path):
     org.write_text('[floor]\nrung2 = "context"\n')
     policy = discover(
         str(tmp_path),
-        env={"AGENT_PRESENCE_ORG_POLICY": str(org)},
+        env={"AGENT_SYNC_ORG_POLICY": str(org)},
         include=("builtin", "org"),
     )
     assert {layer.name for layer in policy.layers} == {"builtin", "org"}
@@ -702,7 +702,7 @@ rung3 = "silent"
 def test_a_leading_double_star_is_not_a_penalty():
     # `**/pay.py` and `pay.py` are equally specific about the only thing that
     # decides a match here, so they tie and warn rather than one silently losing.
-    from agent_presence.policy import Rule
+    from agent_sync.policy import Rule
 
     def rule(match: str) -> Rule:
         return Rule(match=match, effects={}, is_floor=False, order=0)
@@ -840,7 +840,7 @@ def test_an_absolute_path_outside_the_rule_is_still_untouched():
 
 
 def test_a_caller_that_knows_the_checkout_root_can_say_so():
-    from agent_presence.policy import normalize_path
+    from agent_sync.policy import normalize_path
 
     assert normalize_path(
         "/Users/sara/work/myrepo/src/pay.py", root="/Users/sara/work/myrepo"

@@ -2,10 +2,10 @@
 
 Generated. Not checked in.
 
-Each `<os>-<arch>/` here is one `@agent-presence/<os>-<arch>` package: a
+Each `<os>-<arch>/` here is one `@agent-sync/<os>-<arch>` package: a
 `package.json` with the matching `os`/`cpu` fields (that's what makes npm
 pick the right one) and a `bin/` full of prebuilt binaries. The
-`agent-presence` wrapper in `npm/agent-presence` lists all five as
+`agent-sync` wrapper in `npm/agent-sync` lists all five as
 `optionalDependencies`; npm installs only the one that matches the machine.
 
 Regenerate with:
@@ -16,7 +16,7 @@ scripts/build-npm-packages.sh --pack   # also npm pack everything into dist-npm/
 ```
 
 The version is never set here by hand — it's read from
-`npm/agent-presence/package.json` and stamped onto every platform package,
+`npm/agent-sync/package.json` and stamped onto every platform package,
 so the wrapper's pinned `optionalDependencies` versions can't drift from
 what's actually in these folders.
 

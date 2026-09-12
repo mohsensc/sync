@@ -54,8 +54,8 @@ def journal_path(env: Mapping[str, str] | None = None) -> Path:
     """Same rule as the snapshot and the socket: derive it from the socket,
     let one var move it.
 
-    `$AGENT_PRESENCE_JOURNAL` has to be read here as well as in the daemon,
-    and so does `$AGENT_PRESENCE_SOCK` (see paths.py, ported from main.go's
+    `$AGENT_SYNC_JOURNAL` has to be read here as well as in the daemon,
+    and so does `$AGENT_SYNC_SOCK` (see paths.py, ported from main.go's
     siblingPath) — two presenced sharing an XDG_RUNTIME_DIR is the normal
     way to run one per repo, and a reader that derives the journal from a
     fixed name instead of the socket reads the other repo's file.

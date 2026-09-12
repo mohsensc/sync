@@ -6,7 +6,7 @@ import (
 )
 
 // Priority tiers. Four names, not an open integer range — see
-// python/src/agent_presence/priority.py for why. Kept as the same four
+// python/src/agent_sync/priority.py for why. Kept as the same four
 // names and the same integer values so a tier stamped by one language's
 // relay means the same thing to the other's daemon.
 const (

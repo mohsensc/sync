@@ -14,7 +14,7 @@ import os
 
 import pytest
 
-from agent_presence import policy_edit
+from agent_sync import policy_edit
 
 
 def test_atomic_write_creates_a_new_file_with_the_default_mode(tmp_path):

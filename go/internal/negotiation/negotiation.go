@@ -1,5 +1,5 @@
 // Package negotiation is the client-side sliver of
-// python/src/agent_presence/negotiation.py the MCP tool surface needs: the
+// python/src/agent_sync/negotiation.py the MCP tool surface needs: the
 // four moves and how to fold a client-supplied spelling to one of them. The
 // rest of negotiation.py — Negotiator, Brief, wait-die — is relay-side and
 // stays Python; this package only has to agree with it on vocabulary.

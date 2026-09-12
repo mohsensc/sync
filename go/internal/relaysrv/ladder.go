@@ -29,7 +29,7 @@ type Redundancy struct {
 // against the incoming agent's own declaration, in a *different* file.
 // Mirrors ladder.py's redundant_peer exactly, including all four gates —
 // see there for why each one is a refusal rather than a judgment call.
-// Ported as-is, off by default (AGENT_PRESENCE_RUNG4 unset); a separate
+// Ported as-is, off by default (AGENT_SYNC_RUNG4 unset); a separate
 // track (#15) owns improving the scorer, not this port.
 func redundantPeer(incoming AgentEvent, others []Activity, intent string) *Redundancy {
 	if !rung4Enabled() {
@@ -65,7 +65,7 @@ func redundantPeer(incoming AgentEvent, others []Activity, intent string) *Redun
 // Classify returns the highest rung the incoming event reaches against
 // everyone else in `others`. Mirrors ladder.classify: rungs 0-3 are
 // region overlap and always live; rung 4 is declared-intent similarity
-// across different paths, gated by AGENT_PRESENCE_RUNG4 (off by default,
+// across different paths, gated by AGENT_SYNC_RUNG4 (off by default,
 // see redundantPeer).
 func Classify(incoming AgentEvent, others []Activity, intent string) int {
 	highest := 0

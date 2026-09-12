@@ -1,8 +1,8 @@
-# Agent Presence — Design
+# Agent Sync — Design
 
 **Date:** 2026-08-06
 **Status:** Design approved, ready for implementation planning
-**Working title:** Agent Presence (product name not yet chosen; slug `agent-presence` used throughout)
+**Working title:** Agent Sync (product name not yet chosen; slug `agent-sync` used throughout)
 
 ## Thesis
 
@@ -142,7 +142,7 @@ Renewals are unbounded only while nobody else wants the region. The moment someb
 
 **Opaque mode** (org-level toggle): paths are hashed client-side before leaving the machine. The relay still detects collisions and arbitrates leases, because collision detection is equality on region keys and works identically on hashed input. The dashboard renders anonymized shapes. Readability is lost; function is not.
 
-The toggle is a real flag, not a spare function nobody calls: set `AGENT_PRESENCE_OPAQUE=1` (`true`, `yes`, `on` also count) and every path and symbol is hashed on the way out — the redaction pass, the MCP claim tools, and the last hop before the wire. It's read per call, so flipping it doesn't need a restart. Both channels have to hash the same way or the lease table splits in two, so MCP claims run through the same helper the hook path does. A region that's already hashed carries a marker and isn't hashed twice.
+The toggle is a real flag, not a spare function nobody calls: set `AGENT_SYNC_OPAQUE=1` (`true`, `yes`, `on` also count) and every path and symbol is hashed on the way out — the redaction pass, the MCP claim tools, and the last hop before the wire. It's read per call, so flipping it doesn't need a restart. Both channels have to hash the same way or the lease table splits in two, so MCP claims run through the same helper the hook path does. A region that's already hashed carries a marker and isn't hashed twice.
 
 **Retention:** rooms are ephemeral. Events TTL out; nothing is written to durable storage in v1.
 

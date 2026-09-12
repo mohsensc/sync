@@ -2,7 +2,7 @@ import re
 
 import pytest
 
-from agent_presence.room_key import normalize_remote, room_id_from_remote
+from agent_sync.room_key import normalize_remote, room_id_from_remote
 
 # The full ssh/https/.git/case/trailing-slash matrix from docs/design.md. Every
 # one of these is the same repo, so every one of these has to be one room.

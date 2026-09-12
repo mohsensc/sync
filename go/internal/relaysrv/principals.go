@@ -16,9 +16,9 @@ import (
 
 const (
 	rosterVersion = 1
-	rosterEnv     = "AGENT_PRESENCE_PRINCIPALS"
-	rosterRelPath = ".agent-presence/principals.toml"
-	repoRootEnv   = "AGENT_PRESENCE_REPO_ROOT"
+	rosterEnv     = "AGENT_SYNC_PRINCIPALS"
+	rosterRelPath = ".agent-sync/principals.toml"
+	repoRootEnv   = "AGENT_SYNC_REPO_ROOT"
 )
 
 var hex64 = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -347,7 +347,7 @@ func (r Roster) Authenticate(principal, token string) Grant {
 	return Grant{Principal: entry.ID, Attended: entry.Attended, Unattended: entry.Unattended, Reason: ReasonRoster}
 }
 
-// FindRoster is the nearest .agent-presence/principals.toml at or above
+// FindRoster is the nearest .agent-sync/principals.toml at or above
 // start, stopping at the checkout root (a directory holding .git).
 // Mirrors principals.py's find_roster.
 func FindRoster(start string) string {
@@ -372,8 +372,8 @@ func FindRoster(start string) string {
 	}
 }
 
-// DiscoverRoster is the roster for a checkout: $AGENT_PRESENCE_PRINCIPALS,
-// else $AGENT_PRESENCE_REPO_ROOT, else the nearest one at or above the
+// DiscoverRoster is the roster for a checkout: $AGENT_SYNC_PRINCIPALS,
+// else $AGENT_SYNC_REPO_ROOT, else the nearest one at or above the
 // working directory. Mirrors principals.py's Roster.discover.
 func DiscoverRoster() Roster {
 	if override := os.Getenv(rosterEnv); override != "" {

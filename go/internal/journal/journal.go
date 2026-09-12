@@ -1,7 +1,7 @@
 // Package journal is the writer behind `ap why` — the Go mirror of
-// cpp/daemon/journal.{hpp,cpp}. python/src/agent_presence/journal.py is the
+// cpp/daemon/journal.{hpp,cpp}. python/src/agent_sync/journal.py is the
 // reader and is unchanged: one JSON object per line, oldest first, in
-// $XDG_RUNTIME_DIR/agent-presence.decisions.jsonl, tolerant of a torn last
+// $XDG_RUNTIME_DIR/agent-sync.decisions.jsonl, tolerant of a torn last
 // line because the writer may be mid-rewrite.
 //
 // Concurrency shape is deliberately not a port of the C++ locking (see
@@ -46,7 +46,7 @@ const TrimRetryLines = 200
 const maxTrimReadBytes = 8 * 1024 * 1024
 
 // Record is one line `ap why` reads. Field names match
-// python/src/agent_presence/journal.py's DecisionRecord exactly; JSON
+// python/src/agent_sync/journal.py's DecisionRecord exactly; JSON
 // object keys, not position, are what the reader depends on.
 type Record struct {
 	AtMs   int64  `json:"at_ms"`

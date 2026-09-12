@@ -452,13 +452,13 @@ std::string join_path(std::string dir, const char* leaf) {
 }  // namespace
 
 std::string resolve_sock_path(EnvLookup lookup) {
-    const char* sock = lookup("AGENT_PRESENCE_SOCK");
+    const char* sock = lookup("AGENT_SYNC_SOCK");
     if (env_set(sock)) return sock;
     const char* rt = lookup("XDG_RUNTIME_DIR");
-    if (env_set(rt)) return join_path(rt, "agent-presence.sock");
+    if (env_set(rt)) return join_path(rt, "agent-sync.sock");
     const char* tmp = lookup("TMPDIR");
-    if (env_set(tmp)) return join_path(tmp, "agent-presence.sock");
-    return "/tmp/agent-presence.sock";
+    if (env_set(tmp)) return join_path(tmp, "agent-sync.sock");
+    return "/tmp/agent-sync.sock";
 }
 
 // path_of is the edited file, whichever key the tool spells it under.
@@ -636,7 +636,7 @@ std::string blocked_message(const Decision& d, const std::string& where) {
 
     // The daemon's word first. Its `handover_to` is a relay agent id and
     // `d.agent` is a Claude Code session id, so the comparison below is only
-    // ever true when somebody has set AGENT_PRESENCE_AGENT to the session id by
+    // ever true when somebody has set AGENT_SYNC_AGENT to the session id by
     // hand. Kept anyway: a daemon from before the flag existed sends no flag.
     const bool queued_for_me =
         d.handover_to_me || (!d.handover_to.empty() && d.handover_to == d.agent);

@@ -1,4 +1,4 @@
-"""`ap` — the terminal surface for agent-presence.
+"""`ap` — the terminal surface for agent-sync.
 
 No slash commands and no TUI, on purpose. A TUI is for exploring and for
 per-session tweaking, and there is nothing to watch at 3am while the agents
@@ -51,9 +51,9 @@ from .priority import PRIORITY_NAMES, name_of, parse_priority
 
 OK, PROBLEM, USAGE = 0, 1, 2
 
-REPO_ENV = "AGENT_PRESENCE_REPO_ROOT"
-ROSTER_ENV = "AGENT_PRESENCE_PRINCIPALS"
-ROSTER_RELPATH = ".agent-presence/principals.toml"
+REPO_ENV = "AGENT_SYNC_REPO_ROOT"
+ROSTER_ENV = "AGENT_SYNC_PRINCIPALS"
+ROSTER_RELPATH = ".agent-sync/principals.toml"
 
 # Every layer, for looking at. `compile` deliberately uses a shorter list: the
 # org floor reaches the daemon from the relay, not from a file on this disk.
@@ -158,7 +158,7 @@ class Out:
 
 
 def find_repo_root(start: Path, env: Mapping[str, str]) -> Path | None:
-    """`$AGENT_PRESENCE_REPO_ROOT`, else the nearest ancestor holding `.git`.
+    """`$AGENT_SYNC_REPO_ROOT`, else the nearest ancestor holding `.git`.
 
     No subprocess. `ap` gets run from prompts and hooks; shelling out to git to
     answer something three stat calls can answer is latency paid every time.
@@ -221,7 +221,7 @@ class Context:
     def unattended(self, flag: bool = False) -> bool:
         """Whether this run has a human on the other end of an `ask`.
 
-        `--unattended` forces it on and `$AGENT_PRESENCE_UNATTENDED` turns it
+        `--unattended` forces it on and `$AGENT_SYNC_UNATTENDED` turns it
         on, and the env var is the one that matters: the case the promotion
         exists for is an agent launched by a script, and a script does not pass
         `ap` a flag. Only the flag was read before, so the exec path — the
@@ -239,7 +239,7 @@ class Context:
         return Path(base)
 
     def snapshot_path(self) -> Path:
-        """$AGENT_PRESENCE_SNAPSHOT if set, else the socket's sibling — see
+        """$AGENT_SYNC_SNAPSHOT if set, else the socket's sibling — see
         paths.py, ported from main.go's siblingPath. Two presenced sharing
         one runtime dir need their own snapshot the same way they already
         need their own socket."""
@@ -709,7 +709,7 @@ def cmd_policy_path(ctx: Context) -> int:
             out.error("not inside a git repo, so there is no repo layer")
         else:
             out.error("no session policy file; "
-                      "point $AGENT_PRESENCE_POLICY at one first")
+                      "point $AGENT_SYNC_POLICY at one first")
         return PROBLEM
     out.say(str(path))
     return OK
@@ -735,7 +735,7 @@ def _writable_layer(ctx: Context, name: str) -> Path | None:
         ctx.out.error("not inside a git repo, so there is no repo layer to write")
     else:
         ctx.out.error("the session layer has no file; "
-                      "point $AGENT_PRESENCE_POLICY at a path first")
+                      "point $AGENT_SYNC_POLICY at a path first")
     return None
 
 
@@ -1260,7 +1260,7 @@ def cmd_principals_add(ctx: Context) -> int:
     out.say(ink.dim(
         f"  Printed once. Put it in {principals_mod.token_path(ctx.env)} "
         "(chmod 600),\n"
-        "  or $AGENT_PRESENCE_TOKEN, on the machine that runs as this\n"
+        "  or $AGENT_SYNC_TOKEN, on the machine that runs as this\n"
         "  principal. Whoever can read that file is this principal."))
     return OK
 
@@ -1550,7 +1550,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ap",
         description=(
-            "agent-presence from the terminal. The policy file is the state and "
+            "agent-sync from the terminal. The policy file is the state and "
             "these are the verbs. Saved is applied; nothing needs restarting."
         ),
         epilog=(
@@ -1642,7 +1642,7 @@ def build_parser() -> argparse.ArgumentParser:
     compile_cmd.add_argument("--unattended", action="store_true",
                              help="compile for a run with nobody to ask, where "
                                   "ask becomes deny. On anyway when "
-                                  "$AGENT_PRESENCE_UNATTENDED is set")
+                                  "$AGENT_SYNC_UNATTENDED is set")
     _add_json(compile_cmd)
     compile_cmd.set_defaults(run=cmd_policy_compile)
 
@@ -1716,7 +1716,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     # The loaders log every problem they find, and this tool's whole job is to
     # print those problems properly. Two copies of the same line, one of them
     # unformatted on stderr, is worse than one. -v puts them back.
-    lib = logging.getLogger("agent_presence")
+    lib = logging.getLogger("agent_sync")
     if args.verbose:
         logging.basicConfig(level=logging.INFO, stream=sys.stderr,
                             format="ap: %(name)s: %(message)s")

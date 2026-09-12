@@ -1,5 +1,5 @@
 # Scrapes gorelay's /metrics. Nothing else in this system is scrapable —
-# presenced and agent-presence-mcp push a stats frame up the websocket they
+# presenced and agent-sync-mcp push a stats frame up the websocket they
 # already hold instead of exposing an endpoint, because a laptop behind NAT
 # can't be scraped and shouldn't grow a new network path just to be. See
 # docs/monitoring.md for why, and go/internal/metrics for the catalogue.

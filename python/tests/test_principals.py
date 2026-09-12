@@ -5,7 +5,7 @@ import logging
 import pytest
 from hypothesis import given, settings, strategies as st
 
-from agent_presence.principals import (
+from agent_sync.principals import (
     Grant,
     Principal,
     Roster,
@@ -15,7 +15,7 @@ from agent_presence.principals import (
     read_token,
     token_path,
 )
-from agent_presence.priority import (
+from agent_sync.priority import (
     PRIORITY_MAX,
     PRIORITY_MIN,
     PRIORITY_NAMES,
@@ -372,13 +372,13 @@ def test_claiming_unattended_only_reaches_the_top_of_your_own_band(roster):
 def test_discover_prefers_the_env_override(tmp_path, monkeypatch):
     path = tmp_path / "principals.toml"
     path.write_text(roster_text())
-    monkeypatch.setenv("AGENT_PRESENCE_PRINCIPALS", str(path))
+    monkeypatch.setenv("AGENT_SYNC_PRINCIPALS", str(path))
     assert Roster.discover().authenticate("sara", TOKEN).principal == "sara"
 
 
 def test_discover_falls_back_to_the_repo_root(tmp_path, monkeypatch):
-    monkeypatch.delenv("AGENT_PRESENCE_PRINCIPALS", raising=False)
-    target = tmp_path / ".agent-presence" / "principals.toml"
+    monkeypatch.delenv("AGENT_SYNC_PRINCIPALS", raising=False)
+    target = tmp_path / ".agent-sync" / "principals.toml"
     target.parent.mkdir(parents=True)
     target.write_text(roster_text())
     assert Roster.discover(str(tmp_path)).authenticate("sara", TOKEN).principal == (
@@ -387,7 +387,7 @@ def test_discover_falls_back_to_the_repo_root(tmp_path, monkeypatch):
 
 
 def test_discover_on_a_repo_with_no_roster_is_inert(tmp_path, monkeypatch):
-    monkeypatch.delenv("AGENT_PRESENCE_PRINCIPALS", raising=False)
+    monkeypatch.delenv("AGENT_SYNC_PRINCIPALS", raising=False)
     found = Roster.discover(str(tmp_path))
     assert not found.present
     assert not found.degraded
@@ -400,23 +400,23 @@ def test_the_token_path_follows_the_same_rule_as_the_user_policy(tmp_path):
     xdg = tmp_path / "xdg"
     home = tmp_path / "home"
     assert token_path({"XDG_CONFIG_HOME": str(xdg)}) == \
-        xdg / "agent-presence" / "token"
+        xdg / "agent-sync" / "token"
     assert token_path({"HOME": str(home)}) == \
-        home / ".config" / "agent-presence" / "token"
+        home / ".config" / "agent-sync" / "token"
 
 
 def test_the_environment_token_wins_over_the_file(tmp_path):
     xdg = tmp_path / "xdg"
-    (xdg / "agent-presence").mkdir(parents=True)
-    (xdg / "agent-presence" / "token").write_text("from-the-file\n")
-    env = {"XDG_CONFIG_HOME": str(xdg), "AGENT_PRESENCE_TOKEN": "from-the-env"}
+    (xdg / "agent-sync").mkdir(parents=True)
+    (xdg / "agent-sync" / "token").write_text("from-the-file\n")
+    env = {"XDG_CONFIG_HOME": str(xdg), "AGENT_SYNC_TOKEN": "from-the-env"}
     assert read_token(env) == "from-the-env"
 
 
 def test_the_token_file_is_read_and_trimmed(tmp_path):
     xdg = tmp_path / "xdg"
-    (xdg / "agent-presence").mkdir(parents=True)
-    (xdg / "agent-presence" / "token").write_text("  the-token  \n# a note\n")
+    (xdg / "agent-sync").mkdir(parents=True)
+    (xdg / "agent-sync" / "token").write_text("  the-token  \n# a note\n")
     assert read_token({"XDG_CONFIG_HOME": str(xdg)}) == "the-token"
 
 
@@ -521,9 +521,9 @@ token_sha256 = "{hash_token('t')}"
 
 def test_local_identity_reads_the_same_three_env_vars_the_daemon_does():
     env = {
-        "AGENT_PRESENCE_PRINCIPAL": " sara ",
-        "AGENT_PRESENCE_TOKEN": " s3cret ",
-        "AGENT_PRESENCE_UNATTENDED": "yes",
+        "AGENT_SYNC_PRINCIPAL": " sara ",
+        "AGENT_SYNC_TOKEN": " s3cret ",
+        "AGENT_SYNC_UNATTENDED": "yes",
     }
     who = local_identity(env)
     assert (who.principal, who.token, who.unattended) == ("sara", "s3cret", True)
@@ -545,7 +545,7 @@ def test_local_identity_on_a_machine_that_configured_nothing():
 
 
 def write_roster(root, text: str = None):
-    target = root / ".agent-presence" / "principals.toml"
+    target = root / ".agent-sync" / "principals.toml"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(roster_text() if text is None else text)
     return target
@@ -576,7 +576,7 @@ def test_the_env_override_still_wins_over_the_walk(tmp_path):
     elsewhere = tmp_path / "explicit.toml"
     elsewhere.write_text(roster_text().replace("sara", "morgan"))
     found = Roster.discover(
-        str(tmp_path), env={"AGENT_PRESENCE_PRINCIPALS": str(elsewhere)}
+        str(tmp_path), env={"AGENT_SYNC_PRINCIPALS": str(elsewhere)}
     )
     assert found.authenticate("morgan", TOKEN).principal == "morgan"
 

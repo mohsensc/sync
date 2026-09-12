@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Load and chaos harness for agent-presence.
+"""Load and chaos harness for agent-sync.
 
     python tests/load/run.py --all
     python tests/load/run.py swarm --agents 200 --rounds 20

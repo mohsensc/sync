@@ -5,7 +5,7 @@ its idea of "lowercase" or "whitespace", one of these two suites breaks instead
 of a team silently splitting into two rooms.
 """
 
-from agent_presence.room_key import normalize_remote, room_id_from_remote
+from agent_sync.room_key import normalize_remote, room_id_from_remote
 
 # url -> (normalized, room id)
 VECTORS = {

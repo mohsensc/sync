@@ -1,32 +1,31 @@
-# Agent Presence
+# Agent Sync
 
 A team's coding agents can't see each other in a shared repo, so they duplicate
 work and clobber edits. One stream: ambient for humans, claims for agents.
 
 Four binaries: `ap-hook` (C++) sits on Claude Code's tool calls, `presenced`
-(Go) coalesces and snapshots, `agent-presence-mcp` (Go) is the
+(Go) coalesces and snapshots, `agent-sync-mcp` (Go) is the
 `claim_work`/`respond`/`who_else_is_here` surface, `gorelay` (Go) is the
 relay — leases, wait-die, the ladder, negotiation, fan-out, the org policy
 floor. 90s lease TTL: a dead agent never wedges a teammate.
 
 ## Run it
 
-Not on the npm registry yet — ships from tagged releases; for now, build the
-tarball with `scripts/build-npm-packages.sh --pack` and install it.
-```
-npm i -g agent-presence
-agent-presence setup
-```
+**Demo, no install:** `cd web && pnpm install && pnpm dev`, then open
+`http://127.0.0.1:5173/src/office/office.html` (needs Node, pnpm, and Go on
+PATH — dev proxy is Go). No relay/daemon/hook needed, scripted demo off the
+clone's own git history.
 
-Joining instead of starting your own relay (blob from `agent-presence invite`):
+**For real:** not on the npm registry yet — ships from tagged releases.
+Build, pack, then install the two tarballs the script prints:
 ```
-npm i -g agent-presence
-agent-presence join <blob>
+scripts/build-npm-packages.sh --pack
+# then the `npm i -g <wrapper>.tgz <platform>.tgz` line it prints
+agent-sync setup
 ```
-
-Paste into your agent to get set up:
-> Install agent-presence for me using `npm i -g agent-presence`, then run
-> `agent-presence setup`. It self-registers with Claude Code.
+`setup` writes both Claude config files directly, no confirm or undo yet
+(#212). Joining instead: `agent-sync join <blob>` (blob comes from
+`agent-sync invite`).
 
 Packaging and self-registration details: `docs/install-plan.md`.
 
@@ -44,6 +43,6 @@ ports, TLS, and metrics: `docs/`.
 ## What's broken
 
 Ladder tuning is guesswork, only run against scripted clients so far. Rung 4
-is off unless `AGENT_PRESENCE_RUNG4=1`, its scorer is a placeholder (#15), and
+is off unless `AGENT_SYNC_RUNG4=1`, its scorer is a placeholder (#15), and
 `ap policy set rung4=...` is a no-op — the relay resolves that rung against
 the builtin and org layers only, so changing it takes an org file.

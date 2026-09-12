@@ -1,6 +1,6 @@
 // Package repo derives which room a checkout belongs to — the Go mirror of
 // cpp/daemon/repo.{hpp,cpp}. Must stay byte-identical to
-// python/src/agent_presence/room_key.py and to the C++ side it replaces: a
+// python/src/agent_sync/room_key.py and to the C++ side it replaces: a
 // divergence here silently splits a team into two rooms.
 //
 // crypto/sha256 replaces the OpenSSL dependency repo.cpp needed solely for
@@ -154,7 +154,7 @@ func GitOriginURL(root string) string {
 //
 // The fallback exists because the two Go binaries disagreed without it. On
 // a checkout whose only remote is `upstream`, presenced refused to derive a
-// room at all and sat offline while agent-presence-mcp hashed upstream and
+// room at all and sat offline while agent-sync-mcp hashed upstream and
 // joined one — same machine, same directory, same env, two answers. A fork
 // with no origin is an ordinary way to work, and both should treat it the
 // same way.
@@ -184,7 +184,7 @@ func GitRemoteURL(root string) string {
 	return ""
 }
 
-// DiscoverRoom is main.cpp's discover_room: AGENT_PRESENCE_ROOM overrides
+// DiscoverRoom is main.cpp's discover_room: AGENT_SYNC_ROOM overrides
 // everything; otherwise the room is derived from the checkout's origin
 // remote. Empty means no relay connection — joining a made-up room would
 // put every unkeyed machine on the planet in the same one.

@@ -492,16 +492,16 @@ func readBounded(r io.Reader, maxBuf int, timeout time.Duration) string {
 // ---------------------------------------------------------------------------
 
 func sockPath() string {
-	if v := os.Getenv("AGENT_PRESENCE_SOCK"); v != "" {
+	if v := os.Getenv("AGENT_SYNC_SOCK"); v != "" {
 		return v
 	}
 	if v := os.Getenv("XDG_RUNTIME_DIR"); v != "" {
-		return joinPath(v, "agent-presence.sock")
+		return joinPath(v, "agent-sync.sock")
 	}
 	if v := os.Getenv("TMPDIR"); v != "" {
-		return joinPath(v, "agent-presence.sock")
+		return joinPath(v, "agent-sync.sock")
 	}
-	return "/tmp/agent-presence.sock"
+	return "/tmp/agent-sync.sock"
 }
 
 func joinPath(dir, leaf string) string {

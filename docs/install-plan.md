@@ -1,8 +1,8 @@
 # One-line install (plan)
 
-Agent Presence loses on install friction and nothing else. Four commands, two
+Agent Sync loses on install friction and nothing else. Four commands, two
 toolchains, a manual `claude mcp add`, and no download step. This is the plan
-to make it `npm i -g agent-presence` + `agent-presence start`.
+to make it `npm i -g agent-sync` + `agent-sync start`.
 
 Nothing about the C++/Go split changes. Four binaries stay four binaries.
 Packaging bends to the binaries.
@@ -32,8 +32,8 @@ the `--ignore-scripts` hole straight back in.
 Layout:
 
 ```
-npm/agent-presence/                 wrapper: JS shim, optionalDependencies
-npm/platform/darwin-arm64/          @agent-presence/darwin-arm64
+npm/agent-sync/                 wrapper: JS shim, optionalDependencies
+npm/platform/darwin-arm64/          @agent-sync/darwin-arm64
 npm/platform/darwin-x64/
 npm/platform/linux-x64/
 npm/platform/linux-arm64/
@@ -75,23 +75,23 @@ cannot target Linux or Windows. So:
 
 ## Command surface
 
-`agent-presence` is one binary-shim entrypoint with subcommands. Nobody types
+`agent-sync` is one binary-shim entrypoint with subcommands. Nobody types
 `claude mcp add`, and nobody hand-edits `settings.json`.
 
 ```
-agent-presence setup            wire hooks + MCP into Claude Code, then start
-agent-presence start            background relay, free port, state file, prints addr, exits
-agent-presence stop             stop the relay this machine started
-agent-presence status           what's running, where
-agent-presence invite           print a join blob for a teammate
-agent-presence join <blob>      point this machine at someone else's relay
-agent-presence doctor           diagnose, with a next step per failure
-agent-presence mcp              internal: what Claude Code spawns (see zero-config)
+agent-sync setup            wire hooks + MCP into Claude Code, then start
+agent-sync start            background relay, free port, state file, prints addr, exits
+agent-sync stop             stop the relay this machine started
+agent-sync status           what's running, where
+agent-sync invite           print a join blob for a teammate
+agent-sync join <blob>      point this machine at someone else's relay
+agent-sync doctor           diagnose, with a next step per failure
+agent-sync mcp              internal: what Claude Code spawns (see zero-config)
 ```
 
 `start` copies Roughdraft's shape exactly: it forks the relay into the
 background, reuses an already-running relay or takes a free port, writes
-state to `~/.agent-presence/server.json`, prints the address, and gives the
+state to `~/.agent-sync/server.json`, prints the address, and gives the
 terminal back. It does **not** guess a port — `gorelay --port 0` already binds
 a free one and logs the bound address; `start` reads that back rather than
 inventing a second port-picking convention.
@@ -100,7 +100,7 @@ One deliberate difference from Roughdraft: what gets printed is a `ws://`
 address, not an http URL. The relay is a websocket endpoint. The Three.js
 dashboard in `web/` is a vite dev app, not a served artifact, and `gorelay`
 serves no static files — so printing "open this in your browser" would be a
-lie. `start` prints the relay address and the `agent-presence invite` line.
+lie. `start` prints the relay address and the `agent-sync invite` line.
 
 No wizard. No questionnaire.
 
@@ -109,46 +109,46 @@ No wizard. No questionnaire.
 Person one:
 
 ```
-npm i -g agent-presence
-agent-presence setup
+npm i -g agent-sync
+agent-sync setup
 ```
 
 Person two joins an existing relay. This is the path that currently means
-hand-setting `AGENT_PRESENCE_RELAY` and wrangling a dev cert, and it's where
+hand-setting `AGENT_SYNC_RELAY` and wrangling a dev cert, and it's where
 most of the friction actually lives. The fix is one opaque blob instead of
 three environment variables:
 
 ```
 # person one
-agent-presence invite
-# -> agent-presence join eyJyZWxheSI6IndzczovL...
+agent-sync invite
+# -> agent-sync join eyJyZWxheSI6IndzczovL...
 
 # person two
-npm i -g agent-presence
-agent-presence join eyJyZWxheSI6IndzczovL...
+npm i -g agent-sync
+agent-sync join eyJyZWxheSI6IndzczovL...
 ```
 
 The blob carries the relay URL, the bearer token, and — when the relay is
 running TLS — the certificate itself. `join` writes
-`~/.agent-presence/config.json` at 0600 and drops the PEM next to it.
+`~/.agent-sync/config.json` at 0600 and drops the PEM next to it.
 
 **Corrected during implementation:** this section originally said the blob
 pins a certificate *fingerprint*. There is no fingerprint pinning anywhere in
-this codebase — `AGENT_PRESENCE_RELAY_CA` takes a PEM file and verifies the
+this codebase — `AGENT_SYNC_RELAY_CA` takes a PEM file and verifies the
 full chain against it, and no leaf-hash path exists. So the blob carries the
-whole PEM and `join` writes it where `AGENT_PRESENCE_RELAY_CA` can point.
+whole PEM and `join` writes it where `AGENT_SYNC_RELAY_CA` can point.
 Same trust property, different mechanism, and it's the one that's actually
-implemented. `AGENT_PRESENCE_RELAY_INSECURE_SKIP_VERIFY` stays a deliberate
+implemented. `AGENT_SYNC_RELAY_INSECURE_SKIP_VERIFY` stays a deliberate
 escape hatch and is not part of the happy path.
 
 ## Zero-config: solo user, no setup at all
 
 If nobody has started a relay, the first agent starts one on localhost.
 
-The mechanism: Claude Code is registered against `agent-presence mcp`, the
+The mechanism: Claude Code is registered against `agent-sync mcp`, the
 JS shim, not the Go binary directly. The shim checks `server.json`, dials the
 relay, and if nothing answers it starts one on loopback before exec'ing
-`agent-presence-mcp`. A solo user gets value having typed `setup` and nothing
+`agent-sync-mcp`. A solo user gets value having typed `setup` and nothing
 else. A joined machine skips this — `config.json` points at someone else's
 relay and the shim never starts a local one.
 
@@ -164,7 +164,7 @@ before `claude mcp add`.
 ## What I can and cannot verify
 
 I cannot run `npm publish` — that's outward-facing and not authorized — so
-`npm i -g agent-presence` from the public registry is not something I will
+`npm i -g agent-sync` from the public registry is not something I will
 claim to have watched work. What I can verify end to end is `npm pack` into
 tarballs, then `npm i -g` from those, with platform packages resolved
 locally. The README and the final report say it that way.
@@ -187,10 +187,10 @@ A `node:22-slim` container (no Go, no cmake, no `cc`) on Docker/colima,
 | | |
 | --- | --- |
 | `npm i -g` from local tarballs | 1s |
-| `agent-presence start` to a listening relay | 141ms |
+| `agent-sync start` to a listening relay | 141ms |
 | nothing to a joined second machine | 1s |
-| commands, person one | 2 (`npm i -g`, `agent-presence setup`) |
-| commands, person two | 2 (`npm i -g`, `agent-presence join <blob>`) |
+| commands, person one | 2 (`npm i -g`, `agent-sync setup`) |
+| commands, person two | 2 (`npm i -g`, `agent-sync join <blob>`) |
 
 `--ignore-scripts` installs and runs with no degradation, which is the claim
 the optionalDependencies choice rests on. Not verified: `npm publish` and the

@@ -10,26 +10,26 @@
 // lib/start.js uses for start/stop/status. If join.js turns out not to
 // switch on argv[0], this needs a one-line fix here, not a redesign.
 
-const USAGE = `agent-presence - multi-agent presence for Claude Code
+const USAGE = `agent-sync - multi-agent presence for Claude Code
 
 Usage:
-  agent-presence setup            wire hooks + MCP into Claude Code, then start
-  agent-presence start            background relay, prints its address, exits
-  agent-presence stop             stop the relay this machine started
-  agent-presence status           what's running, where
-  agent-presence invite           print a join blob for a teammate
-  agent-presence join <blob>      point this machine at someone else's relay
-  agent-presence doctor           diagnose, with a next step per failure
-  agent-presence mcp              internal: what Claude Code spawns
-  agent-presence --version        print the CLI version
-  agent-presence help             this message
+  agent-sync setup            wire hooks + MCP into Claude Code, then start
+  agent-sync start            background relay, prints its address, exits
+  agent-sync stop             stop the relay this machine started
+  agent-sync status           what's running, where
+  agent-sync invite           print a join blob for a teammate
+  agent-sync join <blob>      point this machine at someone else's relay
+  agent-sync doctor           diagnose, with a next step per failure
+  agent-sync mcp              internal: what Claude Code spawns
+  agent-sync --version        print the CLI version
+  agent-sync help             this message
 `;
 
 function checkNodeVersion() {
   const major = Number(process.versions.node.split('.')[0]);
   if (major < 18) {
     console.error(
-      `agent-presence needs Node 18 or newer (found ${process.version}).\n` +
+      `agent-sync needs Node 18 or newer (found ${process.version}).\n` +
       `Install a current Node - e.g. https://nodejs.org, or via nvm/fnm/volta -\n` +
       `and re-run this command.`
     );
@@ -38,7 +38,7 @@ function checkNodeVersion() {
 }
 
 async function runMcp() {
-  // stdout is the MCP stdio transport from the moment agent-presence-mcp
+  // stdout is the MCP stdio transport from the moment agent-sync-mcp
   // takes over. Nothing before that exec may touch stdout either - so any
   // console.log calls made by lib/start.js while we bring up a local relay
   // get redirected to stderr for the duration of this command.
@@ -56,20 +56,20 @@ async function runMcp() {
     const config = state.readConfig();
     if (config && config.relay) {
       relayUrl = config.relay;
-      if (config.token) extraEnv.AGENT_PRESENCE_TOKEN = config.token;
-      if (config.relayCa) extraEnv.AGENT_PRESENCE_RELAY_CA = config.relayCa;
+      if (config.token) extraEnv.AGENT_SYNC_TOKEN = config.token;
+      if (config.relayCa) extraEnv.AGENT_SYNC_RELAY_CA = config.relayCa;
     } else {
       let server = state.readServer();
       if (!(await state.isServerLive(server))) {
         const code = await start.run(['start']);
         if (code !== 0) {
-          console.error('agent-presence mcp: could not bring up a local relay, see above.');
+          console.error('agent-sync mcp: could not bring up a local relay, see above.');
           return code;
         }
         server = state.readServer();
       }
       if (!server) {
-        console.error('agent-presence mcp: relay start reported success but left no server.json.');
+        console.error('agent-sync mcp: relay start reported success but left no server.json.');
         return 1;
       }
       relayUrl = `ws://${server.addr}`;
@@ -80,7 +80,7 @@ async function runMcp() {
 
   let mcpPath;
   try {
-    mcpPath = resolve.binary('agent-presence-mcp');
+    mcpPath = resolve.binary('agent-sync-mcp');
   } catch (err) {
     console.error(err.message);
     return 1;
@@ -88,7 +88,7 @@ async function runMcp() {
 
   const child = spawn(mcpPath, [], {
     stdio: 'inherit',
-    env: Object.assign({}, process.env, { AGENT_PRESENCE_RELAY: relayUrl }, extraEnv),
+    env: Object.assign({}, process.env, { AGENT_SYNC_RELAY: relayUrl }, extraEnv),
   });
 
   const forward = (sig) => { try { child.kill(sig); } catch { /* already gone */ } };
@@ -100,7 +100,7 @@ async function runMcp() {
       res(signal ? 1 : (code == null ? 1 : code));
     });
     child.on('error', (err) => {
-      console.error(`agent-presence mcp: failed to launch agent-presence-mcp: ${err.message}`);
+      console.error(`agent-sync mcp: failed to launch agent-sync-mcp: ${err.message}`);
       res(1);
     });
   });
@@ -143,7 +143,7 @@ async function dispatch(argv) {
       return runMcp();
 
     default:
-      process.stderr.write(`agent-presence: unknown command '${cmd}'\n\n`);
+      process.stderr.write(`agent-sync: unknown command '${cmd}'\n\n`);
       process.stderr.write(USAGE);
       return 1;
   }
@@ -157,6 +157,6 @@ async function main() {
 
 main().catch((err) => {
   // Plain message, no stack - this is a CLI, not a stack trace dump.
-  console.error(`agent-presence: ${err && err.message ? err.message : err}`);
+  console.error(`agent-sync: ${err && err.message ? err.message : err}`);
   process.exit(1);
 });

@@ -33,20 +33,20 @@ _LOG_LINES = 200
 
 
 def find_or_build_presenced(build_dir: Path) -> str:
-    """An explicit override via the AGENT_PRESENCE_PRESENCED_BIN env var,
+    """An explicit override via the AGENT_SYNC_PRESENCED_BIN env var,
     else a build into a caller-owned directory.
 
     Deliberately not go/bin: two agents (or two `pytest` runs) in one checkout
     would race on the same output path, which is the collision this file's own
     test is about.
     """
-    override = os.environ.get("AGENT_PRESENCE_PRESENCED_BIN", "").strip()
+    override = os.environ.get("AGENT_SYNC_PRESENCED_BIN", "").strip()
     if override:
         return override
     if shutil.which("go") is None:
         raise RuntimeError(
             "no presenced binary and no 'go' on PATH — set "
-            "AGENT_PRESENCE_PRESENCED_BIN or install Go"
+            "AGENT_SYNC_PRESENCED_BIN or install Go"
         )
     build_dir.mkdir(parents=True, exist_ok=True)
     out = build_dir / "presenced"
@@ -179,13 +179,13 @@ def start_presenced(binary: str, *, cwd: str, relay_url: str, room: str,
     """
     env = dict(os.environ)
     env.update({
-        "AGENT_PRESENCE_RELAY": relay_url,
-        "AGENT_PRESENCE_ROOM": room,
-        "AGENT_PRESENCE_SOCK": sock,
+        "AGENT_SYNC_RELAY": relay_url,
+        "AGENT_SYNC_ROOM": room,
+        "AGENT_SYNC_SOCK": sock,
     })
     # Stock identity: no manual agent override, and no session id — a daemon
     # serves many sessions and is not any one of them.
-    env.pop("AGENT_PRESENCE_AGENT", None)
+    env.pop("AGENT_SYNC_AGENT", None)
     env.pop("CLAUDE_CODE_SESSION_ID", None)
 
     # A unix socket path is capped near 104 bytes on macOS and 108 on Linux,

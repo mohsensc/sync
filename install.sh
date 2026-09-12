@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Installs the agent-presence binaries: ap-hook, presenced,
-# agent-presence-mcp, gorelay. Prints Claude Code hook settings with
+# Installs the agent-sync binaries: ap-hook, presenced,
+# agent-sync-mcp, gorelay. Prints Claude Code hook settings with
 # --print-settings.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BIN="${AGENT_PRESENCE_BIN:-$HOME/.local/bin}"
+BIN="${AGENT_SYNC_BIN:-$HOME/.local/bin}"
 
 settings_json() {
   cat <<JSON
@@ -55,7 +55,7 @@ else
   AP_HOOK_FAILED=1
 fi
 
-# presenced, agent-presence-mcp and gorelay: a release binary if one is
+# presenced, agent-sync-mcp and gorelay: a release binary if one is
 # already sitting next to this script (scripts/build-go-release.sh's
 # output, or a binary pulled from a GitHub release built by
 # .github/workflows/release.yml), otherwise a local `go build` — the whole
@@ -130,7 +130,7 @@ install_go_binary() {
   return 1
 }
 
-for bin in presenced agent-presence-mcp gorelay; do
+for bin in presenced agent-sync-mcp gorelay; do
   if install_go_binary "$bin"; then OK+=("$bin"); else FAILED+=("$bin"); fi
 done
 
@@ -151,6 +151,6 @@ if [[ "${AP_HOOK_FAILED:-0}" -eq 1 ]]; then
 fi
 settings_json
 echo
-echo "Then: claude mcp add agent-presence -- $BIN/agent-presence-mcp"
+echo "Then: claude mcp add agent-sync -- $BIN/agent-sync-mcp"
 
 [[ "${#FAILED[@]}" -eq 0 ]]

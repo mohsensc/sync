@@ -169,9 +169,9 @@ describe('ownerLine', () => {
   it('is empty with no ownership data', () => {
     expect(ownerLine(null)).toBe('')
   })
-  it('reads "all theirs" for a single-owner zone, no percentage', () => {
+  it('reads "all <name>" for a single-owner zone, no percentage — same voice zones.js uses', () => {
     const own = pickOwnership({ ok: true, owners: [{ author: 'mohsensc', commits: 12, share: 1 }] })
-    expect(ownerLine(own)).toBe('all theirs')
+    expect(ownerLine(own)).toBe('all mohsensc')
   })
   it('reads a rounded percentage when there is a second author', () => {
     const own = pickOwnership({ ok: true, owners: [

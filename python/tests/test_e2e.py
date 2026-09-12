@@ -6,7 +6,7 @@ import sys
 import pytest
 import websockets
 
-from agent_presence.principals import hash_token
+from agent_sync.principals import hash_token
 
 # Same convention test_golden_noop.py uses: tests/helpers/ is a plain
 # directory of scripts, not a package, so it's put on sys.path rather
@@ -43,7 +43,7 @@ async def roster_server(tmp_path):
         "unattended = 3\n"
         f'token_sha256 = "{hash_token(BOT_TOKEN)}"\n'
     )
-    proc = await start_gorelay(env={"AGENT_PRESENCE_PRINCIPALS": str(roster_path)})
+    proc = await start_gorelay(env={"AGENT_SYNC_PRINCIPALS": str(roster_path)})
     yield None, proc.url
     await proc.stop()
 

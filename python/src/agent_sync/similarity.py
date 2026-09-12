@@ -36,7 +36,7 @@ A backend drops in by registering a factory:
 
     register_backend("embedding", lambda: MyEmbeddingSimilarity(...))
 
-and setting AGENT_PRESENCE_SIMILARITY=embedding. No call site changes: the
+and setting AGENT_SYNC_SIMILARITY=embedding. No call site changes: the
 ladder asks for `default_similarity()` and gets whatever is configured.
 
 ## Why weights, and why a synonym table
@@ -75,7 +75,7 @@ from typing import Callable, Protocol, runtime_checkable
 # lives here with the scorer it tunes.
 DEFAULT_RUNG4_THRESHOLD = 0.82
 
-log = logging.getLogger("agent_presence.similarity")
+log = logging.getLogger("agent_sync.similarity")
 
 # -- the interface ----------------------------------------------------------
 
@@ -393,7 +393,7 @@ class LexicalSimilarity:
 
 # -- backend selection ------------------------------------------------------
 
-BACKEND_ENV = "AGENT_PRESENCE_SIMILARITY"
+BACKEND_ENV = "AGENT_SYNC_SIMILARITY"
 DEFAULT_BACKEND = "lexical"
 
 _BACKENDS: dict[str, Callable[[], IntentSimilarity]] = {
@@ -406,7 +406,7 @@ def register_backend(name: str, factory: Callable[[], IntentSimilarity]) -> None
     """Make a backend selectable by name.
 
     This is the seam an embedding scorer arrives through. It registers itself,
-    the operator sets AGENT_PRESENCE_SIMILARITY, and no call site in the ladder
+    the operator sets AGENT_SYNC_SIMILARITY, and no call site in the ladder
     or the relay changes.
     """
     _BACKENDS[name] = factory
@@ -433,7 +433,7 @@ def default_similarity() -> IntentSimilarity:
         except ImportError:
             log.warning(
                 "%s=embedding was requested but the 'embedding' extra isn't "
-                "installed (pip install 'agent-presence[embedding]'); "
+                "installed (pip install 'agent-sync[embedding]'); "
                 "falling back to lexical", BACKEND_ENV,
             )
     if name not in _BACKENDS:

@@ -13,7 +13,7 @@ from gorelay_proc import start_gorelay  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def _opaque_off(monkeypatch):
-    monkeypatch.delenv("AGENT_PRESENCE_OPAQUE", raising=False)
+    monkeypatch.delenv("AGENT_SYNC_OPAQUE", raising=False)
 
 
 def _opaque_hash(value: str) -> str:
@@ -62,12 +62,12 @@ async def server():
 
 @pytest.fixture
 async def opaque_server():
-    """AGENT_PRESENCE_OPAQUE has to be set before the process starts — a
+    """AGENT_SYNC_OPAQUE has to be set before the process starts — a
     child never observes a parent's later env change, which is exactly
     the harness artifact docs/relay-parity.md's black-box run hit doing
     this with monkeypatch.setenv mid-test against an already-spawned
     subprocess."""
-    proc = await start_gorelay(env={"AGENT_PRESENCE_OPAQUE": "1"})
+    proc = await start_gorelay(env={"AGENT_SYNC_OPAQUE": "1"})
     yield None, proc.url
     await proc.stop()
 

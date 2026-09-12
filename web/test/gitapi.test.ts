@@ -578,6 +578,12 @@ describe('gitApiMiddleware against the real repo', () => {
     expect(huge.json.entries.length).toBeLessThanOrEqual(30)
   })
 
+  it('recent: dedups this repo\'s own split identity the same way shortlog does', async () => {
+    const r: any = await callMiddleware(mw, '/api/git/recent?count=30')
+    const names = new Set<string>(r.json.entries.map((e: any) => e.author))
+    expect([...names].filter((n) => n.toLowerCase().includes('mohsen')).length).toBeLessThanOrEqual(1)
+  })
+
   it('shortlog: gives owners with shares summing to 1 for a real dir', async () => {
     const r: any = await callMiddleware(mw, '/api/git/shortlog?dir=web/src/office')
     expect(r.json.ok).toBe(true)

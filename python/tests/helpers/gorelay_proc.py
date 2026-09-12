@@ -1,5 +1,5 @@
 """Spawns the real `gorelay` binary as a subprocess and hands back a
-`(url, proc)`-shaped fixture, in place of `agent_presence.serve.serve`
+`(url, proc)`-shaped fixture, in place of `agent_sync.serve.serve`
 running the (now-deleted) Python relay in-process.
 
 This is the black-box parity harness docs/relay-parity.md and
@@ -12,7 +12,7 @@ someone re-running it by hand before trusting a change to the relay.
 Every test file that uses this swaps its `server`/`roster_server` fixture
 body for one that calls `start_gorelay()` — the test *functions* below
 those fixtures (the actual `test_*` assertions) are unchanged from when
-they drove `agent_presence.serve.serve` against the Python relay, because
+they drove `agent_sync.serve.serve` against the Python relay, because
 none of them touch the `relay` object the old fixtures also yielded, only
 the wire.
 """
@@ -37,12 +37,12 @@ _GO_DIR = _REPO_ROOT / "go"
 def _find_or_build_gorelay() -> str:
     """Where the gorelay binary comes from, checked in the order an
     operator (or ci-local.sh) would expect: an explicit override via the
-    AGENT_PRESENCE_GORELAY_BIN env var, a release build already sitting in
+    AGENT_SYNC_GORELAY_BIN env var, a release build already sitting in
     go/bin, or a plain `go build` on demand — the same fallback
     go/internal/relay's own integration test uses, so a bare `pytest` needs
     nothing pre-built, only `go` on PATH.
     """
-    override = os.environ.get("AGENT_PRESENCE_GORELAY_BIN", "").strip()
+    override = os.environ.get("AGENT_SYNC_GORELAY_BIN", "").strip()
     if override:
         return override
     candidate = _GO_DIR / "bin" / "gorelay"
@@ -111,8 +111,8 @@ async def start_gorelay(
     """Start gorelay on 127.0.0.1:0 and wait for its listen line.
 
     `env` extends the current process's environment — the roster and org
-    policy fixtures below use it to point AGENT_PRESENCE_PRINCIPALS /
-    AGENT_PRESENCE_ORG_POLICY at a temp file before the process starts,
+    policy fixtures below use it to point AGENT_SYNC_PRINCIPALS /
+    AGENT_SYNC_ORG_POLICY at a temp file before the process starts,
     which is the only way any operator can actually set either one (an
     env var set after a child exists is invisible to it — the exact
     harness artifact docs/relay-parity.md's black-box run hit and worked

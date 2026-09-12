@@ -10,14 +10,14 @@ was always the unix socket between the two.
 
 ```
 cd go && go build -o presenced ./cmd/presenced
-AGENT_PRESENCE_ROOM=myroom ./presenced       # or let it derive the room, see below
+AGENT_SYNC_ROOM=myroom ./presenced       # or let it derive the room, see below
 ```
 
 No flag, no env var gate — this is the daemon `install.sh` installs. Same env
-vars as before: `AGENT_PRESENCE_SOCK`, `AGENT_PRESENCE_SNAPSHOT`,
-`AGENT_PRESENCE_POLICY_CACHE`, `AGENT_PRESENCE_JOURNAL`, `AGENT_PRESENCE_RELAY`,
-`AGENT_PRESENCE_AGENT`, `AGENT_PRESENCE_HUMAN`, `AGENT_PRESENCE_PRINCIPAL`,
-`AGENT_PRESENCE_TOKEN`, `AGENT_PRESENCE_UNATTENDED`. `AGENT_PRESENCE_ROOM` is
+vars as before: `AGENT_SYNC_SOCK`, `AGENT_SYNC_SNAPSHOT`,
+`AGENT_SYNC_POLICY_CACHE`, `AGENT_SYNC_JOURNAL`, `AGENT_SYNC_RELAY`,
+`AGENT_SYNC_AGENT`, `AGENT_SYNC_HUMAN`, `AGENT_SYNC_PRINCIPAL`,
+`AGENT_SYNC_TOKEN`, `AGENT_SYNC_UNATTENDED`. `AGENT_SYNC_ROOM` is
 now optional: unset, the daemon hashes `git remote get-url origin` the same
 way `main.cpp`'s `discover_room()` did (`go/internal/repo`, `crypto/sha256`
 instead of OpenSSL — see #21). No remote still means no relay, same fail-open
@@ -28,15 +28,15 @@ Tests: `cd go && go test ./... -race -count=1`. Cross-compiles with no cgo:
 and windows/amd64 from one machine — run by `scripts/ci-local.sh`'s go job
 before a PR, and by `.github/workflows/release.yml` on a `v*` tag.
 
-A handful of other `AGENT_PRESENCE_*` vars exist but aren't read by
+A handful of other `AGENT_SYNC_*` vars exist but aren't read by
 `presenced` itself, so they don't belong in the list above:
-`AGENT_PRESENCE_PRINCIPALS` (`relaysrv/principals.go`) overrides the roster
-file gorelay loads; `AGENT_PRESENCE_REPO_ROOT` (same file, plus `policy.py`/
+`AGENT_SYNC_PRINCIPALS` (`relaysrv/principals.go`) overrides the roster
+file gorelay loads; `AGENT_SYNC_REPO_ROOT` (same file, plus `policy.py`/
 `cli.py` on the Python side) overrides where roster/policy discovery starts
 looking, instead of deriving it from the working directory;
-`AGENT_PRESENCE_RUNG4_THRESHOLD` (`relaysrv/similarity.go`) overrides rung
-4's default 0.82 score cutoff; `AGENT_PRESENCE_LOG_LEVEL` sets
-`agent-presence-mcp`'s log verbosity (default `INFO`) — that binary logs
+`AGENT_SYNC_RUNG4_THRESHOLD` (`relaysrv/similarity.go`) overrides rung
+4's default 0.82 score cutoff; `AGENT_SYNC_LOG_LEVEL` sets
+`agent-sync-mcp`'s log verbosity (default `INFO`) — that binary logs
 one line, its startup banner, so anything at `WARNING` or above silences
 it and nothing else changes.
 

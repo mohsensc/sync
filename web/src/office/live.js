@@ -17,7 +17,7 @@
 import * as Z from './zones.js'
 
 export const RELAY_URL = 'ws://127.0.0.1:8799'
-// Matches PresenceTTLS in go/internal/relaysrv/leases.go (python/src/agent_presence/
+// Matches PresenceTTLS in go/internal/relaysrv/leases.go (python/src/agent_sync/
 // leases.py, where this comment used to point, was deleted with the python relay).
 // A character that has gone this long without a presence frame reads as "not
 // here", the same rule the capsule viewer's CharacterRegistry uses.

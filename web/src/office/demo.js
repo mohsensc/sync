@@ -38,7 +38,7 @@ function waitForEncounter(e) {
 // level down — a start/end pair well inside that same file, verified by
 // hand against `wc -l` while writing this so a stray line or two of drift
 // doesn't push a range past EOF. Not every cast member gets one: a1's file
-// (python/src/agent_presence/__init__.py) is an empty stub with zero lines,
+// (python/src/agent_sync/__init__.py) is an empty stub with zero lines,
 // which makes it the natural exercise of the "no usable range" fallback
 // path rather than a range I'd have to fake, and a5 (README.md) is left
 // whole-file on purpose so there's always at least one demo agent to A/B

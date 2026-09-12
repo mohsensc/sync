@@ -3,8 +3,8 @@
 These all start real processes. Importing a module proves nothing about
 whether it runs.
 
-The relay used to be covered here too — `python -m agent_presence.serve`
-and the `agent-presence-relay` console script, spawned and checked for a
+The relay used to be covered here too — `python -m agent_sync.serve`
+and the `agent-sync-relay` console script, spawned and checked for a
 real bound socket and a real reply. It's `go/cmd/gorelay` now, the only
 relay (#40): `go/internal/relay/gorelay_integration_test.go` builds and
 runs the real binary the same way this file did, for the same claim (it
@@ -35,21 +35,21 @@ BOOT_TIMEOUT_S = 30.0
 def _clean_env(**extra: str) -> dict[str, str]:
     import os
     env = {k: v for k, v in os.environ.items()
-           if not k.startswith("AGENT_PRESENCE_")}
+           if not k.startswith("AGENT_SYNC_")}
     env.update(extra)
     return env
 
 
 # -- the console scripts ----------------------------------------------------
 #
-# agent-presence-mcp used to be a console script here too, checked the same
-# way `ap` is below. It's a Go binary now (#32) — go/cmd/agent-presence-mcp
+# agent-sync-mcp used to be a console script here too, checked the same
+# way `ap` is below. It's a Go binary now (#32) — go/cmd/agent-sync-mcp
 # has its own build-and-exec tests for the same claims (starts, speaks the
-# protocol, exits cleanly). agent-presence-relay is gone the same way, for
+# protocol, exits cleanly). agent-sync-relay is gone the same way, for
 # the same reason: see the module docstring.
 
 EXPECTED_SCRIPTS = {
-    "ap": "agent_presence.cli:main",
+    "ap": "agent_sync.cli:main",
 }
 
 

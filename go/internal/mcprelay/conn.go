@@ -1,5 +1,5 @@
 // Package mcprelay is the MCP tool surface's own connection to the relay —
-// the Go mirror of python/src/agent_presence/relay_client.py's
+// the Go mirror of python/src/agent_sync/relay_client.py's
 // RelayConnection. It is not go/internal/relay: that package is the
 // daemon's fire-and-forget pump, callbacks and a background reconnect loop,
 // because a daemon has no caller waiting on a reply. This one is

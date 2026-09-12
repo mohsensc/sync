@@ -1,6 +1,7 @@
 # Status
 
-Written 2026-08-11, this wave. Every number here came from running the thing.
+Written 2026-08-11, this wave. Every number here came from running the
+thing — a working engineering log kept as-is, not rewritten into a summary.
 
 ## Where the code is
 
@@ -15,7 +16,7 @@ Ported this wave, on top of wave 1's skeleton (docs/go-daemon.md): the
 presence table and the statusline's snapshot file, policy live-reload (org
 floor + the compiled cache, both merged with `Louder`), own-handover and
 lost-region notes, the decision journal (`ap why`), room derivation from the
-git remote (`AGENT_PRESENCE_ROOM` is no longer required), the decision
+git remote (`AGENT_SYNC_ROOM` is no longer required), the decision
 socket (`.decide`, so the hook's primary path is answered, not just its
 fallback), and the coalescer. `go build` cross-compiles to
 linux/{amd64,arm64}, darwin/{amd64,arm64} and windows/amd64 with
@@ -52,7 +53,7 @@ Built the real `ap-hook` binary (unmodified) and the real Go `presenced`,
 pointed the hook at the daemon's sockets, and drove it directly: a
 PreToolUse edit with no conflict answers rung 0 and prints nothing; a
 PostToolUse event lands in the snapshot with the right verb/path. Both
-sockets (`agent-presence.sock` and `agent-presence.sock.decide`) come up and
+sockets (`agent-sync.sock` and `agent-sync.sock.decide`) come up and
 answer. `tests/load/` is the same proof at scale — every scenario drives this
 same unmodified `ap-hook` binary against the Go daemon over the real sockets,
 which is why `_lib.py`'s `DaemonProc` now launches Go, not C++.
@@ -87,7 +88,7 @@ under the C++ baseline's own historical numbers, 0 isolation violations.
   docs/go-daemon.md's clock-source note, carried over from wave 1.
 - Ladder tuning is guesswork, run only against scripted clients, not real
   sessions.
-- Rung 4 is off unless `AGENT_PRESENCE_RUNG4=1`; token-overlap, not
+- Rung 4 is off unless `AGENT_SYNC_RUNG4=1`; token-overlap, not
   embeddings.
 - ~~`ap policy compile` puts `[[path]]` rules in the cache; the daemon (either
   language, always) has only ever read the blanket table.~~ Fixed and never
@@ -105,8 +106,8 @@ under the C++ baseline's own historical numbers, 0 isolation violations.
 
 The relay optionally terminates TLS (`--tls-cert`/`--tls-key`, plaintext
 `ws://` still the zero-config default); the Go daemon dials `wss://` with
-certificate verification on by default, `AGENT_PRESENCE_RELAY_CA` for a
-self-signed dev cert, and a loud `AGENT_PRESENCE_RELAY_INSECURE_SKIP_VERIFY`
+certificate verification on by default, `AGENT_SYNC_RELAY_CA` for a
+self-signed dev cert, and a loud `AGENT_SYNC_RELAY_INSECURE_SKIP_VERIFY`
 escape hatch. `docs/tls-dev-cert.md` is the how-to; `docs/threat-model.md` is
 updated to close out the "pending TLS" section it left open.
 
@@ -155,8 +156,8 @@ way over TLS that STATUS.md already had them failing/flaking over plaintext
 
 ## MCP server in Go (#32), venv step dropped (#33)
 
-`agent-presence-mcp` (`go/cmd/agent-presence-mcp`) replaces
-`python/src/agent_presence/mcp_server.py` and `relay_client.py`, both
+`agent-sync-mcp` (`go/cmd/agent-sync-mcp`) replaces
+`python/src/agent_sync/mcp_server.py` and `relay_client.py`, both
 deleted. Same four tools, same schemas, same reply shapes and error
 strings — ported field by field against the Python source, not
 reimplemented from the issue text. `go/internal/mcprelay` is its own
@@ -175,7 +176,7 @@ not `feat/go-daemon-complete`) — verified against a scripted fake relay
 that sends the `presence` array on join, since the local relay can't
 produce one to test against live.
 
-Verified against a real `agent-presence-relay`, not just fakes: a
+Verified against a real `agent-sync-relay`, not just fakes: a
 `claim_work` through the Go MCP server refuses a second, independent
 websocket connection's `claim` on the same region and names the holder and
 intent — the exact shape issue #12 fixed in Python — in both plaintext and
@@ -191,21 +192,21 @@ tests but kept their relay-wire-path ones, with a note pointing at the Go
 equivalent. `test_entrypoints.py` lost the stdio-transport section; its
 claims (handshake, tool list, a claim reaching a real relay, exit 0 on
 stdin close, only protocol on stdout) are re-proven in
-`go/cmd/agent-presence-mcp/main_test.go`, which builds and execs the real
+`go/cmd/agent-sync-mcp/main_test.go`, which builds and execs the real
 binary rather than testing against the package.
 
 `install.sh` now builds and installs all three binaries;
-`scripts/build-go-release.sh` cross-compiles `agent-presence-mcp` alongside
+`scripts/build-go-release.sh` cross-compiles `agent-sync-mcp` alongside
 `presenced`. README's "Run it" is three binaries and no venv; the relay's
 own venv step is still there, honestly labeled as one person's server, not
 every teammate's machine.
 
 Suites: `python -m pytest` — 1035 passed (no `mcp` package installed at
 all: dropped from `pyproject.toml`). `go test ./... -race -count=1` — 156
-tests, clean, `mcprelay`/`mcptools`/`negotiation`/`agent-presence-mcp` new.
+tests, clean, `mcprelay`/`mcptools`/`negotiation`/`agent-sync-mcp` new.
 `ctest --test-dir cpp/build` — 1/1 (cpp untouched; the hook-storm latency
 case flakes under load on this shared box, pre-existing and unrelated).
-Walked a from-scratch install with `AGENT_PRESENCE_BIN` pointed at an empty
+Walked a from-scratch install with `AGENT_SYNC_BIN` pointed at an empty
 dir and `python3` off `PATH` entirely: `cmake --build` + `./install.sh`
 produced three working Mach-O binaries, no Python anywhere in the path.
 
@@ -222,11 +223,11 @@ assert the call never reaches the relay at all.
 ## Go relay only, Python relay deleted (#40, #47, #48)
 
 The Python relay is gone. `gorelay` is the relay, full stop —
-`AGENT_PRESENCE_RELAY_IMPL` and `--impl go/python` don't exist anymore,
+`AGENT_SYNC_RELAY_IMPL` and `--impl go/python` don't exist anymore,
 there's nothing to select. Four things blocked this; all four are closed:
 
 - **TLS.** `gorelay` terminates `wss://` now (`crypto/tls`, same
-  `--tls-cert`/`--tls-key` flags and `AGENT_PRESENCE_TLS_*` env names the
+  `--tls-cert`/`--tls-key` flags and `AGENT_SYNC_TLS_*` env names the
   Python side had). Verified with a real handshake: `openssl s_client`
   reports TLS 1.3, cert verify OK against the dev cert; a plaintext HTTP
   request to the same port gets Go's own "client sent an HTTP request to
@@ -278,7 +279,7 @@ but:
   object in-process. **17/17 passing** against `gorelay` — better than
   the original 13/14, because the one known failure (opaque mode, an
   env-var-set-after-spawn harness artifact) doesn't reproduce here: this
-  harness sets `AGENT_PRESENCE_OPAQUE` in the child's env before spawn,
+  harness sets `AGENT_SYNC_OPAQUE` in the child's env before spawn,
   the only way any operator actually sets it.
 - `python/tests/test_relay_restart.py` lost exactly one assertion with no
   Go equivalent — `relay.registry.active_claims(room) == []` on a bare
@@ -337,7 +338,7 @@ in-process. `priority.py`, `principals.py` and `policy.py` stayed — the
 CLI (`ap`) and the Go relay both still need them, `policy.py`/CLI-only,
 `priority.py`/`principals.py` mirrored into `relaysrv/{priority,principals}.go`
 for the relay's own path. `websockets` moved from a runtime dependency to
-a dev one — nothing left in `src/agent_presence` imports it, only the
+a dev one — nothing left in `src/agent_sync` imports it, only the
 black-box suite (as a client now, not the relay).
 
 `tests/load/_lib.py`'s `RelayProc` spawns `gorelay` directly (a `go
@@ -419,7 +420,7 @@ describes; `scripts/ci-local.sh` is what a PR gets checked against now.
 
 **The "Deleted, once nothing referenced it anymore" list is wrong about two
 entries.** It names `similarity.py` and `tools/tune_rung4.py` as deleted
-alongside `leases.py`/`wait_die.py`. Neither was: `python/src/agent_presence/similarity.py`
+alongside `leases.py`/`wait_die.py`. Neither was: `python/src/agent_sync/similarity.py`
 exists today and is imported by `embedding_similarity.py`, `tools/tune_rung4.py`
 and the test suite; `python/tools/tune_rung4.py` exists and is the offline
 corpus-scoring tool rung 4's threshold came from. (Correction, 2026-08-25:
@@ -467,12 +468,12 @@ audit's measurement, not re-run for this section)**, dated 2026-08-17;
 re-run `tests/load/run.py swarm50` on a quiet machine to refresh it rather
 than trusting a number this old going forward.
 
-**Previously-undocumented env vars, now documented:** `AGENT_PRESENCE_PRINCIPALS`,
-`AGENT_PRESENCE_REPO_ROOT`, `AGENT_PRESENCE_RUNG4_THRESHOLD` and
-`AGENT_PRESENCE_LOG_LEVEL` are read by shipped code (`relaysrv`, `agent-presence-mcp`)
+**Previously-undocumented env vars, now documented:** `AGENT_SYNC_PRINCIPALS`,
+`AGENT_SYNC_REPO_ROOT`, `AGENT_SYNC_RUNG4_THRESHOLD` and
+`AGENT_SYNC_LOG_LEVEL` are read by shipped code (`relaysrv`, `agent-sync-mcp`)
 — `LOG_LEVEL` was read and validated but never applied until it was wired to
-`agent-presence-mcp`'s one log line —
+`agent-sync-mcp`'s one log line —
 and were documented nowhere; they're now listed in `docs/go-daemon.md` next
 to the vars `presenced` itself reads, with a note that they belong to other
-binaries. `AGENT_PRESENCE_GORELAY_BIN` is test-harness-only, documented in
+binaries. `AGENT_SYNC_GORELAY_BIN` is test-harness-only, documented in
 `python/tests/helpers/gorelay_proc.py`'s own docstring instead.

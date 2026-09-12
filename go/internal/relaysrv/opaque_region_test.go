@@ -9,7 +9,7 @@ import (
 // Opaque mode is meant to replace a path with its hash on the way out, not
 // to lose it. onEvent asserted the redacted region as Frame, but
 // applyOpaqueMap rebuilds every nested map as a bare map[string]any, so
-// under AGENT_PRESENCE_OPAQUE the assertion failed silently and every touch
+// under AGENT_SYNC_OPAQUE the assertion failed silently and every touch
 // was processed as a region with an empty path.
 
 func TestOpaqueModeHashesTheRegionRatherThanBlankingIt(t *testing.T) {
