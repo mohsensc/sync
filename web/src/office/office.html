@@ -6,6 +6,11 @@
 <style>
   html,body{margin:0;height:100%;background:#F0ECE6;overflow:hidden;
     font:14px/1.5 ui-sans-serif,-apple-system,Segoe UI,sans-serif;color:#35455C}
+  #office-root{height:100%}
+  #auth-gate{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+    background:#F0ECE6;z-index:10}
+  #auth-gate-box{max-width:400px;width:100%;padding:0 20px}
+  #auth-gate-fallback{text-align:center;color:#6b5f56;font-size:13px}
   #c{display:block;width:100%;height:100%;cursor:grab}
   #c:active{cursor:grabbing}
   #hud{position:fixed;left:18px;top:16px;background:#fffdfaee;border:1px solid #C3B39B;
@@ -303,6 +308,16 @@
 </style>
 </head>
 <body>
+<!-- Soft client-side login wall (Clerk). office-root stays hidden until a
+     signed-in user is confirmed; see the gate code at the top of the module
+     script below. -->
+<div id="auth-gate">
+  <div id="auth-gate-box">
+    <p id="auth-gate-fallback" hidden>Sign-in is unavailable right now — try reloading.</p>
+    <div id="clerk-signin"></div>
+  </div>
+</div>
+<div id="office-root" style="display:none">
 <canvas id="c"></canvas>
 <div id="hud">
   <h1>The office</h1>
@@ -327,6 +342,7 @@
 <div id="caption"></div>
 <div id="replayCard"></div>
 <div id="log">loading…</div>
+</div>
 
 <script type="importmap">
 {"imports":{"three":"./vendor/three.module.js","three/addons/":"./vendor/addons/"}}
@@ -348,8 +364,65 @@ import { ReelStore, SAMPLE_EVENTS, mountReel, resolveSkin } from './reel.js'
 import { seedEvents } from './seed.js'
 import { createCaptionArbiter, PRIORITY } from './caption.js'
 import { createReplayCard } from './replay-card.js'
-import { attachGitSignals } from './gitsignals.js'
+import { attachGitSignals, ZONE_DIRS } from './gitsignals.js'
 import { YAW_MIN, YAW_MAX, clampYaw, headFraming, pickFraming, resolveFrameMode } from './framing.js'
+import { attachHistShelf } from './histshelf.js'
+import { attachZoneOwner } from './zoneowner.js'
+import { attachCommitBoard } from './commitboard.js'
+import { inject } from '@vercel/analytics'
+import { Clerk } from '@clerk/clerk-js'
+
+inject()
+
+// ---- auth gate (Clerk) ---------------------------------------------------
+// Soft, client-side gate: no server session check, no secret key anywhere —
+// good enough to keep this off search engines and casual links, not real
+// access control. See the PR this shipped in for the accepted tradeoff.
+//
+// No key configured (plain checkout, no VITE_CLERK_PUBLISHABLE_KEY) skips
+// the gate entirely — `pnpm dev` and any build without the env var behave
+// exactly as before this landed.
+const authGate = document.getElementById('auth-gate')
+const officeRoot = document.getElementById('office-root')
+const clerkKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY
+
+function revealOffice() {
+  authGate.style.display = 'none'
+  officeRoot.style.display = ''
+  startOffice()
+}
+
+async function boot() {
+  if (!clerkKey) return revealOffice()
+  try {
+    // Current @clerk/clerk-js ships its UI as a separate bundle, loaded from
+    // the app's own Frontend API domain (encoded in the publishable key)
+    // rather than bundled into the npm package — see Clerk's vanilla-JS
+    // quickstart.
+    const clerkDomain = atob(clerkKey.split('_')[2]).slice(0, -1)
+    await new Promise((resolve, reject) => {
+      const s = document.createElement('script')
+      s.src = `https://${clerkDomain}/npm/@clerk/ui@1/dist/ui.browser.js`
+      s.async = true
+      s.crossOrigin = 'anonymous'
+      s.onload = resolve
+      s.onerror = () => reject(new Error('failed to load @clerk/ui bundle'))
+      document.head.appendChild(s)
+    })
+    const clerk = new Clerk(clerkKey)
+    await clerk.load({ ui: { ClerkUI: window.__internal_ClerkUICtor } })
+    if (clerk.isSignedIn) return revealOffice()
+    clerk.mountSignIn(document.getElementById('clerk-signin'))
+    clerk.addListener(({ user }) => { if (user) location.reload() })
+  } catch (err) {
+    // No key, wrong key, Clerk's CDN unreachable — whatever it is, a blank
+    // cream page with no explanation is the worst outcome here.
+    console.error('clerk sign-in unavailable:', err)
+    document.getElementById('auth-gate-fallback').hidden = false
+  }
+}
+
+async function startOffice() {
 
 const P = { cream:0xF0ECE6, sand:0xE9E0CE, taupe:0xC3B39B, sage:0xE5E1D2, butter:0xF7DFAF,
             mustard:0xD6B45C, caramel:0xC0762A, coffee:0xB0674F, terracotta:0xD9714F,
@@ -1752,8 +1825,6 @@ window.__zoomAgent = name => {
 }
 
 // --- histshelf wiring ---
-import { attachHistShelf } from './histshelf.js'
-
 // interact.js's onSelect hook (see setupCast() above) already drives
 // zoomToAgent/blameCard, and reassigning it here would just clobber that —
 // so this polls interaction.selected instead, same low-cost pattern
@@ -1772,9 +1843,6 @@ setInterval(() => {
 window.__histShelf = histShelf
 
 // --- zoneowner wiring ---
-import { attachZoneOwner } from './zoneowner.js'
-import { ZONE_DIRS } from './gitsignals.js'
-
 // Runs its own shortlog poll rather than piggybacking the attachGitSignals()
 // call above: that call sits outside this round's append-only slice of this
 // file and can't be edited to add a new sink this round. gitsignals.js grew
@@ -1785,12 +1853,14 @@ const zoneOwner = attachZoneOwner({ scene, zoneDirs: ZONE_DIRS })
 window.__zoneOwner = zoneOwner
 
 // --- commit board wiring ---
-import { attachCommitBoard } from './commitboard.js'
-
 // Same append-only-slice reasoning as zoneowner above: its own poll loop,
 // its own render-frame loop, one call and stash the handle.
 const commitBoard = attachCommitBoard({ scene })
 window.__commitBoard = commitBoard
+
+} // end startOffice()
+
+boot()
 </script>
 </body>
 </html>
