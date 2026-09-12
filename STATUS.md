@@ -1,6 +1,7 @@
 # Status
 
-Written 2026-08-11, this wave. Every number here came from running the thing.
+Written 2026-08-11, this wave. Every number here came from running the
+thing — a working engineering log kept as-is, not rewritten into a summary.
 
 ## Where the code is
 
