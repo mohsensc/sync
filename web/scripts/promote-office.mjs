@@ -6,18 +6,20 @@
 // inside the file needs rewriting: vite's default base is '/', so every
 // injected asset src is already root-absolute, not relative to the html's
 // own folder.
-import { existsSync, renameSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, renameSync, rmSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const distDir = path.resolve(here, '../dist')
 const built = path.join(distDir, 'src/office/office.html')
-const target = path.join(distDir, 'index.html')
+const targetDir = path.join(distDir, 'office')
+const target = path.join(targetDir, 'index.html')
 
 if (!existsSync(built)) {
   throw new Error(`expected ${built} from vite build (check vite.config.js's build.rollupOptions.input)`)
 }
+mkdirSync(targetDir, { recursive: true })
 renameSync(built, target)
 rmSync(path.join(distDir, 'src'), { recursive: true, force: true })
-console.log('promoted office.html to dist/index.html')
+console.log('promoted office.html to dist/office/index.html')

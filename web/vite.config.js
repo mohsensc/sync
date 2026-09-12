@@ -38,15 +38,18 @@ export default defineConfig(({ command, mode }) => {
     config.server = { hmr: { clientPort: Number(publicPort) } }
   }
 
-  // Production build only — pnpm dev is untouched, it serves office.html
-  // straight off disk same as always. `index.html` (the bare src/main.ts
-  // page) is left out of the build entirely: nothing deploys it, and
-  // scripts/promote-office.mjs moves this entry's output to dist/index.html
-  // after the fact, since vite has no option to name a custom entry's output
-  // anything other than its own source path.
+  // Production has two deliberately separate surfaces: the authenticated
+  // account dashboard at `/`, and the original 3D office at `/office/`.
+  // The office keeps its source path during Rollup; promote-office.mjs moves
+  // only that HTML file after the build without disturbing dashboard assets.
   if (command === 'build') {
     config.build = {
-      rollupOptions: { input: path.resolve(here, 'src/office/office.html') },
+      rollupOptions: {
+        input: {
+          dashboard: path.resolve(here, 'index.html'),
+          office: path.resolve(here, 'src/office/office.html'),
+        },
+      },
     }
   }
 
