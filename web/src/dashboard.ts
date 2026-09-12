@@ -22,6 +22,41 @@ const repoList = byId<HTMLElement>('repo-list')
 const agentList = byId<HTMLElement>('agent-list')
 const resolutionList = byId<HTMLElement>('resolution-list')
 
+// Mirrors dashboard.css's own palette exactly (ink text/primary, card and
+// page backgrounds, danger/success, border radius, font stack) so Clerk's
+// mounted components read as part of the site instead of Clerk's default
+// indigo. Passed once at `clerk.load()` — per Clerk's docs a load-level
+// appearance applies globally to every component mounted afterwards,
+// including the User Profile modal opened from account settings, but that
+// hasn't been confirmed against a live key in this environment. Spot-check
+// the actual profile modal once real Clerk credentials are available; add a
+// per-call override on `clerk.openUserProfile()` if it doesn't inherit this.
+const clerkAppearance = {
+  variables: {
+    colorPrimary: '#29384d',
+    colorBackground: '#fffdf8',
+    colorText: '#29384d',
+    colorTextSecondary: '#6b7280',
+    colorDanger: '#a33c32',
+    colorSuccess: '#287247',
+    borderRadius: '10px',
+    fontFamily: 'Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif',
+  },
+}
+
+// The website no longer prints its own "sign in" heading above the mounted
+// SignIn card (see #auth-gate in index.html) — this is the one heading the
+// signed-out visitor sees, so it carries the site's own name instead of
+// Clerk's generic default.
+const clerkLocalization = {
+  signIn: {
+    start: {
+      title: 'Sign in to Agent Sync',
+      subtitle: 'Connect an agent and see its live work.',
+    },
+  },
+}
+
 let payload: DashboardPayload | null = null
 let selectedRepoId: string | null = null
 let refreshTimer: number | null = null
@@ -194,7 +229,11 @@ async function boot() {
   try {
     const ClerkUI = await loadClerkUi(clerkKey)
     const clerk = new Clerk(clerkKey)
-    await clerk.load({ ui: { ClerkUI: ClerkUI as never } })
+    await clerk.load({
+      ui: { ClerkUI: ClerkUI as never },
+      appearance: clerkAppearance,
+      localization: clerkLocalization,
+    })
     if (clerk.isSignedIn) {
       await showDashboard(clerk)
       return
