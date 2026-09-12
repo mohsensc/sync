@@ -27,8 +27,16 @@ describe('account token helpers', () => {
 
   it('emits an invite the existing CLI can decode without putting secrets in a URL', () => {
     const instructions = setupInstructions('ags_deadbeef.secret', 'wss://relay.example.test')
-    expect(instructions).toContain('installed from a tagged release')
+    expect(instructions).toContain('signed-in user at https://www.agentsync.studio/')
+    expect(instructions).toContain('ask the user to confirm that they personally copied this block')
+    expect(instructions).toContain('Wait for explicit approval')
+    expect(instructions).toContain('https://github.com/mohsensc/sync')
+    expect(instructions).toContain('not yet publicly distributed')
+    expect(instructions).toContain('Do not search for, download, or substitute another package or binary')
+    expect(instructions).toContain('command -v agent-sync && agent-sync --version')
     expect(instructions).not.toContain('npm install')
+    expect(instructions).not.toContain('curl')
+    expect(instructions).not.toContain('wget')
     const line = instructions.split('\n').find((value) => value.startsWith('agent-sync join '))
     expect(line).toBeTruthy()
     const blob = line!.slice('agent-sync join '.length)
@@ -36,5 +44,8 @@ describe('account token helpers', () => {
       v: 1, relay: 'wss://relay.example.test', token: 'ags_deadbeef.secret',
     })
     expect(instructions).not.toContain('?token=')
+    expect(instructions).toContain('Expected relay: wss://relay.example.test')
+    expect(instructions).toContain('Do not decode, reprint, log, commit, upload, or send it anywhere else')
+    expect(instructions).toContain('Never conceal actions or output from the user')
   })
 })

@@ -23,8 +23,6 @@
     border:1px solid #C3B39B;background:#fff;color:#35455C;cursor:pointer}
   button:hover{background:#E9E0CE}
   button[aria-pressed="true"]{background:#35455C;color:#F0ECE6;border-color:#35455C}
-  #bDemo{background:#35455C;color:#F0ECE6;border-color:#35455C;font-weight:600}
-  #bDemo:hover{background:#4A1F3D;border-color:#4A1F3D}
   #log{position:fixed;left:18px;bottom:16px;font:11px ui-monospace,monospace;color:#6b5f56;
     background:#fffdfacc;border-radius:8px;padding:7px 10px;max-width:36vw}
   #caption{position:fixed;left:50%;transform:translateX(-50%);bottom:34px;
@@ -39,7 +37,7 @@
     background:#35455Cf2;color:#F0ECE6;border-radius:999px;padding:6px 16px;
     font:600 11px ui-monospace,monospace;letter-spacing:.04em;text-transform:uppercase;
     box-shadow:0 4px 14px #4a1f3d22}
-  #mode.demo{background:#C0762Af2}
+  #mode.empty{background:#8A94A3f2}
   #mode.connecting{background:#8A94A3f2}
 
   /* ---- highlight reel ----------------------------------------------
@@ -324,7 +322,6 @@
   <p>Zones map to the kind of work an agent is doing. Click a figure to select
      it, then click the floor, a desk or a prop to send it there.</p>
   <div class="row">
-    <button id="bDemo">Play demo</button>
     <button id="bZones" aria-pressed="true">Zones</button>
   </div>
   <div class="row">
@@ -357,18 +354,15 @@ import { createAgent, World } from './agent.js'
 import { attachInteraction } from './interact.js'
 import { attachGhostAuthors } from './ghost.js'
 import { attachBlameCard } from './blamecard.js'
-import { runDemo } from './demo.js'
 import { buildDressing } from './dressing.js'
 import * as Live from './live.js'
-import { ReelStore, SAMPLE_EVENTS, mountReel, resolveSkin } from './reel.js'
-import { seedEvents } from './seed.js'
+import { ReelStore, mountReel, resolveSkin } from './reel.js'
 import { createCaptionArbiter, PRIORITY } from './caption.js'
 import { createReplayCard } from './replay-card.js'
 import { attachGitSignals, ZONE_DIRS } from './gitsignals.js'
 import { YAW_MIN, YAW_MAX, clampYaw, headFraming, pickFraming, resolveFrameMode } from './framing.js'
 import { attachHistShelf } from './histshelf.js'
 import { attachZoneOwner } from './zoneowner.js'
-import { attachCommitBoard } from './commitboard.js'
 import { inject } from '@vercel/analytics'
 import { Clerk } from '@clerk/clerk-js'
 
@@ -434,12 +428,8 @@ const capEl = document.getElementById('caption')
 const modeEl = document.getElementById('mode')
 
 // ---- caption arbiter (#63) -----------------------------------------------
-// Both the demo and a reel replay want to drive #caption; see caption.js
-// for why a plain last-write-wins was a bug (a live demo beat could clobber
-// a replay's own text mid-read) and why this is the fix rather than a
-// timer or a "pause the demo" hack — the demo keeps running underneath a
-// replay (agents elsewhere in the room still walk around), it just loses
-// the caption line for as long as the replay holds it.
+// Live notifications and a reel replay both want to drive #caption. Keep the
+// arbiter so a replay can hold its explanation without being overwritten.
 const captionArbiter = createCaptionArbiter(text => {
   capEl.textContent = text
   capEl.classList.toggle('on', !!text)
@@ -453,13 +443,9 @@ const vcardParam = new URLSearchParams(location.search).get('vcard')
 const replayCard = createReplayCard(document.getElementById('replayCard'), vcardParam)
 
 // ---- highlight reel -----------------------------------------------------
-// Panel lives top-right, over the scene (see #reel's CSS). Seeded with
-// reel.js's own sample events plus seed.js's larger generated history, so
-// a fresh checkout reads as a plausible day of activity, not 12 rows. Both
-// are source:'generated' and tagged as such by the panel itself. The live
-// decision feed (onDecision/onRedundant below) adds real rows on top as
-// they arrive — see live.js's toReelEvent for the normalization.
-const reelStore = new ReelStore([...SAMPLE_EVENTS, ...seedEvents()])
+// Production starts with no generated history. Only relay events may populate
+// the reel, so an empty account always renders an honestly empty office.
+const reelStore = new ReelStore([])
 // ?skin=glass|ticker picks a look on load; anything else (including no
 // param) falls back to 'paper', the original warm-card treatment. The
 // head's cycle button (drawn by mountReel itself) switches at runtime too.
@@ -740,40 +726,9 @@ function tally(){
 PLAN.forEach(load)
 
 // ---- agents -----------------------------------------------------------
-// Five demo agents plus three background characters that just idle so the
-// office does not look evacuated between beats.
-// Start marks moved in with the room. The old -8.6 column now sits inside the
-// left-wall shelving, and 8.2 clipped the crate stack; both put a figure half
-// buried in furniture on first paint. Kept identical to demo.js's park row so
-// a demo restart doesn't teleport anyone.
-// `file` is a real repo-relative path, picked for a spread of git history:
-// a1 hasn't moved since the repo's first commit, a4 landed yesterday. Stashed
-// onto the spawned agent as `.gitPath` in setupCast() below — everything that
-// reads git data off a demo agent (hover card, blame card, ambient signals)
-// reads that field, not this list.
-const AGENT_CAST = [
-  { id:'a1', name:'agent-1', color:P.navy,       start:[-7.7,-3.4], file:'python/src/agent_sync/__init__.py' },
-  { id:'a2', name:'agent-2', color:P.caramel,    start:[-7.7,-2.2], file:'cpp/hook/hook.cpp' },
-  { id:'a3', name:'agent-3', color:P.mauve,      start:[-7.7,-1.0], file:'web/src/office/anim.js' },
-  { id:'a4', name:'agent-4', color:P.terracotta, start:[ 7.5,-0.4], file:'go/cmd/gorelay/main.go' },
-  { id:'a5', name:'agent-5', color:P.slate,      start:[ 7.5, 1.4], file:'README.md' },
-]
-// Three more so the office is not empty between beats. They are full agents —
-// selectable, sendable — they just start with somewhere to be. The demo never
-// touches them: it only ever indexes `agents`.
-const BACKGROUND = [
-  { id:'b1', name:'reception', role:'taking incoming work', color:P.taupe,
-    pos:[-5.8, 0.8], yaw: Math.PI/2, act:'reading' },
-  { id:'b2', name:'indexer',   role:'walking the tree',     color:P.mustard,
-    seat:'desk 2', act:'typing' },
-  { id:'b3', name:'archivist', role:'nothing, for now',     color:P.rose,
-    seat:'desk 5', act:'sleeping' },
-]
-const deskNamed = l => desks.find(d => d.label === l)
-
+// No static cast is created. A figure exists only after a real presence frame
+// arrives from the relay.
 const world = new World()
-const agents = []                // demo cast, in AGENT_CAST order
-const extras = []                // background cast
 
 /**
  * Height-normalised character in an UNSCALED outer group. agent.js hangs a
@@ -816,48 +771,18 @@ function makeCharacterRoot(gltfScene, height = 1.68, bodyColor = null) {
   return root
 }
 
-// The seated background characters need their desks placed first, and the
-// interaction layer needs every prop, so setup waits for the whole load.
+// The interaction layer needs every prop, so setup waits for the whole load.
 let charGLTF = null, interaction = null
 const blameCard = attachBlameCard({ onClose: () => interaction && interaction.select(null) })
 function setupCast() {
   if (!charGLTF || interaction || done < pending) return
-  const gltf = charGLTF
-  for (const spec of AGENT_CAST) {
-    const root = makeCharacterRoot(skinnedClone(gltf.scene), 1.68, spec.color)
-    scene.add(root)
-    const a = world.add(createAgent({
-      root, id: spec.id, name: spec.name, color: spec.color,
-      pos: spec.start, yaw: Math.PI / 2, height: 1.68,
-      scale: root.userData.scale,
-    }))
-    a.gitPath = spec.file
-    agents.push(a)
-  }
-  for (const b of BACKGROUND) {
-    const root = makeCharacterRoot(skinnedClone(gltf.scene), 1.68, b.color)
-    scene.add(root)
-    // A seated one starts on its desk's seat, already facing the desk.
-    const d = b.seat ? deskNamed(b.seat) : null
-    const a = createAgent({
-      root, id:b.id, name:b.name, role:b.role, color:b.color, height:1.68,
-      pos: d ? [d.seat[0], d.seat[1]] : b.pos,
-      yaw: d ? d.seat[2] : b.yaw,
-      scale: root.userData.scale,
-    })
-    if (b.act) a.act(b.act, { fade:0 })
-    if (d) a.homeDesk = d
-    extras.push(world.add(a))
-  }
 
   // Set dressing needs the real seat positions, so it waits for the desks.
   // Built before attachInteraction so nothing here lands in the pick list —
   // a chair that swallowed a floor click would break "send them there".
   const dressing = buildDressing({
     desks, wallZ: WALL_Z, wallX: WALL_X, deskTop: DESK_TOP,
-    // The desks the background cast actually sits at get their chairs pulled
-    // out; the rest tuck under. See buildDressing for why this isn't uniform.
-    occupied: BACKGROUND.filter(b => b.seat).map(b => b.seat),
+    occupied: [],
   })
   scene.add(dressing.group)
   dressing.meshes.forEach(m => meshes.push(m))
@@ -921,9 +846,9 @@ const goal = { target: target.clone(), dist: 1.14, yaw: 0.78, active: false }
 // middle of the frame with a wide band of empty background around it.
 const RADIUS = 18
 
-/** Demo camera: ease toward a floor point at a given zoom, yaw and look-height.
+/** Ease toward a floor point at a given zoom, yaw and look-height.
  *  targetY defaults to 1.15 (roughly torso height on the floor plate) so every
- *  existing demo.js call site — none of which pass a 4th arg — is unaffected. */
+ *  existing callers that omit the fourth argument are unaffected. */
 function focus([x, z], d = 1, y = null, targetY = 1.15) {
   goal.target.set(x, targetY, z)
   goal.dist = d
@@ -993,8 +918,8 @@ function beginReplayOutro() {
       // Write '' before releasing the hold — release() alone only frees the
       // priority slot, it doesn't touch the DOM, so without this the last
       // replay caption (or the empty string standing in for the versus
-      // card, see replayEvent) just sat there forever until the demo's next
-      // scripted line happened to overwrite it.
+      // card, see replayEvent) would otherwise sit there until another live
+      // notification happened to overwrite it.
       captionArbiter.set('', { priority: PRIORITY.replay })
       captionArbiter.release(replayCaptionToken)
       replayCaptionToken = null
@@ -1019,7 +944,7 @@ let priorFraming = null   // { target, dist, yaw, pitch } to restore to on desel
 // end and a duration, which is what lets it carry an arc and a distinct feel
 // per mode, neither of which a per-frame "close 0.15% of the gap" loop can
 // express. `focus()`/goal is untouched and still drives every other camera
-// move in the file (demo.js's scripted shots, the top/spin buttons) — this
+// move in the file (the top/spin buttons and replay framing) — this
 // is additive, only zoomToAgent/zoomRestore start a flight.
 //
 // Z toggles between two feels, so both are sitting in the room to compare
@@ -1085,7 +1010,7 @@ function zoomRestore() {
 
 // ---- focus mode: declutter the zoomed state ----------------------------
 // The reviewer's verdict on the zoomed state: blame card + stale hover card
-// + selection panel + zone pill + zoneowner plaque/rug + demo caption all
+// + selection panel + zone pill + zoneowner plaque/rug + status caption all
 // pile up, stating the same fact four different ways. Focus mode drops
 // everything but the character and the blame card for as long as a head
 // zoom holds the camera (priorFraming is set) — on by default, off via the
@@ -1142,7 +1067,6 @@ canvas.addEventListener('wheel', e => { e.preventDefault(); goal.active=false; f
 
 const bSpin=document.getElementById('bSpin'), bTop=document.getElementById('bTop')
 const bWire=document.getElementById('bWire'), bZones=document.getElementById('bZones')
-const bDemo=document.getElementById('bDemo')
 const setB=(b,v)=>b.setAttribute('aria-pressed',String(v))
 bSpin.onclick=()=>{spin=!spin; setB(bSpin,spin); if(spin) goal.active=false}
 bTop.onclick=()=>{top=!top; setB(bTop,top); pitch = top?1.35:0.42; dist = top?1.15:1; goal.active=false}
@@ -1150,8 +1074,7 @@ bWire.onclick=()=>{wire=!wire; setB(bWire,wire); meshes.forEach(m=>{m.material.w
 let zonesOn = true
 bZones.onclick=()=>{zonesOn=!zonesOn; setB(bZones,zonesOn); zoneUI.setVisible(zonesOn)}
 
-// Two agents that end a walk near each other greet. The demo turns this off
-// while it runs, because it scripts its own encounters.
+// Two live agents that end a walk near each other greet.
 const bGreet=document.getElementById('bGreet'), bFive=document.getElementById('bFive')
 bGreet.onclick=()=>{world.greetings=!world.greetings; setB(bGreet,world.greetings)}
 bFive.onclick=()=>{ pairUp() }
@@ -1172,10 +1095,8 @@ function pairUp(a = interaction && interaction.selected) {
 const dist2 = (p,q) => (p.pos.x-q.pos.x)**2 + (p.pos.z-q.pos.z)**2
 
 // ---- live ---------------------------------------------------------------
-// Points the room at the relay. demo.js is the fallback, not the default: if
-// nothing answers within LIVE_TIMEOUT_MS, or the relay hangs up later, the
-// scene falls back to the scripted demo and the #mode badge says so — it
-// never quietly sits there looking staffed when nobody is home.
+// Points the room at the relay. If nothing answers, the office stays empty and
+// the status badge says why; it never substitutes generated activity.
 const LIVE_TIMEOUT_MS = 1500
 const director = new Live.LiveDirector()
 const liveAgents = new Map()     // agent id -> Agent, live-spawned characters only
@@ -1191,10 +1112,7 @@ let everConnected = false
 
 function setMode(kind, text) { modeEl.className = kind; modeEl.textContent = text }
 
-/** Height-normalised, hair-tinted character for one live agent id. Reuses
- *  the exact same rig setup the demo cast gets — same clone, same tint math,
- *  same shadow flags — so a live figure and a demo figure are indistinguishable
- *  except for what they are actually doing. */
+/** Height-normalised, hair-tinted character for one live agent id. */
 function spawnLive(id, human, path) {
   if (!charGLTF) return null      // frame arrived before the rig finished loading
   const color = Live.hairFor(human)
@@ -1209,7 +1127,7 @@ function spawnLive(id, human, path) {
     pos: [Z.ZONES.reception.at[0], Z.ZONES.reception.at[1]], yaw: Math.PI / 2,
     scale: root.userData.scale,
   }))
-  a.gitPath = path   // same field the demo cast carries; git-aware UI reads only this
+  a.gitPath = path
   liveAgents.set(id, a)
   if (interaction) interaction.addAgent(a)
   return a
@@ -1311,10 +1229,9 @@ function onLivePresence(msg) {
 // vocabulary World.replay() expects — no translation table needed. `a`/`b`
 // follow the reel event's own sides throughout: "a is the one who stands
 // down, b is the one who keeps going" — matching live.js's toReelEvent,
-// where b is always the current lease holder. For generated events
-// (seed.js, SAMPLE_EVENTS) there's no real winner encoded on the wire, so
-// which side is a vs b there is arbitrary — fine for a demo replay, but
-// not a claim about who actually deferred to whom.
+// where b is always the current lease holder. Every production entry comes
+// from a live relay frame, so its winner/loser
+// ordering is authoritative.
 //
 // Kept local to replayEvent rather than imported from reel.js, same
 // "small copy across the toolchain boundary" pattern live.js's HAIR/
@@ -1384,7 +1301,7 @@ function pickReplayVariant(kind, eventId) {
 // not clobber whatever the *active* replay's caption is currently showing,
 // so these go through the arbiter at replay priority too, just released on
 // a short timer instead of held open. Previously these four branches called
-// the plain demo-priority caption() and got silently swallowed by an
+// the plain lower-priority caption and got silently swallowed by an
 // in-progress replay's hold — a click that looked like it did nothing.
 function replayCaption(text, ms = 2400) {
   const token = captionArbiter.hold(PRIORITY.replay)
@@ -1421,8 +1338,8 @@ function replayEvent(e) {
     return
   }
 
-  const a = agents.find(x => x.name === e.a.agent)
-  const b = agents.find(x => x.name === e.b.agent)
+  const a = world.agents.find(x => x.name === e.a.agent)
+  const b = world.agents.find(x => x.name === e.b.agent)
 
   if (!a || !b || a === b) {
     replayCaption(`replay: ${pair} — not both on screen right now`)
@@ -1478,7 +1395,7 @@ function replayEvent(e) {
   // center spot, so leaving #caption's text set too doubled up as two
   // stacked, overlapping captions (found in the browser, round 7
   // integration). Writing '' still takes the hold at replay priority
-  // (still blocks the demo's own captions per #63) but text.toggle('on',
+  // (still blocks lower-priority captions per #63) but text.toggle('on',
   // false) on an empty string is what actually hides the plain line —
   // see caption.js's write callback in office.html.
   captionArbiter.set(replayCard.variant ? '' : `replay: ${pair} — ${label}`,
@@ -1546,32 +1463,11 @@ function expireLive(now) {
 function goLive() {
   liveMode = true
   setMode('live', `live · room ${new URLSearchParams(location.search).get('room') || '(default)'}`)
-  // A demo that started because the relay was down (or during a retry) has
-  // no business still acting out its own script once real presence is
-  // back — "live" badge, five agents running a fiction underneath it is
-  // the badge lying by omission. Null it out, not just cancel: a later
-  // drop needs startDemo() to see "no demo running" and start a fresh one,
-  // not find a stale cancelled handle and skip it (see goDemoFallback).
-  // Restore before cancel: cancel() still lets the run's own promise settle
-  // (see startDemo), and restoreGreetings keys off `demo` still pointing at
-  // this run to tell "this run" apart from "a run that replaced it".
-  if (demo) { demo.restoreGreetings?.(); demo.cancel(); demo = null }
-  // Same "badge must not lie" reasoning as the demo cancel above: a
-  // "Restart demo" click that's still live would run the scripted cast
-  // under the live badge. Disable rather than repurpose the button so its
-  // label stays honest too.
-  bDemo.disabled = true
 }
 
-function goDemoFallback(reason) {
+function goEmpty(reason) {
   liveMode = false
-  setMode('demo', `demo — ${reason}`)
-  bDemo.disabled = false
-  // Only the first fallback (or the first after a reconnect) needs to
-  // start the story — connectWithReconnect's onClose fires again on every
-  // failed retry, and restarting the script from beat one on every miss
-  // would reset the cast each backoff tick instead of leaving it running.
-  if (!demo) startDemo()
+  setMode('empty', `empty · ${reason}`)
 }
 
 function initLive() {
@@ -1580,27 +1476,27 @@ function initLive() {
   // No room, no live. relaysrv/server.go's join handler `continue`s on an
   // empty room, so the socket opens, onOpen fires, goLive() paints the LIVE
   // badge — and the connection is in no room at all, so not one frame ever
-  // arrives. An empty office insisting it's connected is worse than the demo.
+  // arrives. An empty office must say why it cannot receive presence.
   //
   // There's nothing to default to: a room id is a hash of the checkout's
   // origin remote (go/internal/repo, python's room_key.py), which this page
   // has no way to derive. Whoever opens it has to say which room.
-  if (!room) { goDemoFallback('no ?room= to join'); return }
-  fallbackTimer = setTimeout(() => goDemoFallback(`no relay at ${Live.RELAY_URL}`), LIVE_TIMEOUT_MS)
+  if (!room) { goEmpty('no repository selected'); return }
+  fallbackTimer = setTimeout(() => goEmpty(`no relay at ${Live.RELAY_URL}`), LIVE_TIMEOUT_MS)
   // connectWithReconnect, not connect(): a relay that drops (or never
   // showed up in the first place) gets retried with backoff instead of
-  // leaving the office stuck in demo mode until someone reloads the page.
+  // leaving the office disconnected until someone reloads the page.
   liveConn = Live.connectWithReconnect({
     room, human,
     onOpen: () => { clearTimeout(fallbackTimer); everConnected = true; goLive() },
     onClose: () => {
       clearTimeout(fallbackTimer)
-      // Same badge class either way (still demo mode), different text: a
+      // Same badge class either way (still empty), different text: a
       // connection that never once succeeded reads as "no relay here",
       // one that dropped after being live reads as "lost it, retrying" —
       // repeating the first message forever while a retry is already
       // under way would be the badge lying about which state it's in.
-      goDemoFallback(everConnected ? 'relay dropped, reconnecting…' : `no relay at ${Live.RELAY_URL}`)
+      goEmpty(everConnected ? 'relay dropped, reconnecting…' : `no relay at ${Live.RELAY_URL}`)
     },
     onPresence: onLivePresence,
     onDecision: onLiveReelFrame,
@@ -1608,49 +1504,6 @@ function initLive() {
   })
   window.__liveConn = liveConn
 }
-
-// ---- demo -------------------------------------------------------------
-let demo = null
-// Routed through captionArbiter at demo priority — see #63 above. A
-// replay hold (higher priority) simply drops these while it's active;
-// this function's own signature and every existing call site are
-// unchanged, so this is a transparent swap.
-function caption(text) {
-  captionArbiter.set(text, { priority: PRIORITY.demo })
-}
-function startDemo() {
-  if (demo) demo.cancel()
-  if (agents.length < 5 || !props.tortoise) { caption('still loading'); return }
-  spin = false; setB(bSpin, false)
-  bDemo.textContent = 'Restart demo'
-  const preGreetings = world.greetings
-  world.greetings = false; setB(bGreet, false)   // the demo scripts its own
-  let n = 0
-  demo = runDemo({
-    agents, world, tortoise: props.tortoise, scene, caption, focus, zoneUI,
-    onBeat: (t) => { n++; reel.setFoot(`beat <b>${n}</b> / 6`) },
-  })
-  window.__demo = demo
-  // Capture the run. A cancelled run still settles, and without this check its
-  // handler switched greetings back on underneath the run that replaced it —
-  // which then hijacked the cast into spontaneous high fives mid-story.
-  const run = demo
-  // Restoring greetings has two ways in: the run settling on its own, or
-  // goLive() cutting it short because real presence showed up. Both call
-  // this — whichever gets there first restores and clears itself, so the
-  // other is a no-op instead of a second flip (or, worse, restoring a
-  // run that's already been replaced by a fresh startDemo()).
-  run.restoreGreetings = () => {
-    if (demo !== run || !run.restoreGreetings) return
-    world.greetings = preGreetings; setB(bGreet, preGreetings)
-    run.restoreGreetings = null
-  }
-  demo.promise.then(r => {
-    if (demo === run) reel.setFoot(`demo <b>${r}</b>`)
-    run.restoreGreetings?.()
-  })
-}
-bDemo.onclick = startDemo
 
 /**
  * Slide each desk chair between its tucked and pulled-out marks.
@@ -1724,7 +1577,6 @@ function tick(){
   world.update(dt)
   updateChairs(dt)
   expireLive(Date.now())
-  if (demo) demo.update(dt)
   if (interaction) { interaction.paint(); interaction.tick(dt) }
   zoneUI.updateCamera(camera)
   if (window.__zoneOwner) window.__zoneOwner.updateCamera(camera)
@@ -1771,9 +1623,7 @@ window.__cam = camera
 window.__renderer = renderer
 window.__THREE = THREE
 window.__world = world
-window.__agents = world.agents     // all eight
-window.__cast = agents             // the five the demo drives
-window.__extras = extras
+window.__agents = world.agents
 window.__desks = desks
 window.__props = props
 window.__pairUp = pairUp
@@ -1790,9 +1640,8 @@ window.__selected = () => interaction.selected ? interaction.selected.id : null
 window.__zones = Z
 window.__zoneUI = zoneUI
 window.__anim = ANIM
-window.__startDemo = startDemo
 window.__caption = () => capEl.textContent
-window.__live = { director, liveAgents, mode: () => (liveMode ? 'live' : 'demo'), onPresence: onLivePresence }
+window.__live = { director, liveAgents, mode: () => (liveMode ? 'live' : 'empty'), onPresence: onLivePresence }
 window.__focus = focus
 window.__setCam = (y,p,d) => { goal.active=false; flight=null; yaw=y; pitch=p; dist=d }
 window.__zoomMode = { get: () => zoomMode, set: m => { zoomMode = m === 'snap' ? 'snap' : 'ease' },
@@ -1812,7 +1661,7 @@ window.__agentState = () => world.agents.map(a => ({
 }))
 // Drives the zoom-to-head + blame card flow without going through a real
 // click — useful for testing before interact.js's onSelect hook lands, and
-// for a console-driven demo beat later. Matches on id first, then name, so
+// for console diagnostics. Matches on id first, then name, so
 // either `__zoomAgent('a1')` or `__zoomAgent('reception')` works.
 window.__zoomAgent = name => {
   if (!name) { interaction && interaction.select(null); zoomRestore(); blameCard.hide(); return null }
@@ -1851,12 +1700,6 @@ window.__histShelf = histShelf
 // STATE.md has documented since round 2, not new debt.
 const zoneOwner = attachZoneOwner({ scene, zoneDirs: ZONE_DIRS })
 window.__zoneOwner = zoneOwner
-
-// --- commit board wiring ---
-// Same append-only-slice reasoning as zoneowner above: its own poll loop,
-// its own render-frame loop, one call and stash the handle.
-const commitBoard = attachCommitBoard({ scene })
-window.__commitBoard = commitBoard
 
 } // end startOffice()
 
