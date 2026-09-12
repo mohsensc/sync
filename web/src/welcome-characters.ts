@@ -19,11 +19,14 @@ async function start() {
   if (started || welcome.hidden || document.hidden || reducedMotion.matches) return
   started = true
   try {
-    const [THREE, { GLTFLoader }, { clone }, { getClip }] = await Promise.all([
+    const [THREE, { GLTFLoader }, { clone }, { getClip }, argue, { spacingFor }, { createEncounters }] = await Promise.all([
       import('three'),
       import('three/addons/loaders/GLTFLoader.js'),
       import('three/addons/utils/SkeletonUtils.js'),
       import('./office/anim.js'),
+      import('./office/clips/argue.js'),
+      import('./office/highfive.js'),
+      import('./welcome-encounters.js'),
     ])
     const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true })
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5))
@@ -62,7 +65,8 @@ async function start() {
       model.position.set(-center.x, -bounds.min.y, -center.z)
       const body = new THREE.Group()
       body.add(model)
-      body.scale.setScalar((1.65 + index * 0.08) / bounds.getSize(new THREE.Vector3()).y)
+      // Matching heights keep the authored high-five palms at the same level.
+      body.scale.setScalar(1.72 / bounds.getSize(new THREE.Vector3()).y)
       const root = new THREE.Group()
       root.add(body)
       // Keep entire animated figures in separate depth lanes. Sharing z=0
@@ -77,7 +81,11 @@ async function start() {
         walk: mixer.clipAction(getClip('walk', index + 1)),
         wave: mixer.clipAction(getClip('wave', index + 1)),
         idle: mixer.clipAction(getClip('idle', index + 1)),
+        highfive: mixer.clipAction(getClip('highfive', index + 1)).setLoop(THREE.LoopOnce, 1),
+        argue: mixer.clipAction(argue.getClip('argue')),
+        argueReact: mixer.clipAction(argue.getClip('argueReact')),
       }
+      actions.highfive.clampWhenFinished = true
       actions.walk.play()
       mixer.update(index * 0.23)
       return {
@@ -87,6 +95,7 @@ async function start() {
         activity: 'walk' as 'walk' | 'wave' | 'dance' | 'look',
       }
     })
+    const encounters = createEncounters(walkers, spacingFor(1.72))
     let width = 20
     const resize = () => {
       const rect = stage.getBoundingClientRect()
@@ -99,7 +108,9 @@ async function start() {
       render(0)
     }
     const render = (dt: number) => {
+      const paired = encounters(dt, width)
       for (const walker of walkers) {
+        if (paired.has(walker)) continue
         walker.remaining -= dt
         walker.elapsed += dt
         if (walker.remaining <= 0) {
