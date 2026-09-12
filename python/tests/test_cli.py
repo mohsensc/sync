@@ -39,18 +39,18 @@ class Box:
         self.home = home
         self.run = run
         self.config = home / ".config"
-        self.user_policy = self.config / "agent-presence" / "policy.toml"
-        self.repo_policy = repo / ".agent-presence" / "policy.toml"
-        self.roster = repo / ".agent-presence" / "principals.toml"
-        self.snapshot = run / "agent-presence.json"
-        self.sock = run / "agent-presence.sock"
-        self.cache = run / "agent-presence.policy.json"
-        self.journal = run / "agent-presence.decisions.jsonl"
+        self.user_policy = self.config / "agent-sync" / "policy.toml"
+        self.repo_policy = repo / ".agent-sync" / "policy.toml"
+        self.roster = repo / ".agent-sync" / "principals.toml"
+        self.snapshot = run / "agent-sync.json"
+        self.sock = run / "agent-sync.sock"
+        self.cache = run / "agent-sync.policy.json"
+        self.journal = run / "agent-sync.decisions.jsonl"
 
     @property
     def env(self) -> dict[str, str]:
         env = {k: v for k, v in os.environ.items()
-               if not k.startswith("AGENT_PRESENCE_") and k != "NO_COLOR"}
+               if not k.startswith("AGENT_SYNC_") and k != "NO_COLOR"}
         env.update({
             "HOME": str(self.home),
             "XDG_CONFIG_HOME": str(self.config),
@@ -65,7 +65,7 @@ class Box:
     def ap(self, *argv: str, stdin: str | None = None,
            env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
         return subprocess.run(
-            [sys.executable, "-m", "agent_presence.cli", *argv],
+            [sys.executable, "-m", "agent_sync.cli", *argv],
             cwd=self.repo, input=stdin, capture_output=True, text=True,
             timeout=TIMEOUT_S, env=env or self.env,
         )
@@ -195,7 +195,7 @@ def test_policy_path_prints_the_file_to_edit(box):
 def test_policy_path_fails_loudly_when_there_is_no_session_file(box):
     done = box.ap("policy", "path", "--layer", "session")
     assert done.returncode == 1
-    assert "AGENT_PRESENCE_POLICY" in done.stderr
+    assert "AGENT_SYNC_POLICY" in done.stderr
 
 
 # -- set and unset ----------------------------------------------------------
@@ -703,7 +703,7 @@ def test_color_never_is_bare_even_with_a_flag_saying_otherwise(box):
 def test_a_session_env_var_beats_the_user_file(box):
     box.write_user_policy('schema = 1\n[effects]\nrung3 = "notify"\n')
     env = box.env
-    env["AGENT_PRESENCE_POLICY_RUNG3"] = "ask"
+    env["AGENT_SYNC_POLICY_RUNG3"] = "ask"
     blob = json.loads(box.ap("policy", "show", "--effective", "--json",
                              env=env).stdout)
     assert blob["rungs"][3]["effect"] == "ask"
@@ -712,16 +712,16 @@ def test_a_session_env_var_beats_the_user_file(box):
 
 def test_a_bad_session_env_var_is_reported_rather_than_swallowed(box):
     env = box.env
-    env["AGENT_PRESENCE_POLICY_RUNG3"] = "loud"
+    env["AGENT_SYNC_POLICY_RUNG3"] = "loud"
     done = box.ap("policy", "check", env=env)
     assert done.returncode == 1
-    assert "AGENT_PRESENCE_POLICY_RUNG3" in done.stdout
+    assert "AGENT_SYNC_POLICY_RUNG3" in done.stdout
 
 
 def test_a_session_policy_file_can_be_written_and_read(box):
     session = box.run / "session.toml"
     env = box.env
-    env["AGENT_PRESENCE_POLICY"] = str(session)
+    env["AGENT_SYNC_POLICY"] = str(session)
     assert box.ap("policy", "set", "rung2=ask", "--layer", "session",
                   env=env).returncode == 0
     blob = json.loads(box.ap("policy", "show", "--effective", "--json",
@@ -753,7 +753,7 @@ def test_the_directory_flag_moves_where_the_repo_is_looked_for(box, tmp_path):
     outside = tmp_path / "outside"
     outside.mkdir()
     done = subprocess.run(
-        [sys.executable, "-m", "agent_presence.cli", "-C", str(box.repo),
+        [sys.executable, "-m", "agent_sync.cli", "-C", str(box.repo),
          "doctor", "--json"],
         cwd=outside, capture_output=True, text=True, timeout=TIMEOUT_S,
         env=box.env,
@@ -765,7 +765,7 @@ def test_the_directory_flag_moves_where_the_repo_is_looked_for(box, tmp_path):
 # -- the principal this machine presents -------------------------------------
 #
 # `ap principals add` prints a token once and says: put it in
-# ~/.config/agent-presence/token, or $AGENT_PRESENCE_TOKEN, on the machine that
+# ~/.config/agent-sync/token, or $AGENT_SYNC_TOKEN, on the machine that
 # runs as this principal. Nothing checked whether you did, so a typo in the name
 # or a token pasted with a stray character was indistinguishable from working —
 # right up until the day it mattered and your agent lost a contest it should
@@ -798,8 +798,8 @@ def test_doctor_says_so_when_this_machine_presents_nobody(box):
 
 def test_doctor_confirms_a_principal_whose_token_matches_the_roster(box):
     token = add_sara(box)
-    env = box.env | {"AGENT_PRESENCE_PRINCIPAL": "sara",
-                     "AGENT_PRESENCE_TOKEN": token}
+    env = box.env | {"AGENT_SYNC_PRINCIPAL": "sara",
+                     "AGENT_SYNC_TOKEN": token}
     check = doctor_check(box, "principal", env)
     assert check["state"] == "ok"
     assert "sara" in check["detail"]
@@ -808,20 +808,20 @@ def test_doctor_confirms_a_principal_whose_token_matches_the_roster(box):
 
 def test_doctor_reads_the_token_out_of_the_file_the_cli_told_you_to_write(box):
     token = add_sara(box)
-    token_file = box.config / "agent-presence" / "token"
+    token_file = box.config / "agent-sync" / "token"
     token_file.parent.mkdir(parents=True, exist_ok=True)
     token_file.write_text(token + "\n")
     token_file.chmod(0o600)
 
-    env = box.env | {"AGENT_PRESENCE_PRINCIPAL": "sara"}
+    env = box.env | {"AGENT_SYNC_PRINCIPAL": "sara"}
     check = doctor_check(box, "principal", env)
     assert check["state"] == "ok"
 
 
 def test_doctor_fails_a_principal_the_roster_has_never_heard_of(box):
     add_sara(box)
-    env = box.env | {"AGENT_PRESENCE_PRINCIPAL": "sarah",  # one letter out
-                     "AGENT_PRESENCE_TOKEN": "whatever"}
+    env = box.env | {"AGENT_SYNC_PRINCIPAL": "sarah",  # one letter out
+                     "AGENT_SYNC_TOKEN": "whatever"}
     check = doctor_check(box, "principal", env)
     assert check["state"] == "fail"
     assert "sarah" in check["detail"]
@@ -829,8 +829,8 @@ def test_doctor_fails_a_principal_the_roster_has_never_heard_of(box):
 
 def test_doctor_fails_a_token_that_does_not_match_the_roster(box):
     add_sara(box)
-    env = box.env | {"AGENT_PRESENCE_PRINCIPAL": "sara",
-                     "AGENT_PRESENCE_TOKEN": "not-the-minted-one"}
+    env = box.env | {"AGENT_SYNC_PRINCIPAL": "sara",
+                     "AGENT_SYNC_TOKEN": "not-the-minted-one"}
     check = doctor_check(box, "principal", env)
     assert check["state"] == "fail"
     assert "does not match" in check["detail"]
@@ -841,7 +841,7 @@ def test_doctor_warns_when_a_principal_has_no_token_at_all(box):
     # the machine still works and the person still is not getting what they
     # configured.
     add_sara(box)
-    env = box.env | {"AGENT_PRESENCE_PRINCIPAL": "sara"}
+    env = box.env | {"AGENT_SYNC_PRINCIPAL": "sara"}
     check = doctor_check(box, "principal", env)
     assert check["state"] == "warn"
     assert "no token" in check["detail"]
@@ -849,12 +849,12 @@ def test_doctor_warns_when_a_principal_has_no_token_at_all(box):
 
 def test_doctor_warns_about_a_token_file_anyone_can_read(box):
     token = add_sara(box)
-    token_file = box.config / "agent-presence" / "token"
+    token_file = box.config / "agent-sync" / "token"
     token_file.parent.mkdir(parents=True, exist_ok=True)
     token_file.write_text(token + "\n")
     token_file.chmod(0o644)
 
-    env = box.env | {"AGENT_PRESENCE_PRINCIPAL": "sara"}
+    env = box.env | {"AGENT_SYNC_PRINCIPAL": "sara"}
     check = doctor_check(box, "principal", env)
     assert check["state"] == "warn"
     assert "0644" in check["detail"]
@@ -867,9 +867,9 @@ def test_doctor_names_the_tier_the_unattended_bit_selects(box):
     token = [ln.split()[-1] for ln in done.stdout.splitlines()
              if ln.strip().startswith("token")][0]
 
-    env = box.env | {"AGENT_PRESENCE_PRINCIPAL": "sara",
-                     "AGENT_PRESENCE_TOKEN": token,
-                     "AGENT_PRESENCE_UNATTENDED": "1"}
+    env = box.env | {"AGENT_SYNC_PRINCIPAL": "sara",
+                     "AGENT_SYNC_TOKEN": token,
+                     "AGENT_SYNC_UNATTENDED": "1"}
     check = doctor_check(box, "principal", env)
     assert check["state"] == "ok"
     assert "critical" in check["detail"]
@@ -895,7 +895,7 @@ def _daemon_effect(blob: dict, rung: int, path: str) -> str:
     is the daemon's other obligation and has its own tests; this one is about
     which entry wins.
     """
-    from agent_presence.policy import _compile_glob
+    from agent_sync.policy import _compile_glob
 
     def hit(match: str) -> bool:
         if not match:
@@ -972,7 +972,7 @@ def test_the_compiled_cache_answers_the_way_explain_does(box):
 
 def test_compile_promotes_ask_when_the_environment_says_nobody_is_watching(box):
     box.write_user_policy('schema = 1\n[effects]\nrung3 = "ask"\n')
-    env = box.env | {"AGENT_PRESENCE_UNATTENDED": "1"}
+    env = box.env | {"AGENT_SYNC_UNATTENDED": "1"}
     done = box.ap("policy", "compile", env=env)
     assert done.returncode == 0, done.stderr
 
@@ -986,7 +986,7 @@ def test_compile_promotes_ask_when_the_environment_says_nobody_is_watching(box):
 
 def test_explain_promotes_ask_when_the_environment_says_so(box):
     box.write_user_policy('schema = 1\n[effects]\nrung3 = "ask"\n')
-    env = box.env | {"AGENT_PRESENCE_UNATTENDED": "1"}
+    env = box.env | {"AGENT_SYNC_UNATTENDED": "1"}
     blob = json.loads(box.ap("policy", "explain", "src/auth.py", "--rung", "3",
                              "--json", env=env).stdout)
     assert blob["effect"] == "deny"
@@ -1013,7 +1013,7 @@ def test_doctor_will_not_pass_a_cache_compiled_for_the_other_supervision(
     box.write_user_policy('schema = 1\n[effects]\nrung3 = "ask"\n')
     assert box.ap("policy", "compile").returncode == 0
 
-    env = box.env | {"AGENT_PRESENCE_UNATTENDED": "1"}
+    env = box.env | {"AGENT_SYNC_UNATTENDED": "1"}
     done = box.ap("doctor", env=env)
     assert done.returncode == 1
     assert "unattended" in done.stdout
@@ -1130,5 +1130,5 @@ def test_principals_add_names_the_token_file_that_is_actually_read(box):
     assert done.returncode == 0, done.stderr
     # `read_token` honours $XDG_CONFIG_HOME. The instructions printed here did
     # not, so on a machine that sets it they named a file nothing would read.
-    assert str(xdg / "agent-presence" / "token") in done.stdout
+    assert str(xdg / "agent-sync" / "token") in done.stdout
     assert "~/.config" not in done.stdout

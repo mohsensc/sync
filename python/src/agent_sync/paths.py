@@ -16,11 +16,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Mapping
 
-SOCK_ENV = "AGENT_PRESENCE_SOCK"
-SNAPSHOT_ENV = "AGENT_PRESENCE_SNAPSHOT"
-JOURNAL_ENV = "AGENT_PRESENCE_JOURNAL"
+SOCK_ENV = "AGENT_SYNC_SOCK"
+SNAPSHOT_ENV = "AGENT_SYNC_SNAPSHOT"
+JOURNAL_ENV = "AGENT_SYNC_JOURNAL"
 
-SOCK_NAME = "agent-presence.sock"
+SOCK_NAME = "agent-sync.sock"
 SNAPSHOT_SUFFIX = "json"
 JOURNAL_SUFFIX = "decisions.jsonl"
 
@@ -51,7 +51,7 @@ def sibling_path(sock: Path, suffix: str) -> Path:
     dot = base.rfind(".")
     stem = base if dot == -1 else base[:dot]
     if not stem:
-        stem = "agent-presence"
+        stem = "agent-sync"
     return sock.parent / f"{stem}.{suffix}"
 
 

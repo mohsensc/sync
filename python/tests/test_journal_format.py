@@ -8,7 +8,7 @@ only way the two can drift without anybody noticing, `ap why` having been
 carefully written to tolerate everything it does not understand.
 
 Regenerate it by running the chain and copying a line out of
-$XDG_RUNTIME_DIR/agent-presence.decisions.jsonl. Do not hand-edit it into
+$XDG_RUNTIME_DIR/agent-sync.decisions.jsonl. Do not hand-edit it into
 agreement.
 """
 
@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agent_presence.journal import journal_path, parse_record, read_journal
+from agent_sync.journal import journal_path, parse_record, read_journal
 
 # One line, exactly as cpp/daemon/journal.cpp emitted it.
 FROM_THE_DAEMON = (
@@ -44,7 +44,7 @@ def test_every_field_the_daemon_writes_is_a_field_the_reader_keeps():
 
 
 def test_the_reader_round_trips_what_the_writer_produced(tmp_path):
-    path = tmp_path / "agent-presence.decisions.jsonl"
+    path = tmp_path / "agent-sync.decisions.jsonl"
     path.write_text(FROM_THE_DAEMON + "\n")
     records = read_journal(path)
     assert len(records) == 1
@@ -66,48 +66,48 @@ def test_a_record_with_no_reason_is_still_readable():
 #
 # go/cmd/presenced/main.go derives this the same way (siblingPath, ported to
 # paths.py) and reads the same override. Two presenced on one box with
-# distinct AGENT_PRESENCE_SOCK used to share one journal, so `ap why` in one
+# distinct AGENT_SYNC_SOCK used to share one journal, so `ap why` in one
 # repo answered with the other repo's blocks.
 
 
 def test_journal_path_falls_back_to_the_runtime_directory():
     assert journal_path({"XDG_RUNTIME_DIR": "/run/user/501"}) == Path(
-        "/run/user/501/agent-presence.decisions.jsonl"
+        "/run/user/501/agent-sync.decisions.jsonl"
     )
 
 
-def test_agent_presence_journal_moves_the_file():
+def test_agent_sync_journal_moves_the_file():
     env = {"XDG_RUNTIME_DIR": "/run/user/501",
-           "AGENT_PRESENCE_JOURNAL": "/run/user/501/repo-a.jsonl"}
+           "AGENT_SYNC_JOURNAL": "/run/user/501/repo-a.jsonl"}
     assert journal_path(env) == Path("/run/user/501/repo-a.jsonl")
 
 
 def test_two_daemons_sharing_a_runtime_dir_read_two_journals():
     shared = "/run/user/501"
-    a = journal_path({"XDG_RUNTIME_DIR": shared, "AGENT_PRESENCE_JOURNAL": shared + "/a.jsonl"})
-    b = journal_path({"XDG_RUNTIME_DIR": shared, "AGENT_PRESENCE_JOURNAL": shared + "/b.jsonl"})
+    a = journal_path({"XDG_RUNTIME_DIR": shared, "AGENT_SYNC_JOURNAL": shared + "/a.jsonl"})
+    b = journal_path({"XDG_RUNTIME_DIR": shared, "AGENT_SYNC_JOURNAL": shared + "/b.jsonl"})
     assert a != b
 
 
 def test_a_non_default_sock_moves_the_journal_beside_it():
-    # No $AGENT_PRESENCE_JOURNAL — a second daemon pointed at ap2.sock is the
+    # No $AGENT_SYNC_JOURNAL — a second daemon pointed at ap2.sock is the
     # scenario #90 is about, and it never sets that var, only the socket.
     env = {"XDG_RUNTIME_DIR": "/run/user/501",
-           "AGENT_PRESENCE_SOCK": "/run/user/501/ap2.sock"}
+           "AGENT_SYNC_SOCK": "/run/user/501/ap2.sock"}
     assert journal_path(env) == Path("/run/user/501/ap2.decisions.jsonl")
 
 
 def test_explicit_journal_still_beats_socket_derivation():
     env = {"XDG_RUNTIME_DIR": "/run/user/501",
-           "AGENT_PRESENCE_SOCK": "/run/user/501/ap2.sock",
-           "AGENT_PRESENCE_JOURNAL": "/run/user/501/wherever.jsonl"}
+           "AGENT_SYNC_SOCK": "/run/user/501/ap2.sock",
+           "AGENT_SYNC_JOURNAL": "/run/user/501/wherever.jsonl"}
     assert journal_path(env) == Path("/run/user/501/wherever.jsonl")
 
 
 def test_two_sockets_sharing_a_runtime_dir_read_two_journals():
     shared = "/run/user/501"
-    a = journal_path({"XDG_RUNTIME_DIR": shared, "AGENT_PRESENCE_SOCK": shared + "/a.sock"})
-    b = journal_path({"XDG_RUNTIME_DIR": shared, "AGENT_PRESENCE_SOCK": shared + "/b.sock"})
+    a = journal_path({"XDG_RUNTIME_DIR": shared, "AGENT_SYNC_SOCK": shared + "/a.sock"})
+    b = journal_path({"XDG_RUNTIME_DIR": shared, "AGENT_SYNC_SOCK": shared + "/b.sock"})
     assert a != b
     assert a == Path(shared) / "a.decisions.jsonl"
     assert b == Path(shared) / "b.decisions.jsonl"

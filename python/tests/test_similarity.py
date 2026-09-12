@@ -2,8 +2,8 @@
 
 import pytest
 
-from agent_presence import similarity
-from agent_presence.similarity import (
+from agent_sync import similarity
+from agent_sync.similarity import (
     BACKEND_ENV,
     IntentSimilarity,
     LexicalSimilarity,
@@ -125,7 +125,7 @@ def test_the_default_is_lexical(monkeypatch):
 def test_selecting_embedding_without_the_extra_falls_back(monkeypatch):
     """Exercises the real ImportError path, not a simulated one: this repo's
     plain dev install does not pull in fastembed (see pyproject.toml), so
-    asking for AGENT_PRESENCE_SIMILARITY=embedding here must fall back to
+    asking for AGENT_SYNC_SIMILARITY=embedding here must fall back to
     lexical rather than handing back a backend that can only ever score 0.0.
     Skips itself if the embedding extra happens to be installed - see
     test_embedding_similarity.py for that case."""
@@ -170,7 +170,7 @@ def test_threshold_matches_the_relay():
     import re
     from pathlib import Path
 
-    from agent_presence.similarity import DEFAULT_RUNG4_THRESHOLD
+    from agent_sync.similarity import DEFAULT_RUNG4_THRESHOLD
 
     go = Path(__file__).resolve().parents[2] / "go" / "internal" / "relaysrv" / "similarity.go"
     m = re.search(r"defaultRung4Threshold\s*=\s*([0-9.]+)", go.read_text())

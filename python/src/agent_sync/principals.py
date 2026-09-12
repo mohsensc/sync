@@ -4,7 +4,7 @@ Why priority is not in ``policy.toml``: ``conn.agent`` and ``conn.human`` come
 straight off the join frame and ``human_id()`` is the local part of
 ``git config user.email``. Both are attacker-controlled in the only threat model
 that matters — an agent that reads CLAUDE.md, notices the roster, and sets
-``AGENT_PRESENCE_HUMAN=sara``. Any scheme keyed on the declared name is
+``AGENT_SYNC_HUMAN=sara``. Any scheme keyed on the declared name is
 decoration. So the tier comes from a separate roster the relay reads and the
 client cannot write, and the client's contribution is authenticated with a
 bearer token.
@@ -60,22 +60,22 @@ from typing import Literal
 
 from .priority import PRIORITY_NORMAL, name_of, parse_priority
 
-log = logging.getLogger("agent_presence.principals")
+log = logging.getLogger("agent_sync.principals")
 
 ROSTER_VERSION = 1
-ROSTER_ENV = "AGENT_PRESENCE_PRINCIPALS"
-ROSTER_RELPATH = ".agent-presence/principals.toml"
-REPO_ROOT_ENV = "AGENT_PRESENCE_REPO_ROOT"
+ROSTER_ENV = "AGENT_SYNC_PRINCIPALS"
+ROSTER_RELPATH = ".agent-sync/principals.toml"
+REPO_ROOT_ENV = "AGENT_SYNC_REPO_ROOT"
 
 # The other half of the roster: who *this* machine presents itself as. The
 # roster says who is entitled to what; these say which of those entries the
 # daemon on this box claims to be. cpp/daemon/main.cpp reads the same three, by
 # the same rules, because a machine with two ideas about where its token lives
 # has one that is wrong.
-PRINCIPAL_ENV = "AGENT_PRESENCE_PRINCIPAL"
-TOKEN_ENV = "AGENT_PRESENCE_TOKEN"
-UNATTENDED_ENV = "AGENT_PRESENCE_UNATTENDED"
-TOKEN_RELPATH = "agent-presence/token"
+PRINCIPAL_ENV = "AGENT_SYNC_PRINCIPAL"
+TOKEN_ENV = "AGENT_SYNC_TOKEN"
+UNATTENDED_ENV = "AGENT_SYNC_UNATTENDED"
+TOKEN_RELPATH = "agent-sync/token"
 
 GrantReason = Literal["roster", "no-roster", "no-token", "bad-token", "unknown"]
 
@@ -95,8 +95,8 @@ def hash_token(token: str) -> str:
 def token_path(env: Mapping[str, str] | None = None) -> Path:
     """Where this machine keeps its own bearer token.
 
-    ``$XDG_CONFIG_HOME/agent-presence/token``, else
-    ``$HOME/.config/agent-presence/token`` — the same rule ``policy.py`` uses
+    ``$XDG_CONFIG_HOME/agent-sync/token``, else
+    ``$HOME/.config/agent-sync/token`` — the same rule ``policy.py`` uses
     for the user layer, so a machine has one config directory and not two.
     """
     env = os.environ if env is None else env
@@ -106,7 +106,7 @@ def token_path(env: Mapping[str, str] | None = None) -> Path:
 
 
 def read_token(env: Mapping[str, str] | None = None) -> str:
-    """This machine's token, or empty. ``$AGENT_PRESENCE_TOKEN`` first.
+    """This machine's token, or empty. ``$AGENT_SYNC_TOKEN`` first.
 
     Never raises. No token is not an error: the relay grants such a connection
     the default tier, which is what a room with no roster runs at anyway.
@@ -168,7 +168,7 @@ def local_identity(env: Mapping[str, str] | None = None) -> LocalIdentity:
 
 
 def find_roster(start: str | os.PathLike) -> Path | None:
-    """The nearest ``.agent-presence/principals.toml`` at or above ``start``.
+    """The nearest ``.agent-sync/principals.toml`` at or above ``start``.
 
     Stops climbing at the checkout — the directory holding ``.git`` — because a
     roster belongs to a repo. Without that stop, one stray roster in a home
@@ -352,8 +352,8 @@ class Roster:
         repo_root: str | None = None,
         env: Mapping[str, str] | None = None,
     ) -> "Roster":
-        """The roster for a checkout: ``$AGENT_PRESENCE_PRINCIPALS``, else
-        ``$AGENT_PRESENCE_REPO_ROOT``, else the nearest one at or above the
+        """The roster for a checkout: ``$AGENT_SYNC_PRINCIPALS``, else
+        ``$AGENT_SYNC_REPO_ROOT``, else the nearest one at or above the
         working directory.
 
         The walk is the difference between a roster that works and one that

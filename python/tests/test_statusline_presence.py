@@ -39,7 +39,7 @@ def run(snapshot=None, env=None, timeout=10):
     """Run the segment the way a prompt does: clean env, hard timeout."""
     e = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
     if snapshot is not None:
-        e["AGENT_PRESENCE_SNAPSHOT"] = str(snapshot)
+        e["AGENT_SYNC_SNAPSHOT"] = str(snapshot)
     e.update(env or {})
     proc = subprocess.run(
         [str(SCRIPT)], capture_output=True, env=e, timeout=timeout
@@ -58,7 +58,7 @@ def ok(r):
     return r
 
 
-def snap(tmp_path, body, name="agent-presence.json"):
+def snap(tmp_path, body, name="agent-sync.json"):
     p = tmp_path / name
     p.write_text(body, encoding="utf-8")
     return p
@@ -156,7 +156,7 @@ def test_garbage_content(tmp_path):
 
 
 def test_binary_content(tmp_path):
-    p = tmp_path / "agent-presence.json"
+    p = tmp_path / "agent-sync.json"
     p.write_bytes(bytes(range(256)) * 8)
     ok(run(p))
 
@@ -196,7 +196,7 @@ def test_many_peers(tmp_path):
 
 
 def test_snapshot_path_is_a_directory(tmp_path):
-    d = tmp_path / "agent-presence.json"
+    d = tmp_path / "agent-sync.json"
     d.mkdir()
     ok(run(d))
 
@@ -204,7 +204,7 @@ def test_snapshot_path_is_a_directory(tmp_path):
 def test_snapshot_path_is_a_fifo(tmp_path):
     # A fifo nobody is writing to blocks a naive read forever, and the prompt
     # with it.
-    p = tmp_path / "agent-presence.json"
+    p = tmp_path / "agent-sync.json"
     os.mkfifo(p)
     try:
         r = run(p, timeout=5)
@@ -214,13 +214,13 @@ def test_snapshot_path_is_a_fifo(tmp_path):
 
 
 def test_snapshot_is_a_dangling_symlink(tmp_path):
-    p = tmp_path / "agent-presence.json"
+    p = tmp_path / "agent-sync.json"
     p.symlink_to(tmp_path / "gone.json")
     ok(run(p))
 
 
 def test_huge_file_finishes_fast(tmp_path):
-    p = tmp_path / "agent-presence.json"
+    p = tmp_path / "agent-sync.json"
     p.write_text('{"peers":[' + ("x" * 4_000_000) + "]}", encoding="utf-8")
     start = time.monotonic()
     r = ok(run(p, timeout=10))
@@ -240,7 +240,7 @@ def test_a_normal_tick_is_quick(tmp_path):
 
 
 def test_default_path_follows_xdg_runtime_dir(tmp_path):
-    (tmp_path / "agent-presence.json").write_text(peers_json("sara"))
+    (tmp_path / "agent-sync.json").write_text(peers_json("sara"))
     r = ok(run(None, env={"XDG_RUNTIME_DIR": str(tmp_path)}))
     assert r.out == "· sara here"
 
@@ -249,7 +249,7 @@ def test_default_path_falls_back_to_tmpdir(tmp_path):
     # cpp/daemon/main.cpp: XDG_RUNTIME_DIR, else TMPDIR, else /tmp. On macOS
     # only TMPDIR is set, so skipping it points the reader at a file the daemon
     # never writes.
-    (tmp_path / "agent-presence.json").write_text(peers_json("sara"))
+    (tmp_path / "agent-sync.json").write_text(peers_json("sara"))
     r = ok(run(None, env={"TMPDIR": str(tmp_path)}))
     assert r.out == "· sara here"
 
@@ -259,20 +259,20 @@ def test_xdg_runtime_dir_wins_over_tmpdir(tmp_path):
     tmp = tmp_path / "tmp"
     xdg.mkdir()
     tmp.mkdir()
-    (xdg / "agent-presence.json").write_text(peers_json("sara"))
-    (tmp / "agent-presence.json").write_text(peers_json("a", "b", "c"))
+    (xdg / "agent-sync.json").write_text(peers_json("sara"))
+    (tmp / "agent-sync.json").write_text(peers_json("a", "b", "c"))
     r = ok(run(None, env={"XDG_RUNTIME_DIR": str(xdg), "TMPDIR": str(tmp)}))
     assert r.out == "· sara here"
 
 
 def test_trailing_slash_on_tmpdir(tmp_path):
     # macOS hands out TMPDIR with a trailing slash.
-    (tmp_path / "agent-presence.json").write_text(peers_json("sara"))
+    (tmp_path / "agent-sync.json").write_text(peers_json("sara"))
     r = ok(run(None, env={"TMPDIR": str(tmp_path) + "/"}))
     assert r.out == "· sara here"
 
 
-# --- sock-derived path: #90, a second daemon on AGENT_PRESENCE_SOCK -----------
+# --- sock-derived path: #90, a second daemon on AGENT_SYNC_SOCK -----------
 #
 # go/cmd/presenced/main.go's siblingPath, ported here: the snapshot lives
 # beside the socket, named after it. Before this the script only ever
@@ -282,16 +282,16 @@ def test_trailing_slash_on_tmpdir(tmp_path):
 
 def test_sock_override_alone_redirects_the_reader(tmp_path):
     (tmp_path / "ap2.json").write_text(peers_json("sara"))
-    r = ok(run(None, env={"AGENT_PRESENCE_SOCK": str(tmp_path / "ap2.sock")}))
+    r = ok(run(None, env={"AGENT_SYNC_SOCK": str(tmp_path / "ap2.sock")}))
     assert r.out == "· sara here"
 
 
 def test_sock_override_does_not_read_the_default_name(tmp_path):
     # The fixed name still exists on disk, from a first daemon; the second
     # daemon's socket has to win, not fall through to it.
-    (tmp_path / "agent-presence.json").write_text(peers_json("wrong-daemon"))
+    (tmp_path / "agent-sync.json").write_text(peers_json("wrong-daemon"))
     (tmp_path / "ap2.json").write_text(peers_json("sara"))
-    r = ok(run(None, env={"AGENT_PRESENCE_SOCK": str(tmp_path / "ap2.sock")}))
+    r = ok(run(None, env={"AGENT_SYNC_SOCK": str(tmp_path / "ap2.sock")}))
     assert r.out == "· sara here"
 
 
@@ -300,8 +300,8 @@ def test_explicit_snapshot_still_beats_socket_derivation(tmp_path):
     explicit = tmp_path / "wherever.json"
     explicit.write_text(peers_json("sara"))
     r = ok(run(None, env={
-        "AGENT_PRESENCE_SOCK": str(tmp_path / "ap2.sock"),
-        "AGENT_PRESENCE_SNAPSHOT": str(explicit),
+        "AGENT_SYNC_SOCK": str(tmp_path / "ap2.sock"),
+        "AGENT_SYNC_SNAPSHOT": str(explicit),
     }))
     assert r.out == "· sara here"
 
@@ -309,15 +309,15 @@ def test_explicit_snapshot_still_beats_socket_derivation(tmp_path):
 def test_two_sockets_sharing_a_runtime_dir_read_two_snapshots(tmp_path):
     (tmp_path / "a.json").write_text(peers_json("carol"))
     (tmp_path / "b.json").write_text(peers_json("dan"))
-    a = ok(run(None, env={"AGENT_PRESENCE_SOCK": str(tmp_path / "a.sock")}))
-    b = ok(run(None, env={"AGENT_PRESENCE_SOCK": str(tmp_path / "b.sock")}))
+    a = ok(run(None, env={"AGENT_SYNC_SOCK": str(tmp_path / "a.sock")}))
+    b = ok(run(None, env={"AGENT_SYNC_SOCK": str(tmp_path / "b.sock")}))
     assert a.out == "· carol here"
     assert b.out == "· dan here"
 
 
 # No-env-at-all coverage for the ordinary single-daemon case already lives
 # above (test_default_path_follows_xdg_runtime_dir and friends) — this
-# section only adds AGENT_PRESENCE_SOCK to the picture.
+# section only adds AGENT_SYNC_SOCK to the picture.
 
 
 # --- end to end against the daemon's real writer ------------------------------
@@ -346,21 +346,21 @@ def write_real_snapshot(writer, path, peers):
 
 
 def test_e2e_daemon_writer_no_peers(writer, tmp_path):
-    p = tmp_path / "agent-presence.json"
+    p = tmp_path / "agent-sync.json"
     write_real_snapshot(writer, p, [])
     r = ok(run(p))
     assert r.out == ""
 
 
 def test_e2e_daemon_writer_one_peer(writer, tmp_path):
-    p = tmp_path / "agent-presence.json"
+    p = tmp_path / "agent-sync.json"
     write_real_snapshot(writer, p, [("sara", "edit", "src/auth.py")])
     r = ok(run(p))
     assert r.out == "· sara here"
 
 
 def test_e2e_daemon_writer_three_peers(writer, tmp_path):
-    p = tmp_path / "agent-presence.json"
+    p = tmp_path / "agent-sync.json"
     write_real_snapshot(writer, p, [
         ("sara", "edit", "src/auth.py"),
         ("dev", "read", "src/db.py"),
@@ -382,21 +382,21 @@ def test_e2e_daemon_writer_three_peers(writer, tmp_path):
 ])
 def test_e2e_odd_names_round_trip(writer, tmp_path, human):
     """Whatever the writer escapes, the reader has to unescape the same way."""
-    p = tmp_path / "agent-presence.json"
+    p = tmp_path / "agent-sync.json"
     write_real_snapshot(writer, p, [(human, "edit", "src/a.py")])
     r = ok(run(p))
     assert r.out == f"· {human} here"
 
 
 def test_e2e_odd_path_does_not_inflate_the_count(writer, tmp_path):
-    p = tmp_path / "agent-presence.json"
+    p = tmp_path / "agent-sync.json"
     write_real_snapshot(writer, p, [("sara", "edit", '/tmp/"human":"ghost"')])
     r = ok(run(p))
     assert r.out == "· sara here"
 
 
 def test_e2e_odd_names_with_several_peers(writer, tmp_path):
-    p = tmp_path / "agent-presence.json"
+    p = tmp_path / "agent-sync.json"
     write_real_snapshot(writer, p, [
         ('sa"ra', "edit", "a.py"),
         ("back\\slash", "read", 'b".py'),
@@ -412,7 +412,7 @@ def test_e2e_newline_in_a_name_keeps_the_file_one_line(writer, tmp_path):
     # it. encoding/json escapes every control byte, so the file this script
     # reads with `read -r -n 65536` (one line, full stop) stays one line no
     # matter what a peer's name contains.
-    p = tmp_path / "agent-presence.json"
+    p = tmp_path / "agent-sync.json"
     write_real_snapshot(writer, p, [("before\nafter", "edit", "src/a.py")])
     raw = p.read_text(encoding="utf-8")
     assert "\n" not in raw, f"a peer name broke the one-line contract: {raw!r}"

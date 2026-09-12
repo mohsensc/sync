@@ -18,7 +18,7 @@ import re
 from pathlib import Path
 
 HEADER = (
-    "# agent-presence policy. Saved is applied; nothing to restart.\n"
+    "# agent-sync policy. Saved is applied; nothing to restart.\n"
     "# Effects, quietest first: silent, notify, context, ask, deny.\n"
     "schema = 1\n"
 )

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from agent_presence.priority import PRIORITY_MAX, PRIORITY_NAMES, parse_priority
+from agent_sync.priority import PRIORITY_MAX, PRIORITY_NAMES, parse_priority
 
 
 # #95: go's ParsePriority used to fall back to strconv.Atoi, so a quoted

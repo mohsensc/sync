@@ -35,11 +35,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-# DEFAULT_RUNG4_THRESHOLD used to come from agent_presence.ladder, which
+# DEFAULT_RUNG4_THRESHOLD used to come from agent_sync.ladder, which
 # went with the Python relay (#40) — so this tool has raised
 # ModuleNotFoundError on every run since, while the docs went on calling it
 # live. It lives beside the scorer it tunes now.
-from agent_presence.similarity import (  # noqa: E402
+from agent_sync.similarity import (  # noqa: E402
     DEFAULT_RUNG4_THRESHOLD,
     LexicalSimilarity,
 )
@@ -116,7 +116,7 @@ def main() -> int:
         gate = True
     else:
         try:
-            from agent_presence.embedding_similarity import EmbeddingSimilarity
+            from agent_sync.embedding_similarity import EmbeddingSimilarity
         except ImportError:
             print("embedding backend not installed: "
                   "pip install -e '.[dev,embedding]'", file=sys.stderr)

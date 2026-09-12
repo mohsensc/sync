@@ -42,8 +42,8 @@ import time
 import pytest
 import websockets
 
-from agent_presence import journal as journal_mod
-from agent_presence import paths as paths_mod
+from agent_sync import journal as journal_mod
+from agent_sync import paths as paths_mod
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent / "helpers"))
 from gorelay_proc import start_gorelay  # noqa: E402
@@ -440,7 +440,7 @@ async def test_daemon_that_never_joins_fails_readably(tmp_path, sockdir):
 async def test_sock_override_redirects_journal_snapshot_and_statusline(
         two_checkouts, tmp_path, sockdir):
     """#90's whole premise, driven by the real binary: presenced derives its
-    journal and snapshot from AGENT_PRESENCE_SOCK (siblingPath,
+    journal and snapshot from AGENT_SYNC_SOCK (siblingPath,
     go/cmd/presenced/main.go), and every reader hanging off that socket has
     to land on the same two files or it silently answers for whichever
     daemon happened to own the fixed name.
@@ -481,7 +481,7 @@ async def test_sock_override_redirects_journal_snapshot_and_statusline(
             f"daemon never wrote its sibling journal:\n{daemon.recent_output()}"
         )
 
-        env = {"AGENT_PRESENCE_SOCK": sock}
+        env = {"AGENT_SYNC_SOCK": sock}
         assert journal_mod.journal_path(env) == journal_file
         assert paths_mod.snapshot_path(env) == snapshot_file
 
@@ -489,13 +489,13 @@ async def test_sock_override_redirects_journal_snapshot_and_statusline(
         # box — the exact collision #90 is about. The real daemon above
         # wrote an empty peer list to its own sibling snapshot; the
         # statusline has to read that, not this one.
-        (sockdir / "agent-presence.json").write_text(
+        (sockdir / "agent-sync.json").write_text(
             '{"peers":[{"human":"wrong-daemon","verb":"edit","path":"x"}]}'
         )
         r = subprocess.run(
             [str(STATUSLINE)], capture_output=True, text=True, timeout=10,
             env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-                 "AGENT_PRESENCE_SOCK": sock},
+                 "AGENT_SYNC_SOCK": sock},
         )
         assert r.returncode == 0
         assert r.stdout.strip() == "", (

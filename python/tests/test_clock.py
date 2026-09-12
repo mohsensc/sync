@@ -1,6 +1,6 @@
 import pytest
 
-from agent_presence.clock import VirtualClock
+from agent_sync.clock import VirtualClock
 
 
 def test_time_only_moves_when_advanced():

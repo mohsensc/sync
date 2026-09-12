@@ -40,7 +40,7 @@ REGION = {"path": "src/contested.py", "symbol": None, "lines": None}
 
 @pytest.fixture(autouse=True)
 def _opaque_off(monkeypatch):
-    monkeypatch.delenv("AGENT_PRESENCE_OPAQUE", raising=False)
+    monkeypatch.delenv("AGENT_SYNC_OPAQUE", raising=False)
 
 
 async def _recv(ws, kind: str, timeout: float = 5.0) -> dict:
