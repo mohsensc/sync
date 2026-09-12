@@ -15,7 +15,11 @@ gone; see the inline `now:` notes on the specific citations.
 
 Scope: the relay's network surface only. Hooks talk to `presenced` over a
 unix socket on the same machine; that boundary is a filesystem permission,
-not a network one, and is out of scope here.
+not a network one, and is out of scope here. This file also predates the
+hosted account API (Clerk sign-in, `api/*` Vercel functions, account
+tokens) entirely — it was written for the self-hosted `principals.toml`
+roster, not the workspace/token model `docs/hosted-relay.md` describes.
+Nothing below should be read as covering that surface.
 
 ## What changed in #11, and what didn't
 
