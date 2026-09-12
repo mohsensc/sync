@@ -2,6 +2,7 @@
   "name": "agent-sync-web",
   "private": true,
   "type": "module",
+  "packageManager": "pnpm@10.34.5",
   "scripts": {
     "verify-toolchain": "bash scripts/verify-toolchain.sh",
     "test": "bash scripts/verify-toolchain.sh && vitest run",
