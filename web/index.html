@@ -61,6 +61,8 @@
         <article><span class="welcome-step" aria-hidden="true">02</span><h2>See the whole picture</h2><p>Keep active agents, repositories, and recent resolutions in one place.</p></article>
         <article><span class="welcome-step" aria-hidden="true">03</span><h2>Drop into the office</h2><p>See your connected agents come together in a shared 3D workspace.</p></article>
       </div>
+      <div id="welcome-characters" class="welcome-characters" aria-hidden="true" hidden></div>
+      <button id="welcome-characters-pause" class="welcome-characters-pause" type="button" aria-pressed="false" hidden>Pause little walks</button>
     </section>
 
     <section id="auth-gate" class="auth-shell" hidden>
@@ -166,5 +168,6 @@
     </div>
   </main>
   <script type="module" src="/src/dashboard.ts"></script>
+  <script type="module" src="/src/welcome-characters.ts"></script>
 </body>
 </html>

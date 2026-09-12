@@ -1,5 +1,6 @@
 import { Clerk } from '@clerk/clerk-js'
 import { inject } from '@vercel/analytics'
+import { addAuthHomeLink, setupAccountSettings } from './account-settings.js'
 import {
   activeAgents,
   relativeTime,
@@ -22,6 +23,7 @@ const dashboardError = byId<HTMLElement>('dashboard-error')
 const repoList = byId<HTMLElement>('repo-list')
 const agentList = byId<HTMLElement>('agent-list')
 const resolutionList = byId<HTMLElement>('resolution-list')
+addAuthHomeLink(authGate)
 
 // Mirrors dashboard.css's own palette exactly (ink text/primary, card and
 // page backgrounds, danger/success, border radius, font stack) so Clerk's
@@ -62,6 +64,8 @@ let payload: DashboardPayload | null = null
 let selectedRepoId: string | null = null
 let refreshTimer: number | null = null
 let visibleTokenId: string | null = null
+let deletingAccount = false
+const pendingAccountRequests = new Set<Promise<unknown>>()
 
 function setText(el: HTMLElement, value: string) { el.textContent = value }
 
@@ -163,16 +167,20 @@ function render() {
 }
 
 async function api<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, {
+  if (deletingAccount) throw new Error('Account deletion is in progress. Retry deletion or log out.')
+  const request = fetch(url, {
     ...init,
     headers: { 'Content-Type': 'application/json', ...init?.headers },
   })
+  pendingAccountRequests.add(request)
+  const response = await request.finally(() => pendingAccountRequests.delete(request))
   const body = await response.json().catch(() => ({})) as { error?: string }
   if (!response.ok) throw new Error(body.error || `Request failed (${response.status})`)
   return body as T
 }
 
 async function refresh() {
+  if (deletingAccount) return
   try {
     payload = await api<DashboardPayload>('/api/dashboard')
     dashboardError.hidden = true
@@ -206,7 +214,7 @@ async function loadClerkUi(key: string): Promise<unknown> {
 }
 
 async function showDashboard(clerk: Clerk) {
-  if (!clerk.user) return
+  if (!clerk.user || deletingAccount) return
   loginCta.hidden = true
   authGate.hidden = true
   dashboard.hidden = false
@@ -215,11 +223,14 @@ async function showDashboard(clerk: Clerk) {
   const image = byId<HTMLImageElement>('user-avatar')
   image.src = clerk.user.imageUrl
   image.alt = `${name} avatar`
+  if (!byId('account-settings').onclick) setupAccountSettings(clerk, async () => {
+    deletingAccount = true
+    if (refreshTimer !== null) window.clearInterval(refreshTimer)
+    refreshTimer = null
+    await Promise.allSettled([...pendingAccountRequests])
+  })
   await api('/api/bootstrap', { method: 'POST' })
-  beginPolling()
-
-  byId<HTMLButtonElement>('account-settings').onclick = () => void clerk.openUserProfile()
-  byId<HTMLButtonElement>('sign-out').onclick = () => void clerk.signOut({ redirectUrl: '/' })
+  if (!deletingAccount) beginPolling()
 }
 
 function showAuthError() {

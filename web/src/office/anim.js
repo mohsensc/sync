@@ -133,21 +133,30 @@ export const WALK_CYCLE_METERS = 0.86
 // anything that wants to twist without caring where the palm lands, but if a
 // palm target is present for that side the solved roll wins.
 //
-// Axes below are derived from the bind data and a PCA of every vertex weighted
-// to the hand. Signed so that both palms face backward in the bind T-pose,
-// which is what makes the mirror rule [f, -d, -t] come out exact.
+// The source mesh's hands are mounted backwards relative to the authored wrist
+// frame: aiming a hanging palm at the thigh leaves its thumb pointing behind
+// the character. Correct the mounting once, about the hand's own long axis,
+// before applying any authored wrist motion. This keeps the wrist and finger
+// reach fixed, so every consumer (including contact clips) gets the same fix.
+const HAND_MOUNT = new THREE.Quaternion(0, 1, 0, 0)
+
+// PCA-derived palm axes, expressed in the corrected hand mount. Transforming
+// these alongside the mount preserves the existing character-space palm frame
+// and the contact points fitted against it. Local Y is the hand's long axis.
 
 /** Palm normal in hand-bone-local space. Exported so a viewer can draw it. */
 export const PALM_NORMAL = {
-  LeftHand:  new THREE.Vector3( 0.6311, -0.0609, -0.7733),
-  RightHand: new THREE.Vector3(-0.6218, -0.0453, -0.7819),
+  LeftHand:  new THREE.Vector3(-0.6311, -0.0609, 0.7733),
+  RightHand: new THREE.Vector3( 0.6218, -0.0453, 0.7819),
 }
 
 /** Bone's rest orientation in character space. */
 function bindWorld(bone) {
   const b = BIND[bone]
-  return new THREE.Quaternion(b.pw[0], b.pw[1], b.pw[2], b.pw[3])
+  const q = new THREE.Quaternion(b.pw[0], b.pw[1], b.pw[2], b.pw[3])
     .multiply(new THREE.Quaternion(b.q[0], b.q[1], b.q[2], b.q[3]))
+  if (PALM_NORMAL[bone]) q.multiply(HAND_MOUNT)
+  return q
 }
 
 const BONE_Y = new THREE.Vector3(0, 1, 0)
@@ -278,7 +287,14 @@ function localQuat(bone, r, out = _out) {
   _pw.set(b.pw[0], b.pw[1], b.pw[2], b.pw[3])
   _pwi.copy(_pw).invert()
   _qb.set(b.q[0], b.q[1], b.q[2], b.q[3])
-  return out.copy(_pwi).multiply(_d).multiply(_pw).multiply(_qb)
+  out.copy(_pwi).multiply(_d).multiply(_pw).multiply(_qb)
+  // Carry the forearm skin with the hand so the wrist's blended vertices do
+  // not collapse under a 180-degree twist. The wrist is on the forearm's Y
+  // axis, so this leaves its position fixed. Cancel that parent mount before
+  // applying the hand's own mount; authored wrist bends remain unchanged.
+  if (FOREARM_ROLL[bone]) out.multiply(HAND_MOUNT)
+  if (WRIST[bone]) out.premultiply(HAND_MOUNT).multiply(HAND_MOUNT)
+  return out
 }
 
 /** Snap a character to a static pose. Handy for debugging and for parking a
