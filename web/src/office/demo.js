@@ -22,6 +22,17 @@ const CANCEL = Symbol('demo-cancelled')
 /** Race a promise against cancellation so goTo() can't outlive a restart. */
 const race = (p, tok) => Promise.race([p, new Promise((_, rej) => tok.rejects.push(rej))])
 
+/** Await an arrival (or a Promise.all of them). goTo resolves falsy when a
+ *  later order superseded it — agent.js's #cancelMove — which in the app means
+ *  a click sent that agent somewhere else mid-beat. The next line of the script
+ *  would then narrate a walk that never happened, so the run ends here, the
+ *  same way a cancel ends it. */
+async function arrived(p, tok) {
+  const got = await race(p, tok)
+  if (Array.isArray(got) ? got.some(a => !a) : !got) throw CANCEL
+  return got
+}
+
 /** World.highfive returns an encounter record, not a promise. Wait it out. */
 function waitForEncounter(e) {
   if (!e) return Promise.resolve()
@@ -151,7 +162,7 @@ export function runDemo(ctx) {
 
     a1.say('read src/orders/total.ts', 'ok')
     a2.say('read src/orders/total.ts', 'ok')
-    await race(Promise.all([
+    await arrived(Promise.all([
       a1.goTo(s1.pos[0] - 0.34, s1.pos[1], { yaw: s1.yaw, label: 'desk 1' }),
       a2.goTo(s2.pos[0] + 0.10, s2.pos[1] + 0.28, { yaw: s2.yaw, label: 'desk 1' }),
     ]), tok)
@@ -166,7 +177,7 @@ export function runDemo(ctx) {
     const sv = Z.claimSlot(vault, a3.id)
     a3.say('edit src/auth/token.ts', 'working')
     a3.setState('working')
-    await race(a3.goTo(sv.pos[0], sv.pos[1] + 0.5, { yaw: sv.yaw, label: 'vault' }), tok)
+    await arrived(a3.goTo(sv.pos[0], sv.pos[1] + 0.5, { yaw: sv.yaw, label: 'vault' }), tok)
     a3.act('reading')
     await race(wait(2600, tok), tok)
 
@@ -189,7 +200,7 @@ export function runDemo(ctx) {
     const arrive4 = race(a4.goTo(p4[0], p4[1], { yaw: seat[2], label: 'desk 3' }), tok)
     await race(wait(900, tok), tok)
     const arrive5 = race(a5.goTo(p5[0], p5[1], { yaw: Math.PI, label: 'desk 3' }), tok)
-    await race(Promise.all([arrive4, arrive5]), tok)
+    await arrived(Promise.all([arrive4, arrive5]), tok)
 
     // They stop and turn to face each other. That is the whole tell.
     say('Both want Order.total. The first one holds it; the second is blocked.')
@@ -218,7 +229,7 @@ export function runDemo(ctx) {
     a4.act('reading')
 
     const s5 = Z.claimSlot('desks', a5.id)
-    await race(a5.goTo(s5.pos[0], s5.pos[1], { yaw: s5.yaw, label: 'another desk' }), tok)
+    await arrived(a5.goTo(s5.pos[0], s5.pos[1], { yaw: s5.yaw, label: 'another desk' }), tok)
     a5.act('reading')
     await race(wait(1500, tok), tok)
 

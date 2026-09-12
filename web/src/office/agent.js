@@ -47,48 +47,46 @@
 import * as THREE from 'three'
 import * as ANIM from './anim.js'
 import { highfiveMarks, spacingFor } from './highfive.js'
-import { argueMarks, spacingFor as argueSpacingFor, registry as ARGUE_CLIPS } from './clips/argue.js'
-import { handshakeMarks, spacingFor as handshakeSpacingFor, registry as HANDSHAKE_CLIPS } from './clips/handshake.js'
-import { shoveMarks, spacingFor as shoveSpacingFor, registry as SHOVE_CLIPS } from './clips/shove.js'
-import { yieldMarks, spacingFor as yieldSpacingFor, registry as YIELD_CLIPS } from './clips/yield.js'
-import { doubletakeMarks, spacingFor as doubletakeSpacingFor, registry as DOUBLETAKE_CLIPS } from './clips/doubletake.js'
+import { argueMarks, spacingFor as argueSpacingFor } from './clips/argue.js'
+import { handshakeMarks, spacingFor as handshakeSpacingFor } from './clips/handshake.js'
+import { shoveMarks, spacingFor as shoveSpacingFor } from './clips/shove.js'
+import { yieldMarks, spacingFor as yieldSpacingFor } from './clips/yield.js'
+import { doubletakeMarks, spacingFor as doubletakeSpacingFor } from './clips/doubletake.js'
 // Rung-2 "collaboration" beat family — alternates to highfive. See
 // clips/chestbump.js / clips/fistbump.js headers.
-import { chestbumpMarks, spacingFor as chestbumpSpacingFor, registry as CHESTBUMP_CLIPS } from './clips/chestbump.js'
-import { fistbumpMarks, spacingFor as fistbumpSpacingFor, registry as FISTBUMP_CLIPS } from './clips/fistbump.js'
+import { chestbumpMarks, spacingFor as chestbumpSpacingFor } from './clips/chestbump.js'
+import { fistbumpMarks, spacingFor as fistbumpSpacingFor } from './clips/fistbump.js'
 // Rung-3 "abort"/out-authoritied beat family — alternates to shove. See
 // clips/waveoff.js / clips/slap.js headers.
-import { waveoffMarks, spacingFor as waveoffSpacingFor, registry as WAVEOFF_CLIPS } from './clips/waveoff.js'
-import { slapMarks, spacingFor as slapSpacingFor, registry as SLAP_CLIPS } from './clips/slap.js'
+import { waveoffMarks, spacingFor as waveoffSpacingFor } from './clips/waveoff.js'
+import { slapMarks, spacingFor as slapSpacingFor } from './clips/slap.js'
 import * as Z from './zones.js'
-
-// Fold the paired-action clips into anim.js's own table, once, at import
-// time — before any agent has crossfaded into anything and cached the clip
-// list. See anim.js's CLIPS export and each clip module's own header.
-Object.assign(ANIM.CLIPS, ARGUE_CLIPS)
-Object.assign(ANIM.CLIPS, HANDSHAKE_CLIPS)
-Object.assign(ANIM.CLIPS, SHOVE_CLIPS)
-Object.assign(ANIM.CLIPS, YIELD_CLIPS)
-Object.assign(ANIM.CLIPS, DOUBLETAKE_CLIPS)
-Object.assign(ANIM.CLIPS, CHESTBUMP_CLIPS)
-Object.assign(ANIM.CLIPS, FISTBUMP_CLIPS)
-Object.assign(ANIM.CLIPS, WAVEOFF_CLIPS)
-Object.assign(ANIM.CLIPS, SLAP_CLIPS)
 
 export const YAW_OFFSET = Math.PI
 
 const clamp = (v, a, b) => v < a ? a : v > b ? b : v
 const wrapPi = a => Math.atan2(Math.sin(a), Math.cos(a))
 
+// The fastest hand-off #settle's 0.045 m/s glide cap can absorb without the
+// last centimetre reading as a stop dead, and the braking rate #steer uses to
+// get there. TUNING.arrive falls out of the pair: see below.
+const ARRIVE_SPEED = 0.16
+const DECEL = 2.2
+
 export const TUNING = {
   maxSpeed: 1.15,      // m/s
   accel: 2.8,
-  decel: 2.2,
+  decel: DECEL,
   turnWalk: 2.6,       // rad/s while moving
   turnIdle: 2.4,       // rad/s standing still
   minTurnFactor: 0.35, // fraction of maxSpeed kept while turning hard
-  arrive: 0.01,        // m — #steer's trigger radius; brakes to a literal stop here, not a buffer short of it
-  arriveSpeed: 0.16,   // m/s — speed must also be under this for #arrive to fire
+  // #steer's trigger radius, tested against the distance at the TOP of the
+  // frame. Derived, not picked: #steer brakes on sqrt(2*decel*dist), so this
+  // is the one radius where that profile has already come down to arriveSpeed
+  // and both halves of #arrive's gate can fire on the same frame. Any other
+  // radius leaves one gate waiting on the other. 5.8 mm.
+  arrive: ARRIVE_SPEED ** 2 / (2 * DECEL),
+  arriveSpeed: ARRIVE_SPEED,   // m/s — see #arrive for why the speed half still binds
   pivotDist: 1.0,      // inside this, a big turn is done on the spot
   pivotAngle: 1.0,
   pivotExit: 0.35,
@@ -114,18 +112,20 @@ function seedFromId(id) {
 }
 
 // Each activity owns its clip, its blend time and where it goes when it ends.
-// oneShot activities are timed off the clip length.
+// Whether a clip is a one-shot is the clip's own business — anim.js's buildClip
+// derives it from the spec's `loop` — so it isn't restated here. `next` is only
+// read for the ones that are, and they're timed off the clip length.
 const ACTS = {
   idle:       { clip: 'idle',     fade: 0.35 },
   walking:    { clip: 'walk',     fade: 0.28 },
-  sitting:    { clip: 'sit',      fade: 0.30, oneShot: true, next: 'typing' },
-  standing:   { clip: 'sit',      fade: 0.30, oneShot: true, next: 'idle', reverse: true },
+  sitting:    { clip: 'sit',      fade: 0.30, next: 'typing' },
+  standing:   { clip: 'sit',      fade: 0.30, next: 'idle', reverse: true },
   typing:     { clip: 'type',     fade: 0.45, seated: true },
   sleeping:   { clip: 'sleep',    fade: 0.60, seated: true },
   reading:    { clip: 'read',     fade: 0.45 },
   drinking:   { clip: 'drink',    fade: 0.45 },
   waving:     { clip: 'wave',     fade: 0.30 },
-  highfiving: { clip: 'highfive', fade: 0.20, oneShot: true, next: 'idle' },
+  highfiving: { clip: 'highfive', fade: 0.20, next: 'idle' },
   // The contested-write pair. Not a one-shot: it loops until World.resolveContest()
   // ends it, because unlike a high five a real collision has no fixed length —
   // it lasts until the region is free. clips/argue.js supplies 'argue' and
@@ -134,30 +134,30 @@ const ACTS = {
   reacting:   { clip: 'argueReact', fade: 0.25 },
   // Resolution beats — the reel plays these once a rung-3 collision clears.
   // Rung 3, decision "wait": the requester agreed to hold off. clips/handshake.js.
-  handshaking: { clip: 'handshake', fade: 0.20, oneShot: true, next: 'idle' },
+  handshaking: { clip: 'handshake', fade: 0.20, next: 'idle' },
   // Rung 3, decision "abort": wait-die or a straight priority-tier win.
   // clips/shove.js — `shoving` is the winner, `shoveReacting` the loser.
-  shoving:        { clip: 'shove',      fade: 0.18, oneShot: true, next: 'idle' },
-  shoveReacting:  { clip: 'shoveReact', fade: 0.18, oneShot: true, next: 'idle' },
+  shoving:        { clip: 'shove',      fade: 0.18, next: 'idle' },
+  shoveReacting:  { clip: 'shoveReact', fade: 0.18, next: 'idle' },
   // Rung 3 "abort" beat family, alternates to shoving/shoveReacting above:
   // same asymmetric a-wins convention, different beats. clips/waveoff.js
   // (no contact, all contempt) / clips/slap.js (cartoon wind-up and hit).
-  wavingOff:       { clip: 'waveoff',      fade: 0.20, oneShot: true, next: 'idle' },
-  waveoffReacting: { clip: 'waveoffReact', fade: 0.20, oneShot: true, next: 'idle' },
-  slapping:        { clip: 'slap',         fade: 0.14, oneShot: true, next: 'idle' },
-  slapReacting:    { clip: 'slapReact',    fade: 0.14, oneShot: true, next: 'idle' },
+  wavingOff:       { clip: 'waveoff',      fade: 0.20, next: 'idle' },
+  waveoffReacting: { clip: 'waveoffReact', fade: 0.20, next: 'idle' },
+  slapping:        { clip: 'slap',         fade: 0.14, next: 'idle' },
+  slapReacting:    { clip: 'slapReact',    fade: 0.14, next: 'idle' },
   // Rung 1: the reader notices the editor is already in there and steps
   // back. clips/yield.js — `yielding` is the reader, `keeping` the editor.
-  yielding: { clip: 'yieldStep', fade: 0.18, oneShot: true, next: 'idle' },
-  keeping:  { clip: 'yieldKeep', fade: 0.18, oneShot: true, next: 'idle' },
+  yielding: { clip: 'yieldStep', fade: 0.18, next: 'idle' },
+  keeping:  { clip: 'yieldKeep', fade: 0.18, next: 'idle' },
   // Rung 4: redundant work caught by similarity — same beat both sides,
   // mirrored. clips/doubletake.js.
-  doubletaking: { clip: 'doubletake', fade: 0.16, oneShot: true, next: 'idle' },
+  doubletaking: { clip: 'doubletake', fade: 0.16, next: 'idle' },
   // Rung 2 collaboration beat family, alternates to highfiving above: both
   // sides play the same clip, same "facing each other is the mirror" trick.
   // clips/chestbump.js (bigger, weightier) / clips/fistbump.js (understated).
-  chestbumping: { clip: 'chestbump', fade: 0.20, oneShot: true, next: 'idle' },
-  fistbumping:  { clip: 'fistbump',  fade: 0.16, oneShot: true, next: 'idle' },
+  chestbumping: { clip: 'chestbump', fade: 0.20, next: 'idle' },
+  fistbumping:  { clip: 'fistbump',  fade: 0.16, next: 'idle' },
 }
 export const ACTIVITIES = Object.keys(ACTS)
 
@@ -395,7 +395,7 @@ export class Agent {
    *  timeScale directly. So a play('walk') outside a steer (a demo beat, say)
    *  inherits whatever rate the last steer or pivot left on that action. */
   play(clip, fade = 0.3) {
-    if (this.clip === clip && !ANIM.ONE_SHOT.has(clip)) return this
+    if (this.clip === clip && !ANIM.getClip(clip).userData.oneShot) return this
     this.clip = clip
     ANIM.crossfade(this.root, clip, fade)
     // play() overrides the machine, so any transition it had armed is void.
@@ -427,9 +427,10 @@ export class Agent {
     }
     this.activity = name
     if (name !== 'walking') this.speed = 0
-    if (st.oneShot) {
+    const c = ANIM.getClip(clip)
+    if (c.userData.oneShot) {
       const next = opts.next !== undefined ? opts.next : st.next
-      this._timer = { t: ANIM.getClip(clip).duration, fn: () => {
+      this._timer = { t: c.duration, fn: () => {
         if (opts.then) opts.then(this)
         else if (next) this.act(next)
       } }
@@ -655,7 +656,7 @@ export class Agent {
       // Brakes to a literal stop at the target, not a buffer TUNING.arrive
       // short of it — the old "- TUNING.arrive" here is what used to leave
       // up to ~10cm for #settle to glide through at idle-clip foot-slide
-      // speeds. #settle now only has TUNING.arrive itself (1cm) left to close.
+      // speeds. #settle now only has TUNING.arrive itself (6mm) left to close.
       const stopping = Math.sqrt(2 * TUNING.decel * dist)
       vmax = Math.min(m.speed * turnFactor, stopping)
     }
@@ -681,6 +682,10 @@ export class Agent {
       this.#walkCadence(target, dt)
     }
 
+    // `dist` is this frame's OPENING distance, deliberately: a frame of travel
+    // at 10fps is longer than the 6mm radius, so testing where the frame ended
+    // lets the agent step across the mark without ever landing inside it and
+    // orbit forever (measured: it never arrives at all from 4 m at 10fps).
     if (dist <= TUNING.arrive && this.speed < TUNING.arriveSpeed) this.#arrive()
   }
 
@@ -716,8 +721,14 @@ export class Agent {
     // reads as a flicker; only do it now when there's no turn phase coming.
     if (Math.abs(wrapPi(toYaw - this.yaw)) < TUNING.pivotExit) this.act('idle')
 
-    // TUNING.arrive/arriveSpeed leave at most ~1cm and a small yaw error for
-    // #settle to close — see #steer's braking comment.
+    // Both halves of #steer's gate bind, and neither is decorative: without
+    // the radius, speed alone fires on frame 1 of every move (speed starts at
+    // 0); without the speed test, a frame long enough to leave the agent above
+    // its braking profile hands off at whatever it was still carrying, and
+    // #settle's 0.045 m/s glide cap turns that into a stop dead. TUNING.arrive
+    // is derived so the two coincide on a tracked approach — what's left here
+    // is the radius plus whatever a long frame carried past it, measured over
+    // 4 m / 0.5 m / 5 cm / 2 cm walks: 6mm at 60fps, 8mm at the 0.05 s dt cap.
     this._settle = { to: [m.x, m.z], toYaw, gliding: false, m }
   }
 

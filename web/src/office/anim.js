@@ -1007,11 +1007,12 @@ function idleNoise(t, sp) {
 // ---------------------------------------------------------------------------
 // Clip table
 // ---------------------------------------------------------------------------
-// Exported so a paired-action module can fold its own clips in — see
-// clips/argue.js's header ("an integrator can fold straight into anim.js's
-// own CLIPS table"). Merge before the first createClips() call: the table is
-// cached on first use, so a merge after some other clip has already played
-// is silently too late.
+// The one clip table. Exported so a paired-action module can fold its own
+// specs in, which every clips/*.js does at its own import time — that is the
+// only way a clip gets played, so there is no second builder and no second
+// path onto the mixer. Merge before the first createClips() call: the table
+// is cached on first use, so a merge after some other clip has already played
+// is silently too late. Import time is always early enough.
 //
 // A spec is { fn, dur, keys, loop } plus two optional flags:
 //   fn(t01, seed)  t01 in [0,1]; `seed` is the seedParams() bundle for the
@@ -1043,8 +1044,6 @@ export const CLIPS = {
   wave:     { fn: wavePose,     dur: 2.2,  keys: 18, loop: true },
 }
 
-export const CLIP_NAMES = Object.keys(CLIPS)
-export const ONE_SHOT = new Set(['sit', 'highfive'])
 /** Clips that leave the character seated. Useful for deciding what to play next. */
 export const SEATED_CLIPS = new Set(['sit', 'type', 'sleep'])
 
@@ -1139,8 +1138,6 @@ export function getMixer(obj) {
       fade: null,      // in-flight crossfade: { prev, next, dur, t }
       inertia: null,   // in-flight pose correction: { offsets: Map(bone->Quaternion), dur, t }
       bones: null,     // Map(name -> Object3D), filled in lazily
-      prevQuats: null, // for popMetric: Map(bone -> last frame's quaternion)
-      maxAngVel: 0,
     }
     RIGS.set(obj, r)
   }
@@ -1165,14 +1162,18 @@ function boneMap(obj, rig) {
  *  of L/R asymmetry into the walk and idle (see seedParams). Cached per seed,
  *  so characters that share a seed share their clips.
  *
- *  Call it before the character's first crossfade. It drops the actions
- *  cached for the old seed, but whatever is already playing, fading or being
- *  corrected by inertia keeps running on the clips it was built from — this
- *  is a constructor-time knob, not a live one. */
+ *  Constructor-time only, and it throws rather than asking: all this can do
+ *  is drop the actions cached for the old seed. Whatever is already playing,
+ *  fading or being corrected by inertia holds a direct reference to an action
+ *  built from the old seed's clips, which rig.actions.clear() cannot reach —
+ *  #steer would then write walk cadence into a fresh, silent action while the
+ *  old one still drives the bones. Half-applying that quietly is worse than
+ *  refusing. */
 export function setSeed(obj, seed) {
   const rig = rigOf(obj)
   seed = seed >>> 0
   if (rig.seed === seed) return
+  if (rig.current || rig.fade) throw new Error('anim: setSeed after this character has started playing')
   rig.seed = seed
   rig.actions.clear()
 }
@@ -1216,7 +1217,6 @@ export function makeAction(obj, name, { timeScale = 1 } = {}) {
 // `duration` as a post-mixer pass (see applyInertia) — so the retrigger
 // steps continuously out of wherever the clip was instead of snapping back
 // to frame 0.
-const BIG_BONES = ['Hips', 'LeftUpLeg', 'RightUpLeg', 'LeftArm', 'RightArm', 'Spine02']
 const PHASE_SAMPLES = 8
 const INERTIA_EPS = 0.5 * D2R   // sub-half-degree offsets aren't worth carrying
 
@@ -1246,10 +1246,21 @@ function quatAngle(a, b) {
 const _pmQ = new THREE.Quaternion()
 
 /** Phase of `next`'s clip whose pose is closest (summed angular distance
- *  over the big bones) to what's on screen right now. Used when fading into
+ *  over every bone) to what's on screen right now. Used when fading into
  *  a loop from a clip of a different shape, so the new cycle doesn't start
  *  out of step with the body it's replacing — walk->walk instead reuses the
- *  outgoing action's own time, which crossfade() handles separately. */
+ *  outgoing action's own time, which crossfade() handles separately.
+ *
+ *  Scored over all 24 bones, not a six-bone "big bones" subset. The subset
+ *  was walk-shaped (hips, upper legs, upper arms, belly) and walk is the one
+ *  clip crossfade() routes around: drink and read cycle in the forearms and
+ *  hands, wave in the hand, which the subset never looked at. Measured over
+ *  the 56 transitions that reach here, four outgoing phases each, scored as
+ *  summed start-pose distance over all bones: mean 476.9 deg starting at
+ *  frame 0, 464.6 with the subset, 459.1 with every bone — and the subset
+ *  came out WORSE than not phase matching at all on 15 of the 56, up to
+ *  +36 deg on type->drink. Since phase 0 is one of the candidates, scoring
+ *  the pick over the same bones the result is judged on can't lose. */
 function phaseMatch(obj, rig, next) {
   const bones = boneMap(obj, rig)
   const clip = next.getClip()
@@ -1257,7 +1268,7 @@ function phaseMatch(obj, rig, next) {
   for (let i = 0; i < PHASE_SAMPLES; i++) {
     const phase = i / PHASE_SAMPLES
     let dist = 0
-    for (const name of BIG_BONES) {
+    for (const name of BONES) {
       const b = bones[name]
       if (!b) continue
       dist += quatAngle(b.quaternion, bakeSample(clip, name, phase, _pmQ))
@@ -1277,10 +1288,10 @@ function snapshotPose(obj, rig) {
 }
 
 /** An action's current time as a phase in [0, 1], clamped — used to sample
- *  clip.userData.bake rather than the mixer. */
+ *  clip.userData.bake rather than the mixer. Every clip's duration is a
+ *  positive constant off its spec, so there is no zero to divide by. */
 function actionPhase(action) {
-  const dur = action.getClip().duration
-  return dur > 0 ? Math.min(1, Math.max(0, action.time / dur)) : 0
+  return Math.min(1, Math.max(0, action.time / action.getClip().duration))
 }
 
 const _iqTarget = new THREE.Quaternion(), _iqInv = new THREE.Quaternion(), _iqOffset = new THREE.Quaternion()
@@ -1293,7 +1304,6 @@ const _iqTarget = new THREE.Quaternion(), _iqInv = new THREE.Quaternion(), _iqOf
  *  why). */
 function armInertia(obj, rig, next, outgoing, duration) {
   const clip = next.getClip()
-  if (!clip.userData.bake) { rig.inertia = null; return }
   const phase = actionPhase(next)
   const offsets = new Map()
   for (const name in outgoing) {
@@ -1315,26 +1325,13 @@ const IDENTITY_Q = new THREE.Quaternion()
 export function crossfade(obj, name, duration = 0.35, opts = {}) {
   const rig = rigOf(obj)
   const next = makeAction(obj, name, opts)
-  if (rig.current === next && !ONE_SHOT.has(name)) return next
-  return fadeInto(obj, rig, next, duration, ONE_SHOT.has(name))
-}
-
-/** Same fade, for an action the caller built itself off this character's
- *  mixer — the paired-routine modules in clips/ author their own
- *  AnimationClips, so they have no name in CLIPS to crossfade() by.
- *
- *  They cannot use three's own action.crossFadeFrom() either: update() below
- *  writes both fade actions' weights every frame, and setEffectiveWeight
- *  ends in stopFading(), so a fade three scheduled on one of them is torn
- *  down on the next frame — the outgoing action stays pinned at full weight
- *  and blends 50/50 with the routine forever. Going through here keeps every
- *  weight on this mixer under one owner.
- *
- *  The action always starts at its own frame 0: these clips are fired on both
- *  characters on the same frame and phase-matching would desync the pair. */
-export function crossfadeAction(obj, next, duration = 0.35) {
-  const rig = rigOf(obj)
-  return fadeInto(obj, rig, next, duration, true)
+  // buildClip derives oneShot from the spec's `loop`, and makeAction already
+  // reads it to pick LoopOnce/clampWhenFinished. Read the same flag here so a
+  // clip folded in from clips/ gets restarted on retrigger without anyone
+  // having to remember a second list.
+  const oneShot = next.getClip().userData.oneShot
+  if (rig.current === next && !oneShot) return next
+  return fadeInto(obj, rig, next, duration, oneShot)
 }
 
 /** The fade itself. `reset` cuts the incoming action back to its frame 0
@@ -1374,7 +1371,7 @@ function fadeInto(obj, rig, next, duration, reset) {
     else if (clip.userData.loop) next.time = phaseMatch(obj, rig, next) * clip.duration
   }
 
-  if (prev && !retrigger) {
+  if (prev && !retrigger && duration > 0) {
     // Two actions ramping from (1, 0) to (0, 1) are continuous at the seam by
     // construction — at u=0 the mixer's normalised blend IS prev's own pose,
     // no interpolation error possible — so a fade that starts from a settled
@@ -1394,20 +1391,22 @@ function fadeInto(obj, rig, next, duration, reset) {
     // before this fade does — otherwise the fade would complete, disable
     // prev, freeze prev.time, and leave the still-live offset correcting a
     // pose that's stopped updating.
-    // ...but only if both sides of the blend can still be sampled. A clip
-    // authored outside anim.js (clips/argue.js and friends build their own
-    // AnimationClip) carries no userData.bake, so applyInertia's fade branch
-    // has nothing to recompute the blended pose from. Drop the offset instead.
-    if (rig.inertia && !(prev.getClip().userData.bake && next.getClip().userData.bake)) rig.inertia = null
     if (rig.inertia) {
       const remaining = rig.inertia.dur - rig.inertia.t
       rig.inertia.dur = rig.inertia.t + Math.min(remaining, 0.8 * duration)
     }
+
     prev.enabled = true
     prev.setEffectiveWeight(1)
     next.setEffectiveWeight(0)
     rig.fade = { prev, next, dur: duration, t: 0 }
   } else {
+    // No ramp to run: either there is nothing to fade from, or the caller
+    // asked for a zero-length one. A zero-length fade is finished HERE rather
+    // than parked in rig.fade with dur 0 for update() to special-case — a
+    // duration of 0 has one meaning, and it isn't "one frame". armInertia's
+    // own one-frame floor then carries the outgoing pose across the cut.
+    if (prev && prev !== next) { prev.enabled = false; prev.setEffectiveWeight(0) }
     next.setEffectiveWeight(1)
     if (outgoing) armInertia(obj, rig, next, outgoing, duration)
   }
@@ -1444,11 +1443,7 @@ function applyInertia(obj, rig, dt) {
   const inertia = rig.inertia
   if (!inertia) return
   inertia.t += dt
-  // dur can be capped to exactly t by an interrupting zero-length fade, and
-  // dt can be 0 on a frame; t/dur is then 0/0, and a NaN written to a bone
-  // here sticks — PropertyMixer only rewrites a bone whose accumulated value
-  // changed, so the legs stay NaN for good.
-  const u = inertia.dur > 0 ? Math.min(1, inertia.t / inertia.dur) : 1
+  const u = Math.min(1, inertia.t / inertia.dur)
   const decay = (1 - u) ** 3
   if (decay <= 1e-3) { rig.inertia = null; return }
   const bones = boneMap(obj, rig)
@@ -1457,7 +1452,7 @@ function applyInertia(obj, rig, dt) {
     const clipA = fade.prev.getClip(), clipB = fade.next.getClip()
     const bakeA = clipA.userData.bake, bakeB = clipB.userData.bake
     const phaseA = actionPhase(fade.prev), phaseB = actionPhase(fade.next)
-    const w = fade.dur > 0 ? ease(fade.t / fade.dur, 0, 1) : 1   // same curve update() drove the weights with this frame
+    const w = ease(fade.t / fade.dur, 0, 1)   // same curve update() drove the weights with this frame
     for (const [name, offset] of inertia.offsets) {
       const b = bones[name]
       if (!b || !bakeA.rot[name] || !bakeB.rot[name]) continue
@@ -1481,27 +1476,6 @@ function applyInertia(obj, rig, dt) {
   }
 }
 
-/** Per-bone angular velocity this frame, for popMetric. */
-function trackVelocity(obj, rig, dt) {
-  if (dt <= 0) return
-  const bones = boneMap(obj, rig)
-  if (!rig.prevQuats) rig.prevQuats = new Map()
-  let maxVel = 0
-  for (const n of BONES) {
-    const b = bones[n]
-    if (!b) continue
-    const prev = rig.prevQuats.get(n)
-    if (prev) {
-      const vel = quatAngle(prev, b.quaternion) / dt
-      if (vel > maxVel) maxVel = vel
-      prev.copy(b.quaternion)
-    } else {
-      rig.prevQuats.set(n, b.quaternion.clone())
-    }
-  }
-  rig.maxAngVel = maxVel
-}
-
 /** Advance one character's mixer, ramp any in-flight crossfade weight, and
  *  apply the decaying inertialization offset on top. */
 export function update(obj, dt) {
@@ -1509,7 +1483,7 @@ export function update(obj, dt) {
   const f = rig.fade
   if (f) {
     f.t += dt
-    const u = f.dur > 0 ? Math.min(1, f.t / f.dur) : 1
+    const u = Math.min(1, f.t / f.dur)
     const w = ease(u, 0, 1)   // smoothstep, not the linear ramp crossFadeFrom used
     f.next.setEffectiveWeight(w)
     f.prev.setEffectiveWeight(1 - w)
@@ -1521,15 +1495,6 @@ export function update(obj, dt) {
   }
   rig.mixer.update(dt)
   applyInertia(obj, rig, dt)
-  trackVelocity(obj, rig, dt)
-}
-
-/** Max per-bone angular velocity (rad/s) measured on this character's last
- *  update() call. A transition popping should show up here as a spike well
- *  past whatever the same clip's own peak looks like in steady state. */
-export function popMetric(obj) {
-  const rig = RIGS.get(obj)
-  return rig ? rig.maxAngVel : 0
 }
 
 /** Nudge a cached action's timeScale without touching what's currently

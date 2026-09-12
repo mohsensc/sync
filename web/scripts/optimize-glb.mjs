@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Slims the GLBs in public/glb into public/glb-lite with gltf-transform's JS API
+// Slims the GLBs in assets-src/glb into public/glb-lite with gltf-transform's
+// JS API
 // (not the CLI binary, so ratios/errors live in one place and are easy to retune).
 //
 // Blender is deliberately not part of this: not installed here, it runs the same
@@ -11,11 +12,14 @@
 //     baseColor and emissive.
 //   - the five static props are 9-12k tris each behind a 2048 JPEG.
 //   - cable-ball is error-bound: it barely decimates below error ~0.01-0.02.
-//   - quantize shifted the skinned character's bbox in an earlier run, and the
-//     app's five GLTFLoader sites have no draco/meshopt decoder wired up, so
-//     the character never gets quantize, draco, or meshopt. Static props may,
-//     gated on the bbox check below (three's GLTFLoader reads
-//     KHR_mesh_quantization and EXT_texture_webp natively, no decoder needed).
+//   - quantize shifted the skinned character's bbox in an earlier run, so an
+//     asset that carries a skin doesn't get it. That is read off the document
+//     (countSkinnedPrimitives), not declared per asset. Everything else is
+//     quantized (three's GLTFLoader reads KHR_mesh_quantization and
+//     EXT_texture_webp natively, no decoder needed); draco and meshopt are out
+//     either way, since the app's five GLTFLoader sites wire up no decoder.
+//   - BBOX_TOLERANCE is a budget, not a target: an asset that misses it throws
+//     and nothing is written. There is no per-asset escape from it.
 //
 // Run: pnpm optimize-glb [asset.glb ...]   (defaults to every asset in the table)
 
@@ -28,7 +32,6 @@ import {
   dedup,
   textureCompress,
   quantize,
-  cloneDocument,
   getBounds,
   getGLPrimitiveCount,
   getSceneVertexCount,
@@ -41,7 +44,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const SRC_DIR = path.resolve(__dirname, '../public/glb')
+const SRC_DIR = path.resolve(__dirname, '../assets-src/glb')
 const OUT_DIR = path.resolve(__dirname, '../public/glb-lite')
 
 const BBOX_TOLERANCE = 0.001 // 0.1%, measured against the source bbox diagonal
@@ -51,29 +54,38 @@ const BBOX_TOLERANCE = 0.001 // 0.1%, measured against the source bbox diagonal
 // webp's quality levels.
 const COMPRESSIBLE_SLOTS = /color|metallicRoughness|emissive|occlusion/i
 
-// name -> simplify ratio/error, whether it carries a skin, and whether
-// quantize is even a candidate for it.
+// name -> simplify ratio/error. Every asset is held to the same bbox budget,
+// so the error is whatever the largest value is that still clears it.
 // desk-tripo-12k and vault-door hold their bbox at error 0.01. phone-wall and
 // tortoise-v2 didn't -- 0.01 ate a real corner (0.42% / 0.12% drift), not just
 // a spiky extremity, so they're tightened until the drift check clears; that
 // costs some of the triangle reduction back (see the table this prints).
-// cable-ball is the opposite case: it was swept from 0.02 down to 0.0005 and
-// only clears 0.1% by giving back almost all the reduction (7295+ tris, error
-// <= 0.005) -- there's no error tolerance that both decimates it and holds
-// its bbox, so it keeps 0.02 and the loud (non-fatal) warning.
+// cable-ball is the stubborn one: swept at ratio 0.3 with quantize on,
+// error 0.02 drifts 1.4058% (2797 tris), 0.01 drifts 0.8786% (4595), and
+// 0.005 is the first that clears at 0.0004% -- 9328 source tris down to 7295,
+// 453KB. That is most of its reduction given back, and it is what the budget
+// costs on this asset. Anything looser eats a whole cable loop off the ball.
+// character.glb's ratio is the biggest triangle lever left (12,487 tris x 8
+// agents is most of the main pass), so the whole interval is measured, not
+// just the endpoints. Head rendered at framing.js's HEAD_DIST of 0.24 m --
+// the closest the camera ever gets -- against the source glb, share of pixels
+// differing by more than 8/255:
+//   ratio 0.4  12,487 tris  0.868%      ratio 0.6  18,733 tris  0.604%
+//   ratio 0.5  15,611 tris  0.723%      ratio 0.7  21,855 tris  0.539%
+// That is a straight line, ~21,500 triangles per point of difference at every
+// step, with no knee to buy. So it stays at the cheap end.
 // tex overrides the shared texture budget below. Only the character needs one:
 // it's the only asset the camera ever gets close to (framing.js HEAD_DIST is
 // 0.24 m), and at 1024/q82 webp mottled the flat hair colour and chewed the
 // hair/skin edge -- obvious at that distance, invisible on a prop across the
 // room. The prop budget is unchanged.
 const ASSETS = {
-  'character.glb': { ratio: 0.4, error: 0.002, skinned: true, allowQuantize: false,
-                     tex: { size: 2048, quality: 92 } },
-  'desk-tripo-12k.glb': { ratio: 0.3, error: 0.01, skinned: false, allowQuantize: true },
-  'phone-wall.glb': { ratio: 0.3, error: 0.005, skinned: false, allowQuantize: true },
-  'tortoise-v2.glb': { ratio: 0.3, error: 0.002, skinned: false, allowQuantize: true },
-  'vault-door.glb': { ratio: 0.3, error: 0.01, skinned: false, allowQuantize: true },
-  'cable-ball.glb': { ratio: 0.3, error: 0.02, skinned: false, allowQuantize: true },
+  'character.glb': { ratio: 0.4, error: 0.002, tex: { size: 2048, quality: 92 } },
+  'desk-tripo-12k.glb': { ratio: 0.3, error: 0.01 },
+  'phone-wall.glb': { ratio: 0.3, error: 0.005 },
+  'tortoise-v2.glb': { ratio: 0.3, error: 0.002 },
+  'vault-door.glb': { ratio: 0.3, error: 0.01 },
+  'cable-ball.glb': { ratio: 0.3, error: 0.005 },
 }
 const TEXTURE_SIZE = 1024
 const TEXTURE_QUALITY = 82
@@ -175,7 +187,6 @@ async function processAsset(name, cfg) {
 
   verifySkinSurvived(name, skinnedCountBefore, document)
 
-  const boundsAfterSimplify = getBounds(document.getRoot().listScenes()[0])
   const scale = Math.max(bboxDiagonal(before.bounds), 1e-6)
 
   const texSize = (cfg.tex && cfg.tex.size) || TEXTURE_SIZE
@@ -190,45 +201,33 @@ async function processAsset(name, cfg) {
     }),
   )
 
-  let finalDocument = document
-  let quantizeNote = 'not attempted (character)'
-  if (cfg.allowQuantize) {
-    const candidate = cloneDocument(document)
-    await candidate.transform(quantize())
-    const candidateBounds = getBounds(candidate.getRoot().listScenes()[0])
-    const drift = maxBboxDrift(boundsAfterSimplify, candidateBounds, scale)
-    if (drift <= BBOX_TOLERANCE) {
-      finalDocument = candidate
-      quantizeNote = `applied (bbox drift ${(drift * 100).toFixed(4)}%)`
-    } else {
-      quantizeNote = `skipped (bbox drift ${(drift * 100).toFixed(4)}% > 0.1%)`
-    }
-  }
+  // Quantizing a skinned mesh moved the character's bbox in an earlier run,
+  // so the assets that carry a skin don't get it. Read off the document, not
+  // declared per asset -- it is the same question verifySkinSurvived asks.
+  if (skinnedCountBefore === 0) await document.transform(quantize())
 
   // Drift is checked before the write, not after: a fatal one used to leave
   // the rejected file sitting in glb-lite/ for the scene to load.
-  const finalBounds = getBounds(finalDocument.getRoot().listScenes()[0])
+  const finalBounds = getBounds(document.getRoot().listScenes()[0])
   const totalDrift = maxBboxDrift(before.bounds, finalBounds, scale)
   if (totalDrift > BBOX_TOLERANCE) {
-    const msg =
+    // A bbox this far off means simplify ate a whole corner. The asset's
+    // error comes down until it clears -- that is what the budget is for.
+    // Note this only catches geometry that moves the box: a collapsed nose or
+    // a faceted hair silhouette costs nothing here and needs an eyeball.
+    throw new Error(
       `${name}: final bbox drifted ${(totalDrift * 100).toFixed(4)}% from the source (> 0.1%) -- ` +
       `min ${JSON.stringify(before.bounds.min)} -> ${JSON.stringify(finalBounds.min)}, ` +
-      `max ${JSON.stringify(before.bounds.max)} -> ${JSON.stringify(finalBounds.max)}`
-    // A bbox this far off means simplify ate a whole corner. On the character
-    // that's fatal; on a prop that's mostly thin extremities (cable-ball) it's
-    // the tradeoff the error/ratio asks for, so it's loud but not fatal. Note
-    // this only catches geometry that moves the box -- a collapsed nose or a
-    // faceted hair silhouette costs nothing here and needs an eyeball.
-    if (cfg.skinned) throw new Error(msg)
-    console.warn(`WARNING: ${msg}`)
+      `max ${JSON.stringify(before.bounds.max)} -> ${JSON.stringify(finalBounds.max)}`,
+    )
   }
 
   fs.mkdirSync(OUT_DIR, { recursive: true })
-  await io.write(outPath, finalDocument)
+  await io.write(outPath, document)
 
-  const after = snapshot(finalDocument, fs.statSync(outPath).size)
+  const after = snapshot(document, fs.statSync(outPath).size)
 
-  return { name, before, after, quantizeNote, totalDrift }
+  return { name, before, after, totalDrift }
 }
 
 function fmtBytes(n) {
@@ -251,7 +250,6 @@ function printTable(results) {
     'verts before': r.before.verts,
     'verts after': r.after.verts,
     'bbox drift': `${(r.totalDrift * 100).toFixed(4)}%`,
-    quantize: r.quantizeNote,
   }))
   console.table(rows)
   for (const r of results) {

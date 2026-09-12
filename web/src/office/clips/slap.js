@@ -66,36 +66,6 @@ function makeRig() {
   return bones
 }
 
-function buildClipFromSpec(name, { fn, dur, keys, loop }) {
-  const n = loop ? keys + 1 : keys
-  const times = new Float32Array(n)
-  const rot = {}
-  for (const b of ANIM.BONES) rot[b] = new Float32Array(n * 4)
-  const hips = new Float32Array(n * 3)
-  const rig = makeRig()
-
-  for (let i = 0; i < n; i++) {
-    const t01 = loop ? i / keys : (n === 1 ? 0 : i / (n - 1))
-    times[i] = t01 * dur
-    ANIM.applyPose(rig.Hips, fn(t01))
-    for (const b of ANIM.BONES) {
-      const bone = rig[b]
-      rot[b][i * 4 + 0] = bone.quaternion.x
-      rot[b][i * 4 + 1] = bone.quaternion.y
-      rot[b][i * 4 + 2] = bone.quaternion.z
-      rot[b][i * 4 + 3] = bone.quaternion.w
-    }
-    hips[i * 3 + 0] = rig.Hips.position.x
-    hips[i * 3 + 1] = rig.Hips.position.y
-    hips[i * 3 + 2] = rig.Hips.position.z
-  }
-
-  const tracks = [new THREE.VectorKeyframeTrack('Hips.position', times, hips)]
-  for (const b of ANIM.BONES) tracks.push(new THREE.QuaternionKeyframeTrack(b + '.quaternion', times, rot[b]))
-  const clip = new THREE.AnimationClip(name, dur, tracks)
-  clip.userData = { loop, oneShot: !loop }
-  return clip
-}
 
 // ---------------------------------------------------------------------------
 // Pose authoring — same milestone/lerp scheme as shove.js.
@@ -305,12 +275,12 @@ export const SLAP_REACT_SPEC = { fn: slapReactPose, dur: SL_DUR, keys: SLAP_KEYS
 
 export const registry = { slap: SLAP_SPEC, slapReact: SLAP_REACT_SPEC }
 
-const _clips = {}
-export function getClip(name) {
-  if (!registry[name]) throw new Error(`slap: no clip "${name}". Have: ${Object.keys(registry).join(', ')}`)
-  if (!_clips[name]) _clips[name] = buildClipFromSpec(name, registry[name])
-  return _clips[name]
-}
+// Folded into anim.js's own CLIPS table at import time, so these play by name
+// through ANIM.crossfade like every other clip — one clip table, one owner of
+// the mixer's weights. See anim.js's CLIPS header for the timing rule (the
+// merge has to happen before the first createClips(), which import time is).
+Object.assign(ANIM.CLIPS, registry)
+
 
 // ---------------------------------------------------------------------------
 // Spacing — measured off the slapper's own contact frame, same discipline as

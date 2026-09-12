@@ -255,6 +255,24 @@ describe('goTo promise on supersession (problem 3)', () => {
     expect(a._move).toMatchObject({ x: 2, z: 2 })   // the new order actually took, not clobbered
   })
 
+  // demo.js awaits its walks through Promise.all and then narrates the beat.
+  // A superseded goTo has to show up in that array as a falsy entry, which is
+  // what demo.js's arrived() looks for before it lets the script carry on.
+  it('leaves a falsy entry in a Promise.all when one of the pair is superseded', async () => {
+    const a = createAgent({ root: makeRig(), id: 's6', pos: [0, -3], yaw: 0 })
+    const b = createAgent({ root: makeRig(), id: 's7', pos: [2, -3], yaw: 0 })
+    const both = Promise.all([a.goTo(0, 0, {}), b.goTo(2, 0, {})])
+
+    for (let i = 0; i < 60 * 12 && !a._settle; i++) { a.update(DT); b.update(DT) }
+    expect(a._settle).toBeTruthy()   // sanity: a was really mid-arrival when the click landed
+    a.goTo(-4, -4, {})               // a click sends `a` somewhere else mid-beat
+    for (let i = 0; i < 60 * 20 && (b.moving || b._settle); i++) { a.update(DT); b.update(DT) }
+
+    const got = await both
+    expect(got.some(x => !x)).toBe(true)
+    expect(got[1]).toBe(b)           // the other agent's walk was untouched
+  })
+
   it('still resolves with the agent on an uninterrupted arrival', async () => {
     const a = createAgent({ root: makeRig(), id: 's4', pos: [0, -3], yaw: 0 })
     const p = a.goTo(0, 0, {})

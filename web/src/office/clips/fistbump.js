@@ -55,36 +55,6 @@ function makeRig() {
   return bones
 }
 
-function buildClipFromSpec(name, { fn, dur, keys, loop }) {
-  const n = loop ? keys + 1 : keys
-  const times = new Float32Array(n)
-  const rot = {}
-  for (const b of ANIM.BONES) rot[b] = new Float32Array(n * 4)
-  const hips = new Float32Array(n * 3)
-  const rig = makeRig()
-
-  for (let i = 0; i < n; i++) {
-    const t01 = loop ? i / keys : (n === 1 ? 0 : i / (n - 1))
-    times[i] = t01 * dur
-    ANIM.applyPose(rig.Hips, fn(t01))
-    for (const b of ANIM.BONES) {
-      const bone = rig[b]
-      rot[b][i * 4 + 0] = bone.quaternion.x
-      rot[b][i * 4 + 1] = bone.quaternion.y
-      rot[b][i * 4 + 2] = bone.quaternion.z
-      rot[b][i * 4 + 3] = bone.quaternion.w
-    }
-    hips[i * 3 + 0] = rig.Hips.position.x
-    hips[i * 3 + 1] = rig.Hips.position.y
-    hips[i * 3 + 2] = rig.Hips.position.z
-  }
-
-  const tracks = [new THREE.VectorKeyframeTrack('Hips.position', times, hips)]
-  for (const b of ANIM.BONES) tracks.push(new THREE.QuaternionKeyframeTrack(b + '.quaternion', times, rot[b]))
-  const clip = new THREE.AnimationClip(name, dur, tracks)
-  clip.userData = { loop, oneShot: !loop }
-  return clip
-}
 
 // ---------------------------------------------------------------------------
 // Pose authoring — same milestone/lerpPose shape as chestbump.js/shove.js,
@@ -175,11 +145,12 @@ export const FISTBUMP_SPEC = { fn: fistbumpPose, dur: FB_DUR, keys: FB_KEYS, loo
  *  uses — `Object.assign(ANIM.CLIPS, registry)` folds it straight in. */
 export const registry = { fistbump: FISTBUMP_SPEC }
 
-let _clip = null
-export function getClip() {
-  if (!_clip) _clip = buildClipFromSpec('fistbump', FISTBUMP_SPEC)
-  return _clip
-}
+// Folded into anim.js's own CLIPS table at import time, so these play by name
+// through ANIM.crossfade like every other clip — one clip table, one owner of
+// the mixer's weights. See anim.js's CLIPS header for the timing rule (the
+// merge has to happen before the first createClips(), which import time is).
+Object.assign(ANIM.CLIPS, registry)
+
 
 // ---------------------------------------------------------------------------
 // Spacing — mutual, same derivation as highfive.js/handshake.js: both sides

@@ -137,65 +137,6 @@ function tiptoeObliviousPose(t) {
   })
 }
 
-// ---------------------------------------------------------------------------
-// Scratch rig — identical topology to yield.js's own copy. See that file's
-// header for why each paired-clip module keeps one rather than sharing it.
-// ---------------------------------------------------------------------------
-const PARENT = {
-  Hips: null,
-  Spine02: 'Hips', Spine01: 'Spine02', Spine: 'Spine01', neck: 'Spine', Head: 'neck',
-  LeftShoulder: 'Spine', LeftArm: 'LeftShoulder', LeftForeArm: 'LeftArm', LeftHand: 'LeftForeArm',
-  RightShoulder: 'Spine', RightArm: 'RightShoulder', RightForeArm: 'RightArm', RightHand: 'RightForeArm',
-  LeftUpLeg: 'Hips', LeftLeg: 'LeftUpLeg', LeftFoot: 'LeftLeg', LeftToeBase: 'LeftFoot',
-  RightUpLeg: 'Hips', RightLeg: 'RightUpLeg', RightFoot: 'RightLeg', RightToeBase: 'RightFoot',
-}
-
-function makeRig() {
-  const bones = {}
-  for (const name of ANIM.BONES) {
-    const o = new THREE.Object3D()
-    o.name = name
-    const bd = ANIM.BIND[name]
-    o.position.set(bd.t[0], bd.t[1], bd.t[2])
-    o.quaternion.set(bd.q[0], bd.q[1], bd.q[2], bd.q[3])
-    bones[name] = o
-  }
-  for (const name of ANIM.BONES) { const p = PARENT[name]; if (p) bones[p].add(bones[name]) }
-  bones.Hips.updateMatrixWorld(true)
-  return bones
-}
-
-function buildClipFromSpec(name, { fn, dur, keys, loop }) {
-  const n = loop ? keys + 1 : keys
-  const times = new Float32Array(n)
-  const rot = {}
-  for (const b of ANIM.BONES) rot[b] = new Float32Array(n * 4)
-  const hips = new Float32Array(n * 3)
-  const rig = makeRig()
-
-  for (let i = 0; i < n; i++) {
-    const t01 = loop ? i / keys : (n === 1 ? 0 : i / (n - 1))
-    times[i] = t01 * dur
-    ANIM.applyPose(rig.Hips, fn(t01))
-    for (const b of ANIM.BONES) {
-      const bone = rig[b]
-      rot[b][i * 4 + 0] = bone.quaternion.x
-      rot[b][i * 4 + 1] = bone.quaternion.y
-      rot[b][i * 4 + 2] = bone.quaternion.z
-      rot[b][i * 4 + 3] = bone.quaternion.w
-    }
-    hips[i * 3 + 0] = rig.Hips.position.x
-    hips[i * 3 + 1] = rig.Hips.position.y
-    hips[i * 3 + 2] = rig.Hips.position.z
-  }
-
-  const tracks = [new THREE.VectorKeyframeTrack('Hips.position', times, hips)]
-  for (const b of ANIM.BONES) tracks.push(new THREE.QuaternionKeyframeTrack(b + '.quaternion', times, rot[b]))
-  const clip = new THREE.AnimationClip(name, dur, tracks)
-  clip.userData = { loop, oneShot: !loop }
-  return clip
-}
-
 // 28 keys over 1.85s is ~66ms/sample — plenty for motion this slow (the
 // fastest thing here is the double-tap, ~0.10 clip-width wide, comfortably
 // sampled at that rate; nothing in this file needs slap.js's contact-frame
@@ -206,12 +147,13 @@ export const TIPTOE_OBLIVIOUS_SPEC = { fn: tiptoeObliviousPose, dur: TIPTOE_DUR,
 
 export const registry = { tiptoe: TIPTOE_SPEC, tiptoeOblivious: TIPTOE_OBLIVIOUS_SPEC }
 
-const _clips = {}
-export function getClip(name) {
-  if (!registry[name]) throw new Error(`tiptoe: no clip "${name}". Have: ${Object.keys(registry).join(', ')}`)
-  if (!_clips[name]) _clips[name] = buildClipFromSpec(name, registry[name])
-  return _clips[name]
-}
+// Folded into anim.js's own CLIPS table at import time, so these play by name
+// through ANIM.crossfade like every other clip — one clip table, one owner of
+// the mixer's weights. See anim.js's CLIPS header for the timing rule (the
+// merge has to happen before the first createClips(), which import time is).
+Object.assign(ANIM.CLIPS, registry)
+
+
 
 // ---------------------------------------------------------------------------
 // Spacing and marks — not a contact action, chosen directly, same

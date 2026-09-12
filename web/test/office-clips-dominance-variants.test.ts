@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import * as THREE from 'three'
+import * as ANIM from '../src/office/anim.js'
 import * as WAVEOFF from '../src/office/clips/waveoff.js'
 import * as SLAP from '../src/office/clips/slap.js'
 
@@ -81,7 +82,7 @@ describe('waveoff clips', () => {
 
   it('builds real AnimationClips with matching track/value lengths', () => {
     for (const name of ['waveoff', 'waveoffReact'] as const) {
-      const clip = WAVEOFF.getClip(name)
+      const clip = ANIM.getClip(name)
       checkTrackShapes(clip)
     }
   })
@@ -127,7 +128,7 @@ describe('slap clips', () => {
 
   it('builds real AnimationClips with matching track/value lengths', () => {
     for (const name of ['slap', 'slapReact'] as const) {
-      const clip = SLAP.getClip(name)
+      const clip = ANIM.getClip(name)
       checkTrackShapes(clip)
     }
   })

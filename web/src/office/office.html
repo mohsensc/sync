@@ -403,9 +403,15 @@ reel.setFoot('idle')
 // cleared right after compositing and toDataURL comes back solid black.
 // Trivial GPU memory cost, no visible behavior change.
 const renderer = new THREE.WebGLRenderer({ canvas, antialias:true, preserveDrawingBuffer:true })
-// Measured render() at 232-1100ms with shadows on. The pixel-ratio cap and
-// the map-size cut below are what actually pay; the desk/prop count isn't
-// the problem.
+// The map-size cut below is the measured one: scratch/cost.py swept
+// shadowMap.type and mapSize and put render() at 232-1100ms with shadows on.
+// It never varied the pixel ratio (it pins it at 1), so this cap has no
+// measurement behind it either way, and SwiftShader can't supply one — it is
+// fill-rate dominated in a way no real GPU is. The scene is 154k triangles in
+// ~340 draw calls, so it may well be geometry-bound, in which case the cap
+// buys nothing and costs sharpness. 1.5 is also a non-integer backing store on
+// a 2x panel: blurrier than 2, dearer than 1, and picked by neither. Needs one
+// A/B on real hardware (1.0 / 2.0, frame time at the shipped camera).
 renderer.setPixelRatio(Math.min(devicePixelRatio,1.5))
 renderer.shadowMap.enabled = true
 // Not a cost cut — the two are within noise of each other (17 texture2DCompare
@@ -442,6 +448,10 @@ key.shadow.mapSize.set(1024,1024)
 // just cover the floor plate.
 const S = 11.5
 Object.assign(key.shadow.camera, { left:-S, right:S, top:S, bottom:-S, near:1, far:44 })
+// Not scaled with the map, unlike normalBias: this one is a flat offset in the
+// shadow map's depth, and the acne it would fight is the slope term normalBias
+// already covers. Checked at the desk-1 floor: 0, -0.0004 and -0.0008 are the
+// same picture with normalBias on, and all three show the same acne with it off.
 key.shadow.bias = -0.0004
 key.shadow.normalBias = 0.044
 key.shadow.radius = 1.6   // texels, and only PCF reads it — see the shadowMap.type note above
@@ -474,6 +484,29 @@ left.position.set(-W/2,WALL/2,0); left.receiveShadow = true; scene.add(left)
 const zoneUI = Z.buildZoneMarkers()
 scene.add(zoneUI.group)
 
+// ---- shadow tiering ---------------------------------------------------
+// One rule, one place: a mesh joins the room through addMesh, and casts if it
+// is a character or its longest world-space axis reaches CAST_SIZE — the size
+// at which a missing contact shadow leaves a thing floating. Everything else
+// only receives. Overlays (badges, halos, zone rings, labels, cards) never
+// come through here, so they do neither.
+//
+// CAST_SIZE is measured off what shipped, not picked: the smallest piece the
+// old per-prop cast list opted into is a 0.442 m chair seat, so anything under
+// that was already agreed to be too small to ground.
+const CAST_SIZE = 0.44
+const meshes = []
+const castBox = new THREE.Box3(), castSize = new THREE.Vector3()
+function addMesh(n) {
+  n.updateWorldMatrix(true, false)      // Box3 only refreshes the node itself
+  castBox.setFromObject(n).getSize(castSize)
+  n.castShadow = n.isSkinnedMesh ||
+    Math.max(castSize.x, castSize.y, castSize.z) >= CAST_SIZE
+  n.receiveShadow = true
+  meshes.push(n)
+  return n
+}
+
 // Two zones in the spec have no prop yet (crates, fire). Rather than fake a
 // mesh, they get a primitive stand-in so the zone is not an empty ring.
 ;(function stubProps(){
@@ -483,60 +516,56 @@ scene.add(zoneUI.group)
     .forEach(([dx,dy,s,r]) => {
       const m = new THREE.Mesh(new THREE.BoxGeometry(s,s,s), crate)
       m.position.set(cz[0]+dx, s/2+dy, cz[1]+dx*0.6)
-      m.rotation.y = r; m.castShadow = m.receiveShadow = true; scene.add(m)
+      m.rotation.y = r; scene.add(addMesh(m))
     })
-  // "fire" is a cluster of terracotta cones. Deliberately abstract, and small
-  // enough that neither casting nor receiving reads as missing.
+  // "fire" is a cluster of terracotta cones. Deliberately abstract.
   const fz = Z.ZONES.fire.at
   const flame = new THREE.MeshStandardMaterial({ color:P.terracotta, roughness:0.8, emissive:0x3a1008 })
   ;[[0,0.62,0],[0.34,0.4,0.2],[-0.3,0.44,-0.15]].forEach(([dx,h,dz]) => {
     const m = new THREE.Mesh(new THREE.ConeGeometry(h*0.42, h, 10), flame)
-    m.position.set(fz[0]+dx, h/2, fz[1]+dz); scene.add(m)
+    m.position.set(fz[0]+dx, h/2, fz[1]+dz); scene.add(addMesh(m))
   })
-  // ducks: three small mustard blobs. Same as the fire cones: too small for a
-  // shadow to register, so they skip both flags rather than pay for either.
+  // ducks: three small mustard blobs.
   const dz = Z.ZONES.ducks.at
   const duck = new THREE.MeshStandardMaterial({ color:P.mustard, roughness:1 })
   ;[[0,0],[0.45,0.22],[-0.42,0.16]].forEach(([dx,dzz]) => {
     const b = new THREE.Mesh(new THREE.SphereGeometry(0.17,16,12), duck)
-    b.position.set(dz[0]+dx, 0.17, dz[1]+dzz); scene.add(b)
+    b.position.set(dz[0]+dx, 0.17, dz[1]+dzz); scene.add(addMesh(b))
     const hd = new THREE.Mesh(new THREE.SphereGeometry(0.10,14,10), duck)
-    hd.position.set(dz[0]+dx, 0.38, dz[1]+dzz-0.06); scene.add(hd)
+    hd.position.set(dz[0]+dx, 0.38, dz[1]+dzz-0.06); scene.add(addMesh(hd))
   })
   // whiteboard: a pale panel on the back wall, with a tray and some marks so
   // it doesn't read as a blank grey rectangle.
   const wz = Z.ZONES.whiteboard.at
   const wb = new THREE.Mesh(new THREE.BoxGeometry(3.0,1.7,0.10),
     new THREE.MeshStandardMaterial({ color:0xfffdfa, roughness:0.9, metalness:0 }))
-  wb.position.set(wz[0], 1.9, WALL_Z + 0.05); wb.castShadow = wb.receiveShadow = true; scene.add(wb)
+  wb.position.set(wz[0], 1.9, WALL_Z + 0.05); scene.add(addMesh(wb))
   const wbFrame = new THREE.Mesh(new THREE.BoxGeometry(3.16,1.86,0.06),
     new THREE.MeshStandardMaterial({ color:P.taupe, roughness:0.9, metalness:0 }))
-  wbFrame.position.set(wz[0], 1.9, WALL_Z + 0.02); wbFrame.receiveShadow = true; scene.add(wbFrame)
+  wbFrame.position.set(wz[0], 1.9, WALL_Z + 0.02); scene.add(addMesh(wbFrame))
   const wbTray = new THREE.Mesh(new THREE.BoxGeometry(3.0,0.06,0.16),
     new THREE.MeshStandardMaterial({ color:P.taupe, roughness:0.9, metalness:0 }))
-  wbTray.position.set(wz[0], 1.02, WALL_Z + 0.13); wbTray.receiveShadow = true; scene.add(wbTray)
+  wbTray.position.set(wz[0], 1.02, WALL_Z + 0.13); scene.add(addMesh(wbTray))
   // A few boxes-and-arrows in slate, drawn flat on the board.
   const ink = new THREE.MeshStandardMaterial({ color:P.slate, roughness:1, metalness:0 })
   ;[[-0.95,2.28,0.52,0.34],[0.05,2.28,0.52,0.34],[1.05,2.28,0.52,0.34],
     [-0.45,2.28,0.44,0.04],[0.55,2.28,0.44,0.04],[-0.45,1.62,0.9,0.04]]
     .forEach(([dx,y,w,h]) => {
       const m = new THREE.Mesh(new THREE.BoxGeometry(w,h,0.02), ink)
-      m.position.set(wz[0]+dx, y, WALL_Z + 0.11); scene.add(m)
+      m.position.set(wz[0]+dx, y, WALL_Z + 0.11); scene.add(addMesh(m))
     })
   // hammock: two 1.5 m posts and a 2.1 m sage strip slung a metre off the
-  // floor. Its own shadow on the floor is the only thing that grounds it —
-  // receiveShadow buys nothing for something hanging in the air — so this one
-  // stays on the caster list.
+  // floor. Its own shadow on the floor is the only thing that grounds it.
   const hz = Z.ZONES.hammock.at
   const post = new THREE.MeshStandardMaterial({ color:P.taupe, roughness:1 })
   ;[-1.1, 1.1].forEach(dx => {
     const p2 = new THREE.Mesh(new THREE.CylinderGeometry(0.07,0.09,1.5,10), post)
-    p2.position.set(hz[0]+dx, 0.75, hz[1]); p2.castShadow = p2.receiveShadow = true; scene.add(p2)
+    p2.position.set(hz[0]+dx, 0.75, hz[1]); scene.add(addMesh(p2))
   })
   const hm = new THREE.Mesh(new THREE.CylinderGeometry(0.34,0.34,2.1,14,1,false,0,Math.PI),
     new THREE.MeshStandardMaterial({ color:P.sage, roughness:1, side:THREE.DoubleSide }))
   hm.rotation.z = Math.PI/2; hm.rotation.y = Math.PI
-  hm.position.set(hz[0], 1.0, hz[1]); hm.castShadow = hm.receiveShadow = true; scene.add(hm)
+  hm.position.set(hz[0], 1.0, hz[1]); scene.add(addMesh(hm))
 })()
 
 // ---- asset placement --------------------------------------------------
@@ -550,33 +579,31 @@ const DESK_TOP = 0.76
 const DESK_SX = 1.15
 
 // glb-lite/ (scripts/optimize-glb.mjs) is the only path now: no ?glb= flag,
-// no fallback to the source glb/ tree, which stays put only as that script's
-// input. cast:true marks the "big prop" tier from the render-cost pass. The
-// only one left off it is the tortoise, at 0.55 m the one piece here that is
-// genuinely decor-scale; the phone wall is 2 m tall and the cable ball is the
-// widest thing in its corner, so both keep their contact shadow.
+// no fallback to the source tree, which lives in assets-src/glb outside
+// public/ so a build ships only what the scene asks for. Nothing here says
+// anything about shadows — addMesh decides that from the measured size.
 const PLAN = [
   // The vault is deliberately half-buried in the back wall so it reads as set
   // into it rather than parked in front of it. Front face lands near z = -5.2.
   // Faces +X in mesh space (bbox x=0.566 y=1.000 z=0.998), so it needs -PI/2
   // to look into the room. Centre sits half its depth off the wall plane
   // (-6.625) so the back touches rather than intersects: 0.566*2.6/2 = 0.736.
-  { id:'vault',   url:'/glb-lite/vault-door.glb',   h:2.6,  pos:[-6.0,0,-5.889], rot:-Math.PI/2, facing:'+z', cast:true },
+  { id:'vault',   url:'/glb-lite/vault-door.glb',   h:2.6,  pos:[-6.0,0,-5.889], rot:-Math.PI/2, facing:'+z' },
   // bbox x=0.247 y=1.000 z=0.645. Same -PI/2; depth 0.247*2.0/2 = 0.247.
-  { id:'phones',  url:'/glb-lite/phone-wall.glb',   h:2.0,  pos:[ 5.4,1.1,-6.378], rot:-Math.PI/2, facing:'+z', air:true, cast:true },
-  { id:'cables',  url:'/glb-lite/cable-ball.glb',   h:1.1,  pos:[-7.3,0, 4.7], rot:0.6, cast:true },
+  { id:'phones',  url:'/glb-lite/phone-wall.glb',   h:2.0,  pos:[ 5.4,1.1,-6.378], rot:-Math.PI/2, facing:'+z', air:true },
+  { id:'cables',  url:'/glb-lite/cable-ball.glb',   h:1.1,  pos:[-7.3,0, 4.7], rot:0.6 },
   { id:'tortoise',url:'/glb-lite/tortoise-v2.glb',  h:0.55, pos:[ 2.0,0, 4.3], rot:-0.9         },
   // Desks are click targets. The seat is the zone slot in front of the desk,
   // pulled SEAT_PULL closer so the knees end up under it: the sit clip walks
   // the pelvis 22cm back on the way down (anim.js SEAT_SETBACK).
-  { url:'/glb-lite/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[-2.6,0,-2.4], rot:0, desk:'desk 1', slot:Z.ZONES.desks.slots[0], cast:true },
-  { url:'/glb-lite/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[ 0.4,0,-2.4], rot:0, desk:'desk 2', slot:Z.ZONES.desks.slots[1], cast:true },
-  { url:'/glb-lite/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[ 3.4,0,-2.4], rot:0, desk:'desk 3', slot:Z.ZONES.desks.slots[2], cast:true },
-  { url:'/glb-lite/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[-2.6,0, 1.4], rot:Math.PI, desk:'desk 4', slot:Z.ZONES.desks.slots[3], cast:true },
-  { url:'/glb-lite/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[ 0.4,0, 1.4], rot:Math.PI, desk:'desk 5', slot:Z.ZONES.desks.slots[4], cast:true },
-  { url:'/glb-lite/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[ 3.4,0, 1.4], rot:Math.PI, desk:'desk 6', slot:Z.ZONES.desks.slots[5], cast:true },
+  { url:'/glb-lite/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[-2.6,0,-2.4], rot:0, desk:'desk 1', slot:Z.ZONES.desks.slots[0] },
+  { url:'/glb-lite/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[ 0.4,0,-2.4], rot:0, desk:'desk 2', slot:Z.ZONES.desks.slots[1] },
+  { url:'/glb-lite/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[ 3.4,0,-2.4], rot:0, desk:'desk 3', slot:Z.ZONES.desks.slots[2] },
+  { url:'/glb-lite/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[-2.6,0, 1.4], rot:Math.PI, desk:'desk 4', slot:Z.ZONES.desks.slots[3] },
+  { url:'/glb-lite/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[ 0.4,0, 1.4], rot:Math.PI, desk:'desk 5', slot:Z.ZONES.desks.slots[4] },
+  { url:'/glb-lite/desk-tripo-12k.glb', h:DESK_TOP, sx:DESK_SX, pos:[ 3.4,0, 1.4], rot:Math.PI, desk:'desk 6', slot:Z.ZONES.desks.slots[5] },
   { url:'/glb-lite/desk-tripo-12k.glb', h:0.95, pos:[-6.9,0, 1.0], rot:Math.PI/2, sx:1.45,
-    desk:'reception', slot:Z.ZONES.reception.slots[0], cast:true },
+    desk:'reception', slot:Z.ZONES.reception.slots[0] },
   // Three coffee cups used to sit here (#59): coffee-cup-v2.glb was never
   // committed, so all three 404'd on every load and the loader warned three
   // times about parsing an HTML error page as a GLB. Nothing rendered either
@@ -584,7 +611,6 @@ const PLAN = [
 ]
 
 const loader = new GLTFLoader()
-const meshes = []
 const props = {}
 const desks = []                 // click targets: { label, group, seat:[x,z,yaw] }
 let pending = 0, done = 0
@@ -644,8 +670,7 @@ function place(gltf, spec) {
   if (spec.sx) o.scale.x = spec.sx
   g.position.set(spec.pos[0], spec.pos[1], spec.pos[2])
   g.rotation.y = spec.rot || 0
-  // Only the big props cast — see PLAN's cast:true, per the render-cost pass.
-  o.traverse(n => { if (n.isMesh) { n.castShadow = !!spec.cast; n.receiveShadow = true; meshes.push(n) } })
+  o.traverse(n => { if (n.isMesh) addMesh(n) })
   scene.add(g)
   g.userData.scale = s
   return g
@@ -738,7 +763,7 @@ function makeCharacterRoot(gltfScene, height = 1.68, bodyColor = null) {
   inner.add(o); inner.scale.setScalar(s)
   const root = new THREE.Group()
   root.add(inner)
-  o.traverse(n => { if (n.isMesh) { n.castShadow = true; n.receiveShadow = true; meshes.push(n) } })
+  o.traverse(n => { if (n.isMesh) addMesh(n) })
   root.userData.scale = s
   return root
 }
@@ -787,7 +812,7 @@ function setupCast() {
     occupied: BACKGROUND.filter(b => b.seat).map(b => b.seat),
   })
   scene.add(dressing.group)
-  dressing.meshes.forEach(m => meshes.push(m))
+  dressing.meshes.forEach(m => addMesh(m))
   window.__dressing = dressing
 
   interaction = attachInteraction({

@@ -36,4 +36,3 @@ export function tiptoeMarks(
   bPos: THREE.Vector3 | [number, number?, number?],
   spacing?: number
 ): Marks
-export function getClip(name: 'tiptoe' | 'tiptoeOblivious'): THREE.AnimationClip

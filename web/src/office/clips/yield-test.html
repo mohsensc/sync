@@ -124,7 +124,11 @@ let marks = null
 const markDots = new THREE.Group(); markDots.visible = false; scene.add(markDots)
 let scrubMode = false
 let curVariant = 'default'
-let curReg = YIELD.variants.default
+// The clip NAMES for the loaded take. yield.js folds every variant into
+// ANIM.CLIPS under `<clip><Variant>`, so a take is picked the same way any
+// other clip is: by name.
+const clipFor = (name, v) => v === 'default' ? name : name + v[0].toUpperCase() + v.slice(1)
+let curClip = n => clipFor(n, curVariant)
 
 function buildRun() {
   if (a) { scene.remove(a.group); ANIM.dispose(a.root) }
@@ -165,8 +169,8 @@ loader.load('/glb-lite/character.glb', gltf => {
 }, undefined, e => { tabEl.textContent = 'load failed: ' + e })
 
 function currentT(root, name) {
-  const act = ANIM.getMixer(root).clipAction(YIELD.getClip(name, curReg))
-  return act.time / YIELD.getClip(name, curReg).duration
+  const act = ANIM.getMixer(root).clipAction(ANIM.getClip(curClip(name)))
+  return act.time / ANIM.getClip(curClip(name)).duration
 }
 
 function report() {
@@ -177,7 +181,7 @@ function report() {
     `take      ${curVariant}\n` +
     `reader (yieldStep) t = ${ta.toFixed(3)}\n` +
     `editor (yieldKeep) t = ${tb.toFixed(3)}\n` +
-    `dur       ${curReg.yieldStep.dur.toFixed(3)}s\n` +
+    `dur       ${YIELD.variants[curVariant].yieldStep.dur.toFixed(3)}s\n` +
     `spacing   ${YIELD.YIELD_SPACING.toFixed(3)} m`
 }
 
@@ -191,8 +195,8 @@ window.__play = () => {
   scrubMode = false; running = true
   ANIM.crossfade(a.root, 'idle', 0)
   ANIM.crossfade(b.root, 'idle', 0)
-  const act1 = YIELD.getClip('yieldStep', curReg)
-  const act2 = YIELD.getClip('yieldKeep', curReg)
+  const act1 = ANIM.getClip(curClip('yieldStep'))
+  const act2 = ANIM.getClip(curClip('yieldKeep'))
   const ma = ANIM.getMixer(a.root).clipAction(act1)
   const mb = ANIM.getMixer(b.root).clipAction(act2)
   ma.setLoop(THREE.LoopOnce, 1); ma.clampWhenFinished = true; ma.reset(); ma.play()
@@ -206,9 +210,9 @@ window.__setT = (t01) => {
   for (const [c, name] of pairs) {
     const mixer = ANIM.getMixer(c.root)
     mixer.stopAllAction()
-    const act = mixer.clipAction(YIELD.getClip(name, curReg))
+    const act = mixer.clipAction(ANIM.getClip(curClip(name)))
     act.reset(); act.play(); act.paused = true
-    act.time = t01 * YIELD.getClip(name, curReg).duration
+    act.time = t01 * ANIM.getClip(curClip(name)).duration
     ANIM.update(c.root, 0)
     c.root.updateMatrixWorld(true)
   }
@@ -220,7 +224,6 @@ window.__setT = (t01) => {
  *  doesn't leave a stale pose from the old take. */
 window.__setVariant = (name) => {
   curVariant = name
-  curReg = YIELD.variants[name]
   for (const [id, n] of [['vDefault','default'],['vEmphatic','emphatic']])
     document.getElementById(id).setAttribute('aria-pressed', String(n === name))
   if (a && b) window.__setT(scrubMode ? +document.getElementById('tScrub').value : 0)
@@ -230,7 +233,7 @@ window.__setVariant = (name) => {
 /** Non-finite scan across every sampled key of both clips. */
 window.__finiteCheck = () => {
   for (const name of ['yieldStep', 'yieldKeep']) {
-    const spec = curReg[name]
+    const spec = YIELD.variants[curVariant][name]
     for (let i = 0; i < spec.keys; i++) {
       const t = i / (spec.keys - 1)
       const p = spec.fn(t)
