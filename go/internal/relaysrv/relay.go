@@ -826,23 +826,31 @@ func (r *Relay) PublishTo(room, agent string, frame Frame, actor Conn) {
 // TestPresenceCapDoesNotBlockClaimForCappedAgent).
 //
 // One deliberate side effect, worth stating rather than leaving for a
-// reader to find: Classify's collision detection (ladder.go) reads its
-// "others" argument from this same buffer, so a capped-out agent's edits
-// stop showing up as something the *other* five can collide with. That is
-// unchanged for the capped-out agent's own requests (its "others" list —
-// captured before this gate runs — still contains the five it's actually
-// contending with), and it never blocks, delays, or errors anyone's tool
-// call either way; it just means a human's 6th-and-beyond session is
-// invisible to presence the same way it's invisible to the roster.
+// reader to find: both Classify's collision detection (ladder.go) and
+// redundantPeer (also ladder.go, behind AGENT_SYNC_RUNG4 and off by
+// default) read their "others"/activity argument from this same buffer, so
+// a capped-out agent's edits stop showing up as something the *other* five
+// can collide with, or match as redundant work. That is unchanged for the
+// capped-out agent's own requests (its own "others" list — captured before
+// this gate runs — still contains the five it's actually contending with),
+// and it never blocks, delays, or errors anyone's tool call either way; it
+// just means a human's 6th-and-beyond session is invisible to presence the
+// same way it's invisible to the roster.
 const PresenceAgentCap = 5
 
 // presenceCapAllows reports whether agent should get a presence slot for
-// human, given the room's current (already TTL-trimmed) activity. An agent
-// already represented in activity always keeps updating — the cap limits
-// how many distinct agents a human can occupy, not how often a tracked one
-// is heard from. A human with no identity at all (human == "") is never
-// capped: there's nothing to attribute the count to, and that is the same
-// as today's uncapped behavior for an unconfigured install.
+// human, given activity. An agent already represented in activity always
+// keeps updating — the cap limits how many distinct agents a human can
+// occupy, not how often a tracked one is heard from. A human with no
+// identity at all (human == "") is never capped: there's nothing to
+// attribute the count to, and that is the same as today's uncapped
+// behavior for an unconfigured install.
+//
+// Precondition, not enforced here: the caller trims activity to the live
+// PresenceTTLS window first. onEvent's one call site gets that for free —
+// it reads ri.activity right after r.presence(room) already trimmed and
+// wrote it back — so this stays a plain membership count rather than
+// duplicating that cutoff logic a third time.
 func presenceCapAllows(activity []timedActivity, human, agent string) bool {
 	if human == "" {
 		return true
