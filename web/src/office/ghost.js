@@ -21,7 +21,8 @@
 // ENCOUNTER_ARGUE_DAYS -> argue ("I just wrote that"), older -> handshake.
 // Argue reuses World.contest() (agent.js already folds clips/argue.js's
 // clips into ANIM.CLIPS at import time, so this is the exact same call
-// pairUp()/world.highfive() make in office.html). Handshake has no World-
+// world.highfive() makes from office.html's replay dispatch (see
+// pickReplayVariant/replayEvent there). Handshake has no World-
 // level helper to call, so this drives it the same way World.highfive()
 // does internally: walk both agents onto clips/handshake.js's own marks
 // via Agent.goTo (the controller owns the pathing — see that file's

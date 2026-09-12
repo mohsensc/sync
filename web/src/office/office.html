@@ -325,10 +325,6 @@
     <button id="bZones" aria-pressed="true">Zones</button>
   </div>
   <div class="row">
-    <button id="bGreet" aria-pressed="true">Greetings</button>
-    <button id="bFive">High five</button>
-  </div>
-  <div class="row">
     <button id="bSpin" aria-pressed="false">Auto-rotate</button>
     <button id="bTop" aria-pressed="false">Top down</button>
     <button id="bWire" aria-pressed="false">Wireframe</button>
@@ -1074,26 +1070,6 @@ bWire.onclick=()=>{wire=!wire; setB(bWire,wire); meshes.forEach(m=>{m.material.w
 let zonesOn = true
 bZones.onclick=()=>{zonesOn=!zonesOn; setB(bZones,zonesOn); zoneUI.setVisible(zonesOn)}
 
-// Two live agents that end a walk near each other greet.
-const bGreet=document.getElementById('bGreet'), bFive=document.getElementById('bFive')
-bGreet.onclick=()=>{world.greetings=!world.greetings; setB(bGreet,world.greetings)}
-bFive.onclick=()=>{ pairUp() }
-
-/** Send the selection (or the first agent) to high five whoever is nearest. */
-function pairUp(a = interaction && interaction.selected) {
-  a = a || world.agents[0]
-  if (!a) return
-  const b = world.agents
-    .filter(x => x!==a && !x.busy && !x.seated && !x.moving)
-    .sort((p,q)=>dist2(p,a)-dist2(q,a))[0]
-  if (!b) { logEl.textContent = 'nobody free to high five'; return }
-  a.lastGreet = b.lastGreet = -99
-  world.highfive(a, b)
-  logEl.textContent = `${a.name} + ${b.name} → high five`
-  return [a.id, b.id]
-}
-const dist2 = (p,q) => (p.pos.x-q.pos.x)**2 + (p.pos.z-q.pos.z)**2
-
 // ---- live ---------------------------------------------------------------
 // Points the room at the relay. If nothing answers, the office stays empty and
 // the status badge says why; it never substitutes generated activity.
@@ -1626,7 +1602,6 @@ window.__world = world
 window.__agents = world.agents
 window.__desks = desks
 window.__props = props
-window.__pairUp = pairUp
 // Scripted clicking, so the raycast path itself is what gets tested.
 window.__clickAt = (x,y) => { const p = interaction.click(x,y); return p ? {kind:p.kind, label:p.label} : null }
 window.__clickFloor = (x,z) => { const [sx,sy] = interaction.project(x,z); return window.__clickAt(sx,sy) }
