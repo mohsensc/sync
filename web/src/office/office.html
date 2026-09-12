@@ -514,7 +514,12 @@ const WALL_Z = -D/2 + WALL_T/2   // inner face of the back wall, -6.625
 const WALL_X = -W/2 + WALL_T/2   // inner face of the left wall, -8.825
 const matFloor = new THREE.MeshStandardMaterial({ color:P.sand, roughness:1, metalness:0 })
 const matWall  = new THREE.MeshStandardMaterial({ color:P.cream, roughness:1, metalness:0 })
-const floor = new THREE.Mesh(new THREE.BoxGeometry(W, 0.4, D), matFloor)
+// Each wall is a centered box of thickness WALL_T straddling the W/D
+// boundary (see WALL_Z/WALL_X above), so half its thickness falls outside
+// the plain W x D plate below — a strip of wall with no floor under it.
+// Grown by WALL_T on both axes so the floor's edge reaches the walls'
+// outer faces instead of stopping at their centerline.
+const floor = new THREE.Mesh(new THREE.BoxGeometry(W + WALL_T, 0.4, D + WALL_T), matFloor)
 floor.position.set(0,-0.2,0); floor.receiveShadow = true; scene.add(floor)
 // The old rug was a 6.8 m dusty-rose disc under the desks that read as a lake.
 // Smaller, and moved to the lounge side where it actually bounds something.
