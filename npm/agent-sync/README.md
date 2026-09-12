@@ -57,11 +57,12 @@ your coding agent supports adding a custom MCP server, you can register it
 that way; consult that agent's own docs for the registration step, since
 each one is different and this package doesn't automate any of them.
 
-The dashboard's setup-instructions picker (agentsync.studio) writes an
-`AGENTS.md` section describing this as a voluntary convention - the agent
-calls the coordination tools if it has them, nothing enforces it if it
-doesn't. That's the honest ceiling for a coding agent this package hasn't
-wired a hook for.
+The dashboard's setup-instructions picker (agentsync.studio) generates text
+telling the connecting agent to add an `AGENTS.md` section describing this
+as a voluntary convention - no code writes the file; the agent does, if it
+follows the instruction. The agent calls the coordination tools if it has
+them, nothing enforces it if it doesn't. That's the honest ceiling for a
+coding agent this package hasn't wired a hook for.
 
 ## How the install works
 

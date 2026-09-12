@@ -228,8 +228,11 @@ both about a file with equal or higher priority silently shadowing
 `AGENTS.md`:
 - **Claude Code** reads `CLAUDE.md` as the primary file in a directory and
   only falls back to `AGENTS.md` when no `CLAUDE.md` is present there
-  (behavior as of 2026-09) — so for this target the instructions write the
-  identical section to both files, not `AGENTS.md` alone.
+  (behavior as of 2026-09) — so for this target the generated text tells
+  the connecting agent to write the identical section to both files, not
+  `AGENTS.md` alone. No code path in this repo performs that write; the
+  agent does, if it follows the instruction — same as the AGENTS.md-only
+  write for every other target.
 - **Gemini CLI** reads `AGENTS.md`, but a `GEMINI.md` in the same directory
   wins if both exist. There's no dual-write fix here (Google's own
   precedence, not something this repo's setup step controls) — the
