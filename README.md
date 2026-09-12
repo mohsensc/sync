@@ -11,22 +11,21 @@ floor. 90s lease TTL: a dead agent never wedges a teammate.
 
 ## Run it
 
-Not on the npm registry yet — ships from tagged releases; for now, build the
-tarball with `scripts/build-npm-packages.sh --pack` and install it.
+**Demo, no install:** `cd web && pnpm install && pnpm dev`, then open
+`http://127.0.0.1:5173/src/office/office.html` (needs Node, pnpm, and Go on
+PATH — dev proxy is Go). No relay/daemon/hook needed, scripted demo off the
+clone's own git history.
+
+**For real:** not on the npm registry yet — ships from tagged releases.
+Build, pack, then install the two tarballs the script prints:
 ```
-npm i -g agent-presence
+scripts/build-npm-packages.sh --pack
+# then the `npm i -g <wrapper>.tgz <platform>.tgz` line it prints
 agent-presence setup
 ```
-
-Joining instead of starting your own relay (blob from `agent-presence invite`):
-```
-npm i -g agent-presence
-agent-presence join <blob>
-```
-
-Paste into your agent to get set up:
-> Install agent-presence for me using `npm i -g agent-presence`, then run
-> `agent-presence setup`. It self-registers with Claude Code.
+`setup` writes both Claude config files directly, no confirm or undo yet
+(#212). Joining instead: `agent-presence join <blob>` (blob comes from
+`agent-presence invite`).
 
 Packaging and self-registration details: `docs/install-plan.md`.
 
