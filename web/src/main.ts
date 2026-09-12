@@ -1,7 +1,11 @@
+import { inject } from '@vercel/analytics'
 import { CharacterRegistry } from './characters.js'
 import { buildScene } from './scene.js'
 import { Subscription } from './subscribe.js'
 import { connectWithFrames } from './relay.js'
+
+// Initialize Vercel Web Analytics
+inject()
 
 const canvas = document.getElementById('world') as HTMLCanvasElement
 const registry = new CharacterRegistry()
