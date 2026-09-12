@@ -11,8 +11,7 @@
     background:#F0ECE6;z-index:10}
   #auth-gate-box{max-width:400px;width:100%;padding:0 20px}
   #auth-gate-fallback{text-align:center;color:#6b5f56;font-size:13px}
-  #c{display:block;width:100%;height:100%;cursor:grab}
-  #c:active{cursor:grabbing}
+  #c{display:block;width:100%;height:100%}
   #hud{position:fixed;left:18px;top:16px;background:#fffdfaee;border:1px solid #C3B39B;
     border-radius:10px;padding:12px 14px;max-width:290px;box-shadow:0 6px 24px #4a1f3d18}
   #hud h1{font-size:15px;margin:0 0 3px;letter-spacing:-.01em}
@@ -1050,16 +1049,12 @@ addEventListener('keydown', e => {
   logEl.textContent = `zoom feel: ${zoomMode}`
 })
 
-let drag=false, px=0, py=0
-canvas.addEventListener('pointerdown', e => { drag=true; px=e.clientX; py=e.clientY
-  spin=false; setB(bSpin,false); goal.active=false; flight=null })
-addEventListener('pointerup', () => drag=false)
-addEventListener('pointermove', e => {
-  if(!drag) return
-  yaw = Math.max(YAW_MIN, Math.min(YAW_MAX, yaw - (e.clientX-px)*0.006))
-  pitch = Math.max(0.08, Math.min(1.45, pitch + (e.clientY-py)*0.005))
-  px=e.clientX; py=e.clientY
-})
+// No free-drag orbit: the office presents a fixed default framing rather
+// than something a visitor can grab and spin. A click still stops
+// auto-rotate and cancels any in-flight camera move (interact.js's own
+// pointerdown, registered separately on this same canvas, still handles
+// click-to-select/send).
+canvas.addEventListener('pointerdown', () => { spin=false; setB(bSpin,false); goal.active=false; flight=null })
 canvas.addEventListener('wheel', e => { e.preventDefault(); goal.active=false; flight=null
   dist = Math.max(0.35, Math.min(2.2, dist + e.deltaY*0.0012)) }, {passive:false})
 
