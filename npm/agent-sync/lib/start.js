@@ -29,7 +29,7 @@ function pkgVersion() {
 }
 
 function wsScheme() {
-  return process.env.AGENT_PRESENCE_TLS_CERT ? 'wss' : 'ws';
+  return process.env.AGENT_SYNC_TLS_CERT ? 'wss' : 'ws';
 }
 
 function splitHostPort(addr) {
@@ -97,8 +97,8 @@ async function portTakenByOther(host, port) {
 }
 
 // --host/--port on `start`, because `invite` tells a user to run
-// `agent-presence start --host 0.0.0.0` when the relay is stuck on loopback.
-// Reading only AGENT_PRESENCE_HOST would make that instruction silently do
+// `agent-sync start --host 0.0.0.0` when the relay is stuck on loopback.
+// Reading only AGENT_SYNC_HOST would make that instruction silently do
 // nothing, which is worse than not offering it.
 function parseStartFlags(argv) {
   const out = { host: null, port: null };
@@ -109,10 +109,10 @@ function parseStartFlags(argv) {
     else if (a.startsWith('--host=')) out.host = a.slice(7);
     else if (a === '--port') out.port = rest[++i];
     else if (a.startsWith('--port=')) out.port = a.slice(7);
-    else throw new Error(`agent-presence start: unknown option ${a}\nUsage: agent-presence start [--host HOST] [--port PORT]`);
+    else throw new Error(`agent-sync start: unknown option ${a}\nUsage: agent-sync start [--host HOST] [--port PORT]`);
   }
   if (out.port !== null && !/^\d+$/.test(out.port)) {
-    throw new Error(`agent-presence start: --port must be a number, got ${out.port}`);
+    throw new Error(`agent-sync start: --port must be a number, got ${out.port}`);
   }
   return out;
 }
@@ -129,8 +129,8 @@ async function doStart(argv) {
 
   const existing = state.readServer();
   if (await state.isServerLive(existing)) {
-    console.log(`agent-presence: already running at ${wsScheme()}://${existing.addr}`);
-    console.log(`agent-presence invite   # to bring in a teammate`);
+    console.log(`agent-sync: already running at ${wsScheme()}://${existing.addr}`);
+    console.log(`agent-sync invite   # to bring in a teammate`);
     return 0;
   }
   if (existing) {
@@ -141,8 +141,8 @@ async function doStart(argv) {
 
   const config = state.readConfig();
   if (config && config.relay) {
-    console.log(`agent-presence: this machine is joined to ${config.relay}`);
-    console.log(`Not starting a local relay. Run 'agent-presence join' again to switch,`);
+    console.log(`agent-sync: this machine is joined to ${config.relay}`);
+    console.log(`Not starting a local relay. Run 'agent-sync join' again to switch,`);
     console.log(`or edit ${state.configPath()} directly to leave.`);
     return 0;
   }
@@ -156,12 +156,12 @@ async function doStart(argv) {
   }
 
   // Flag beats env beats default, the same precedence gorelay's own --port
-  // has over AGENT_PRESENCE_PORT. An explicitly chosen port is never quietly
+  // has over AGENT_SYNC_PORT. An explicitly chosen port is never quietly
   // swapped for a free one below.
-  const envPort = process.env.AGENT_PRESENCE_PORT;
+  const envPort = process.env.AGENT_SYNC_PORT;
   const explicitPort = flags.port ? Number(flags.port) : (envPort ? Number(envPort) : null);
   const desiredPort = explicitPort || DEFAULT_PORT;
-  const host = flags.host || process.env.AGENT_PRESENCE_HOST || '127.0.0.1';
+  const host = flags.host || process.env.AGENT_SYNC_HOST || '127.0.0.1';
 
   const taken = await portTakenByOther(host, desiredPort);
   let portArg;
@@ -171,10 +171,10 @@ async function doStart(argv) {
       // we have no record of starting it - don't guess, don't pick a
       // different port out from under them.
       console.error(
-        `agent-presence: something is already listening on ${host}:${desiredPort}, ` +
+        `agent-sync: something is already listening on ${host}:${desiredPort}, ` +
         `and it's not a relay this machine started (no server.json for it).`
       );
-      console.error(`Run 'agent-presence status' to check, or point AGENT_PRESENCE_RELAY at it directly.`);
+      console.error(`Run 'agent-sync status' to check, or point AGENT_SYNC_RELAY at it directly.`);
       console.error(`Not starting a second relay on that port.`);
       return 1;
     }
@@ -212,28 +212,28 @@ async function doStart(argv) {
       url: `${wsScheme()}://${result.addr}`,
       host: boundHost,
       port: boundPort,
-      tlsCert: process.env.AGENT_PRESENCE_TLS_CERT || null,
+      tlsCert: process.env.AGENT_SYNC_TLS_CERT || null,
       started: Date.now(),
       version: pkgVersion(),
     });
-    console.log(`agent-presence: relay listening on ${wsScheme()}://${result.addr}`);
-    console.log(`agent-presence invite   # to bring in a teammate`);
+    console.log(`agent-sync: relay listening on ${wsScheme()}://${result.addr}`);
+    console.log(`agent-sync invite   # to bring in a teammate`);
     return 0;
   }
 
   if (result.exited) {
-    console.error(`agent-presence: gorelay exited before it started listening ` +
+    console.error(`agent-sync: gorelay exited before it started listening ` +
       `(code=${result.exitInfo.code} signal=${result.exitInfo.signal}).`);
     console.error(`--- tail of ${logFile} ---`);
     console.error(tailLog(logFile, 20, logOffset));
-    console.error(`Fix the problem above and run 'agent-presence start' again.`);
+    console.error(`Fix the problem above and run 'agent-sync start' again.`);
     return 1;
   }
 
-  console.error(`agent-presence: gorelay didn't report a listening address within ${START_TIMEOUT_MS}ms.`);
+  console.error(`agent-sync: gorelay didn't report a listening address within ${START_TIMEOUT_MS}ms.`);
   console.error(`--- tail of ${logFile} ---`);
   console.error(tailLog(logFile, 20, logOffset));
-  console.error(`It may still be starting - check 'agent-presence status', or inspect ${logFile}.`);
+  console.error(`It may still be starting - check 'agent-sync status', or inspect ${logFile}.`);
   try { process.kill(child.pid, 'SIGTERM'); } catch { /* best effort */ }
   return 1;
 }
@@ -241,18 +241,18 @@ async function doStart(argv) {
 async function stop(argv) {
   const server = state.readServer();
   if (!server) {
-    console.log('agent-presence: no relay running (nothing started by this machine).');
+    console.log('agent-sync: no relay running (nothing started by this machine).');
     return 0;
   }
   if (!state.pidAlive(server.pid)) {
-    console.log(`agent-presence: relay (pid ${server.pid}) was already stopped.`);
+    console.log(`agent-sync: relay (pid ${server.pid}) was already stopped.`);
     state.clearServer();
     return 0;
   }
   try {
     process.kill(server.pid, 'SIGTERM');
   } catch (err) {
-    console.error(`agent-presence: couldn't stop pid ${server.pid}: ${err.message}`);
+    console.error(`agent-sync: couldn't stop pid ${server.pid}: ${err.message}`);
     return 1;
   }
 
@@ -269,14 +269,14 @@ async function stop(argv) {
   }
 
   if (state.pidAlive(server.pid)) {
-    console.error(`agent-presence: sent SIGTERM to pid ${server.pid} but it is still running after ${STOP_TIMEOUT_MS / 1000}s.`);
-    console.error(`Leaving ${state.serverPath()} in place so 'agent-presence status' still finds it.`);
-    console.error(`If it stays wedged: kill -9 ${server.pid}, then 'agent-presence start'.`);
+    console.error(`agent-sync: sent SIGTERM to pid ${server.pid} but it is still running after ${STOP_TIMEOUT_MS / 1000}s.`);
+    console.error(`Leaving ${state.serverPath()} in place so 'agent-sync status' still finds it.`);
+    console.error(`If it stays wedged: kill -9 ${server.pid}, then 'agent-sync start'.`);
     return 1;
   }
 
   state.clearServer();
-  console.log(`agent-presence: stopped relay (pid ${server.pid}, was at ${server.addr}).`);
+  console.log(`agent-sync: stopped relay (pid ${server.pid}, was at ${server.addr}).`);
   return 0;
 }
 
@@ -299,7 +299,7 @@ async function status(argv) {
     console.log('local relay: not running');
   }
 
-  for (const name of ['presenced', 'agent-presence-mcp', 'gorelay']) {
+  for (const name of ['presenced', 'agent-sync-mcp', 'gorelay']) {
     let binPath = null;
     try {
       binPath = resolve.binary(name);
@@ -314,7 +314,7 @@ async function status(argv) {
   }
 
   const hookPath = resolve.binaryOptional('ap-hook');
-  console.log(`  ap-hook: ${hookPath ? hookPath : 'not shipped for this platform (see: agent-presence doctor)'}`);
+  console.log(`  ap-hook: ${hookPath ? hookPath : 'not shipped for this platform (see: agent-sync doctor)'}`);
 
   return 0;
 }

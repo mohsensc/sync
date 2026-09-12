@@ -1,5 +1,5 @@
 # Provisions the one datasource the dashboard needs. uid must match the
-# "prometheus" uid every panel in agent-presence.json references.
+# "prometheus" uid every panel in agent-sync.json references.
 apiVersion: 1
 
 datasources:

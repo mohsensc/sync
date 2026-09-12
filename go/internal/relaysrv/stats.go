@@ -4,7 +4,7 @@ import "github.com/mohsensc/sync/go/internal/metrics"
 
 // -- the "stats" frame -------------------------------------------------
 //
-// presenced and agent-presence-mcp run on a developer's laptop with
+// presenced and agent-sync-mcp run on a developer's laptop with
 // nothing Prometheus can reach (see the metrics package doc comment) and
 // their own local metrics.Registry to show for it. A "stats" frame is how
 // one of them hands the relay what it would otherwise be exposing on its

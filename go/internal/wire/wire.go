@@ -3,7 +3,7 @@
 // unix socket. It is the Go mirror of cpp/daemon/relay_client.{hpp,cpp} and
 // hook/protocol.hpp, kept to the same field names on purpose: the relay does
 // not know which language sent a frame, so nothing here may drift from what
-// python/src/agent_presence/relay.py and serve.py actually read.
+// python/src/agent_sync/relay.py and serve.py actually read.
 package wire
 
 import "encoding/json"

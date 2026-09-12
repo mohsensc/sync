@@ -1,6 +1,6 @@
 // Package relaysrv is the Go relay: the process leases, wait-die, the
 // ladder, negotiation and fan-out all live in, speaking the same wire
-// protocol python/src/agent_presence/serve.py and relay.py do. It is a
+// protocol python/src/agent_sync/serve.py and relay.py do. It is a
 // separate package from internal/relay (the daemon's relay *client*) on
 // purpose — that package dials out to a relay, this one is the relay.
 package relaysrv

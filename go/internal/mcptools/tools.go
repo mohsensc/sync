@@ -1,5 +1,5 @@
 // Package mcptools is the deliberate channel: the four MCP tools
-// agent-presence exposes, and everything needed to assemble them for one
+// agent-sync exposes, and everything needed to assemble them for one
 // session. It is the Go mirror of mcp_server.py — same tool names, same
 // schemas, same reply shapes, same error strings — talking to the relay
 // through internal/mcprelay the same way mcp_server.py talks to it through

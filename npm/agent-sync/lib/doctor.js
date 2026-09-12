@@ -17,7 +17,7 @@ const { execFileSync } = require('child_process');
 const resolve = require('./resolve');
 const state = require('./state');
 
-const BINARIES = ['gorelay', 'presenced', 'agent-presence-mcp', 'ap-hook'];
+const BINARIES = ['gorelay', 'presenced', 'agent-sync-mcp', 'ap-hook'];
 const CONNECT_TIMEOUT_MS = 2000;
 const RUN_CHECK_TIMEOUT_MS = 3000;
 const SUPPORTED_PLATFORMS = ['darwin-arm64', 'darwin-x64', 'linux-x64', 'linux-arm64', 'win32-x64'];
@@ -53,7 +53,7 @@ function checkNodeVersion(report) {
   if (major >= 18) {
     report('ok', `node ${version}`);
   } else {
-    report('fail', `node ${version}`, 'agent-presence requires Node >= 18', 'install Node 18 or newer');
+    report('fail', `node ${version}`, 'agent-sync requires Node >= 18', 'install Node 18 or newer');
   }
 }
 
@@ -79,7 +79,7 @@ function checkPlatformPackage(report) {
       'fail',
       'platform package',
       `${pkg.name} is not installed`,
-      'reinstall: npm i -g agent-presence --force. Not an --ignore-scripts problem, ' +
+      'reinstall: npm i -g agent-sync --force. Not an --ignore-scripts problem, ' +
         'platform packages are plain optionalDependencies and run no install scripts.'
     );
     return false;
@@ -137,13 +137,13 @@ function checkBinary(report, name) {
           'Not wired: arbitration on tool calls. Build locally: cmake -S cpp -B cpp/build && cmake --build cpp/build'
       );
     } else {
-      report('fail', name, 'not resolvable', 'reinstall agent-presence');
+      report('fail', name, 'not resolvable', 'reinstall agent-sync');
     }
     return;
   }
 
   if (!fs.existsSync(p)) {
-    report('fail', name, `resolved to ${p} but that file does not exist`, 'reinstall agent-presence');
+    report('fail', name, `resolved to ${p} but that file does not exist`, 'reinstall agent-sync');
     return;
   }
 
@@ -159,7 +159,7 @@ function checkBinary(report, name) {
     const hint =
       optional
         ? `still works: relay/daemon/MCP tools. Not wired: arbitration on tool calls. Rebuild: cmake -S cpp -B cpp/build && cmake --build cpp/build`
-        : 'wrong architecture, a truncated download, or a corrupt install - reinstall agent-presence';
+        : 'wrong architecture, a truncated download, or a corrupt install - reinstall agent-sync';
     report(optional ? 'warn' : 'fail', name, `resolved to ${p} but would not execute (${result.reason})`, hint);
     return;
   }
@@ -170,7 +170,7 @@ function checkBinary(report, name) {
 function checkSettingsJson(report) {
   const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
   if (!fs.existsSync(settingsPath)) {
-    report('warn', 'claude settings.json', 'does not exist yet', 'run `agent-presence setup`');
+    report('warn', 'claude settings.json', 'does not exist yet', 'run `agent-sync setup`');
     return;
   }
 
@@ -198,17 +198,17 @@ function checkSettingsJson(report) {
   const postCmd = findHook(post);
 
   if (!preCmd && !postCmd) {
-    report('warn', 'claude settings.json hooks', 'ap-hook not wired', 'run `agent-presence setup`');
+    report('warn', 'claude settings.json hooks', 'ap-hook not wired', 'run `agent-sync setup`');
     return;
   }
 
   for (const [label, cmd] of [['PreToolUse', preCmd], ['PostToolUse', postCmd]]) {
     if (!cmd) {
-      report('warn', `claude settings.json (${label})`, 'ap-hook not wired for this event', 'run `agent-presence setup`');
+      report('warn', `claude settings.json (${label})`, 'ap-hook not wired for this event', 'run `agent-sync setup`');
       continue;
     }
     if (!fs.existsSync(cmd)) {
-      report('fail', `claude settings.json (${label})`, `points at ${cmd}, which does not exist`, 'run `agent-presence setup` to repair, or reinstall');
+      report('fail', `claude settings.json (${label})`, `points at ${cmd}, which does not exist`, 'run `agent-sync setup` to repair, or reinstall');
       continue;
     }
     report('ok', `claude settings.json (${label})`, cmd);
@@ -219,7 +219,7 @@ function checkMcpRegistered(report) {
   try {
     execFileSync('claude', ['--version'], { stdio: 'ignore' });
   } catch (e) {
-    report('warn', 'claude CLI', 'not found on PATH', 'install Claude Code, then run `agent-presence setup`');
+    report('warn', 'claude CLI', 'not found on PATH', 'install Claude Code, then run `agent-sync setup`');
     return;
   }
 
@@ -227,15 +227,15 @@ function checkMcpRegistered(report) {
   try {
     out = execFileSync('claude', ['mcp', 'list'], { encoding: 'utf8' });
   } catch (e) {
-    report('warn', 'mcp registration', `\`claude mcp list\` failed (${e.message})`, 'run `agent-presence setup`');
+    report('warn', 'mcp registration', `\`claude mcp list\` failed (${e.message})`, 'run `agent-sync setup`');
     return;
   }
 
-  const registered = out.split('\n').some((line) => /^agent-presence:/.test(line.trim()));
+  const registered = out.split('\n').some((line) => /^agent-sync:/.test(line.trim()));
   if (registered) {
-    report('ok', 'mcp registration', 'agent-presence registered');
+    report('ok', 'mcp registration', 'agent-sync registered');
   } else {
-    report('warn', 'mcp registration', 'agent-presence not registered', 'run `agent-presence setup`');
+    report('warn', 'mcp registration', 'agent-sync not registered', 'run `agent-sync setup`');
   }
 }
 
@@ -297,7 +297,7 @@ async function checkRelay(report, joinedConfig) {
   if (joinedConfig) {
     const hp = parseHostPort(joinedConfig.relay);
     if (!hp) {
-      report('fail', 'relay (remote)', `config.json has an unparseable relay URL: ${joinedConfig.relay}`, 'run `agent-presence join <blob>` again with a fresh invite');
+      report('fail', 'relay (remote)', `config.json has an unparseable relay URL: ${joinedConfig.relay}`, 'run `agent-sync join <blob>` again with a fresh invite');
       return;
     }
     const result = await testConnection(hp.host, hp.port);
@@ -316,7 +316,7 @@ async function checkRelay(report, joinedConfig) {
 
   const server = safeReadServer();
   if (!server) {
-    report('warn', 'relay (local)', `no ${state.serverPath()}`, 'run `agent-presence start` or `setup`');
+    report('warn', 'relay (local)', `no ${state.serverPath()}`, 'run `agent-sync start` or `setup`');
     return;
   }
 
@@ -332,14 +332,14 @@ async function checkRelay(report, joinedConfig) {
       'fail',
       'relay (local)',
       `server.json exists but pid ${server.pid} is not running - stale state file`,
-      `remove ${state.serverPath()} and run \`agent-presence start\``
+      `remove ${state.serverPath()} and run \`agent-sync start\``
     );
     return;
   }
 
   const hp = parseHostPort(server.url || `ws://${server.host}:${server.port}`);
   if (!hp) {
-    report('fail', 'relay (local)', 'server.json is alive but its url/host/port could not be parsed', `remove ${state.serverPath()} and run \`agent-presence start\``);
+    report('fail', 'relay (local)', 'server.json is alive but its url/host/port could not be parsed', `remove ${state.serverPath()} and run \`agent-sync start\``);
     return;
   }
 
@@ -351,7 +351,7 @@ async function checkRelay(report, joinedConfig) {
       'fail',
       'relay (local)',
       `pid ${server.pid} alive but port ${hp.port} refused connection (${result.reason})`,
-      'check ' + state.logPath() + ' for errors, consider `agent-presence stop` then `agent-presence start`'
+      'check ' + state.logPath() + ' for errors, consider `agent-sync stop` then `agent-sync start`'
     );
   }
 }
@@ -359,7 +359,7 @@ async function checkRelay(report, joinedConfig) {
 async function run(argv) {
   const { report, failed } = makeReporter();
 
-  process.stdout.write('agent-presence doctor\n\n');
+  process.stdout.write('agent-sync doctor\n\n');
 
   checkNodeVersion(report);
   if (checkPlatformPackage(report)) {

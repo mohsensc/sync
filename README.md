@@ -1,10 +1,10 @@
-# Agent Presence
+# Agent Sync
 
 A team's coding agents can't see each other in a shared repo, so they duplicate
 work and clobber edits. One stream: ambient for humans, claims for agents.
 
 Four binaries: `ap-hook` (C++) sits on Claude Code's tool calls, `presenced`
-(Go) coalesces and snapshots, `agent-presence-mcp` (Go) is the
+(Go) coalesces and snapshots, `agent-sync-mcp` (Go) is the
 `claim_work`/`respond`/`who_else_is_here` surface, `gorelay` (Go) is the
 relay — leases, wait-die, the ladder, negotiation, fan-out, the org policy
 floor. 90s lease TTL: a dead agent never wedges a teammate.
@@ -21,11 +21,11 @@ Build, pack, then install the two tarballs the script prints:
 ```
 scripts/build-npm-packages.sh --pack
 # then the `npm i -g <wrapper>.tgz <platform>.tgz` line it prints
-agent-presence setup
+agent-sync setup
 ```
 `setup` writes both Claude config files directly, no confirm or undo yet
-(#212). Joining instead: `agent-presence join <blob>` (blob comes from
-`agent-presence invite`).
+(#212). Joining instead: `agent-sync join <blob>` (blob comes from
+`agent-sync invite`).
 
 Packaging and self-registration details: `docs/install-plan.md`.
 
@@ -43,6 +43,6 @@ ports, TLS, and metrics: `docs/`.
 ## What's broken
 
 Ladder tuning is guesswork, only run against scripted clients so far. Rung 4
-is off unless `AGENT_PRESENCE_RUNG4=1`, its scorer is a placeholder (#15), and
+is off unless `AGENT_SYNC_RUNG4=1`, its scorer is a placeholder (#15), and
 `ap policy set rung4=...` is a no-op — the relay resolves that rung against
 the builtin and org layers only, so changing it takes an org file.

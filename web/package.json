@@ -1,5 +1,5 @@
 {
-  "name": "agent-presence-web",
+  "name": "agent-sync-web",
   "private": true,
   "type": "module",
   "scripts": {

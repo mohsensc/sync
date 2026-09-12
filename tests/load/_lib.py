@@ -54,7 +54,7 @@ def ensure_dev_cert() -> tuple[Path, Path]:
             ["openssl", "req", "-x509", "-newkey", "ec",
              "-pkeyopt", "ec_paramgen_curve:prime256v1",
              "-keyout", str(_TLS_KEY), "-out", str(_TLS_CERT),
-             "-days", "1", "-nodes", "-subj", "/CN=agent-presence-load-test",
+             "-days", "1", "-nodes", "-subj", "/CN=agent-sync-load-test",
              "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1"],
             check=True, capture_output=True,
         )
@@ -65,7 +65,7 @@ def dev_client_ssl_context() -> ssl.SSLContext:
     """A client context that trusts exactly the dev cert above — real
     verification (not `CERT_NONE`), scoped to the one cert this run
     generated, matching what an operator following docs/tls-dev-cert.md
-    would set up with AGENT_PRESENCE_RELAY_CA."""
+    would set up with AGENT_SYNC_RELAY_CA."""
     global _tls_client_ctx
     if _tls_client_ctx is None:
         cert, _ = ensure_dev_cert()
@@ -182,13 +182,13 @@ class RelayProc:
 
     def start(self) -> None:
         env = dict(os.environ)
-        env["AGENT_PRESENCE_PORT"] = str(self.port)
+        env["AGENT_SYNC_PORT"] = str(self.port)
         if self.lease_ttl_s is not None:
             env["AP_LOAD_LEASE_TTL_S"] = str(self.lease_ttl_s)
         if TLS_ENABLED:
             cert, key = ensure_dev_cert()
-            env["AGENT_PRESENCE_TLS_CERT"] = str(cert)
-            env["AGENT_PRESENCE_TLS_KEY"] = str(key)
+            env["AGENT_SYNC_TLS_CERT"] = str(cert)
+            env["AGENT_SYNC_TLS_KEY"] = str(key)
         self.log.parent.mkdir(parents=True, exist_ok=True)
         fh = open(self.log, "wb")
         self.proc = subprocess.Popen(
@@ -270,19 +270,19 @@ class DaemonProc:
     def start(self) -> None:
         env = dict(os.environ)
         env.update({
-            "AGENT_PRESENCE_SOCK": str(self.sock),
-            "AGENT_PRESENCE_SNAPSHOT": str(self.snapshot),
-            "AGENT_PRESENCE_ROOM": self.room,
-            "AGENT_PRESENCE_RELAY": self.relay_url,
-            "AGENT_PRESENCE_AGENT": self.name,
-            "AGENT_PRESENCE_HUMAN": f"human-{self.name}",
+            "AGENT_SYNC_SOCK": str(self.sock),
+            "AGENT_SYNC_SNAPSHOT": str(self.snapshot),
+            "AGENT_SYNC_ROOM": self.room,
+            "AGENT_SYNC_RELAY": self.relay_url,
+            "AGENT_SYNC_AGENT": self.name,
+            "AGENT_SYNC_HUMAN": f"human-{self.name}",
         })
         if TLS_ENABLED and self.relay_url.startswith("wss://"):
             # Real verification against the run's dev cert, not skip-verify
             # — this is what proves the Go client's default TLS dial path,
             # not just that the flag exists.
             cert, _ = ensure_dev_cert()
-            env["AGENT_PRESENCE_RELAY_CA"] = str(cert)
+            env["AGENT_SYNC_RELAY_CA"] = str(cert)
         fh = open(self.log, "wb")
         self.proc = subprocess.Popen([str(PRESENCED)], env=env, stdout=fh, stderr=fh)
         end = time.time() + 10

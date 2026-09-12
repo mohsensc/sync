@@ -1,8 +1,8 @@
 // Rung 4 intent similarity, ported as-is from
-// python/src/agent_presence/similarity.py — a separate track (#15) owns
+// python/src/agent_sync/similarity.py — a separate track (#15) owns
 // improving it, so this is a straight port of the shipped lexical
 // scorer: weighted-cosine token overlap with a hand-maintained synonym
-// table, off by default (AGENT_PRESENCE_RUNG4 unset). See the Python
+// table, off by default (AGENT_SYNC_RUNG4 unset). See the Python
 // file's module doc for why the backend is a baseline and not the
 // answer, and why the weights and synonym table are shaped the way they
 // are.
@@ -16,8 +16,8 @@ import (
 	"strings"
 )
 
-const rung4Env = "AGENT_PRESENCE_RUNG4"
-const rung4ThresholdEnv = "AGENT_PRESENCE_RUNG4_THRESHOLD"
+const rung4Env = "AGENT_SYNC_RUNG4"
+const rung4ThresholdEnv = "AGENT_SYNC_RUNG4_THRESHOLD"
 
 var rung4Truthy = map[string]bool{"1": true, "true": true, "yes": true, "on": true}
 

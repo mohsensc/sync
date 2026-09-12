@@ -1,14 +1,14 @@
 # Go relay: what's ported, what isn't, and the numbers
 
 **Date:** 2026-08-11
-**Status, as of this PR:** ships opt-in. `AGENT_PRESENCE_RELAY_IMPL=go` (or
-`agent-presence-relay --impl go`) runs it; the default is still the Python
+**Status, as of this PR:** ships opt-in. `AGENT_SYNC_RELAY_IMPL=go` (or
+`agent-sync-relay --impl go`) runs it; the default is still the Python
 relay. See "the call" at the bottom for the reasoning.
 
 **Superseded — read this first:** the opt-in this doc argues for shipped,
 and then the decision it was arguing *against* happened anyway: the Python
 relay was deleted outright (#40), `gorelay` is the only relay unconditionally,
-and `AGENT_PRESENCE_RELAY_IMPL`/`--impl` don't exist in the code any more —
+and `AGENT_SYNC_RELAY_IMPL`/`--impl` don't exist in the code any more —
 there's nothing left to select between. Everything below is the evidence and
 reasoning from the PR that made the Go relay trustworthy enough to opt into
 in the first place; it's kept because the numbers and the bugs it found are
@@ -29,7 +29,7 @@ earlier version of this doc said, it's noted inline.
 ## What was built
 
 `go/cmd/gorelay` + `go/internal/relaysrv`: a from-scratch Go relay speaking
-the same wire protocol `python/src/agent_presence/serve.py` and `relay.py`
+the same wire protocol `python/src/agent_sync/serve.py` and `relay.py`
 do. Not the spike's prototype (`spike/relay/goprototype`, PR #39) — this one
 has the domain layer: wait-die arbitration, the ladder (rungs 0-3), handover
 and reservations, the fair-share/handover grace split, tiers and priority
@@ -61,9 +61,9 @@ acquire/release, read under its own lock. See
 ## What is not ported
 
 - **Rung 4 (declared-intent similarity / redundant-work detection).**
-  `python/src/agent_presence/similarity.py` is a 389-line lexical scorer
+  `python/src/agent_sync/similarity.py` is a 389-line lexical scorer
   with a hand-tuned synonym table; porting it wasn't attempted. The Go
-  relay always behaves as if `AGENT_PRESENCE_RUNG4` were unset, which is
+  relay always behaves as if `AGENT_SYNC_RUNG4` were unset, which is
   the Python relay's own shipped default and the common case — this is a
   gap only for a room that has set the flag. Rung 4 is advisory (it never
   touches the lease table), so this cannot cause a wrong grant or refusal,
@@ -202,7 +202,7 @@ PR (it's throwaway, in the session's scratch dir); the result is:
 | file | result |
 | --- | --- |
 | `test_e2e.py` | 8/8 passed, including the roster/principal/token authentication tests over the real wire, and the senior-waits/junior-aborts handover scenario |
-| `test_serve.py` | 5/6 passed. The one failure (`test_opaque_mode_leaves_no_cleartext_path_on_the_wire`) is a harness artifact, not a relay bug: the test flips `AGENT_PRESENCE_OPAQUE` with `monkeypatch.setenv` *after* the relay subprocess has already been spawned, and a child process does not observe a parent's later env change. Verified directly instead: started `gorelay` with `AGENT_PRESENCE_OPAQUE=1` set at process start (the only way any operator would actually set it) and confirmed no cleartext path reaches the wire — see the opaque-mode check below. |
+| `test_serve.py` | 5/6 passed. The one failure (`test_opaque_mode_leaves_no_cleartext_path_on_the_wire`) is a harness artifact, not a relay bug: the test flips `AGENT_SYNC_OPAQUE` with `monkeypatch.setenv` *after* the relay subprocess has already been spawned, and a child process does not observe a parent's later env change. Verified directly instead: started `gorelay` with `AGENT_SYNC_OPAQUE=1` set at process start (the only way any operator would actually set it) and confirmed no cleartext path reaches the wire — see the opaque-mode check below. |
 
 Not run black-box: `test_backpressure.py`, `test_inbound_rate_limit.py`
 (both `VirtualClock`-driven — the shed/rate-limit thresholds are exercised
@@ -465,10 +465,10 @@ of whether a read or a write tripped it.
 ## The call
 
 **Ships opt-in**, but the evidence for the common case (no org policy file,
-`AGENT_PRESENCE_RUNG4` unset — the shipped defaults) is stronger than
+`AGENT_SYNC_RUNG4` unset — the shipped defaults) is stronger than
 "opt-in" alone conveys, so this is closer to "opt-in and ready to become the
-default soon" than "opt-in because it's unproven." `AGENT_PRESENCE_RELAY_IMPL=go`
-selects the Go relay from `agent-presence-relay`'s existing entrypoint
+default soon" than "opt-in because it's unproven." `AGENT_SYNC_RELAY_IMPL=go`
+selects the Go relay from `agent-sync-relay`'s existing entrypoint
 (`serve.py`'s `main`, a real `exec`, not a subprocess wrapper); unset, the
 default stays the Python relay for one release.
 

@@ -1,4 +1,4 @@
-# Agent Presence Implementation Plan
+# Agent Sync Implementation Plan
 
 **Superseded — read this first:** this plan describes a C++ hook + C++
 daemon (`presenced`) forwarding to a Python relay. The daemon and the Python
@@ -21,7 +21,7 @@ of what's running.
 - **All timestamps used in ordering decisions are assigned by the relay on receipt.** Clients never assign them.
 - **Identity comes from the authenticated connection, never from a client-supplied field.** A connection says who it is once, on join. After that the relay reads `agent`/`human` off the connection and ignores those keys in the message body. Trusting the body lets any room member release, renew or steal a teammate's lease by naming them.
 - **No blocking read anywhere in the daemon's accept path.** The daemon is single threaded: one client that connects and stops talking must not be able to stop it serving everyone else. Non-blocking listen fd, non-blocking accepted fds, a per-connection read budget, and a total budget for each `poll_once`. A daemon that stops reading is worse than one that dies, because it still looks alive from the outside.
-- **Opaque mode is a flag, not a helper.** `AGENT_PRESENCE_OPAQUE=1` (also `true`/`yes`/`on`) hashes paths and symbols on ingest, on the MCP path, and on the way out to the wire. All three call sites or none — a half-wired flag splits the lease table.
+- **Opaque mode is a flag, not a helper.** `AGENT_SYNC_OPAQUE=1` (also `true`/`yes`/`on`) hashes paths and symbols on ingest, on the MCP path, and on the way out to the wire. All three call sites or none — a half-wired flag splits the lease table.
 - **Lease TTL 90s, heartbeat 30s. Presence TTL 30s.** Nothing is permanent; no manual cleanup path exists.
 - **Never transmit:** file contents, diffs, prompts, agent reasoning, model output, env vars, command output.
 - **May transmit:** file paths, symbol names, line ranges, verbs, timestamps, identity, MCP-declared intent.
@@ -43,10 +43,10 @@ slate blue #8A94A3  navy #35455C  deep plum #4A1F3D
 ## File Structure
 
 ```
-agent-presence/
+agent-sync/
 ├── python/
 │   ├── pyproject.toml
-│   ├── src/agent_presence/
+│   ├── src/agent_sync/
 │   │   ├── types.py            # Region, AgentEvent, Claim, enums
 │   │   ├── clock.py            # Clock protocol, RealClock, VirtualClock
 │   │   ├── room_key.py         # git remote normalization → room id
@@ -82,7 +82,7 @@ agent-presence/
 └── scripts/statusline-presence.sh
 ```
 
-**Responsibility boundaries.** `python/src/agent_presence/` below `relay.py` is pure — no I/O, no network, every time-dependent behaviour driven through an injected `Clock`. That purity is what lets the concurrency protocol be tested exhaustively in milliseconds. `relay.py` and the C++ daemon are thin shells over it.
+**Responsibility boundaries.** `python/src/agent_sync/` below `relay.py` is pure — no I/O, no network, every time-dependent behaviour driven through an injected `Clock`. That purity is what lets the concurrency protocol be tested exhaustively in milliseconds. `relay.py` and the C++ daemon are thin shells over it.
 
 ---
 
@@ -91,7 +91,7 @@ agent-presence/
 ### Task 1: Python package scaffold and domain types
 
 **Files:**
-- Create: `python/pyproject.toml`, `python/src/agent_presence/__init__.py`, `python/src/agent_presence/types.py`
+- Create: `python/pyproject.toml`, `python/src/agent_sync/__init__.py`, `python/src/agent_sync/types.py`
 - Test: `python/tests/test_types.py`
 
 **Interfaces:**
@@ -102,7 +102,7 @@ agent-presence/
 `python/pyproject.toml`:
 ```toml
 [project]
-name = "agent-presence"
+name = "agent-sync"
 version = "0.0.0"
 requires-python = ">=3.12"
 dependencies = ["websockets>=13.0", "mcp>=1.2.0"]
@@ -115,20 +115,20 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/agent_presence"]
+packages = ["src/agent_sync"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 ```
 
-Create empty `python/src/agent_presence/__init__.py`.
+Create empty `python/src/agent_sync/__init__.py`.
 
 - [ ] **Step 2: Write the failing test**
 
 `python/tests/test_types.py`:
 ```python
-from agent_presence.types import Region, same_region
+from agent_sync.types import Region, same_region
 
 
 def test_same_path_and_symbol_is_the_same_region():
@@ -151,11 +151,11 @@ def test_regions_are_hashable_so_they_can_key_a_cache():
 - [ ] **Step 3: Run test to verify it fails**
 
 Run: `cd python && python -m pytest tests/test_types.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'agent_presence.types'`
+Expected: FAIL — `ModuleNotFoundError: No module named 'agent_sync.types'`
 
 - [ ] **Step 4: Write the implementation**
 
-`python/src/agent_presence/types.py`:
+`python/src/agent_sync/types.py`:
 ```python
 from __future__ import annotations
 
@@ -220,7 +220,7 @@ Expected: PASS, 3 tests
 - [ ] **Step 6: Commit**
 
 ```bash
-git add python/pyproject.toml python/src/agent_presence python/tests/test_types.py
+git add python/pyproject.toml python/src/agent_sync python/tests/test_types.py
 git commit -m "feat(core): python package scaffold and domain types"
 ```
 
@@ -231,7 +231,7 @@ git commit -m "feat(core): python package scaffold and domain types"
 The distribution mechanism of the whole product. Anyone who clones the repo lands in the same room with zero configuration, so every URL form of one repo must normalize identically.
 
 **Files:**
-- Create: `python/src/agent_presence/room_key.py`
+- Create: `python/src/agent_sync/room_key.py`
 - Test: `python/tests/test_room_key.py`
 
 **Interfaces:**
@@ -245,7 +245,7 @@ import re
 
 import pytest
 
-from agent_presence.room_key import normalize_remote, room_id_from_remote
+from agent_sync.room_key import normalize_remote, room_id_from_remote
 
 EQUIVALENT = [
     "git@github.com:acme/api.git",
@@ -286,11 +286,11 @@ def test_room_id_does_not_leak_the_repo_name():
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cd python && python -m pytest tests/test_room_key.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'agent_presence.room_key'`
+Expected: FAIL — `ModuleNotFoundError: No module named 'agent_sync.room_key'`
 
 - [ ] **Step 3: Write the implementation**
 
-`python/src/agent_presence/room_key.py`:
+`python/src/agent_sync/room_key.py`:
 ```python
 from __future__ import annotations
 
@@ -336,7 +336,7 @@ Expected: PASS, 5 tests
 - [ ] **Step 5: Commit**
 
 ```bash
-git add python/src/agent_presence/room_key.py python/tests/test_room_key.py
+git add python/src/agent_sync/room_key.py python/tests/test_room_key.py
 git commit -m "feat(core): normalize git remotes to stable room ids"
 ```
 
@@ -347,7 +347,7 @@ git commit -m "feat(core): normalize git remotes to stable room ids"
 Without this, testing 90-second lease expiry takes 90 seconds.
 
 **Files:**
-- Create: `python/src/agent_presence/clock.py`
+- Create: `python/src/agent_sync/clock.py`
 - Test: `python/tests/test_clock.py`
 
 **Interfaces:**
@@ -359,7 +359,7 @@ Without this, testing 90-second lease expiry takes 90 seconds.
 ```python
 import pytest
 
-from agent_presence.clock import VirtualClock
+from agent_sync.clock import VirtualClock
 
 
 def test_time_only_moves_when_advanced():
@@ -379,11 +379,11 @@ def test_time_cannot_run_backwards():
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cd python && python -m pytest tests/test_clock.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'agent_presence.clock'`
+Expected: FAIL — `ModuleNotFoundError: No module named 'agent_sync.clock'`
 
 - [ ] **Step 3: Write the implementation**
 
-`python/src/agent_presence/clock.py`:
+`python/src/agent_sync/clock.py`:
 ```python
 from __future__ import annotations
 
@@ -426,7 +426,7 @@ Expected: PASS, 2 tests
 - [ ] **Step 5: Commit**
 
 ```bash
-git add python/src/agent_presence/clock.py python/tests/test_clock.py
+git add python/src/agent_sync/clock.py python/tests/test_clock.py
 git commit -m "feat(core): injectable clock with virtual implementation"
 ```
 
@@ -435,7 +435,7 @@ git commit -m "feat(core): injectable clock with virtual implementation"
 ### Task 4: Lease registry with TTL expiry
 
 **Files:**
-- Create: `python/src/agent_presence/leases.py`
+- Create: `python/src/agent_sync/leases.py`
 - Test: `python/tests/test_leases.py`
 
 **Interfaces:**
@@ -450,9 +450,9 @@ git commit -m "feat(core): injectable clock with virtual implementation"
 ```python
 import pytest
 
-from agent_presence.clock import VirtualClock
-from agent_presence.leases import LEASE_TTL_S, LeaseRegistry
-from agent_presence.types import Region
+from agent_sync.clock import VirtualClock
+from agent_sync.leases import LEASE_TTL_S, LeaseRegistry
+from agent_sync.types import Region
 
 R = Region(path="src/auth.py", symbol="sign_in", lines=None)
 
@@ -510,11 +510,11 @@ def test_release_all_drops_every_lease_for_one_agent(reg):
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cd python && python -m pytest tests/test_leases.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'agent_presence.leases'`
+Expected: FAIL — `ModuleNotFoundError: No module named 'agent_sync.leases'`
 
 - [ ] **Step 3: Write the implementation**
 
-`python/src/agent_presence/leases.py`:
+`python/src/agent_sync/leases.py`:
 ```python
 from __future__ import annotations
 
@@ -611,7 +611,7 @@ Expected: PASS, 6 tests
 - [ ] **Step 5: Commit**
 
 ```bash
-git add python/src/agent_presence/leases.py python/tests/test_leases.py
+git add python/src/agent_sync/leases.py python/tests/test_leases.py
 git commit -m "feat(core): lease registry with lazy TTL expiry"
 ```
 
@@ -624,7 +624,7 @@ Resolves the case where A holds `auth.py` and wants `db.py` while B holds `db.py
 This is wait-die, not wound-wait. Under wound-wait the older requester would preempt the holder, and preemption here means yanking a lease out from under an agent that is part-way through an edit. Wait-die is equally deadlock-free and costs nothing to get that property.
 
 **Files:**
-- Create: `python/src/agent_presence/wait_die.py`
+- Create: `python/src/agent_sync/wait_die.py`
 - Test: `python/tests/test_wait_die.py`
 
 **Interfaces:**
@@ -638,8 +638,8 @@ This is wait-die, not wound-wait. Under wound-wait the older requester would pre
 import pytest
 from hypothesis import given, strategies as st
 
-from agent_presence.types import Claim, Region
-from agent_presence.wait_die import resolve
+from agent_sync.types import Claim, Region
+from agent_sync.wait_die import resolve
 
 R = Region(path="a.py", symbol=None, lines=None)
 
@@ -676,11 +676,11 @@ def test_relation_is_never_symmetric_which_is_what_forbids_wait_cycles(x, y):
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cd python && python -m pytest tests/test_wait_die.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'agent_presence.wait_die'`
+Expected: FAIL — `ModuleNotFoundError: No module named 'agent_sync.wait_die'`
 
 - [ ] **Step 3: Write the implementation**
 
-`python/src/agent_presence/wait_die.py`:
+`python/src/agent_sync/wait_die.py`:
 ```python
 from __future__ import annotations
 
@@ -723,7 +723,7 @@ Expected: PASS, 4 tests (the last one runs 100 generated cases)
 - [ ] **Step 5: Commit**
 
 ```bash
-git add python/src/agent_presence/wait_die.py python/tests/test_wait_die.py
+git add python/src/agent_sync/wait_die.py python/tests/test_wait_die.py
 git commit -m "feat(core): wait-die deadlock resolution"
 ```
 
@@ -732,7 +732,7 @@ git commit -m "feat(core): wait-die deadlock resolution"
 ### Task 6: Collision ladder classification
 
 **Files:**
-- Create: `python/src/agent_presence/ladder.py`
+- Create: `python/src/agent_sync/ladder.py`
 - Test: `python/tests/test_ladder.py`
 
 **Interfaces:**
@@ -744,8 +744,8 @@ git commit -m "feat(core): wait-die deadlock resolution"
 
 `python/tests/test_ladder.py`:
 ```python
-from agent_presence.ladder import Activity, classify, interrupts_at
-from agent_presence.types import AgentEvent, Region
+from agent_sync.ladder import Activity, classify, interrupts_at
+from agent_sync.types import AgentEvent, Region
 
 FILE = "src/auth.py"
 
@@ -812,11 +812,11 @@ def test_rungs_0_through_2_never_interrupt():
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cd python && python -m pytest tests/test_ladder.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'agent_presence.ladder'`
+Expected: FAIL — `ModuleNotFoundError: No module named 'agent_sync.ladder'`
 
 - [ ] **Step 3: Write the implementation**
 
-`python/src/agent_presence/ladder.py`:
+`python/src/agent_sync/ladder.py`:
 ```python
 from __future__ import annotations
 
@@ -882,7 +882,7 @@ Expected: PASS, 9 tests
 - [ ] **Step 5: Commit**
 
 ```bash
-git add python/src/agent_presence/ladder.py python/tests/test_ladder.py
+git add python/src/agent_sync/ladder.py python/tests/test_ladder.py
 git commit -m "feat(core): five-rung collision ladder classification"
 ```
 
@@ -893,7 +893,7 @@ git commit -m "feat(core): five-rung collision ladder classification"
 Bounded and enumerable. Free-form negotiation between two agents is untestable and they will agree on wrong things at length.
 
 **Files:**
-- Create: `python/src/agent_presence/negotiation.py`
+- Create: `python/src/agent_sync/negotiation.py`
 - Test: `python/tests/test_negotiation.py`
 
 **Interfaces:**
@@ -909,10 +909,10 @@ Bounded and enumerable. Free-form negotiation between two agents is untestable a
 ```python
 import pytest
 
-from agent_presence.clock import VirtualClock
-from agent_presence.leases import LeaseRegistry
-from agent_presence.negotiation import Negotiator
-from agent_presence.types import Region
+from agent_sync.clock import VirtualClock
+from agent_sync.leases import LeaseRegistry
+from agent_sync.negotiation import Negotiator
+from agent_sync.types import Region
 
 R = Region(path="src/auth.py", symbol="sign_in", lines=None)
 OTHER = Region(path="src/auth.py", symbol="sign_out", lines=None)
@@ -980,11 +980,11 @@ def test_unknown_move_is_rejected(neg):
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cd python && python -m pytest tests/test_negotiation.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'agent_presence.negotiation'`
+Expected: FAIL — `ModuleNotFoundError: No module named 'agent_sync.negotiation'`
 
 - [ ] **Step 3: Write the implementation**
 
-`python/src/agent_presence/negotiation.py`:
+`python/src/agent_sync/negotiation.py`:
 ```python
 from __future__ import annotations
 
@@ -996,7 +996,7 @@ from .clock import Clock
 from .leases import LeaseRegistry
 from .types import Region
 
-log = logging.getLogger("agent_presence.negotiation")
+log = logging.getLogger("agent_sync.negotiation")
 
 Move = Literal["DEFER", "SPLIT", "HANDOFF", "PROCEED"]
 MOVES: tuple[Move, ...] = ("DEFER", "SPLIT", "HANDOFF", "PROCEED")
@@ -1077,7 +1077,7 @@ Expected: PASS, 8 tests
 - [ ] **Step 5: Commit**
 
 ```bash
-git add python/src/agent_presence/negotiation.py python/tests/test_negotiation.py
+git add python/src/agent_sync/negotiation.py python/tests/test_negotiation.py
 git commit -m "feat(core): bounded four-move negotiation protocol"
 ```
 
@@ -1086,7 +1086,7 @@ git commit -m "feat(core): bounded four-move negotiation protocol"
 ### Task 8: Privacy redaction and opaque mode
 
 **Files:**
-- Create: `python/src/agent_presence/redact.py`
+- Create: `python/src/agent_sync/redact.py`
 - Test: `python/tests/test_redact.py`
 
 Opaque mode is a flag, not a spare function. `opaque_region` on its own is dead code: something has to call it on every path that leaves the machine, or an org turns the toggle on and nothing changes.
@@ -1094,9 +1094,9 @@ Opaque mode is a flag, not a spare function. `opaque_region` on its own is dead 
 **Interfaces:**
 - Consumes: `AgentEvent`, `Region` (Task 1).
 - Produces: `FORBIDDEN_FIELDS: frozenset[str]`; `redact(event_dict: dict) -> dict`; `opaque_region(region: Region) -> Region`.
-- Produces the flag wiring: `OPAQUE_ENV = "AGENT_PRESENCE_OPAQUE"`, `opaque_enabled() -> bool`, `opaque_region_if_enabled(region) -> Region`, `apply_opaque(payload)`, `opaque_outbound(payload: dict) -> dict`.
+- Produces the flag wiring: `OPAQUE_ENV = "AGENT_SYNC_OPAQUE"`, `opaque_enabled() -> bool`, `opaque_region_if_enabled(region) -> Region`, `apply_opaque(payload)`, `opaque_outbound(payload: dict) -> dict`.
 
-**The flag.** `AGENT_PRESENCE_OPAQUE=1` turns opaque mode on; `true`, `yes` and `on` also count, anything else is off. It's read per call rather than cached, so flipping it doesn't need a relay restart and the cost is one dict lookup on a path that already does JSON. Three call sites, and all three are required:
+**The flag.** `AGENT_SYNC_OPAQUE=1` turns opaque mode on; `true`, `yes` and `on` also count, anything else is off. It's read per call rather than cached, so flipping it doesn't need a relay restart and the cost is one dict lookup on a path that already does JSON. Three call sites, and all three are required:
 
 - `redact()` — the hook path, on ingest.
 - `mcp_server` claim/release helpers — the MCP path. Both channels must hash identically or the lease table splits in two and two agents editing one function never see each other.
@@ -1110,13 +1110,13 @@ Hashed regions carry an `opaque: true` marker so a second pass doesn't hash them
 ```python
 import pytest
 
-from agent_presence.redact import (
+from agent_sync.redact import (
     FORBIDDEN_FIELDS,
     opaque_outbound,
     opaque_region,
     redact,
 )
-from agent_presence.types import Region
+from agent_sync.types import Region
 
 
 def raw():
@@ -1169,40 +1169,40 @@ def test_opaque_mode_keeps_distinct_regions_distinct():
 
 
 def test_paths_are_readable_while_the_flag_is_off(monkeypatch):
-    monkeypatch.delenv("AGENT_PRESENCE_OPAQUE", raising=False)
+    monkeypatch.delenv("AGENT_SYNC_OPAQUE", raising=False)
     assert redact(raw())["region"]["path"] == "src/auth.py"
 
 
 def test_the_flag_actually_hashes_the_wire_payload(monkeypatch):
-    monkeypatch.setenv("AGENT_PRESENCE_OPAQUE", "1")
+    monkeypatch.setenv("AGENT_SYNC_OPAQUE", "1")
     out = redact(raw())
     assert out["region"]["path"] != "src/auth.py"
     assert "auth" not in out["region"]["path"]
 
 
 def test_outbound_is_hashed_too(monkeypatch):
-    monkeypatch.setenv("AGENT_PRESENCE_OPAQUE", "1")
+    monkeypatch.setenv("AGENT_SYNC_OPAQUE", "1")
     sent = opaque_outbound({"type": "presence", "path": "src/auth.py", "symbol": "sign_in"})
     assert "auth" not in sent["path"]
     assert sent["opaque"] is True
 
 
 def test_an_already_opaque_payload_is_not_hashed_twice(monkeypatch):
-    monkeypatch.setenv("AGENT_PRESENCE_OPAQUE", "1")
+    monkeypatch.setenv("AGENT_SYNC_OPAQUE", "1")
     once = opaque_outbound({"path": "src/auth.py", "symbol": "sign_in"})
     assert opaque_outbound(once) == once
 ```
 
-Every test in this file that doesn't set the flag must clear it first (`monkeypatch.delenv("AGENT_PRESENCE_OPAQUE", raising=False)` in a fixture), or a stray env var in a shell turns the suite green for the wrong reason.
+Every test in this file that doesn't set the flag must clear it first (`monkeypatch.delenv("AGENT_SYNC_OPAQUE", raising=False)` in a fixture), or a stray env var in a shell turns the suite green for the wrong reason.
 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cd python && python -m pytest tests/test_redact.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'agent_presence.redact'`
+Expected: FAIL — `ModuleNotFoundError: No module named 'agent_sync.redact'`
 
 - [ ] **Step 3: Write the implementation**
 
-`python/src/agent_presence/redact.py`:
+`python/src/agent_sync/redact.py`:
 ```python
 from __future__ import annotations
 
@@ -1227,8 +1227,8 @@ PERMITTED_TOP_LEVEL: frozenset[str] = frozenset(
     {"room", "human", "agent", "kind", "source", "verb", "region", "ts", "intent"}
 )
 
-# Set AGENT_PRESENCE_OPAQUE=1 to turn on org-level opaque mode.
-OPAQUE_ENV = "AGENT_PRESENCE_OPAQUE"
+# Set AGENT_SYNC_OPAQUE=1 to turn on org-level opaque mode.
+OPAQUE_ENV = "AGENT_SYNC_OPAQUE"
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
 # Marks a region that has already been hashed, so a second pass on the way out
@@ -1321,7 +1321,7 @@ Expected: PASS, 21 tests (12 parametrized + 9)
 - [ ] **Step 5: Commit**
 
 ```bash
-git add python/src/agent_presence/redact.py python/tests/test_redact.py
+git add python/src/agent_sync/redact.py python/tests/test_redact.py
 git commit -m "feat(core): privacy redaction and opaque mode"
 ```
 
@@ -1386,10 +1386,10 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass
 
-from agent_presence.clock import VirtualClock
-from agent_presence.leases import LEASE_TTL_S, LeaseRegistry
-from agent_presence.types import Region
-from agent_presence.wait_die import resolve
+from agent_sync.clock import VirtualClock
+from agent_sync.leases import LEASE_TTL_S, LeaseRegistry
+from agent_sync.types import Region
+from agent_sync.wait_die import resolve
 
 
 @dataclass(frozen=True)
@@ -1479,7 +1479,7 @@ git commit -m "test(sim): deterministic simulation harness and protocol invarian
 ### Task 10: Relay WebSocket server with rooms and fan-out
 
 **Files:**
-- Create: `python/src/agent_presence/relay.py`
+- Create: `python/src/agent_sync/relay.py`
 - Test: `python/tests/test_relay.py`
 
 **Interfaces:**
@@ -1493,8 +1493,8 @@ git commit -m "test(sim): deterministic simulation harness and protocol invarian
 ```python
 import pytest
 
-from agent_presence.clock import VirtualClock
-from agent_presence.relay import Relay
+from agent_sync.clock import VirtualClock
+from agent_sync.relay import Relay
 
 
 class FakeConn:
@@ -1585,11 +1585,11 @@ def test_forbidden_fields_never_reach_presence(relay):
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cd python && python -m pytest tests/test_relay.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'agent_presence.relay'`
+Expected: FAIL — `ModuleNotFoundError: No module named 'agent_sync.relay'`
 
 - [ ] **Step 3: Write the implementation**
 
-`python/src/agent_presence/relay.py`:
+`python/src/agent_sync/relay.py`:
 ```python
 from __future__ import annotations
 
@@ -1757,7 +1757,7 @@ Expected: PASS, 6 tests
 - [ ] **Step 5: Commit**
 
 ```bash
-git add python/src/agent_presence/relay.py python/tests/test_relay.py
+git add python/src/agent_sync/relay.py python/tests/test_relay.py
 git commit -m "feat(relay): rooms, fan-out, relay-assigned timestamps, ladder dispatch"
 ```
 
@@ -1766,7 +1766,7 @@ git commit -m "feat(relay): rooms, fan-out, relay-assigned timestamps, ladder di
 ### Task 11: Relay WebSocket transport
 
 **Files:**
-- Create: `python/src/agent_presence/serve.py`
+- Create: `python/src/agent_sync/serve.py`
 - Test: `python/tests/test_serve.py`
 
 **Interfaces:**
@@ -1783,9 +1783,9 @@ import json
 import pytest
 import websockets
 
-from agent_presence.clock import RealClock
-from agent_presence.relay import Relay
-from agent_presence.serve import serve
+from agent_sync.clock import RealClock
+from agent_sync.relay import Relay
+from agent_sync.serve import serve
 
 
 @pytest.fixture
@@ -1829,11 +1829,11 @@ async def test_malformed_json_does_not_kill_the_connection(server):
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cd python && python -m pytest tests/test_serve.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'agent_presence.serve'`
+Expected: FAIL — `ModuleNotFoundError: No module named 'agent_sync.serve'`
 
 - [ ] **Step 3: Write the implementation**
 
-`python/src/agent_presence/serve.py`:
+`python/src/agent_sync/serve.py`:
 ```python
 from __future__ import annotations
 
@@ -1846,7 +1846,7 @@ import websockets
 from .redact import opaque_outbound
 from .relay import Relay
 
-log = logging.getLogger("agent_presence.serve")
+log = logging.getLogger("agent_sync.serve")
 
 
 class WsConn:
@@ -1912,7 +1912,7 @@ Expected: PASS, 2 tests
 - [ ] **Step 5: Commit**
 
 ```bash
-git add python/src/agent_presence/serve.py python/tests/test_serve.py
+git add python/src/agent_sync/serve.py python/tests/test_serve.py
 git commit -m "feat(relay): websocket transport with fail-open message handling"
 ```
 
@@ -1929,7 +1929,7 @@ The single most latency-sensitive component. It runs before every Read, Edit and
 - Test: `cpp/tests/test_hook.cpp`
 
 **Interfaces:**
-- Produces: binary `ap-hook`. Reads a JSON hook payload on stdin, writes one line to `$AGENT_PRESENCE_SOCK` (default `$XDG_RUNTIME_DIR/agent-presence.sock`), exits 0 always.
+- Produces: binary `ap-hook`. Reads a JSON hook payload on stdin, writes one line to `$AGENT_SYNC_SOCK` (default `$XDG_RUNTIME_DIR/agent-sync.sock`), exits 0 always.
 - Produces: `bool write_line(const std::string& sock_path, const std::string& line, int timeout_ms)` for tests.
 
 - [ ] **Step 1: Write the failing test**
@@ -1980,7 +1980,7 @@ Expected: FAIL — `hook/hook.hpp` not found
 `cpp/CMakeLists.txt`:
 ```cmake
 cmake_minimum_required(VERSION 3.25)
-project(agent_presence CXX)
+project(agent_sync CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -2112,16 +2112,16 @@ int main() {
         std::string input((std::istreambuf_iterator<char>(std::cin)),
                           std::istreambuf_iterator<char>());
 
-        const char* sock = std::getenv("AGENT_PRESENCE_SOCK");
+        const char* sock = std::getenv("AGENT_SYNC_SOCK");
         std::string path;
         if (sock != nullptr) {
             path = sock;
         } else if (const char* rt = std::getenv("XDG_RUNTIME_DIR")) {
-            path = std::string(rt) + "/agent-presence.sock";
+            path = std::string(rt) + "/agent-sync.sock";
         } else if (const char* tmp = std::getenv("TMPDIR")) {
-            path = std::string(tmp) + "agent-presence.sock";
+            path = std::string(tmp) + "agent-sync.sock";
         } else {
-            path = "/tmp/agent-presence.sock";
+            path = "/tmp/agent-sync.sock";
         }
 
         ap::write_line(path, ap::build_event(input), 5);
@@ -2981,7 +2981,7 @@ Expected: PASS
 
 Then cross-check against Python:
 ```bash
-cd python && python -c "from agent_presence.room_key import room_id_from_remote; print(room_id_from_remote('git@github.com:acme/api.git'))"
+cd python && python -c "from agent_sync.room_key import room_id_from_remote; print(room_id_from_remote('git@github.com:acme/api.git'))"
 ```
 The two values must be identical.
 
@@ -3271,7 +3271,7 @@ void write_snapshot(const std::string& path, const std::vector<Peer>& peers) {
 # Reads the daemon's snapshot. Never performs network I/O; runs once a second.
 set -uo pipefail
 
-SNAP="${AGENT_PRESENCE_SNAPSHOT:-${XDG_RUNTIME_DIR:-/tmp}/agent-presence.json}"
+SNAP="${AGENT_SYNC_SNAPSHOT:-${XDG_RUNTIME_DIR:-/tmp}/agent-sync.json}"
 [[ -r "$SNAP" ]] || exit 0
 
 count=$(grep -o '"human"' "$SNAP" 2>/dev/null | wc -l | tr -d ' ')
@@ -3441,8 +3441,8 @@ std::string env_or(const char* key, const std::string& fallback) {
 
 int main() {
     const std::string runtime = env_or("XDG_RUNTIME_DIR", "/tmp");
-    const std::string sock = env_or("AGENT_PRESENCE_SOCK", runtime + "/agent-presence.sock");
-    const std::string snap = env_or("AGENT_PRESENCE_SNAPSHOT", runtime + "/agent-presence.json");
+    const std::string sock = env_or("AGENT_SYNC_SOCK", runtime + "/agent-sync.sock");
+    const std::string snap = env_or("AGENT_SYNC_SNAPSHOT", runtime + "/agent-sync.json");
 
     ap::SocketServer server(sock);
     ap::Coalescer coalescer(1000, 200);
@@ -3493,7 +3493,7 @@ git commit -m "feat(daemon): bounded outbound buffer and daemon entrypoint"
 ### Task 20: The four intent tools
 
 **Files:**
-- Create: `python/src/agent_presence/mcp_server.py`
+- Create: `python/src/agent_sync/mcp_server.py`
 - Test: `python/tests/test_mcp_tools.py`
 
 **Interfaces:**
@@ -3507,9 +3507,9 @@ git commit -m "feat(daemon): bounded outbound buffer and daemon entrypoint"
 ```python
 import pytest
 
-from agent_presence.clock import VirtualClock
-from agent_presence.mcp_server import Tools
-from agent_presence.relay import Relay
+from agent_sync.clock import VirtualClock
+from agent_sync.mcp_server import Tools
+from agent_sync.relay import Relay
 
 
 class FakeConn:
@@ -3552,7 +3552,7 @@ def test_claim_work_grants_an_uncontested_region(setup):
 def test_claim_work_is_refused_and_names_the_holder(setup):
     relay, tools = setup
     relay.registry.acquire("r1", "sara", "a1",
-                           __import__("agent_presence.types", fromlist=["Region"])
+                           __import__("agent_sync.types", fromlist=["Region"])
                            .Region(path="src/db.py", symbol="query", lines=None),
                            "rewriting query")
     result = tools.claim_work("src/db.py", "query", "add index")
@@ -3566,7 +3566,7 @@ def test_release_frees_the_region_for_others(setup):
     tools.claim_work("src/db.py", "query", "add index")
     tools.release("src/db.py", "query")
     assert relay.registry.holder_of("r1", __import__(
-        "agent_presence.types", fromlist=["Region"]
+        "agent_sync.types", fromlist=["Region"]
     ).Region(path="src/db.py", symbol="query", lines=None)) is None
 
 
@@ -3578,7 +3578,7 @@ def test_respond_rejects_an_invented_move(setup):
 
 def test_proceed_is_always_granted_and_flagged_as_an_override(setup):
     relay, tools = setup
-    from agent_presence.types import Region
+    from agent_sync.types import Region
     relay.registry.acquire("r1", "sara", "a1",
                            Region(path="src/db.py", symbol="query", lines=None), "x")
     result = tools.respond("src/db.py", "query", "PROCEED", reason="unrelated")
@@ -3589,11 +3589,11 @@ def test_proceed_is_always_granted_and_flagged_as_an_override(setup):
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cd python && python -m pytest tests/test_mcp_tools.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'agent_presence.mcp_server'`
+Expected: FAIL — `ModuleNotFoundError: No module named 'agent_sync.mcp_server'`
 
 - [ ] **Step 3: Write the implementation**
 
-`python/src/agent_presence/mcp_server.py`:
+`python/src/agent_sync/mcp_server.py`:
 ```python
 from __future__ import annotations
 
@@ -3671,7 +3671,7 @@ def build_server(tools: Tools):
     from mcp.types import TextContent, Tool
     import json
 
-    server = Server("agent-presence")
+    server = Server("agent-sync")
 
     @server.list_tools()
     async def list_tools() -> list[Tool]:
@@ -3726,7 +3726,7 @@ Expected: PASS, 7 tests
 - [ ] **Step 5: Commit**
 
 ```bash
-git add python/src/agent_presence/mcp_server.py python/tests/test_mcp_tools.py
+git add python/src/agent_sync/mcp_server.py python/tests/test_mcp_tools.py
 git commit -m "feat(mcp): four intent tools over the relay"
 ```
 
@@ -3750,10 +3750,10 @@ Asserts every row of the fail-open table in the spec that lives on the Python si
 ```python
 import pytest
 
-from agent_presence.clock import VirtualClock
-from agent_presence.leases import LEASE_TTL_S
-from agent_presence.relay import Relay
-from agent_presence.types import Region
+from agent_sync.clock import VirtualClock
+from agent_sync.leases import LEASE_TTL_S
+from agent_sync.relay import Relay
+from agent_sync.types import Region
 
 R = Region(path="src/auth.py", symbol="sign_in", lines=None)
 
@@ -3876,9 +3876,9 @@ import json
 import pytest
 import websockets
 
-from agent_presence.clock import RealClock
-from agent_presence.relay import Relay
-from agent_presence.serve import serve
+from agent_sync.clock import RealClock
+from agent_sync.relay import Relay
+from agent_sync.serve import serve
 
 PORT = 8801
 REGION = {"path": "src/auth.py", "symbol": "sign_in", "lines": None}
@@ -4069,7 +4069,7 @@ describe('zones', () => {
 `web/package.json`:
 ```json
 {
-  "name": "agent-presence-web",
+  "name": "agent-sync-web",
   "private": true,
   "type": "module",
   "scripts": { "test": "vitest run", "dev": "vite" },
@@ -4593,7 +4593,7 @@ export { ZONES, zoneFor, type ZoneName } from './zones.js'
 ```html
 <!doctype html>
 <meta charset="utf-8" />
-<title>Agent Presence</title>
+<title>Agent Sync</title>
 <style>
   html, body { margin: 0; height: 100%; background: #F0ECE6; }
   canvas { display: block; width: 100%; height: 100%; }
@@ -4703,10 +4703,10 @@ Expected: FAIL — `install.sh` does not exist
 `install.sh`:
 ```bash
 #!/usr/bin/env bash
-# Installs agent-presence hooks. Prints settings with --print-settings.
+# Installs agent-sync hooks. Prints settings with --print-settings.
 set -euo pipefail
 
-BIN="${AGENT_PRESENCE_BIN:-$HOME/.local/bin}"
+BIN="${AGENT_SYNC_BIN:-$HOME/.local/bin}"
 
 settings_json() {
   cat <<JSON
@@ -4744,7 +4744,7 @@ echo "Add this to ~/.claude/settings.json:"
 settings_json
 ```
 
-`README.md`: document the four commands — build C++ (`cd cpp && cmake -B build && cmake --build build`), install Python (`cd python && pip install -e '.[dev]'`), run the relay (`python -m agent_presence.serve`), run `./install.sh`.
+`README.md`: document the four commands — build C++ (`cd cpp && cmake -B build && cmake --build build`), install Python (`cd python && pip install -e '.[dev]'`), run the relay (`python -m agent_sync.serve`), run `./install.sh`.
 
 - [ ] **Step 4: Run test to verify it passes**
 

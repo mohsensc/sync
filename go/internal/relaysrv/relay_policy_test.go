@@ -19,7 +19,7 @@ func orgRelay(t *testing.T, contents string) (*Relay, string, *VirtualClock) {
 	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("AGENT_PRESENCE_ORG_POLICY", path)
+	t.Setenv("AGENT_SYNC_ORG_POLICY", path)
 	clock := NewVirtualClock(1000.0)
 	return NewRelay(clock, InertRoster(), metrics.New()), path, clock
 }
@@ -183,7 +183,7 @@ func (f *fakeUnattendedConn) Unattended() bool { return true }
 
 func TestARelayWithNoOrgPolicySendsNoPolicyFrame(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("AGENT_PRESENCE_ORG_POLICY", filepath.Join(dir, "nope.toml"))
+	t.Setenv("AGENT_SYNC_ORG_POLICY", filepath.Join(dir, "nope.toml"))
 	rel := NewRelay(NewVirtualClock(1000.0), InertRoster(), metrics.New())
 	conn := &recorder{agent: "a1", human: "sara"}
 	rel.Join("r1", conn)

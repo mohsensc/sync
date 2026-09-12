@@ -1,10 +1,10 @@
 {
-  "name": "agent-presence",
+  "name": "agent-sync",
   "version": "0.1.0",
   "description": "Multi-agent presence and coordination for Claude Code. One install, one command.",
   "license": "MIT",
   "bin": {
-    "agent-presence": "./bin/agent-presence.js"
+    "agent-sync": "./bin/agent-sync.js"
   },
   "files": [
     "bin",
@@ -20,10 +20,10 @@
     "win32"
   ],
   "optionalDependencies": {
-    "@agent-presence/darwin-arm64": "0.1.0",
-    "@agent-presence/darwin-x64": "0.1.0",
-    "@agent-presence/linux-x64": "0.1.0",
-    "@agent-presence/linux-arm64": "0.1.0",
-    "@agent-presence/win32-x64": "0.1.0"
+    "@agent-sync/darwin-arm64": "0.1.0",
+    "@agent-sync/darwin-x64": "0.1.0",
+    "@agent-sync/linux-x64": "0.1.0",
+    "@agent-sync/linux-arm64": "0.1.0",
+    "@agent-sync/win32-x64": "0.1.0"
   }
 }

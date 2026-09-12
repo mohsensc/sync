@@ -18,7 +18,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 METRICS_GO = REPO / "go" / "internal" / "metrics" / "metrics.go"
-DASHBOARD = REPO / "ops" / "grafana" / "agent-presence.json"
+DASHBOARD = REPO / "ops" / "grafana" / "agent-sync.json"
 ALERTS = REPO / "ops" / "prometheus" / "alerts.yml"
 MONITORING_DOC = REPO / "docs" / "monitoring.md"
 

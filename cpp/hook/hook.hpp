@@ -12,9 +12,9 @@ namespace ap {
 /// handed a fake one in tests instead of mutating real process environment.
 using EnvLookup = char* (*)(const char*);
 
-/// Where the hook dials: `AGENT_PRESENCE_SOCK`, then `XDG_RUNTIME_DIR` joined
-/// with `agent-presence.sock`, then `TMPDIR` the same way, then
-/// `/tmp/agent-presence.sock`. A variable that is set but empty is treated the
+/// Where the hook dials: `AGENT_SYNC_SOCK`, then `XDG_RUNTIME_DIR` joined
+/// with `agent-sync.sock`, then `TMPDIR` the same way, then
+/// `/tmp/agent-sync.sock`. A variable that is set but empty is treated the
 /// same as unset and falls through to the next candidate — the same rule
 /// go/cmd/presenced's envOr and scripts/statusline-presence.sh's `${VAR:-...}`
 /// already apply, so all four readers agree on what "unset" means.
@@ -28,7 +28,7 @@ std::string resolve_sock_path(EnvLookup lookup = std::getenv);
 // in both directions. There are no ids and no multiplexing: a response belongs
 // to the request it arrived on, and the connection is closed after it.
 //
-// Two sockets, not one. Events go to `$AGENT_PRESENCE_SOCK` and decisions to
+// Two sockets, not one. Events go to `$AGENT_SYNC_SOCK` and decisions to
 // that path plus `.decide` — see protocol.hpp, which both halves derive it
 // with. They are separate because they shared an accept queue and a decision
 // therefore waited behind whatever events were in front of it, spent its

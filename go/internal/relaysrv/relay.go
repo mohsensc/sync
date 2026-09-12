@@ -533,7 +533,7 @@ func (r *Relay) bindAgent(conn Conn) *Refusal {
 		if theirs.Authenticated() {
 			log.Printf("refused join: agent id %s is principal %s's, at %s", agent, theirs.Principal, PriorityName(r.priorityOf(other)))
 			return &Refusal{"agent-id-taken",
-				"agent id " + agent + " is already in use on this relay by another principal; pick a different one (set AGENT_PRESENCE_AGENT) and join again"}
+				"agent id " + agent + " is already in use on this relay by another principal; pick a different one (set AGENT_SYNC_AGENT) and join again"}
 		}
 		log.Printf("agent id %s reclaimed by principal %s; dropping the unauthenticated connection holding it", agent, grant.Principal)
 		toEvict = append(toEvict, other)

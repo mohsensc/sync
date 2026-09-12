@@ -351,7 +351,7 @@ func TestARelayStackIsBuiltinPlusOrgOnly(t *testing.T) {
 	if err := os.WriteFile(org, []byte("[floor]\nrung2 = \"context\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("AGENT_PRESENCE_ORG_POLICY", org)
+	t.Setenv("AGENT_SYNC_ORG_POLICY", org)
 
 	pf := NewPolicyFileForRelay(NewVirtualClock(0), metrics.New())
 	policy := pf.Current()
@@ -374,7 +374,7 @@ func TestEditingTheOrgFileTakesEffectWithoutARestart(t *testing.T) {
 	if err := os.WriteFile(org, []byte("[effects]\nrung3 = \"ask\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("AGENT_PRESENCE_ORG_POLICY", org)
+	t.Setenv("AGENT_SYNC_ORG_POLICY", org)
 
 	clock := NewVirtualClock(0)
 	pf := NewPolicyFileForRelay(clock, metrics.New())
@@ -397,7 +397,7 @@ func TestOrgFileNotRestattedOnEveryCall(t *testing.T) {
 	if err := os.WriteFile(org, []byte("[effects]\nrung3 = \"ask\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("AGENT_PRESENCE_ORG_POLICY", org)
+	t.Setenv("AGENT_SYNC_ORG_POLICY", org)
 
 	clock := NewVirtualClock(0)
 	pf := NewPolicyFileForRelay(clock, metrics.New())
@@ -419,7 +419,7 @@ func TestOrgFileThatStopsParsingKeepsTheLastGoodTable(t *testing.T) {
 	if err := os.WriteFile(org, []byte("[effects]\nrung3 = \"ask\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("AGENT_PRESENCE_ORG_POLICY", org)
+	t.Setenv("AGENT_SYNC_ORG_POLICY", org)
 
 	clock := NewVirtualClock(0)
 	pf := NewPolicyFileForRelay(clock, metrics.New())
@@ -449,7 +449,7 @@ func TestOrgFileThatStartsBrokenFallsBackToBuiltinAndSaysSo(t *testing.T) {
 	if err := os.WriteFile(org, []byte("this is not [ toml"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("AGENT_PRESENCE_ORG_POLICY", org)
+	t.Setenv("AGENT_SYNC_ORG_POLICY", org)
 
 	pf := NewPolicyFileForRelay(NewVirtualClock(0), metrics.New())
 	policy := pf.Current()
@@ -467,7 +467,7 @@ func TestOrgFileDeletedFallsBackWithoutPretendingItIsFine(t *testing.T) {
 	if err := os.WriteFile(org, []byte("[effects]\nrung3 = \"context\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("AGENT_PRESENCE_ORG_POLICY", org)
+	t.Setenv("AGENT_SYNC_ORG_POLICY", org)
 
 	clock := NewVirtualClock(0)
 	pf := NewPolicyFileForRelay(clock, metrics.New())
@@ -498,7 +498,7 @@ func TestOrgFileDeletedFallsBackWithoutPretendingItIsFine(t *testing.T) {
 // acts on it to keep the wire silent, not this function.
 func TestNoOrgFileMeansNoPolicyFrame(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("AGENT_PRESENCE_ORG_POLICY", filepath.Join(dir, "does-not-exist.toml"))
+	t.Setenv("AGENT_SYNC_ORG_POLICY", filepath.Join(dir, "does-not-exist.toml"))
 	relay := NewRelay(NewVirtualClock(0), InertRoster(), metrics.New())
 	frame, configured := relay.policyFrame(relay.policy.Current())
 	if configured {

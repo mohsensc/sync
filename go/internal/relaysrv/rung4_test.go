@@ -25,7 +25,7 @@ func declaredActivity(intent, agent, path string) Activity {
 }
 
 func TestRung4TruePositiveFires(t *testing.T) {
-	t.Setenv("AGENT_PRESENCE_RUNG4", "1")
+	t.Setenv("AGENT_SYNC_RUNG4", "1")
 	event, intent := declaringEvent(jwtIntent, "a2", "src/auth/jwt.py")
 	got := Classify(event, []Activity{declaredActivity(tokenIntent, "a1", "src/login/session.py")}, intent)
 	if got != 4 {
@@ -34,7 +34,7 @@ func TestRung4TruePositiveFires(t *testing.T) {
 }
 
 func TestRung4TrueNegativeStaysSilent(t *testing.T) {
-	t.Setenv("AGENT_PRESENCE_RUNG4", "1")
+	t.Setenv("AGENT_SYNC_RUNG4", "1")
 	event, intent := declaringEvent(jwtIntent, "a2", "src/auth/jwt.py")
 	got := Classify(event, []Activity{declaredActivity(unrelatedIntent, "a1", "src/login/session.py")}, intent)
 	if got != 0 {
@@ -43,7 +43,7 @@ func TestRung4TrueNegativeStaysSilent(t *testing.T) {
 }
 
 func TestRung4ANearMissStaysBelowTheBar(t *testing.T) {
-	t.Setenv("AGENT_PRESENCE_RUNG4", "1")
+	t.Setenv("AGENT_SYNC_RUNG4", "1")
 	event, intent := declaringEvent("add retry with backoff to the S3 uploader", "a2", "src/auth/jwt.py")
 	peer := declaredActivity("add retry with backoff to the GCS uploader", "a1", "src/login/session.py")
 	if got := Classify(event, []Activity{peer}, intent); got != 0 {
@@ -52,7 +52,7 @@ func TestRung4ANearMissStaysBelowTheBar(t *testing.T) {
 }
 
 func TestRung4MatchCarriesWhoAndWhat(t *testing.T) {
-	t.Setenv("AGENT_PRESENCE_RUNG4", "1")
+	t.Setenv("AGENT_SYNC_RUNG4", "1")
 	event, intent := declaringEvent(jwtIntent, "a2", "src/auth/jwt.py")
 	red := redundantPeer(event, []Activity{declaredActivity(tokenIntent, "a1", "src/login/session.py")}, intent)
 	if red == nil {
@@ -70,7 +70,7 @@ func TestRung4MatchCarriesWhoAndWhat(t *testing.T) {
 }
 
 func TestRung4StrongestMatchWinsNotFirst(t *testing.T) {
-	t.Setenv("AGENT_PRESENCE_RUNG4", "1")
+	t.Setenv("AGENT_SYNC_RUNG4", "1")
 	event, intent := declaringEvent(jwtIntent, "a2", "src/auth/jwt.py")
 	peers := []Activity{
 		declaredActivity(unrelatedIntent, "a1", "src/x.py"),
@@ -83,7 +83,7 @@ func TestRung4StrongestMatchWinsNotFirst(t *testing.T) {
 }
 
 func TestRung4OffByDefault(t *testing.T) {
-	// No AGENT_PRESENCE_RUNG4 set: rung4Enabled must read false, and
+	// No AGENT_SYNC_RUNG4 set: rung4Enabled must read false, and
 	// Classify must never reach 4 no matter how strong the text match.
 	event, intent := declaringEvent(jwtIntent, "a2", "src/auth/jwt.py")
 	got := Classify(event, []Activity{declaredActivity(tokenIntent, "a1", "src/login/session.py")}, intent)
@@ -93,7 +93,7 @@ func TestRung4OffByDefault(t *testing.T) {
 }
 
 func TestRung4RequiresBothSidesMCPDeclared(t *testing.T) {
-	t.Setenv("AGENT_PRESENCE_RUNG4", "1")
+	t.Setenv("AGENT_SYNC_RUNG4", "1")
 	event, intent := declaringEvent(jwtIntent, "a2", "src/auth/jwt.py")
 	hookOnly := Activity{Agent: "a1", Human: "sara", Verb: "edit", Region: Region{Path: "src/login/session.py"}, Intent: "", Source: SourceHook}
 	if got := Classify(event, []Activity{hookOnly}, intent); got == 4 {
@@ -104,7 +104,7 @@ func TestRung4RequiresBothSidesMCPDeclared(t *testing.T) {
 func TestRung4SamePathIsNotRung4(t *testing.T) {
 	// Same-path contention is rungs 0-3's business, decided on facts, not
 	// a text guess.
-	t.Setenv("AGENT_PRESENCE_RUNG4", "1")
+	t.Setenv("AGENT_SYNC_RUNG4", "1")
 	event, intent := declaringEvent(jwtIntent, "a2", "src/auth/jwt.py")
 	peer := declaredActivity(tokenIntent, "a1", "src/auth/jwt.py")
 	if got := redundantPeer(event, []Activity{peer}, intent); got != nil {
@@ -115,7 +115,7 @@ func TestRung4SamePathIsNotRung4(t *testing.T) {
 // -- wired into the relay: claim_result carries a redundant hit ------------
 
 func TestClaimGrantCarriesRung4RedundantWork(t *testing.T) {
-	t.Setenv("AGENT_PRESENCE_RUNG4", "1")
+	t.Setenv("AGENT_SYNC_RUNG4", "1")
 	clock := NewVirtualClock(1000.0)
 	relay := NewRelay(clock, InertRoster(), metrics.New())
 	a := &recorder{agent: "a1", human: "sara"}
@@ -141,7 +141,7 @@ func TestClaimGrantCarriesRung4RedundantWork(t *testing.T) {
 }
 
 // TestTokenizeMatchesPythonOnDottedCapitalI pins similarity.go's tokenize
-// and lexicalScore against python/src/agent_presence/similarity.py's
+// and lexicalScore against python/src/agent_sync/similarity.py's
 // tokens()/LexicalSimilarity for the Turkish dotted capital İ (U+0130)
 // case from #165: Python's str.lower() is a full case mapping and yields
 // "i" + U+0307, which the [a-z0-9]+ token regex then splits the word
@@ -151,7 +151,7 @@ func TestClaimGrantCarriesRung4RedundantWork(t *testing.T) {
 // by running, against this same commit's python/src:
 //
 //	python3 -c "
-//	from agent_presence.similarity import tokens, LexicalSimilarity
+//	from agent_sync.similarity import tokens, LexicalSimilarity
 //	a, b = 'İstanbul auth token add', 'istanbul auth token add'
 //	print(tokens(a))
 //	print('%.17f' % LexicalSimilarity().score(a, b))"

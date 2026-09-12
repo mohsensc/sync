@@ -9,11 +9,11 @@ func TestSiblingPathKeepsTheDefaultFilenamesThisAlwaysUsed(t *testing.T) {
 	// `ap doctor`, and scripts/statusline-presence.sh — hardcode these
 	// names. Deriving them from the socket has to leave the default spelling
 	// untouched or the daemon and its readers part company on upgrade.
-	sock := "/run/user/501/agent-presence.sock"
+	sock := "/run/user/501/agent-sync.sock"
 	for _, tc := range []struct{ suffix, want string }{
-		{"json", "/run/user/501/agent-presence.json"},
-		{"policy.json", "/run/user/501/agent-presence.policy.json"},
-		{"decisions.jsonl", "/run/user/501/agent-presence.decisions.jsonl"},
+		{"json", "/run/user/501/agent-sync.json"},
+		{"policy.json", "/run/user/501/agent-sync.policy.json"},
+		{"decisions.jsonl", "/run/user/501/agent-sync.decisions.jsonl"},
 	} {
 		if got := siblingPath(sock, tc.suffix); got != tc.want {
 			t.Errorf("siblingPath(%q, %q) = %q, want %q", sock, tc.suffix, got, tc.want)
@@ -23,7 +23,7 @@ func TestSiblingPathKeepsTheDefaultFilenamesThisAlwaysUsed(t *testing.T) {
 
 // TestTwoDaemonsInOneRuntimeDirGetDistinctDefaultPaths is the regression
 // case the audit verified: two presenced processes sharing XDG_RUNTIME_DIR
-// (the normal way to run one per repo) with distinct AGENT_PRESENCE_SOCK
+// (the normal way to run one per repo) with distinct AGENT_SYNC_SOCK
 // values still shared one journal, because only the socket path was ever
 // forced unique — 1,200 decisions written by each daemon landed as 2,400
 // interleaved lines in a single file.
@@ -32,7 +32,7 @@ func TestSiblingPathKeepsTheDefaultFilenamesThisAlwaysUsed(t *testing.T) {
 // share a room and would still have collided, and because every reader would
 // have needed its own copy of the room derivation.
 func TestTwoDaemonsInOneRuntimeDirGetDistinctDefaultPaths(t *testing.T) {
-	sockA := "/run/user/501/agent-presence.sock"
+	sockA := "/run/user/501/agent-sync.sock"
 	sockB := "/run/user/501/ap2.sock"
 
 	for _, tc := range []struct {
@@ -56,15 +56,15 @@ func TestSiblingPathOfASocketWithNoExtension(t *testing.T) {
 }
 
 func TestDiscoverJournalPathExplicitOverrideWins(t *testing.T) {
-	got := discoverJournalPath("/custom/path.jsonl", "/run/user/501/agent-presence.sock")
+	got := discoverJournalPath("/custom/path.jsonl", "/run/user/501/agent-sync.sock")
 	if got != "/custom/path.jsonl" {
 		t.Fatalf("got %q, want the explicit override untouched", got)
 	}
 }
 
 // TestEnvTruthyAcceptsPaddingAndCase exercises envTruthy itself — the
-// function main() actually calls for AGENT_PRESENCE_UNATTENDED and
-// AGENT_PRESENCE_RELAY_INSECURE_SKIP_VERIFY — not just envflag.Truthy in
+// function main() actually calls for AGENT_SYNC_UNATTENDED and
+// AGENT_SYNC_RELAY_INSECURE_SKIP_VERIFY — not just envflag.Truthy in
 // isolation. presenced used to parse these with its own hand-rolled
 // switch, matching only a fixed list of literals and rejecting a
 // leading/trailing space or "YES" in caps, and presenced is the one
@@ -72,7 +72,7 @@ func TestDiscoverJournalPathExplicitOverrideWins(t *testing.T) {
 // envTruthy to that old switch fails this test; calling envflag.Truthy
 // directly instead of through envTruthy would not have.
 func TestEnvTruthyAcceptsPaddingAndCase(t *testing.T) {
-	const key = "AGENT_PRESENCE_UNATTENDED_TEST"
+	const key = "AGENT_SYNC_UNATTENDED_TEST"
 	cases := []string{" true ", "TRUE", "YES", "\ton\n"}
 	for _, v := range cases {
 		t.Setenv(key, v)

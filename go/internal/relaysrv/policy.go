@@ -1,4 +1,4 @@
-// Policy: the org floor, ported from python/src/agent_presence/policy.py's
+// Policy: the org floor, ported from python/src/agent_sync/policy.py's
 // relay slice — builtin plus one org layer (policy.py's RELAY_INCLUDE),
 // which is the whole of what the relay ever resolves. The repo, user and
 // session layers are files on the client's own disk that the relay cannot
@@ -614,7 +614,7 @@ func (p Policy) resolveOpaque(rung int, path string, unattended bool) Resolution
 	}
 
 	problems := append(append([]string{}, blanket.Problems...),
-		fmt.Sprintf("%s is an opaque path (AGENT_PRESENCE_OPAQUE); no glob can "+
+		fmt.Sprintf("%s is an opaque path (AGENT_SYNC_OPAQUE); no glob can "+
 			"match a hash, so every path rule was read as if it might apply "+
 			"and the strictest one stands", path))
 
@@ -931,8 +931,8 @@ func loadLayer(path string, name layerName) *policyLayer {
 
 // -- discovery ----------------------------------------------------------
 
-const orgPolicyEnv = "AGENT_PRESENCE_ORG_POLICY"
-const orgPolicyDefault = "/etc/agent-presence/policy.toml"
+const orgPolicyEnv = "AGENT_SYNC_ORG_POLICY"
+const orgPolicyDefault = "/etc/agent-sync/policy.toml"
 
 func orgPolicyPath() string {
 	if v := os.Getenv(orgPolicyEnv); v != "" {

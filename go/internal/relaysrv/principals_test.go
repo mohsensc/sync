@@ -15,7 +15,7 @@ import (
 // the two relays, silently changing which tier an agent got.
 func TestFindRosterResolvesSymlinks(t *testing.T) {
 	real := t.TempDir()
-	rosterDir := filepath.Join(real, ".agent-presence")
+	rosterDir := filepath.Join(real, ".agent-sync")
 	if err := os.MkdirAll(rosterDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +51,7 @@ func TestFindRosterResolvesSymlinks(t *testing.T) {
 // symlink anywhere, so resolving one changes nothing.
 func TestFindRosterStillWorksWithNoSymlinksInvolved(t *testing.T) {
 	real := t.TempDir()
-	rosterDir := filepath.Join(real, ".agent-presence")
+	rosterDir := filepath.Join(real, ".agent-sync")
 	if err := os.MkdirAll(rosterDir, 0o755); err != nil {
 		t.Fatal(err)
 	}

@@ -5,7 +5,7 @@
 
 ## What was built
 
-- `spike/relay/pyfix/src/agent_presence/` — a full copy of `python/src/agent_presence`
+- `spike/relay/pyfix/src/agent_sync/` — a full copy of `python/src/agent_sync`
   with two changes: `relay.py`'s `broadcast()` marshals a fan-out frame once
   and sends the same bytes to every room member instead of letting each
   connection's writer re-run `json.dumps` on an identical dict, and
@@ -19,7 +19,7 @@
   per connection with drop-oldest on full, one `sync.Mutex`-protected
   map per room, incremental per-member fan-out that marshals once per
   event. Speaks join/claim/release/heartbeat on the wire exactly as
-  `python/src/agent_presence/serve.py` and `relay.py` emit and expect —
+  `python/src/agent_sync/serve.py` and `relay.py` emit and expect —
   verified by pointing the real `tests/load/_lib.py` `Client` (actual
   `websockets` client, not a stub) at it. It does **not** implement
   wait-die ordering, tiers, handover, or reservations — see "what the

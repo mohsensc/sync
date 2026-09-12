@@ -55,7 +55,7 @@ value can only ever come from one of those constants.
 
 ## Reading the dashboard
 
-`ops/grafana/agent-presence.json`, five rows, roughly in the order someone
+`ops/grafana/agent-sync.json`, five rows, roughly in the order someone
 debugging would reach for them.
 
 ### Availability
@@ -109,7 +109,7 @@ Whether the product is doing anything, not just staying up.
   being released, which is usually a client that died without saying so.
 - **Redundant work** (`ap_redundant_work_total`) — rung-4 hits: two agents
   caught doing the same work in different files. Off unless
-  `AGENT_PRESENCE_RUNG4=1`; zero here when rung-4 is on is either good news
+  `AGENT_SYNC_RUNG4=1`; zero here when rung-4 is on is either good news
   or the scorer placeholder (#15) not scoring anything.
 - **Coalesce: dropped vs admitted** (`ap_coalesce_total` by `outcome`) — the
   share of hook events the coalescer is dropping as duplicates. A spike
@@ -227,12 +227,12 @@ gorelay --metrics-addr=0.0.0.0:9830     # in one terminal
 cd ops && docker compose up             # Prometheus on :9831, Grafana on :9832
 ```
 
-Grafana comes up with the datasource and the Agent Presence dashboard
+Grafana comes up with the datasource and the Agent Sync dashboard
 already provisioned — nothing to click through. Default login is
 `admin`/`admin`; Grafana will ask you to change it on first login.
 
 `ops/verify_metrics.py` (wired into `scripts/ci-local.sh ops`) parses
-`agent-presence.json` and `alerts.yml`, pulls every metric name out of
+`agent-sync.json` and `alerts.yml`, pulls every metric name out of
 every PromQL `expr`, and fails if one isn't something `metrics.go` actually
 emits. It's the guard against exactly the failure mode this whole file
 exists to prevent: a dashboard that quietly stops meaning anything because

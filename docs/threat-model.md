@@ -58,7 +58,7 @@ A clone of the repo gives you, with no further credential:
   exactly the assumption that stops being defensible once the relay is
   reachable from more than one machine.
 - If you also have **push access**: the ability to add yourself to
-  `.agent-presence/principals.toml` at any tier, including `critical`. The
+  `.agent-sync/principals.toml` at any tier, including `critical`. The
   control here isn't cryptographic — it's that the roster is committed, so
   adding yourself at `critical` is a diff someone else reviews before it
   merges, same as any other code change.
@@ -68,7 +68,7 @@ A clone of the repo gives you, with no further credential:
 - **Anybody's bearer token.** `principals.toml` holds `sha256(token)`, never
   the token itself (`_HEX64` in `principals.py`; `hash_token`). The plaintext
   token is minted once by `ap principals add`, printed to whoever ran it, and
-  from then on lives at `$XDG_CONFIG_HOME/agent-presence/token` on that
+  from then on lives at `$XDG_CONFIG_HOME/agent-sync/token` on that
   person's machine — never in the repo, never in git history. Cloning the
   repo gets you the hash, which is useless for authenticating as anyone.
 - **A tier you weren't granted.** The client sends one bit —
@@ -93,7 +93,7 @@ someone else logged into this machine) that can open a local socket." The
 trust boundary is the machine's own user/process boundary, which the relay
 adds nothing to and takes nothing from.
 
-Bind a real interface (`--host` / `AGENT_PRESENCE_HOST`, still defaulting to
+Bind a real interface (`--host` / `AGENT_SYNC_HOST`, still defaulting to
 `127.0.0.1`) and that stops being true. "A member of the room" now means "a
 host that can route to this port and can compute or guess the room id."
 Concretely, once the relay is reachable from outside one machine:
@@ -188,13 +188,13 @@ join, claim or event ever needs.
 ## What #22 changed
 
 The relay optionally terminates TLS (`--tls-cert`/`--tls-key` or
-`AGENT_PRESENCE_TLS_CERT`/`AGENT_PRESENCE_TLS_KEY`; `serve.py`,
+`AGENT_SYNC_TLS_CERT`/`AGENT_SYNC_TLS_KEY`; `serve.py`,
 `build_tls_context`). The Go daemon dials `wss://` and verifies the relay's
 certificate by default against the system root pool — the same trust store
 any other TLS client on that machine uses — with two ways to point it at a
-cert nothing else signed: `AGENT_PRESENCE_RELAY_CA` trusts one specific PEM
+cert nothing else signed: `AGENT_SYNC_RELAY_CA` trusts one specific PEM
 on top of the system pool (the documented dev path,
-`docs/tls-dev-cert.md`), and `AGENT_PRESENCE_RELAY_INSECURE_SKIP_VERIFY`
+`docs/tls-dev-cert.md`), and `AGENT_SYNC_RELAY_INSECURE_SKIP_VERIFY`
 turns verification off entirely, logging a loud, impossible-to-miss warning
 every time it does. Neither the C++ hook nor the unix-socket protocol to it
 changed; this is entirely the daemon-to-relay hop.
@@ -208,7 +208,7 @@ This closes the two items #11 filed against transport encryption:
   longer cross the wire as plaintext JSON once TLS is configured. Off
   loopback, run it — see `docs/tls-dev-cert.md`.
 - **Server authentication.** A daemon verifying the relay's certificate (the
-  default, once `AGENT_PRESENCE_RELAY` is `wss://`) has a real answer to "is
+  default, once `AGENT_SYNC_RELAY` is `wss://`) has a real answer to "is
   this actually the relay I mean to join": something on-path answering in
   the relay's place fails the TLS handshake before any frame crosses,
   unless verification was explicitly turned off with the loud flag above.
@@ -235,7 +235,7 @@ This closes the two items #11 filed against transport encryption:
   it lapses. `docs/tls-dev-cert.md` covers a 30-day dev cert; a longer-lived
   deployment needs its own operational answer to that, outside this repo's
   scope so far.
-- **`AGENT_PRESENCE_RELAY_INSECURE_SKIP_VERIFY` exists.** It's meant to be
+- **`AGENT_SYNC_RELAY_INSECURE_SKIP_VERIFY` exists.** It's meant to be
   the loud, deliberately inconvenient path, not a normal way to run this —
   see the warning it logs. A fleet that sets it as a default has quietly
   put itself back at pre-#22 exposure to an on-path attacker, with the one
@@ -249,14 +249,14 @@ This closes the two items #11 filed against transport encryption:
 ## Rung 4's embedding backend: an offline tool, not a relay-adjacent surface
 
 Everything above is scoped to the relay, on purpose (see the top of this
-file). This section used to describe `agent_presence.embedding_similarity` —
-rung 4's opt-in sentence-embedding backend, `AGENT_PRESENCE_SIMILARITY=embedding`
+file). This section used to describe `agent_sync.embedding_similarity` —
+rung 4's opt-in sentence-embedding backend, `AGENT_SYNC_SIMILARITY=embedding`
 — as "a Python process on the same machine as the relay making an outbound
 HTTPS call." That was true when the relay itself was that Python process.
 It no longer is: the relay is `gorelay` now (#40), rung 4's actual scorer on
 the relay's request path is `relaysrv/similarity.go` — a lexical port with no
 embedding backend and no outbound call of any kind — and `gorelay` never
-reads `AGENT_PRESENCE_SIMILARITY` and has no subprocess capability at all (a
+reads `AGENT_SYNC_SIMILARITY` and has no subprocess capability at all (a
 static Go binary; it doesn't shell out to anything, Python included). There
 is no live path left that reaches this code.
 
@@ -285,8 +285,8 @@ any live process exposes.
   `embedding_similarity.py`'s docstring for the sentence-embedding backends
   that were evaluated, all local).
 - **Not gated by an env var:** `tune_rung4.py --backend embedding` builds
-  `EmbeddingSimilarity()` directly from the CLI flag — `AGENT_PRESENCE_RUNG4`
-  and `AGENT_PRESENCE_SIMILARITY` don't come into it. The default install
+  `EmbeddingSimilarity()` directly from the CLI flag — `AGENT_SYNC_RUNG4`
+  and `AGENT_SYNC_SIMILARITY` don't come into it. The default install
   doesn't have `fastembed` on disk either way — it's an optional extra
   (`pip install -e '.[dev,embedding]'`) `tune_rung4.py` fails loudly without.
 - **What would change this note:** a hosted embedding backend (an API call

@@ -23,7 +23,7 @@ services:
     image: grafana/grafana:latest
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./grafana/agent-presence.json:/var/lib/grafana/dashboards/agent-presence.json:ro
+      - ./grafana/agent-sync.json:/var/lib/grafana/dashboards/agent-sync.json:ro
       - grafana-data:/var/lib/grafana
     ports:
       - "9832:3000"

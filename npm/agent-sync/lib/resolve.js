@@ -6,17 +6,17 @@
 // matter how deep node_modules nests the platform package.
 
 const PLATFORM_PACKAGES = {
-  'darwin-arm64': '@agent-presence/darwin-arm64',
-  'darwin-x64': '@agent-presence/darwin-x64',
-  'linux-x64': '@agent-presence/linux-x64',
-  'linux-arm64': '@agent-presence/linux-arm64',
-  'win32-x64': '@agent-presence/win32-x64',
+  'darwin-arm64': '@agent-sync/darwin-arm64',
+  'darwin-x64': '@agent-sync/darwin-x64',
+  'linux-x64': '@agent-sync/linux-x64',
+  'linux-arm64': '@agent-sync/linux-arm64',
+  'win32-x64': '@agent-sync/win32-x64',
 };
 
 // Binaries that every platform package is expected to ship. ap-hook is
 // handled separately below because a platform package can legitimately
 // ship without it (see install-plan.md's "degradation is explicit" note).
-const REQUIRED_BINARIES = new Set(['presenced', 'agent-presence-mcp', 'gorelay']);
+const REQUIRED_BINARIES = new Set(['presenced', 'agent-sync-mcp', 'gorelay']);
 
 function platformKey() {
   return `${process.platform}-${process.arch}`;
@@ -33,7 +33,7 @@ function exeSuffix() {
 function unsupportedPlatformError(key) {
   const supported = Object.keys(PLATFORM_PACKAGES).join(', ');
   return new Error(
-    `agent-presence has no build for ${key}.\n` +
+    `agent-sync has no build for ${key}.\n` +
     `Supported platforms: ${supported}.\n` +
     `If you think this platform should be supported, open an issue - ` +
     `there's nothing you can change locally to fix this.`
@@ -42,12 +42,12 @@ function unsupportedPlatformError(key) {
 
 function missingPackageError(pkgName, key, cause) {
   const err = new Error(
-    `agent-presence: the platform package ${pkgName} (for ${key}) is not installed.\n` +
+    `agent-sync: the platform package ${pkgName} (for ${key}) is not installed.\n` +
     `This is not caused by --ignore-scripts - platform packages are plain ` +
     `optionalDependencies and need no install scripts to work.\n` +
     `Likely causes: the optional dependency failed to resolve for this platform/arch, ` +
     `or the install was interrupted.\n` +
-    `Try: npm i -g agent-presence --force\n` +
+    `Try: npm i -g agent-sync --force\n` +
     `Or check that ${pkgName} exists on your configured registry.`
   );
   if (cause) err.cause = cause;
@@ -61,10 +61,10 @@ function missingPackageError(pkgName, key, cause) {
 // accurate here.
 function missingBinaryError(name, pkgName, binPath) {
   return new Error(
-    `agent-presence: ${pkgName} is installed but doesn't contain '${name}' ` +
+    `agent-sync: ${pkgName} is installed but doesn't contain '${name}' ` +
     `(expected at ${binPath}).\n` +
     `This looks like a corrupt or partial install of that package.\n` +
-    `Try: npm i -g agent-presence --force`
+    `Try: npm i -g agent-sync --force`
   );
 }
 

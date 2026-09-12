@@ -374,7 +374,7 @@ func (c *Client) buildTLSConfig() (*tls.Config, error) {
 			"without checking who's on the other end. Traffic is still encrypted, "+
 			"but anyone who can intercept the connection can impersonate the relay. "+
 			"This is for local development only; see docs/tls-dev-cert.md for the "+
-			"non-insecure option (AGENT_PRESENCE_RELAY_CA).", c.cfg.URL)
+			"non-insecure option (AGENT_SYNC_RELAY_CA).", c.cfg.URL)
 		return &tls.Config{InsecureSkipVerify: true}, nil
 	}
 	if c.cfg.TLSCAFile == "" {

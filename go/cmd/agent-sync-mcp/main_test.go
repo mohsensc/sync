@@ -32,14 +32,14 @@ import (
 var binPath string
 
 func TestMain(m *testing.M) {
-	dir, err := os.MkdirTemp("", "agent-presence-mcp-test")
+	dir, err := os.MkdirTemp("", "agent-sync-mcp-test")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 	defer os.RemoveAll(dir)
 
-	binPath = filepath.Join(dir, "agent-presence-mcp")
+	binPath = filepath.Join(dir, "agent-sync-mcp")
 	build := exec.Command("go", "build", "-o", binPath, ".")
 	if out, err := build.CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "go build: %v\n%s", err, out)
@@ -155,7 +155,7 @@ func (c *stdioClient) handshake() map[string]any {
 func cleanEnv(extra ...string) []string {
 	var env []string
 	for _, kv := range os.Environ() {
-		if strings.HasPrefix(kv, "AGENT_PRESENCE_") {
+		if strings.HasPrefix(kv, "AGENT_SYNC_") {
 			continue
 		}
 		env = append(env, kv)
@@ -164,17 +164,17 @@ func cleanEnv(extra ...string) []string {
 }
 
 func TestMCPServerCompletesAStdioHandshake(t *testing.T) {
-	c := startMCP(t, cleanEnv("AGENT_PRESENCE_ROOM=r1", "AGENT_PRESENCE_AGENT=a1", "AGENT_PRESENCE_HUMAN=sara"))
+	c := startMCP(t, cleanEnv("AGENT_SYNC_ROOM=r1", "AGENT_SYNC_AGENT=a1", "AGENT_SYNC_HUMAN=sara"))
 	reply := c.handshake()
 	result, _ := reply["result"].(map[string]any)
 	serverInfo, _ := result["serverInfo"].(map[string]any)
-	if serverInfo["name"] != "agent-presence" {
+	if serverInfo["name"] != "agent-sync" {
 		t.Fatalf("got %+v", reply)
 	}
 }
 
 func TestMCPServerListsItsFourToolsOverStdio(t *testing.T) {
-	c := startMCP(t, cleanEnv("AGENT_PRESENCE_ROOM=r1", "AGENT_PRESENCE_AGENT=a1", "AGENT_PRESENCE_HUMAN=sara"))
+	c := startMCP(t, cleanEnv("AGENT_SYNC_ROOM=r1", "AGENT_SYNC_AGENT=a1", "AGENT_SYNC_HUMAN=sara"))
 	c.handshake()
 	listed := c.request("tools/list", map[string]any{})
 	result, _ := listed["result"].(map[string]any)
@@ -207,8 +207,8 @@ func TestMCPServerReachesARealRelayOverStdio(t *testing.T) {
 	// convention.
 	relay := newTestRelay(t)
 	c := startMCP(t, cleanEnv(
-		"AGENT_PRESENCE_ROOM=r1", "AGENT_PRESENCE_AGENT=a1", "AGENT_PRESENCE_HUMAN=sara",
-		"AGENT_PRESENCE_RELAY="+relay.url,
+		"AGENT_SYNC_ROOM=r1", "AGENT_SYNC_AGENT=a1", "AGENT_SYNC_HUMAN=sara",
+		"AGENT_SYNC_RELAY="+relay.url,
 	))
 	c.handshake()
 
@@ -227,7 +227,7 @@ func TestMCPServerReachesARealRelayOverStdio(t *testing.T) {
 }
 
 func TestMCPServerExitsZeroWhenTheClientClosesStdin(t *testing.T) {
-	c := startMCP(t, cleanEnv("AGENT_PRESENCE_ROOM=r1"))
+	c := startMCP(t, cleanEnv("AGENT_SYNC_ROOM=r1"))
 	c.handshake()
 	c.stdin.Close()
 
@@ -247,7 +247,7 @@ func TestNothingButProtocolReachesStdout(t *testing.T) {
 	// Logs on stdout would corrupt the transport, so the log line naming
 	// the room has to be on stderr, and everything on stdout has to stay
 	// parseable JSON-RPC.
-	c := startMCP(t, cleanEnv("AGENT_PRESENCE_ROOM=r1"))
+	c := startMCP(t, cleanEnv("AGENT_SYNC_ROOM=r1"))
 	c.handshake()
 	c.stdin.Close()
 	c.cmd.Wait()
@@ -269,7 +269,7 @@ func TestNothingButProtocolReachesStdout(t *testing.T) {
 
 func TestMCPFlagsPinRoomAgentAndHuman(t *testing.T) {
 	// Env says something else, so this also pins the precedence: flags win.
-	c := startMCP(t, cleanEnv("AGENT_PRESENCE_ROOM=from-env"),
+	c := startMCP(t, cleanEnv("AGENT_SYNC_ROOM=from-env"),
 		"-room", "r9", "-agent", "a9", "-human", "h9")
 	c.stdin.Close()
 

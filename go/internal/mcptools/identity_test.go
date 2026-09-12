@@ -246,13 +246,13 @@ func containsAny(s string, subs ...string) bool {
 
 func TestLocalIdentityReadsPrincipalTokenAndUnattendedFromEnv(t *testing.T) {
 	clearIdentityEnv(t)
-	os.Setenv("AGENT_PRESENCE_PRINCIPAL", "sara")
-	os.Setenv("AGENT_PRESENCE_TOKEN", "s3cret")
-	os.Setenv("AGENT_PRESENCE_UNATTENDED", "true")
+	os.Setenv("AGENT_SYNC_PRINCIPAL", "sara")
+	os.Setenv("AGENT_SYNC_TOKEN", "s3cret")
+	os.Setenv("AGENT_SYNC_UNATTENDED", "true")
 	t.Cleanup(func() {
-		os.Unsetenv("AGENT_PRESENCE_PRINCIPAL")
-		os.Unsetenv("AGENT_PRESENCE_TOKEN")
-		os.Unsetenv("AGENT_PRESENCE_UNATTENDED")
+		os.Unsetenv("AGENT_SYNC_PRINCIPAL")
+		os.Unsetenv("AGENT_SYNC_TOKEN")
+		os.Unsetenv("AGENT_SYNC_UNATTENDED")
 	})
 
 	who := LocalIdentityFromEnv()
@@ -262,12 +262,12 @@ func TestLocalIdentityReadsPrincipalTokenAndUnattendedFromEnv(t *testing.T) {
 }
 
 func TestReadTokenFallsBackToTheConfigFile(t *testing.T) {
-	os.Unsetenv("AGENT_PRESENCE_TOKEN")
+	os.Unsetenv("AGENT_SYNC_TOKEN")
 	dir := t.TempDir()
 	os.Setenv("XDG_CONFIG_HOME", dir)
 	t.Cleanup(func() { os.Unsetenv("XDG_CONFIG_HOME") })
 
-	path := filepath.Join(dir, "agent-presence", "token")
+	path := filepath.Join(dir, "agent-sync", "token")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +280,7 @@ func TestReadTokenFallsBackToTheConfigFile(t *testing.T) {
 }
 
 func TestReadTokenIsEmptyWithNothingConfigured(t *testing.T) {
-	os.Unsetenv("AGENT_PRESENCE_TOKEN")
+	os.Unsetenv("AGENT_SYNC_TOKEN")
 	os.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Cleanup(func() { os.Unsetenv("XDG_CONFIG_HOME") })
 	if got := ReadToken(); got != "" {

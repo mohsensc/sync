@@ -1,11 +1,11 @@
 # Loads every dashboard JSON in this directory on startup. The compose file
-# mounts agent-presence.json here — one dashboard today, but this is a
+# mounts agent-sync.json here — one dashboard today, but this is a
 # folder provider, not a single-file one, so a second dashboard just needs
 # dropping in beside it.
 apiVersion: 1
 
 providers:
-  - name: agent-presence
+  - name: agent-sync
     orgId: 1
     folder: ""
     type: file

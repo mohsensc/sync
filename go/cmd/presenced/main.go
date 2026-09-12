@@ -58,7 +58,7 @@ func trimASCII(s string) string {
 // kMaxTokenBytes.
 const maxTokenBytes = 4096
 
-// discoverToken is main.cpp's discover_token: $AGENT_PRESENCE_TOKEN first,
+// discoverToken is main.cpp's discover_token: $AGENT_SYNC_TOKEN first,
 // then the file `ap principals add` tells people to write. Every failure is
 // empty: no token means the relay grants the default tier, same as no
 // roster at all.
@@ -73,7 +73,7 @@ func discoverToken(envToken, configHome, home string) string {
 		}
 		base = home + "/.config"
 	}
-	path := base + "/agent-presence/token"
+	path := base + "/agent-sync/token"
 
 	st, err := os.Stat(path)
 	if err != nil || st.Size() > maxTokenBytes {
@@ -97,7 +97,7 @@ func main() {
 	flag.Parse()
 
 	runtime := envOr("XDG_RUNTIME_DIR", envOr("TMPDIR", "/tmp"))
-	sock := envOr("AGENT_PRESENCE_SOCK", runtime+"/agent-presence.sock")
+	sock := envOr("AGENT_SYNC_SOCK", runtime+"/agent-sync.sock")
 
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -105,7 +105,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	room := repo.DiscoverRoom(os.Getenv("AGENT_PRESENCE_ROOM"), cwd)
+	room := repo.DiscoverRoom(os.Getenv("AGENT_SYNC_ROOM"), cwd)
 
 	// Resolved here, next to the room, because both answer the same question
 	// about the same checkout and a daemon that found one but not the other
@@ -123,24 +123,24 @@ func main() {
 	opts := daemon.Options{
 		Sock:       sock,
 		Root:       root,
-		RelayURL:   envOr("AGENT_PRESENCE_RELAY", "ws://127.0.0.1:8799"),
+		RelayURL:   envOr("AGENT_SYNC_RELAY", "ws://127.0.0.1:8799"),
 		Room:       room,
-		Agent:      envOr("AGENT_PRESENCE_AGENT", "presenced@"+hostname()),
-		Human:      envOr("AGENT_PRESENCE_HUMAN", envOr("USER", hostname())),
-		Principal:  trimASCII(os.Getenv("AGENT_PRESENCE_PRINCIPAL")),
-		Token:      discoverToken(os.Getenv("AGENT_PRESENCE_TOKEN"), os.Getenv("XDG_CONFIG_HOME"), os.Getenv("HOME")),
-		Unattended: envTruthy("AGENT_PRESENCE_UNATTENDED"),
+		Agent:      envOr("AGENT_SYNC_AGENT", "presenced@"+hostname()),
+		Human:      envOr("AGENT_SYNC_HUMAN", envOr("USER", hostname())),
+		Principal:  trimASCII(os.Getenv("AGENT_SYNC_PRINCIPAL")),
+		Token:      discoverToken(os.Getenv("AGENT_SYNC_TOKEN"), os.Getenv("XDG_CONFIG_HOME"), os.Getenv("HOME")),
+		Unattended: envTruthy("AGENT_SYNC_UNATTENDED"),
 
-		// Only consulted when AGENT_PRESENCE_RELAY is wss:// — see
+		// Only consulted when AGENT_SYNC_RELAY is wss:// — see
 		// docs/tls-dev-cert.md. RelayTLSCAFile trusts one extra PEM on
 		// top of the system pool; the skip-verify env var is deliberately
 		// not named anything an operator could set by accident.
-		RelayTLSCAFile:             trimASCII(os.Getenv("AGENT_PRESENCE_RELAY_CA")),
-		RelayTLSInsecureSkipVerify: envTruthy("AGENT_PRESENCE_RELAY_INSECURE_SKIP_VERIFY"),
+		RelayTLSCAFile:             trimASCII(os.Getenv("AGENT_SYNC_RELAY_CA")),
+		RelayTLSInsecureSkipVerify: envTruthy("AGENT_SYNC_RELAY_INSECURE_SKIP_VERIFY"),
 
-		Snapshot:    envOr("AGENT_PRESENCE_SNAPSHOT", siblingPath(sock, "json")),
-		PolicyCache: envOr("AGENT_PRESENCE_POLICY_CACHE", siblingPath(sock, "policy.json")),
-		Journal:     discoverJournalPath(os.Getenv("AGENT_PRESENCE_JOURNAL"), sock),
+		Snapshot:    envOr("AGENT_SYNC_SNAPSHOT", siblingPath(sock, "json")),
+		PolicyCache: envOr("AGENT_SYNC_POLICY_CACHE", siblingPath(sock, "policy.json")),
+		Journal:     discoverJournalPath(os.Getenv("AGENT_SYNC_JOURNAL"), sock),
 
 		// presenced serves nothing itself — a laptop behind NAT can't be
 		// scraped, so there is no metrics flag here and never will be (see
@@ -194,7 +194,7 @@ func siblingPath(sock, suffix string) string {
 	dir := filepath.Dir(sock)
 	stem := strings.TrimSuffix(filepath.Base(sock), filepath.Ext(sock))
 	if stem == "" {
-		stem = "agent-presence"
+		stem = "agent-sync"
 	}
 	return filepath.Join(dir, stem+"."+suffix)
 }

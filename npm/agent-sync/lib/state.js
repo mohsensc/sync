@@ -1,6 +1,6 @@
-// ~/.agent-presence/ state: server.json (what this machine started, if
+// ~/.agent-sync/ state: server.json (what this machine started, if
 // anything) and config.json (what relay this machine is joined to, if any).
-// AGENT_PRESENCE_HOME overrides the base dir - mainly for tests, so we don't
+// AGENT_SYNC_HOME overrides the base dir - mainly for tests, so we don't
 // have to touch the real home directory to exercise this.
 
 const fs = require('fs');
@@ -9,7 +9,7 @@ const net = require('net');
 const os = require('os');
 
 function homeDir() {
-  return process.env.AGENT_PRESENCE_HOME || path.join(os.homedir(), '.agent-presence');
+  return process.env.AGENT_SYNC_HOME || path.join(os.homedir(), '.agent-sync');
 }
 
 function ensureHomeDir() {
@@ -72,7 +72,7 @@ function readConfig() {
 }
 
 // { relay, relayCa, token } - written 0600 because it holds a bearer token.
-// relayCa mirrors AGENT_PRESENCE_RELAY_CA: a PEM path (or, once join.js
+// relayCa mirrors AGENT_SYNC_RELAY_CA: a PEM path (or, once join.js
 // pins a fingerprint at join time, whatever it ends up storing there).
 function writeConfig(config) {
   writeJsonAtomic(configPath(), config, 0o600);

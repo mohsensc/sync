@@ -53,7 +53,7 @@ assert_not_contains() {
 # warning in install.sh exists for.
 fake_root() {
   local dir="$1" mode="$2"
-  mkdir -p "$dir/cpp/build" "$dir/go/cmd/presenced" "$dir/go/cmd/agent-presence-mcp" "$dir/go/cmd/gorelay"
+  mkdir -p "$dir/cpp/build" "$dir/go/cmd/presenced" "$dir/go/cmd/agent-sync-mcp" "$dir/go/cmd/gorelay"
   cp "$INSTALL_SH" "$dir/install.sh"
   chmod +x "$dir/install.sh"
   if [[ "$mode" != "nohook" ]]; then
@@ -65,7 +65,7 @@ module fakeinstall
 
 go 1.22
 EOF
-  for pkg in presenced agent-presence-mcp; do
+  for pkg in presenced agent-sync-mcp; do
     cat > "$dir/go/cmd/$pkg/main.go" <<'EOF'
 package main
 
@@ -102,15 +102,15 @@ NPM_HOME=""
 NPM_AP_HOME=""
 trap 'rm -rf "$HAPPY_ROOT" "$HAPPY_BIN" "$BROKEN_ROOT" "$BROKEN_BIN" "$NOHOOK_ROOT" "$NOHOOK_BIN" "$STALE_ROOT" "$STALE_BIN" "$STALE_NOGO_ROOT" "$STALE_NOGO_BIN" "$NOGO_SHIM" "$NPM_SHIM" "$NPM_HOME" "$NPM_AP_HOME"' EXIT
 fake_root "$HAPPY_ROOT" good
-OUT="$(AGENT_PRESENCE_BIN="$HAPPY_BIN" bash "$HAPPY_ROOT/install.sh" 2>&1)"
+OUT="$(AGENT_SYNC_BIN="$HAPPY_BIN" bash "$HAPPY_ROOT/install.sh" 2>&1)"
 RC=$?
 assert "exits 0" "$RC" "0"
-for b in ap-hook presenced agent-presence-mcp gorelay; do
+for b in ap-hook presenced agent-sync-mcp gorelay; do
   assert "$b installed and executable" \
     "$([[ -x "$HAPPY_BIN/$b" ]] && echo yes || echo no)" "yes"
 done
 assert_contains "prints settings JSON" "$OUT" '"PreToolUse"'
-assert_contains "prints mcp add line" "$OUT" "claude mcp add agent-presence"
+assert_contains "prints mcp add line" "$OUT" "claude mcp add agent-sync"
 assert_not_contains "no ap-hook warning when ap-hook installed cleanly" "$OUT" \
   "WARNING: ap-hook"
 
@@ -118,31 +118,31 @@ echo "=== partial failure: gorelay won't build ==="
 BROKEN_ROOT="$(mktemp -d)"
 BROKEN_BIN="$(mktemp -d)"
 fake_root "$BROKEN_ROOT" broken
-OUT="$(AGENT_PRESENCE_BIN="$BROKEN_BIN" bash "$BROKEN_ROOT/install.sh" 2>&1)"
+OUT="$(AGENT_SYNC_BIN="$BROKEN_BIN" bash "$BROKEN_ROOT/install.sh" 2>&1)"
 RC=$?
 # Direct value comparisons throughout, not "assert the previous command's
 # $? equals some expected-to-fail value" — that pattern reads as asserting
 # the assertion itself failed, and inverts silently if this file is ever
 # edited without noticing which way the logic runs.
 assert "exits non-zero" "$([[ "$RC" -ne 0 ]] && echo yes || echo no)" "yes"
-for b in ap-hook presenced agent-presence-mcp; do
+for b in ap-hook presenced agent-sync-mcp; do
   assert "$b still installed despite gorelay failing" \
     "$([[ -x "$BROKEN_BIN/$b" ]] && echo yes || echo no)" "yes"
 done
 assert "gorelay correctly absent" \
   "$([[ -e "$BROKEN_BIN/gorelay" ]] && echo present || echo absent)" "absent"
 assert_contains "still prints settings JSON on partial failure" "$OUT" '"PreToolUse"'
-assert_contains "still prints mcp add line on partial failure" "$OUT" "claude mcp add agent-presence"
+assert_contains "still prints mcp add line on partial failure" "$OUT" "claude mcp add agent-sync"
 assert_contains "reports gorelay by name as failed" "$OUT" "gorelay"
 
 echo "=== partial failure: ap-hook missing ==="
 NOHOOK_ROOT="$(mktemp -d)"
 NOHOOK_BIN="$(mktemp -d)"
 fake_root "$NOHOOK_ROOT" nohook
-OUT="$(AGENT_PRESENCE_BIN="$NOHOOK_BIN" bash "$NOHOOK_ROOT/install.sh" 2>&1)"
+OUT="$(AGENT_SYNC_BIN="$NOHOOK_BIN" bash "$NOHOOK_ROOT/install.sh" 2>&1)"
 RC=$?
 assert "exits non-zero" "$([[ "$RC" -ne 0 ]] && echo yes || echo no)" "yes"
-for b in presenced agent-presence-mcp gorelay; do
+for b in presenced agent-sync-mcp gorelay; do
   assert "$b still installed despite ap-hook missing" \
     "$([[ -x "$NOHOOK_BIN/$b" ]] && echo yes || echo no)" "yes"
 done
@@ -160,7 +160,7 @@ assert_contains "warns ap-hook is missing, next to the settings JSON" "$OUT" \
 # that's newer, standing in for #96: dist/ built once, then a source edit
 # nobody rebuilt for, alongside a binary nothing touched since. presenced
 # stays fresh so "installing prebuilt" gets covered in the same run;
-# agent-presence-mcp is left with no dist/ entry at all, same as
+# agent-sync-mcp is left with no dist/ entry at all, same as
 # fake_root's other modes, so all three log lines this fix adds show up
 # from one install.sh invocation.
 GOOS="$(uname -s | tr '[:upper:]' '[:lower:]')"
@@ -210,7 +210,7 @@ echo "=== stale dist: go on PATH rebuilds instead of installing it ==="
 STALE_ROOT="$(mktemp -d)"
 STALE_BIN="$(mktemp -d)"
 stale_dist_root "$STALE_ROOT"
-OUT="$(AGENT_PRESENCE_BIN="$STALE_BIN" bash "$STALE_ROOT/install.sh" 2>&1)"
+OUT="$(AGENT_SYNC_BIN="$STALE_BIN" bash "$STALE_ROOT/install.sh" 2>&1)"
 RC=$?
 assert "exits 0" "$RC" "0"
 assert_contains "says it's building gorelay from source over stale dist/" "$OUT" \
@@ -221,7 +221,7 @@ assert_not_contains "did not install the stale stub" "$(cat "$STALE_BIN/gorelay"
 assert_contains "names the prebuilt path for a fresh dist/ binary" "$OUT" \
   "presenced: installing prebuilt dist/$PRESENCED_DIST"
 assert_contains "names the source path when there's no dist/ binary at all" "$OUT" \
-  "agent-presence-mcp: building from source"
+  "agent-sync-mcp: building from source"
 
 echo "=== stale dist: no go on PATH warns and installs it anyway ==="
 STALE_NOGO_ROOT="$(mktemp -d)"
@@ -229,13 +229,13 @@ STALE_NOGO_BIN="$(mktemp -d)"
 NOGO_SHIM="$(mktemp -d)"
 stale_dist_root "$STALE_NOGO_ROOT"
 nogo_path "$NOGO_SHIM"
-# AGENT_PRESENCE_BIN goes after env -i, not before it — env -i clears the
+# AGENT_SYNC_BIN goes after env -i, not before it — env -i clears the
 # environment env itself inherits, so a plain prefix assignment never
 # reaches the child and install.sh silently falls back to its own
 # $HOME/.local/bin default. bash is invoked by its shimmed path so env -i
 # resolves the command against $NOGO_SHIM, not whatever PATH this test
 # script is already running under.
-OUT="$(env -i PATH="$NOGO_SHIM" HOME="$HOME" AGENT_PRESENCE_BIN="$STALE_NOGO_BIN" \
+OUT="$(env -i PATH="$NOGO_SHIM" HOME="$HOME" AGENT_SYNC_BIN="$STALE_NOGO_BIN" \
   "$NOGO_SHIM/bash" "$STALE_NOGO_ROOT/install.sh" 2>&1)"
 assert_contains "warns dist/ is stale with no go to rebuild it" "$OUT" \
   "WARNING: gorelay: dist/$GORELAY_DIST looks older than go/ source"
@@ -268,18 +268,18 @@ done
 
 # --- npm wrapper, clean toolchain-free environment ------------------------
 #
-# npm/agent-presence/ is the wrapper package (docs/install-plan.md): the
-# whole pitch is `npm i -g agent-presence` needing no go, no cmake, nothing
+# npm/agent-sync/ is the wrapper package (docs/install-plan.md): the
+# whole pitch is `npm i -g agent-sync` needing no go, no cmake, nothing
 # beyond node. This section proves that claim rather than asserting it.
 # Skips (not fails) if the package isn't there yet - other agents are
 # writing it as this lands, and ordering shouldn't break this file.
-NPM_DIR="$REPO_ROOT/npm/agent-presence"
-BIN_JS="$NPM_DIR/bin/agent-presence.js"
+NPM_DIR="$REPO_ROOT/npm/agent-sync"
+BIN_JS="$NPM_DIR/bin/agent-sync.js"
 
 echo
 echo "-- npm wrapper (clean, toolchain-free environment)"
 if [[ ! -f "$BIN_JS" ]] || ! command -v node >/dev/null; then
-  echo "  skip  npm/agent-presence/bin/agent-presence.js or node not present yet"
+  echo "  skip  npm/agent-sync/bin/agent-sync.js or node not present yet"
 else
   # Same nogo_path() the stale-dist tests use, plus node symlinked in -
   # not edited, since the stale-dist cases depend on its current contents
@@ -288,14 +288,14 @@ else
   nogo_path "$NPM_SHIM"
   ln -sf "$(command -v node)" "$NPM_SHIM/node"
 
-  # Fresh HOME and AGENT_PRESENCE_HOME per run, so doctor's settings.json /
+  # Fresh HOME and AGENT_SYNC_HOME per run, so doctor's settings.json /
   # server.json / config.json checks read a clean slate instead of whoever
   # happens to be running this script.
   NPM_HOME="$(mktemp -d)"
   NPM_AP_HOME="$(mktemp -d)"
 
   npm_env_run() {
-    env -i PATH="$NPM_SHIM" HOME="$NPM_HOME" AGENT_PRESENCE_HOME="$NPM_AP_HOME" \
+    env -i PATH="$NPM_SHIM" HOME="$NPM_HOME" AGENT_SYNC_HOME="$NPM_AP_HOME" \
       "$NPM_SHIM/node" "$BIN_JS" "$@" 2>&1
   }
 
@@ -318,7 +318,7 @@ else
   OUT="$(npm_env_run help)"
   RC=$?
   assert "'help' exits 0" "$RC" "0"
-  assert_contains "'help' prints usage" "$OUT" "agent-presence - multi-agent presence"
+  assert_contains "'help' prints usage" "$OUT" "agent-sync - multi-agent presence"
 
   OUT="$(npm_env_run bogus-subcommand)"
   RC=$?
@@ -326,7 +326,7 @@ else
   assert_contains "unknown subcommand names itself in the error" "$OUT" "unknown command 'bogus-subcommand'"
 
   # doctor with no platform packages installed (no node_modules under
-  # npm/agent-presence in this checkout) and no go/cmake on PATH. The
+  # npm/agent-sync in this checkout) and no go/cmake on PATH. The
   # platform package for this host is supported but not installed, so
   # checkPlatformPackage() fails fast and the four per-binary checks are
   # skipped rather than run - doctor's own "not checked" line, not a crash.
@@ -336,7 +336,7 @@ else
   RC=$?
   assert "'doctor' exits non-zero with no platform package installed" \
     "$([[ "$RC" -ne 0 ]] && echo yes || echo no)" "yes"
-  assert_contains "doctor names itself" "$OUT" "agent-presence doctor"
+  assert_contains "doctor names itself" "$OUT" "agent-sync doctor"
   assert_contains "doctor checks node version" "$OUT" "node "
   assert_contains "doctor checks the platform package" "$OUT" "platform package"
   assert_contains "doctor checks claude settings.json" "$OUT" "claude settings.json"
@@ -353,7 +353,7 @@ else
   assert_contains "doctor reports mode" "$OUT" "mode"
   assert_contains "doctor prints a summary line" "$OUT" "summary:"
   assert_contains "doctor's platform-package failure says how to fix it" "$OUT" \
-    "npm i -g agent-presence --force"
+    "npm i -g agent-sync --force"
 
   # --ignore-scripts framing: doctor's missing-package message actively
   # denies the usual "must be --ignore-scripts" assumption, so assert what
@@ -403,16 +403,16 @@ else
       console.log(e.message);
     }
   ' "$NPM_DIR/lib/resolve.js" 2>&1)"
-  assert_contains "missing platform package names the package" "$MISSING_PKG_OUT" "@agent-presence/linux-x64"
+  assert_contains "missing platform package names the package" "$MISSING_PKG_OUT" "@agent-sync/linux-x64"
   assert_contains "missing platform package gives an actionable next step" "$MISSING_PKG_OUT" \
-    "npm i -g agent-presence --force"
+    "npm i -g agent-sync --force"
   assert_contains "missing platform package doesn't blame --ignore-scripts" "$MISSING_PKG_OUT" \
     "not caused by --ignore-scripts"
 
   # -- node version guard ----------------------------------------------
   #
   # Overriding process.versions.node (not process.version, which stays
-  # real) is what checkNodeVersion() in bin/agent-presence.js actually
+  # real) is what checkNodeVersion() in bin/agent-sync.js actually
   # reads.
   OLD_NODE_OUT="$("$NPM_SHIM/node" -e '
     Object.defineProperty(process.versions, "node", { value: "16.20.0" });

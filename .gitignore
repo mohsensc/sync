@@ -15,4 +15,4 @@ go/bin/
 spike/relay/goprototype/gorelayd
 npm/platform/*/
 dist-npm/
-npm/agent-presence/node_modules/
+npm/agent-sync/node_modules/

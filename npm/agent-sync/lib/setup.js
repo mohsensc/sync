@@ -2,11 +2,11 @@
 
 // API notes (resolve.js/state.js/start.js are owned by another agent):
 //   lib/resolve.js: binary(name) throws, binaryOptional(name) -> path|null.
-//   lib/state.js: readConfig() -> parsed ~/.agent-presence/config.json or null
+//   lib/state.js: readConfig() -> parsed ~/.agent-sync/config.json or null
 //                 ({ v:1, relay, token?, relayCa? } - written by join.js when
 //                 this machine has joined someone else's relay).
 //   lib/start.js: run(['start']) starts/reuses a relay the way
-//                 `agent-presence start` does, and returns an exit code.
+//                 `agent-sync start` does, and returns an exit code.
 
 const fs = require('fs');
 const os = require('os');
@@ -148,7 +148,7 @@ function mcpAlreadyRegistered() {
   try {
     const out = execFileSync('claude', ['mcp', 'list'], { encoding: 'utf8' });
     // Format per survey: "<name>: <command> - <status>". Match the name field only.
-    return out.split('\n').some((line) => /^agent-presence:/.test(line.trim()));
+    return out.split('\n').some((line) => /^agent-sync:/.test(line.trim()));
   } catch (err) {
     // `claude mcp list` failing (e.g. no servers, or a non-zero exit some
     // versions use) shouldn't be treated as "already registered".
@@ -158,32 +158,32 @@ function mcpAlreadyRegistered() {
 
 function registerMcp(printOnly, force) {
   if (!claudeOnPath()) {
-    // bin/agent-presence.js is a sibling of lib/ in this same package.
-    const binPath = path.join(__dirname, '..', 'bin', 'agent-presence.js');
+    // bin/agent-sync.js is a sibling of lib/ in this same package.
+    const binPath = path.join(__dirname, '..', 'bin', 'agent-sync.js');
     log('claude CLI not found on PATH — skipping MCP registration.');
     log('Run this yourself once claude is installed:');
-    log(`  claude mcp add agent-presence --scope user -- node ${binPath} mcp`);
+    log(`  claude mcp add agent-sync --scope user -- node ${binPath} mcp`);
     return { registered: false };
   }
 
   if (!force && mcpAlreadyRegistered()) {
-    log('mcp: agent-presence already registered');
+    log('mcp: agent-sync already registered');
     return { registered: true, changed: false };
   }
 
-  // Register the shim subcommand ("node <bin/agent-presence.js> mcp"), not
-  // the Go agent-presence-mcp binary directly. That is what makes
+  // Register the shim subcommand ("node <bin/agent-sync.js> mcp"), not
+  // the Go agent-sync-mcp binary directly. That is what makes
   // zero-config work: the shim checks server.json and starts a local relay
   // on loopback before exec'ing the real binary. Pointing Claude Code at the
   // Go binary directly would skip that and break the solo-user path.
   //
   // We resolve our own absolute bin path rather than relying on a global
-  // `agent-presence` on PATH: a global npm bin dir isn't guaranteed to be on
+  // `agent-sync` on PATH: a global npm bin dir isn't guaranteed to be on
   // PATH (nvm, corepack, `npx`-style installs), but this file's location
   // relative to bin/ always is correct. process.execPath pins the same node
   // that's running this script, in case `node` on PATH resolves elsewhere.
-  const binPath = path.join(__dirname, '..', 'bin', 'agent-presence.js');
-  const args = ['mcp', 'add', 'agent-presence', '--scope', 'user', '--', process.execPath, binPath, 'mcp'];
+  const binPath = path.join(__dirname, '..', 'bin', 'agent-sync.js');
+  const args = ['mcp', 'add', 'agent-sync', '--scope', 'user', '--', process.execPath, binPath, 'mcp'];
 
   if (printOnly) {
     log(`(--print-only: would run) claude ${args.join(' ')}`);
@@ -192,7 +192,7 @@ function registerMcp(printOnly, force) {
 
   try {
     execFileSync('claude', args, { stdio: 'inherit' });
-    log('mcp: registered agent-presence');
+    log('mcp: registered agent-sync');
     return { registered: true, changed: true };
   } catch (err) {
     log(`mcp: registration failed — ${err.message}`);
@@ -205,7 +205,7 @@ async function run(argv) {
   const printOnly = argv.includes('--print-only');
   const force = argv.includes('--force');
 
-  log('agent-presence setup');
+  log('agent-sync setup');
   log('');
 
   let hookResult;
@@ -244,8 +244,8 @@ async function run(argv) {
   log(`  mcp:     ${mcpResult.registered ? 'registered' : 'not registered — see command above'}`);
   log(`  relay:   ${joined ? 'using joined relay' : relayStarted ? 'started' : printOnly ? 'not started (--print-only)' : 'not started'}`);
   log('');
-  log('next: run `agent-presence invite` to get a join blob for a teammate,');
-  log('      or `agent-presence doctor` if anything above looks off.');
+  log('next: run `agent-sync invite` to get a join blob for a teammate,');
+  log('      or `agent-sync doctor` if anything above looks off.');
 
   return 0;
 }

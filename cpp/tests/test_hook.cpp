@@ -631,7 +631,7 @@ Run run_hook_binary(const std::string& exe, const std::string& sock, const std::
         ::close(in_fds[1]);
         ::close(out_fds[0]);
         ::close(out_fds[1]);
-        ::setenv("AGENT_PRESENCE_SOCK", sock.c_str(), 1);
+        ::setenv("AGENT_SYNC_SOCK", sock.c_str(), 1);
         ::execl(exe.c_str(), exe.c_str(), nullptr);
         ::_exit(127);
     }
@@ -941,29 +941,29 @@ char* fake_getenv(const char* key) {
 
 // The one case this whole extraction exists for: XDG_RUNTIME_DIR, presenced's
 // envOr and statusline-presence.sh's ${VAR:-fallback} already treat "" as
-// unset, and the hook used to be the holdout — join_path("", "agent-presence.sock")
-// produced "/agent-presence.sock", a path nothing binds.
-TEST_CASE("resolve_sock_path treats a set-but-empty AGENT_PRESENCE_SOCK as unset") {
-    fake_env() = {{"AGENT_PRESENCE_SOCK", ""}, {"XDG_RUNTIME_DIR", "/run/agent"}};
-    REQUIRE(ap::resolve_sock_path(fake_getenv) == "/run/agent/agent-presence.sock");
+// unset, and the hook used to be the holdout — join_path("", "agent-sync.sock")
+// produced "/agent-sync.sock", a path nothing binds.
+TEST_CASE("resolve_sock_path treats a set-but-empty AGENT_SYNC_SOCK as unset") {
+    fake_env() = {{"AGENT_SYNC_SOCK", ""}, {"XDG_RUNTIME_DIR", "/run/agent"}};
+    REQUIRE(ap::resolve_sock_path(fake_getenv) == "/run/agent/agent-sync.sock");
 }
 
 TEST_CASE("resolve_sock_path treats a set-but-empty XDG_RUNTIME_DIR as unset") {
     fake_env() = {{"XDG_RUNTIME_DIR", ""}, {"TMPDIR", "/tmp/agentx"}};
-    REQUIRE(ap::resolve_sock_path(fake_getenv) == "/tmp/agentx/agent-presence.sock");
+    REQUIRE(ap::resolve_sock_path(fake_getenv) == "/tmp/agentx/agent-sync.sock");
 }
 
 TEST_CASE("resolve_sock_path treats a set-but-empty TMPDIR as unset") {
     fake_env() = {{"TMPDIR", ""}};
-    REQUIRE(ap::resolve_sock_path(fake_getenv) == "/tmp/agent-presence.sock");
+    REQUIRE(ap::resolve_sock_path(fake_getenv) == "/tmp/agent-sync.sock");
 }
 
-TEST_CASE("resolve_sock_path honours a non-empty AGENT_PRESENCE_SOCK outright") {
-    fake_env() = {{"AGENT_PRESENCE_SOCK", "/custom/agent.sock"}, {"XDG_RUNTIME_DIR", "/run/agent"}};
+TEST_CASE("resolve_sock_path honours a non-empty AGENT_SYNC_SOCK outright") {
+    fake_env() = {{"AGENT_SYNC_SOCK", "/custom/agent.sock"}, {"XDG_RUNTIME_DIR", "/run/agent"}};
     REQUIRE(ap::resolve_sock_path(fake_getenv) == "/custom/agent.sock");
 }
 
 TEST_CASE("resolve_sock_path falls all the way through to /tmp when nothing is set") {
     fake_env() = {};
-    REQUIRE(ap::resolve_sock_path(fake_getenv) == "/tmp/agent-presence.sock");
+    REQUIRE(ap::resolve_sock_path(fake_getenv) == "/tmp/agent-sync.sock");
 }

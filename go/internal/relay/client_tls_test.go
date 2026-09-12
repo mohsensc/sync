@@ -15,7 +15,7 @@ import (
 )
 
 // certPEM writes an httptest TLS server's leaf certificate out as a PEM
-// file — the shape AGENT_PRESENCE_RELAY_CA / TLSCAFile expects, and the
+// file — the shape AGENT_SYNC_RELAY_CA / TLSCAFile expects, and the
 // same shape docs/tls-dev-cert.md has an operator generate by hand for a
 // real self-signed relay cert.
 func certPEM(t *testing.T, srv *httptest.Server) string {

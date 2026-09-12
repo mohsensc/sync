@@ -11,7 +11,7 @@ import (
 
 // OpaqueEnv is the toggle for org-level opaque mode, read per call so
 // flipping it needs no restart — same rule redact.py's opaque_enabled uses.
-const OpaqueEnv = "AGENT_PRESENCE_OPAQUE"
+const OpaqueEnv = "AGENT_SYNC_OPAQUE"
 
 const OpaqueMark = "opaque"
 

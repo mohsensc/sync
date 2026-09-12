@@ -37,7 +37,7 @@ computation, so the volume knob doubles as a way to stop paying for the comparis
 
 Rung 4 landed while this branch was open (`feat/rung-4`, merged in), so the original
 plan of "ships as still off, `silent` by default" no longer holds. It has its own off
-switch — `AGENT_PRESENCE_RUNG4`, down unless you set it — and a `silent` default behind
+switch — `AGENT_SYNC_RUNG4`, down unless you set it — and a `silent` default behind
 that flag would mean turning the feature on and getting nothing. So the default is
 `context`: the flag decides whether rung 4 runs, the effect decides how loudly a hit is
 reported.
@@ -76,10 +76,10 @@ repo-level glob beats a user-level blanket, which is a question with no good ans
 | layer | file | owner | parsed by |
 |---|---|---|---|
 | `builtin` | compiled in | us | client and relay |
-| `org` | `$AGENT_PRESENCE_ORG_POLICY`, else `/etc/agent-presence/policy.toml` | whoever runs the relay | relay only |
-| `repo` | `<repo_root>/.agent-presence/policy.toml`, committed | the team, via PR review | client only |
-| `user` | `$XDG_CONFIG_HOME/agent-presence/policy.toml`, else `~/.config/agent-presence/policy.toml` | the person | client only |
-| `session` | `$AGENT_PRESENCE_POLICY` file, then `AGENT_PRESENCE_POLICY_RUNG<N>` env | this run | client only |
+| `org` | `$AGENT_SYNC_ORG_POLICY`, else `/etc/agent-sync/policy.toml` | whoever runs the relay | relay only |
+| `repo` | `<repo_root>/.agent-sync/policy.toml`, committed | the team, via PR review | client only |
+| `user` | `$XDG_CONFIG_HOME/agent-sync/policy.toml`, else `~/.config/agent-sync/policy.toml` | the person | client only |
+| `session` | `$AGENT_SYNC_POLICY` file, then `AGENT_SYNC_POLICY_RUNG<N>` env | this run | client only |
 
 Effects: `session > user > repo > org > builtin`. The personal file beats the committed
 one on effects, because it's your machine and there is no enforcement — pretending
@@ -146,12 +146,12 @@ self-declarable because it can only ever tighten.
 `conn.agent` and `conn.human` come straight off the join frame (`serve.py:186-187`) and
 `human_id()` is `git config user.email`'s local part. Both are attacker-controlled in the
 only threat model that matters: an agent that reads `CLAUDE.md`, notices the roster, and
-sets `AGENT_PRESENCE_HUMAN=sara`. Any scheme keyed on the declared name is decoration.
+sets `AGENT_SYNC_HUMAN=sara`. Any scheme keyed on the declared name is decoration.
 
 So priority never appears in `policy.toml`. It lives in a separate roster the relay reads
 and the client does not.
 
-**`.agent-presence/principals.toml`**, committed at repo root, read only by the relay:
+**`.agent-sync/principals.toml`**, committed at repo root, read only by the relay:
 
 ```toml
 version = 1
@@ -171,7 +171,7 @@ unattended   = "critical"
 token_sha256 = "1ab4…"
 ```
 
-The secret lives at `~/.config/agent-presence/token` (0600) or `$AGENT_PRESENCE_TOKEN`,
+The secret lives at `~/.config/agent-sync/token` (0600) or `$AGENT_SYNC_TOKEN`,
 never in the repo. The roster holds only the hash, so a leaked roster leaks nothing.
 Plain sha256, not argon2: the token is 32 random bytes from `secrets.token_urlsafe`, not
 a password. There is no dictionary to defend against and a KDF would be a dependency for
@@ -207,7 +207,7 @@ agent has nobody to notice a block and re-drive it. A blocked attended session c
 human ten seconds; a blocked unattended one costs the whole run. Higher cost of losing,
 higher priority.
 
-Nothing detects supervision. `AGENT_PRESENCE_UNATTENDED=1` is set by whatever launches
+Nothing detects supervision. `AGENT_SYNC_UNATTENDED=1` is set by whatever launches
 the run — cron, CI, a wrapper. Default is attended, the lower tier, so winning is opt-in.
 
 ### 4.4 Failure modes, all fail open
@@ -436,7 +436,7 @@ number — and `tomllib` is stdlib.
 ### 7.1 Schema
 
 ```toml
-# agent-presence policy. Saved is applied; nothing to restart.
+# agent-sync policy. Saved is applied; nothing to restart.
 schema = 1
 mode   = "normal"            # normal | observer. observer caps this layer at notify.
 
@@ -464,7 +464,7 @@ Priority is not in this file. It is in `principals.toml` and the relay owns it (
 
 ### 7.2 CLI surface
 
-`ap`, installed as a console script (`ap = "agent_presence.cli:main"`).
+`ap`, installed as a console script (`ap = "agent_sync.cli:main"`).
 
 ```
 ap policy show [--effective] [--layer L] [--json]
@@ -529,7 +529,7 @@ a 5 ms per-connection budget (`kConnBudgetMs`) served off the event loop by
 policy.toml (repo, user, session)
         │  ap policy compile  /  SessionStart hook  /  MCP server startup
         ▼
-$XDG_RUNTIME_DIR/agent-presence.policy.json     one line, atomic temp+rename
+$XDG_RUNTIME_DIR/agent-sync.policy.json     one line, atomic temp+rename
         │  daemon stats it on the 100 ms tick, parses only on mtime/size change
         ▼
 PolicyCache.local_   ── 5 enum values
@@ -547,7 +547,7 @@ The compiled cache is written by:
 
 - `ap policy compile`, run by `install.sh` and available by hand;
 - the `SessionStart` hook, so a fresh session always has a current table;
-- `agent_presence.mcp_server.main`, at startup, for the same reason.
+- `agent_sync.mcp_server.main`, at startup, for the same reason.
 
 If the file is missing or unparseable the daemon uses `kBuiltin` and marks itself
 degraded (§9). It never blocks, never forks, never reads TOML, and never touches the disk
@@ -608,12 +608,12 @@ line to `problems`. This is the same discipline `redact.py` and `serve.py` alrea
 
 | Path | What |
 |---|---|
-| `python/src/agent_presence/policy.py` | Effects, layers, rules, resolution, compile |
-| `python/src/agent_presence/policy_edit.py` | Line-oriented TOML writer, preserves comments |
-| `python/src/agent_presence/priority.py` | Tiers, names, parsing |
-| `python/src/agent_presence/principals.py` | Roster, grants, token hashing |
-| `python/src/agent_presence/journal.py` | Decision journal reader (the daemon writes it) |
-| `python/src/agent_presence/cli.py` | The `ap` binary |
+| `python/src/agent_sync/policy.py` | Effects, layers, rules, resolution, compile |
+| `python/src/agent_sync/policy_edit.py` | Line-oriented TOML writer, preserves comments |
+| `python/src/agent_sync/priority.py` | Tiers, names, parsing |
+| `python/src/agent_sync/principals.py` | Roster, grants, token hashing |
+| `python/src/agent_sync/journal.py` | Decision journal reader (the daemon writes it) |
+| `python/src/agent_sync/cli.py` | The `ap` binary |
 
 ### New — C++
 
@@ -930,7 +930,7 @@ public:
 void flush_journal(const std::string& path, const std::vector<std::string>& lines);
 ```
 
-Path: `$XDG_RUNTIME_DIR/agent-presence.decisions.jsonl`, capped at 2000 lines. `ap why`
+Path: `$XDG_RUNTIME_DIR/agent-sync.decisions.jsonl`, capped at 2000 lines. `ap why`
 reads it. Redaction is the existing `redact_line` allowlist — a journal entry can carry no
 field a relay frame could not.
 
@@ -949,7 +949,7 @@ Relay → client, new frame, sent after the lease snapshot and on org-policy cha
 
 ```json
 {"type":"policy","floor":["silent","silent","silent","notify","silent"],
- "source":"org:/etc/agent-presence/policy.toml","digest":"…"}
+ "source":"org:/etc/agent-sync/policy.toml","digest":"…"}
 ```
 
 `claim_result` and `negotiate` gain `"effect"` and `"effect_source"`. `claim_result` on a

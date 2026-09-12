@@ -40,7 +40,7 @@ jobs:
         with:
           files: |
             dist/presenced-*
-            dist/agent-presence-mcp-*
+            dist/agent-sync-mcp-*
             dist/gorelay-*
 
   # ap-hook is plain C++20 over POSIX + pthreads (cpp/CMakeLists.txt) - unix

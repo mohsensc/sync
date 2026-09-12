@@ -1,7 +1,7 @@
 'use strict';
 
 // API notes (state.js is owned by another agent):
-//   lib/state.js: homeDir() -> ~/.agent-presence, configPath() -> that dir's
+//   lib/state.js: homeDir() -> ~/.agent-sync, configPath() -> that dir's
 //                 config.json, readServer()/readConfig() -> parsed JSON or
 //                 null, writeConfig(o) (writes 0600 itself - this file's
 //                 own chmod after the write is a belt-and-suspenders no-op).
@@ -9,10 +9,10 @@
 //                 tlsCert? (path to PEM, if the relay was started with TLS) }
 //
 // Per the binaries survey: there is no TLS fingerprint pinning anywhere in
-// this codebase (AGENT_PRESENCE_RELAY_CA only takes a PEM file/bundle path,
+// this codebase (AGENT_SYNC_RELAY_CA only takes a PEM file/bundle path,
 // verified via full chain, not a leaf hash). So the join blob carries the
 // whole cert PEM, not a fingerprint, and `join` writes it to a file that
-// AGENT_PRESENCE_RELAY_CA can point at. This deviates from install-plan.md's
+// AGENT_SYNC_RELAY_CA can point at. This deviates from install-plan.md's
 // "pins the fingerprint" language on purpose — that mechanism doesn't exist
 // in the code being wrapped.
 
@@ -70,9 +70,9 @@ function parseRelayUrl(url) {
 }
 
 function readTokenFile() {
-  if (process.env.AGENT_PRESENCE_TOKEN) return process.env.AGENT_PRESENCE_TOKEN.trim();
+  if (process.env.AGENT_SYNC_TOKEN) return process.env.AGENT_SYNC_TOKEN.trim();
   const base = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config');
-  const tokenPath = path.join(base, 'agent-presence', 'token');
+  const tokenPath = path.join(base, 'agent-sync', 'token');
   try {
     const text = fs.readFileSync(tokenPath, 'utf8');
     const firstLine = text.split('\n').find((l) => l.trim() !== '');
@@ -85,7 +85,7 @@ function readTokenFile() {
 function cmdInvite() {
   const server = safeReadServer();
   if (!server || !server.url) {
-    err('no relay is running on this machine (no server.json). Run `agent-presence start` or `setup` first.');
+    err('no relay is running on this machine (no server.json). Run `agent-sync start` or `setup` first.');
     return 1;
   }
 
@@ -108,8 +108,8 @@ function cmdInvite() {
     log('');
     log('WARNING: the relay is bound to a loopback address (' + host + ').');
     log('A teammate on another machine cannot reach this. Restart the relay with:');
-    log('  agent-presence stop && agent-presence start --host 0.0.0.0');
-    log('  (or set AGENT_PRESENCE_HOST=0.0.0.0)');
+    log('  agent-sync stop && agent-sync start --host 0.0.0.0');
+    log('  (or set AGENT_SYNC_HOST=0.0.0.0)');
     log('(for wss://, see docs/tls-dev-cert.md)');
     log('');
     log('Printing the invite anyway, but it will only work from this machine.');
@@ -134,7 +134,7 @@ function cmdInvite() {
   }
 
   const encoded = b64urlEncode(JSON.stringify(blob));
-  log('agent-presence join ' + encoded);
+  log('agent-sync join ' + encoded);
   return 0;
 }
 
@@ -155,7 +155,7 @@ function decodeBlob(raw) {
     throw new Error('invite blob decoded to something other than an object.');
   }
   if (blob.v !== BLOB_VERSION) {
-    throw new Error(`invite blob has version ${blob.v}, this agent-presence only understands v${BLOB_VERSION}.`);
+    throw new Error(`invite blob has version ${blob.v}, this agent-sync only understands v${BLOB_VERSION}.`);
   }
   if (typeof blob.relay !== 'string' || !/^wss?:\/\//.test(blob.relay)) {
     throw new Error(`invite blob's relay field is not a ws:// or wss:// URL: ${JSON.stringify(blob.relay)}`);
@@ -185,7 +185,7 @@ function testConnection(host, port) {
 
 async function cmdJoin(blobArg) {
   if (!blobArg) {
-    err('usage: agent-presence join <blob>');
+    err('usage: agent-sync join <blob>');
     return 1;
   }
 
@@ -234,7 +234,7 @@ async function cmdJoin(blobArg) {
   }
 
   err(`could not reach ${host}:${port} — ${result.reason}`);
-  err('config was written anyway; run `agent-presence doctor` for more detail. Next steps:');
+  err('config was written anyway; run `agent-sync doctor` for more detail. Next steps:');
   err('  - is a firewall blocking the port?');
   err('  - did the other machine start the relay with --host 0.0.0.0 (not the default 127.0.0.1)?');
   err('  - is the host/port in the invite actually correct (NAT, VPN, wrong interface)?');
@@ -249,7 +249,7 @@ function safeReadServer() {
   }
 }
 
-// Handles both plausible dispatch conventions from bin/agent-presence.js:
+// Handles both plausible dispatch conventions from bin/agent-sync.js:
 // either it forwards the full argv including the subcommand name ('invite'
 // or 'join <blob>'), or it already consumed the subcommand and calls this
 // module once per verb with just the remaining args. 'invite' takes no

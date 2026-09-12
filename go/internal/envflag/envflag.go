@@ -4,7 +4,7 @@
 // It exists because there were three of these. presenced matched a fixed
 // list of literals ("1", "true", "TRUE", "True", "yes", "on"), the MCP
 // server lowercased and trimmed first, and python's principals.py did the
-// same as the MCP server — so `AGENT_PRESENCE_UNATTENDED=YES` promoted
+// same as the MCP server — so `AGENT_SYNC_UNATTENDED=YES` promoted
 // ask to deny in two of the three, and the one that disagreed was the
 // daemon, the only one that actually gates a tool call. A trailing space
 // from a .env file did the same thing.
@@ -19,7 +19,7 @@ import "strings"
 // surrounding whitespace are ignored; anything not in the set — including
 // the empty string — is no.
 //
-// Kept byte-identical to python/src/agent_presence/principals.py's
+// Kept byte-identical to python/src/agent_sync/principals.py's
 // unattended_flag. A divergence here means the CLI tells an operator one
 // thing about their own policy and the daemon does another.
 func Truthy(v string) bool {

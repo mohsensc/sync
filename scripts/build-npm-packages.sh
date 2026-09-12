@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Builds the binaries and generates the five npm/platform/<os>-<arch>
-# packages that npm/agent-presence's optionalDependencies point at.
+# packages that npm/agent-sync's optionalDependencies point at.
 #
-# Go binaries (presenced, agent-presence-mcp, gorelay) cross-compile for all
+# Go binaries (presenced, agent-sync-mcp, gorelay) cross-compile for all
 # five targets via scripts/build-go-release.sh — no cgo, one machine, no
 # per-target toolchain.
 #
@@ -17,7 +17,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST="$ROOT/dist"
 PLATFORM_DIR="$ROOT/npm/platform"
-WRAPPER_DIR="$ROOT/npm/agent-presence"
+WRAPPER_DIR="$ROOT/npm/agent-sync"
 DIST_NPM="$ROOT/dist-npm"
 
 # name -> "goos goarch" for the Go build, plus the npm platform/arch names
@@ -31,7 +31,7 @@ TARGETS=(
   "win32-x64 windows amd64"
 )
 
-GO_BINARIES=(presenced agent-presence-mcp gorelay)
+GO_BINARIES=(presenced agent-sync-mcp gorelay)
 
 VERSION="$(node -p "require('$WRAPPER_DIR/package.json').version")"
 
@@ -101,9 +101,9 @@ for t in "${TARGETS[@]}"; do
 
   cat >"$pkg_dir/package.json" <<JSON
 {
-  "name": "@agent-presence/$pkgname",
+  "name": "@agent-sync/$pkgname",
   "version": "$VERSION",
-  "description": "agent-presence prebuilt binaries for $npm_os/$npm_arch",
+  "description": "agent-sync prebuilt binaries for $npm_os/$npm_arch",
   "license": "MIT",
   "os": ["$npm_os"],
   "cpu": ["$npm_arch"],
@@ -139,9 +139,9 @@ if [[ "${1:-}" == "--pack" ]]; then
   echo "optionalDependency locally instead of hitting npm. Paths must be"
   echo "absolute or './'-prefixed, or npm parses them as git specs. Try it:"
   echo
-  echo "  npm i -g $DIST_NPM/agent-presence-$VERSION.tgz $DIST_NPM/agent-presence-$HOST_PKG-$VERSION.tgz"
+  echo "  npm i -g $DIST_NPM/agent-sync-$VERSION.tgz $DIST_NPM/agent-sync-$HOST_PKG-$VERSION.tgz"
   echo
   echo "That proves the optionalDependency resolves. It does not prove the"
-  echo "'agent-presence' command works: bin/agent-presence.js in the wrapper"
+  echo "'agent-sync' command works: bin/agent-sync.js in the wrapper"
   echo "package is owned by other work in this branch and may not exist yet."
 fi
