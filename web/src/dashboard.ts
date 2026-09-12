@@ -15,6 +15,7 @@ declare global {
 const byId = <T extends HTMLElement>(id: string) => document.getElementById(id) as T
 const clerkKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY
 const configError = byId<HTMLElement>('configuration-error')
+const loginCta = byId<HTMLElement>('login-cta')
 const authGate = byId<HTMLElement>('auth-gate')
 const dashboard = byId<HTMLElement>('dashboard')
 const dashboardError = byId<HTMLElement>('dashboard-error')
@@ -206,6 +207,7 @@ async function loadClerkUi(key: string): Promise<unknown> {
 
 async function showDashboard(clerk: Clerk) {
   if (!clerk.user) return
+  loginCta.hidden = true
   authGate.hidden = true
   dashboard.hidden = false
   const name = clerk.user.fullName || clerk.user.primaryEmailAddress?.emailAddress || 'Your account'
@@ -220,13 +222,33 @@ async function showDashboard(clerk: Clerk) {
   byId<HTMLButtonElement>('sign-out').onclick = () => void clerk.signOut({ redirectUrl: '/' })
 }
 
+function showAuthError() {
+  loginCta.hidden = true
+  authGate.hidden = false
+  byId('auth-error').hidden = false
+}
+
 async function boot() {
   inject()
+
+  // Unauthenticated, non-tenant-scoped warm-up: nudge the browser to fetch
+  // the office's static document ahead of the "Open the 3D office" link.
+  // Never touches /api/dashboard, /api/bootstrap, or any other tenant-scoped
+  // route before a real Clerk session exists.
+  void fetch('/office/', { credentials: 'omit' }).catch(() => {})
+
   if (!clerkKey) {
+    loginCta.hidden = true
     configError.hidden = false
     return
   }
-  try {
+
+  // Clerk's own script load and clerk.load() handshake are the two network
+  // round trips that make a bare sign-in screen feel slow. Kick both off
+  // immediately behind the CTA card below instead of waiting for the visitor
+  // to click through first, so "Okay, log in" reveals a card that mounts
+  // instantly instead of one still waiting on the network.
+  const ready = (async () => {
     const ClerkUI = await loadClerkUi(clerkKey)
     const clerk = new Clerk(clerkKey)
     await clerk.load({
@@ -234,17 +256,33 @@ async function boot() {
       appearance: clerkAppearance,
       localization: clerkLocalization,
     })
+    return clerk
+  })()
+
+  const ctaButton = byId<HTMLButtonElement>('cta-continue')
+  ctaButton.onclick = async () => {
+    ctaButton.disabled = true
+    try {
+      const clerk = await ready
+      loginCta.hidden = true
+      authGate.hidden = false
+      clerk.mountSignIn(byId('clerk-signin'))
+    } catch (error) {
+      console.error('dashboard auth unavailable:', error)
+      showAuthError()
+    }
+  }
+
+  try {
+    const clerk = await ready
     if (clerk.isSignedIn) {
       await showDashboard(clerk)
       return
     }
-    authGate.hidden = false
-    clerk.mountSignIn(byId('clerk-signin'))
     clerk.addListener(({ user }) => { if (user) void showDashboard(clerk) })
   } catch (error) {
     console.error('dashboard auth unavailable:', error)
-    authGate.hidden = false
-    byId('auth-error').hidden = false
+    showAuthError()
   }
 }
 
