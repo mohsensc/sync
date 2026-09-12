@@ -442,16 +442,20 @@ export function buildZoneMarkers({ labels = true, y = 0.045 } = {}) {
         sp.material.opacity = baseOpacity(n) * t
       }
     },
-    /** Shortlog-driven area ownership: repaint a zone's pill with "mostly
-     *  <name>" under its usual meaning line. Pass null/undefined to clear
-     *  back to plain `means`. No-op on an unknown zone or a labels:false
-     *  build (no sprites to repaint). */
-    setOwner(name, ownerLabel) {
+    /** Shortlog-driven area ownership: repaint a zone's pill with "all
+     *  <name>" (one deduped author) or "mostly <name>" (more than one)
+     *  under its usual meaning line — same voice zoneowner.js's rug/plaque
+     *  caption uses for the same fact (see that file's ownerLine), so a
+     *  desk's floor pill and its rug don't disagree about how sure they
+     *  are. Pass null/undefined to clear back to plain `means`. No-op on
+     *  an unknown zone or a labels:false build (no sprites to repaint). */
+    setOwner(name, ownerLabel, sole) {
       const zn = ZONES[name]
       const sp = sprites[name]
       if (!zn || !sp) return
       owners[name] = ownerLabel || null
-      const sub = owners[name] ? `${zn.means} · mostly ${owners[name]}` : zn.means
+      const verb = sole ? 'all' : 'mostly'
+      const sub = owners[name] ? `${zn.means} · ${verb} ${owners[name]}` : zn.means
       const old = sp.material.map
       sp.material.map = labelTexture(zn.label, sub, zn.color)
       sp.material.needsUpdate = true

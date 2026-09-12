@@ -25,7 +25,8 @@
 // trophy for "the only person who could possibly own this" states the
 // obvious, and a plaque doing long division to print "100%" is worse
 // than just saying so. See ownerLine()/flourishFor() below: no flourish,
-// no percentage, just a name and "all theirs".
+// no percentage, just "all <name>" — the same phrasing zones.js's floor
+// pill uses for a single-owner zone, so the two surfaces agree.
 //
 // Degrade rule: no shortlog data (fresh dir, endpoint not up, network
 // hiccup) means no dressing for that zone. A plaque with no name on it or
@@ -62,6 +63,18 @@ export function hairFor(human) {
   const s = String(human || '')
   for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0
   return HAIR_COLORS[h % HAIR_COLORS.length]
+}
+
+/** A hex string, darkened toward black by `amt` (0..1) — used for the
+ *  rug's woven border, which needs to read as "an edge" against its own
+ *  fill colour rather than another flat tint the eye can't separate from
+ *  the pastel zone floor underneath it. */
+function darken(hex, amt) {
+  const n = parseInt(hex.slice(1), 16)
+  const r = Math.round(((n >> 16) & 0xff) * (1 - amt))
+  const g = Math.round(((n >> 8) & 0xff) * (1 - amt))
+  const b = Math.round((n & 0xff) * (1 - amt))
+  return (r << 16) | (g << 8) | b
 }
 
 // ---------------------------------------------------------------------
@@ -112,13 +125,16 @@ export function pickOwnership(data) {
 }
 
 /** The line under a plaque's name (and the quiet caption on a
- *  single-owner rug) — a percentage most of the time, but a flat "all
- *  theirs" once a zone has exactly one author. A bar chart with one
- *  segment doesn't need the number spelled out, and "100%" reads like a
- *  stat that could have come out otherwise. */
+ *  single-owner rug) — a percentage most of the time, but "all <name>"
+ *  once a zone has exactly one author. A bar chart with one segment
+ *  doesn't need the number spelled out, and "100%" reads like a stat that
+ *  could have come out otherwise. Same "all <name>" voice zones.js's
+ *  floor-pill sub-label uses for the same fact — see that file's
+ *  setOwner — so the two surfaces never disagree about how sure they are
+ *  that one person wrote something. */
 export function ownerLine(ownership) {
   if (!ownership) return ''
-  if (ownership.authorCount === 1) return 'all theirs'
+  if (ownership.authorCount === 1) return `all ${ownership.top.author}`
   return `${Math.round(ownership.top.share * 100)}% of this area`
 }
 
@@ -293,34 +309,64 @@ function buildPlaque(zoneDef, ownership) {
 }
 
 /** A rug texture: owner colour fill, a runner-up stripe woven along one
- *  edge if there is a second author, a plain undyed border either way so
- *  it reads as a mat and not a paint swatch. Single-owner zones (no
- *  second author — see the file header's "single-owner calm") get a
- *  small, low-contrast name stitched near the edge instead of the
- *  two-tone split, since there's no second colour to do the telling. */
+ *  edge if there is a second author, a woven diagonal hatch over the
+ *  whole fill, and a two-tone braided border (a dark ring inside a light
+ *  one) so it reads as a mat with a physical edge rather than another
+ *  pastel tint at a glance — round 5's flat single-colour fill with a
+ *  thin light stroke was visually indistinguishable from the room's
+ *  pre-existing zone-floor circles from normal camera distance. Single-
+ *  owner zones (no second author — see the file header's "single-owner
+ *  calm") get a small, low-contrast name stitched near the edge instead
+ *  of the two-tone split, since there's no second colour to do the
+ *  telling. */
 function rugTexture(ownership) {
   const W = 256, H = 256
   const c = document.createElement('canvas')
   c.width = W; c.height = H
   const g = c.getContext('2d')
   const { topFrac, secondFrac } = rugSplit(ownership)
-  g.fillStyle = hairFor(ownership.top.author)
+  const topHex = hairFor(ownership.top.author)
+  g.fillStyle = topHex
   g.fillRect(0, 0, W, H)
   if (secondFrac > 0) {
     g.fillStyle = hairFor(ownership.second.author)
     g.fillRect(0, 0, W, H * secondFrac)
   }
-  // undyed woven border
-  g.strokeStyle = 'rgba(240,236,230,0.85)'
-  g.lineWidth = 14
-  g.strokeRect(7, 7, W - 14, H - 14)
+
+  // woven diagonal hatch across the whole fill — the thing a flat tint
+  // never had, and the thing that reads as "fabric" instead of "floor
+  // paint" even before you're close enough to make out the border.
+  g.save()
+  g.globalAlpha = 0.16
+  g.strokeStyle = '#000000'
+  g.lineWidth = 2
+  for (let x = -H; x < W + H; x += 12) {
+    g.beginPath(); g.moveTo(x, 0); g.lineTo(x + H, H); g.stroke()
+  }
+  g.globalAlpha = 0.10
+  g.strokeStyle = '#ffffff'
+  for (let x = -H; x < W + H; x += 12) {
+    g.beginPath(); g.moveTo(x + 6, 0); g.lineTo(x + H + 6, H); g.stroke()
+  }
+  g.restore()
+
+  // braided border: a dark ring set inside a light one, both well outside
+  // the old single 3px stroke, so the mat's edge reads as an object
+  // sitting on the floor rather than a coloured outline.
+  const darkHex = '#' + darken(topHex, 0.55).toString(16).padStart(6, '0')
+  g.lineWidth = 10
+  g.strokeStyle = darkHex
+  g.strokeRect(6, 6, W - 12, H - 12)
+  g.lineWidth = 4
+  g.strokeStyle = 'rgba(240,236,230,0.9)'
+  g.strokeRect(15, 15, W - 30, H - 30)
 
   if (ownership.authorCount === 1) {
     g.save()
     g.textAlign = 'center'
-    g.font = '600 15px ui-monospace, SFMono-Regular, Menlo, monospace'
-    g.fillStyle = 'rgba(240,236,230,0.55)'
-    g.fillText(ownership.top.author, W / 2, H - 24)
+    g.font = '600 16px ui-monospace, SFMono-Regular, Menlo, monospace'
+    g.fillStyle = 'rgba(240,236,230,0.8)'
+    g.fillText(ownership.top.author, W / 2, H - 30)
     g.restore()
   }
 
@@ -333,17 +379,38 @@ function rugTexture(ownership) {
 function buildRug(zoneDef, ownership) {
   const g = new THREE.Group()
   g.name = 'zoneowner-rug'
-  const r = zoneDef.r * 0.56
+  // Bigger than round 5's 0.56 — a rug that only covers about a third of
+  // its zone's floor circle reads as a rounding error next to that
+  // circle, not a distinct object on top of it.
+  const r = zoneDef.r * 0.7
   const mesh = new THREE.Mesh(
     new THREE.CircleGeometry(r, 40),
-    new THREE.MeshStandardMaterial({ map: rugTexture(ownership), roughness: 1, transparent: true, opacity: 0.92 }),
+    new THREE.MeshStandardMaterial({ map: rugTexture(ownership), roughness: 1, transparent: true, opacity: 0.97 }),
   )
   mesh.rotation.x = -Math.PI / 2
-  mesh.position.set(zoneDef.at[0], 0.05, zoneDef.at[1])
+  mesh.position.set(zoneDef.at[0], 0.052, zoneDef.at[1])
   mesh.receiveShadow = true
   g.add(mesh)
+
+  // A short beveled lip standing a few millimetres proud of the floor —
+  // the thing a flat decal can never sell, and cheap here since it's one
+  // extra ring per zone. Sits a shade below the fill's darkened border so
+  // the two read as one continuous raised edge rather than two objects.
+  // Own material rather than solidMat's shared cache — this group gets
+  // rebuilt (and disposed) on every poll, and a cache entry disposed out
+  // from under a still-cached key would break the next zone that reuses
+  // it, the same trap the flourish materials below already carry.
+  const lipMat = new THREE.MeshStandardMaterial({
+    color: darken(hairFor(ownership.top.author), 0.5), roughness: 0.95,
+  })
+  const lip = new THREE.Mesh(new THREE.CylinderGeometry(r * 1.03, r, 0.018, 40, 1, true), lipMat)
+  lip.position.set(zoneDef.at[0], 0.043, zoneDef.at[1])
+  lip.castShadow = true
+  lip.receiveShadow = true
+  g.add(lip)
+
   const flourish = buildFlourish(flourishFor(ownership), ownership)
-  if (flourish) { flourish.position.set(zoneDef.at[0], 0.05, zoneDef.at[1] + r * 0.55); g.add(flourish) }
+  if (flourish) { flourish.position.set(zoneDef.at[0], 0.06, zoneDef.at[1] + r * 0.55); g.add(flourish) }
   return g
 }
 
@@ -439,9 +506,14 @@ export function attachZoneOwner(cfg = {}) {
       main.getWorldPosition(_worldpos)
       const d = _campos.distanceTo(_worldpos)
       const t = Math.min(1, Math.max(0, (d - FADE_NEAR) / (FADE_FAR - FADE_NEAR)))
-      const base = mode === 'rug' ? 0.92 : 0.97
+      const base = mode === 'rug' ? 0.97 : 0.97
       main.material.opacity = base * t
       main.visible = t > 0.02
+      // rug mode's second child is the raised lip — fades with the mat
+      // itself so a close zoom doesn't leave a bare rim floating with no
+      // fill under it once the mat's own opacity hits 0.
+      const lip = mode === 'rug' ? g.children[1] : null
+      if (lip && lip.visible !== undefined) lip.visible = t > 0.02
     }
   }
 

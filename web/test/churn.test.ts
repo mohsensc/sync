@@ -129,8 +129,8 @@ describe('attachGitSignals churn wiring', () => {
 // -- CHURN_MODES / staleToIntensity — the 'C'-key churn treatments --------
 
 describe('CHURN_MODES', () => {
-  it('cycles stack -> heat -> cold', () => {
-    expect(CHURN_MODES).toEqual(['stack', 'heat', 'cold'])
+  it('cycles stack -> heat -> heat-loud -> cold', () => {
+    expect(CHURN_MODES).toEqual(['stack', 'heat', 'heat-loud', 'cold'])
   })
 })
 
@@ -151,6 +151,12 @@ describe('staleToIntensity', () => {
 
   it('ramps linearly between the floor and the ceiling', () => {
     expect(staleToIntensity(212.5)).toBeCloseTo(0.5, 5) // midpoint of 60..365
+  })
+
+  it('accepts a custom floor/ceiling for the ?coldDays= demo override', () => {
+    expect(staleToIntensity(5, 2, 12)).toBeCloseTo(0.3, 5) // midpoint-ish of 2..12
+    expect(staleToIntensity(1, 2, 12)).toBe(0) // below the overridden floor
+    expect(staleToIntensity(20, 2, 12)).toBe(1) // past the overridden ceiling
   })
 })
 
@@ -221,6 +227,22 @@ describe('attachGitSignals churn-vis mode', () => {
     const s = attachGitSignals({ world, zones, fetchFn, intervalMs: 999999 })
     s.setChurnMode('cold')
     await expect(s.poll()).resolves.toBeUndefined()
+    s.stop()
+  })
+
+  it('accepts heat-loud as a real mode and still stops routing to setChurn', async () => {
+    const setChurn = vi.fn()
+    const root = fakeRoot()
+    const world = { agents: [{ gitPath: 'web/src/office/anim.js', setFreshness: vi.fn(), setChurn, root, scale: 1 }] }
+    const zones = { setOwner: vi.fn() }
+    const fetchFn: FetchStub = vi.fn(async () => stubResponse({
+      ok: true, recent: { commits: 5, added: 40, deleted: 10, windowDays: 14 }, working: { added: 20, deleted: 5 },
+    }))
+    const s = attachGitSignals({ world, zones, fetchFn, intervalMs: 999999 })
+    s.setChurnMode('heat-loud')
+    expect(s.churnMode).toBe('heat-loud')
+    await s.tick(16)
+    expect(setChurn).not.toHaveBeenCalled()
     s.stop()
   })
 })

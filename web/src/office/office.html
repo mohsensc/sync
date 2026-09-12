@@ -1783,6 +1783,14 @@ import { ZONE_DIRS } from './gitsignals.js'
 // STATE.md has documented since round 2, not new debt.
 const zoneOwner = attachZoneOwner({ scene, zoneDirs: ZONE_DIRS })
 window.__zoneOwner = zoneOwner
+
+// --- commit board wiring ---
+import { attachCommitBoard } from './commitboard.js'
+
+// Same append-only-slice reasoning as zoneowner above: its own poll loop,
+// its own render-frame loop, one call and stash the handle.
+const commitBoard = attachCommitBoard({ scene })
+window.__commitBoard = commitBoard
 </script>
 </body>
 </html>

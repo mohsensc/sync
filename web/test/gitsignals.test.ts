@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { freshnessBucket } from '../src/office/agent.js'
 import {
-  ZONE_DIRS, statToAgeDays, shortlogToOwner, attachGitSignals,
+  ZONE_DIRS, statToAgeDays, shortlogToOwner, shortlogIsSole, attachGitSignals,
 } from '../src/office/gitsignals.js'
 
 describe('freshnessBucket', () => {
@@ -60,6 +60,20 @@ describe('shortlogToOwner', () => {
   })
 })
 
+describe('shortlogIsSole', () => {
+  it('is true for exactly one author', () => {
+    expect(shortlogIsSole({ ok: true, owners: [{ author: 'mohsen', commits: 9, share: 1 }] })).toBe(true)
+  })
+  it('is false for zero, two-plus, or no-signal owners', () => {
+    expect(shortlogIsSole({ ok: true, owners: [
+      { author: 'sara', commits: 4, share: 0.3 }, { author: 'mohsen', commits: 9, share: 0.7 },
+    ] })).toBe(false)
+    expect(shortlogIsSole({ ok: true, owners: [] })).toBe(false)
+    expect(shortlogIsSole({ ok: false })).toBe(false)
+    expect(shortlogIsSole(null)).toBe(false)
+  })
+})
+
 // -- attachGitSignals: the fold from fetchFn responses onto agents/zones ----
 
 function stubResponse(body: unknown, ok = true): Response {
@@ -96,7 +110,7 @@ describe('attachGitSignals', () => {
     s.stop()
   })
 
-  it('sets zone ownership from shortlog for the configured dirs', async () => {
+  it('sets zone ownership from shortlog for the configured dirs, flagging sole authorship', async () => {
     const zones = { setOwner: vi.fn() }
     const world = { agents: [] }
     const fetchFn: FetchStub = vi.fn(async (input) => {
@@ -106,7 +120,23 @@ describe('attachGitSignals', () => {
     })
     const s = attachGitSignals({ world, zones, fetchFn, intervalMs: 999999, zoneDirs: { desks: 'web/src' } })
     await s.poll()
-    expect(zones.setOwner).toHaveBeenCalledWith('desks', 'sara')
+    expect(zones.setOwner).toHaveBeenCalledWith('desks', 'sara', true)
+    s.stop()
+  })
+
+  it('flags sole=false for a zone split across authors', async () => {
+    const zones = { setOwner: vi.fn() }
+    const world = { agents: [] }
+    const fetchFn: FetchStub = vi.fn(async (input) => {
+      const url = String(input)
+      if (url.includes('dir=web%2Fsrc')) return stubResponse({ ok: true, owners: [
+        { author: 'sara', commits: 10, share: 0.6 }, { author: 'kim', commits: 6, share: 0.4 },
+      ] })
+      return stubResponse({ ok: false })
+    })
+    const s = attachGitSignals({ world, zones, fetchFn, intervalMs: 999999, zoneDirs: { desks: 'web/src' } })
+    await s.poll()
+    expect(zones.setOwner).toHaveBeenCalledWith('desks', 'sara', false)
     s.stop()
   })
 
