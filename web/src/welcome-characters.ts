@@ -65,14 +65,27 @@ async function start() {
       body.scale.setScalar((1.65 + index * 0.08) / bounds.getSize(new THREE.Vector3()).y)
       const root = new THREE.Group()
       root.add(body)
+      // Keep entire animated figures in separate depth lanes. Sharing z=0
+      // makes their limbs intersect when their screen positions cross.
+      // Orthographic projection preserves their size and baseline in each lane.
+      root.position.z = -index * 3
       const direction = index === 1 ? -1 : 1
       root.rotation.y = direction * Math.PI / 2
       scene.add(root)
       const mixer = new THREE.AnimationMixer(model)
-      const action = mixer.clipAction(getClip('walk', index + 1))
-      action.play()
+      const actions = {
+        walk: mixer.clipAction(getClip('walk', index + 1)),
+        wave: mixer.clipAction(getClip('wave', index + 1)),
+        idle: mixer.clipAction(getClip('idle', index + 1)),
+      }
+      actions.walk.play()
       mixer.update(index * 0.23)
-      return { root, mixer, direction, progress: [0.12, 0.55, 0.82][index], speed: 0.54 + index * 0.05 }
+      return {
+        root, body, mixer, actions, action: actions.walk, direction,
+        progress: [0.12, 0.55, 0.82][index], speed: 0.54 + index * 0.05,
+        pace: 0, remaining: 2 + index * 3, elapsed: 0, beat: index,
+        activity: 'walk' as 'walk' | 'wave' | 'dance' | 'look',
+      }
     })
     let width = 20
     const resize = () => {
@@ -87,7 +100,36 @@ async function start() {
     }
     const render = (dt: number) => {
       for (const walker of walkers) {
-        walker.progress = (walker.progress + walker.direction * walker.speed * dt / (width + 2) + 1) % 1
+        walker.remaining -= dt
+        walker.elapsed += dt
+        if (walker.remaining <= 0) {
+          if (walker.activity === 'walk') {
+            walker.activity = (['wave', 'dance', 'look'] as const)[walker.beat % 3]
+            walker.beat++
+            walker.remaining = walker.activity === 'wave' ? 4.4 : 3.8
+          } else {
+            walker.activity = 'walk'
+            if (walker.beat % 2 === 0) walker.direction *= -1
+            walker.remaining = 8 + Math.random() * 8
+          }
+          walker.elapsed = 0
+          const next = walker.actions[walker.activity === 'walk' ? 'walk' : walker.activity === 'wave' ? 'wave' : 'idle']
+          if (next !== walker.action) {
+            next.reset().setEffectiveWeight(1).play()
+            walker.action.crossFadeTo(next, 0.35, false)
+            walker.action = next
+          }
+        }
+        // Turn toward the visitor for a hello or a little happy shuffle.
+        const heading = walker.activity === 'walk' ? walker.direction * Math.PI / 2
+          : walker.activity === 'look' ? Math.sin(walker.elapsed * 1.8) * 0.65 : 0
+        walker.root.rotation.y += (heading - walker.root.rotation.y) * Math.min(1, dt * 5)
+        const targetPace = walker.activity === 'walk' && Math.abs(heading - walker.root.rotation.y) < 0.3 ? 1 : 0
+        walker.pace += (targetPace - walker.pace) * Math.min(1, dt * 6)
+        const dancing = walker.activity === 'dance' ? Math.min(1, walker.elapsed * 3, walker.remaining * 3) : 0
+        walker.body.rotation.z = Math.sin(walker.elapsed * 7) * 0.07 * dancing
+        walker.root.position.y = Math.abs(Math.sin(walker.elapsed * 7)) * 0.045 * dancing
+        walker.progress = (walker.progress + walker.direction * walker.speed * walker.pace * dt / (width + 2) + 1) % 1
         walker.root.position.x = walker.progress * (width + 2) - (width + 2) / 2
         walker.mixer.update(dt)
       }
