@@ -209,12 +209,29 @@ async function boot() {
   }
 }
 
+// Ids match the <input value=""> attributes in index.html's .setup-card and
+// the SetupTarget union in api/_lib/tokens.ts. Kept as plain string literals
+// here (not imported from api/) so the web package's typecheck doesn't reach
+// across that boundary — see api/_lib/tokens.ts for what each id means and
+// which targets get real hook/MCP enforcement vs. an AGENTS.md-only block.
+function selectedSetupTargets(): string[] {
+  const boxes = document.querySelectorAll<HTMLInputElement>('input[name="setup-target"]:checked')
+  return Array.from(boxes, (box) => box.value)
+}
+
 byId<HTMLButtonElement>('rotate-token').onclick = async () => {
   const button = byId<HTMLButtonElement>('rotate-token')
+  const targets = selectedSetupTargets()
+  const targetError = byId('setup-target-error')
+  if (targets.length === 0) {
+    targetError.hidden = false
+    return
+  }
+  targetError.hidden = true
   button.disabled = true
   try {
     const result = await api<{ id: string; instructions: string }>('/api/tokens', {
-      method: 'POST', body: JSON.stringify({ label: 'dashboard setup' }),
+      method: 'POST', body: JSON.stringify({ label: 'dashboard setup', targets }),
     })
     visibleTokenId = result.id
     setText(byId('setup-instructions'), result.instructions)
