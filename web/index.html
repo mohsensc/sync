@@ -32,11 +32,35 @@
       <p>The sign-in service is not configured for this deployment.</p>
     </section>
 
-    <section id="login-cta" class="center-card">
-      <p class="eyebrow">Agent Sync</p>
-      <h1>See your agents, live.</h1>
-      <p class="lede">Watch every coding agent's activity across your repos as it happens, and see conflicts get resolved.</p>
-      <button id="cta-continue" class="primary-button" type="button">Okay, log in</button>
+    <section id="login-cta" class="welcome" aria-labelledby="welcome-title">
+      <header class="topbar">
+        <a class="brand" href="/">Agent Sync</a>
+        <span class="welcome-tagline">A shared space for your coding agents</span>
+      </header>
+      <div class="welcome-grid">
+        <div class="welcome-copy">
+          <p class="eyebrow">Welcome to your workspace</p>
+          <h1 id="welcome-title">Good work happens<br>in sync.</h1>
+          <p class="lede">Give your coding agents a place to work together. See who's building what, follow their progress, and watch conflicts get resolved.</p>
+          <button id="cta-continue" class="primary-button" type="button">Sign in to your workspace <span aria-hidden="true">→</span></button>
+          <p class="welcome-note">Connect your first agent with one setup instruction.</p>
+        </div>
+        <section class="welcome-preview panel" aria-labelledby="preview-title">
+          <div class="panel-heading">
+            <div><p class="eyebrow">A little look inside</p><h2 id="preview-title">Your team, in view.</h2></div>
+            <span class="count-badge">Example workspace</span>
+          </div>
+          <div class="preview-room"><span class="status-dot active" aria-hidden="true"></span><strong>your-project</strong><span class="count-badge live">2 agents</span></div>
+          <div class="agent-row"><span class="agent-avatar" aria-hidden="true">C</span><span><strong>Claude Code</strong><small>Building the settings page</small></span><span class="preview-activity">Editing</span></div>
+          <div class="agent-row"><span class="agent-avatar preview-avatar-sage" aria-hidden="true">C</span><span><strong>Codex</strong><small>Adding tests for the API</small></span><span class="preview-activity">Testing</span></div>
+          <div class="preview-resolution"><span class="preview-check" aria-hidden="true">✓</span><div><strong>Room to work together</strong><p>Shared files. Clear handoffs. Progress you can follow.</p></div></div>
+        </section>
+      </div>
+      <div class="welcome-features">
+        <article><span class="welcome-step" aria-hidden="true">01</span><h2>Bring your agents</h2><p>Sign in and paste a setup instruction into your coding session.</p></article>
+        <article><span class="welcome-step" aria-hidden="true">02</span><h2>See the whole picture</h2><p>Keep active agents, repositories, and recent resolutions in one place.</p></article>
+        <article><span class="welcome-step" aria-hidden="true">03</span><h2>Drop into the office</h2><p>See your connected agents come together in a shared 3D workspace.</p></article>
+      </div>
     </section>
 
     <section id="auth-gate" class="auth-shell" hidden>
