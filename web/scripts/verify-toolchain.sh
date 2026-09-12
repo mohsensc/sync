@@ -9,11 +9,12 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+lockfile="../pnpm-lock.yaml"
 
 lock_version() {
   # First "  <name>@<x.y.z>:" key in the packages: section. Two-space anchor so
   # `vitest` can't match `@vitest/expect` and `vite` can't match `vitest`.
-  grep -oE "^  $1@[0-9]+\.[0-9]+\.[0-9]+:" pnpm-lock.yaml |
+  grep -oE "^  $1@[0-9]+\.[0-9]+\.[0-9]+:" "$lockfile" |
     head -1 | sed -E "s/^  $1@//; s/:\$//"
 }
 
@@ -21,7 +22,7 @@ check() {
   local pkg="$1" bin="node_modules/.bin/$2" want got
   want="$(lock_version "$pkg")"
   if [ -z "$want" ]; then
-    echo "error: no $pkg version in web/pnpm-lock.yaml" >&2
+    echo "error: no $pkg version in root pnpm-lock.yaml" >&2
     exit 1
   fi
   if [ ! -x "$bin" ]; then
@@ -32,7 +33,7 @@ check() {
   fi
   got="$("$bin" --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
   if [ "$got" != "$want" ]; then
-    echo "error: $2 reports $got but pnpm-lock.yaml pins $want." >&2
+    echo "error: $2 reports $got but root pnpm-lock.yaml pins $want." >&2
     echo "       Something resolved a binary other than the local one." >&2
     exit 1
   fi

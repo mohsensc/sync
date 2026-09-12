@@ -21,6 +21,20 @@ import (
 	"github.com/mohsensc/sync/go/internal/wire"
 )
 
+func TestHostedTokenIsSentWithoutPrincipal(t *testing.T) {
+	c := New(Config{Room: "0123456789abcdef", Agent: "session", Human: "human", Token: "ags_id.secret"}, leases.New())
+	var got map[string]any
+	if err := json.Unmarshal(c.buildJoin(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["token"] != "ags_id.secret" {
+		t.Fatalf("join token = %v", got["token"])
+	}
+	if _, present := got["principal"]; present {
+		t.Fatalf("hosted join unexpectedly declared a principal: %#v", got)
+	}
+}
+
 // gaugeValue reads back one no-label gauge's current value straight from
 // the registry's own Gatherer — see metrics.Registry.Gatherer's doc
 // comment on why that method exists.
@@ -571,12 +585,12 @@ func TestStalledRelayDoesNotWedgeTheClient(t *testing.T) {
 	defer srv.Close()
 
 	c := New(Config{
-		URL:          "ws" + strings.TrimPrefix(srv.URL, "http"),
-		Room:         "r1",
-		Agent:        "a1",
-		PingInterval: 20 * time.Millisecond,
-		IdleTimeout:  200 * time.Millisecond,
-		WriteTimeout: 50 * time.Millisecond,
+		URL:              "ws" + strings.TrimPrefix(srv.URL, "http"),
+		Room:             "r1",
+		Agent:            "a1",
+		PingInterval:     20 * time.Millisecond,
+		IdleTimeout:      200 * time.Millisecond,
+		WriteTimeout:     50 * time.Millisecond,
 		BackoffMin:       10 * time.Millisecond,
 		BackoffMax:       20 * time.Millisecond,
 		OutboundCapacity: 500,

@@ -1,6 +1,10 @@
+packages:
+  - web
+
 allowBuilds:
   browser-tabs-lock: true
   bufferutil: true
   core-js: true
   esbuild: true
+  sharp: true
   utf-8-validate: true

@@ -16,7 +16,10 @@ import (
 	"os/signal"
 	"strconv"
 	"syscall"
+	"time"
 
+	"github.com/mohsensc/sync/go/internal/envflag"
+	"github.com/mohsensc/sync/go/internal/hosted"
 	"github.com/mohsensc/sync/go/internal/metrics"
 	"github.com/mohsensc/sync/go/internal/relaysrv"
 )
@@ -47,6 +50,15 @@ func envPort(name string) (int, bool, error) {
 		return 0, true, fmt.Errorf("%s must be an integer, got %q", name, raw)
 	}
 	return n, true, nil
+}
+
+func deploymentPort() (int, bool, error) {
+	if os.Getenv("AGENT_SYNC_PORT") != "" {
+		return envPort("AGENT_SYNC_PORT")
+	}
+	// Container platforms conventionally inject PORT. The product-specific
+	// variable remains authoritative when both are present.
+	return envPort("PORT")
 }
 
 // explicitlySet is whether the operator actually passed this flag, as
@@ -83,12 +95,15 @@ func main() {
 			"hold — see internal/metrics's package doc) become scrapeable, and an "+
 			"endpoint that shows up on a well-known port without anyone asking is "+
 			"a way to leak a room's shape to whoever shares the network.")
+	hostedMode := flag.Bool("hosted", envflag.Truthy(os.Getenv("AGENT_SYNC_HOSTED")),
+		"require account tokens and persist bounded dashboard projections "+
+			"(env AGENT_SYNC_HOSTED; requires DATABASE_URL)")
 	flag.Parse()
 
 	// The env var supplies the default, so an explicit --port wins and a
 	// malformed env var is only fatal when nothing overrode it.
 	if !explicitlySet("port") {
-		n, set, err := envPort("AGENT_SYNC_PORT")
+		n, set, err := deploymentPort()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(2)
@@ -108,13 +123,47 @@ func main() {
 			"docs/threat-model.md before doing this on an untrusted network.", *host)
 	}
 
+	var (
+		hostedStore *hosted.Store
+		projector   *projectionWriter
+	)
 	roster := relaysrv.DiscoverRoster()
+	if *hostedMode {
+		databaseURL := os.Getenv("DATABASE_URL")
+		if databaseURL == "" {
+			log.Fatal("hosted mode requires DATABASE_URL")
+		}
+		startupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		var err error
+		hostedStore, err = hosted.Open(startupCtx, databaseURL)
+		if err == nil {
+			err = hostedStore.Ping(startupCtx)
+		}
+		if err == nil {
+			err = hostedStore.Migrate(startupCtx)
+		}
+		cancel()
+		if err != nil {
+			log.Fatalf("hosted database startup failed: %v", err)
+		}
+		// Account tokens are the hosted authority. A local principals file must
+		// never silently add another identity or policy boundary.
+		roster = relaysrv.InertRoster()
+		projector = newProjectionWriter(hostedStore)
+		log.Printf("hosted account isolation enabled")
+	}
 	reg := metrics.New()
 	relay := relaysrv.NewRelay(relaysrv.RealClock{}, roster, reg)
+	if projector != nil {
+		relay.SetProjectionSink(projector)
+	}
 
 	srv := &relaysrv.Server{
 		Addr: fmt.Sprintf("%s:%d", *host, *port), Relay: relay,
 		TLSCert: *tlsCert, TLSKey: *tlsKey,
+	}
+	if hostedStore != nil {
+		srv.HostedAuth = storeAuthenticator{store: hostedStore}
 	}
 	addr, err := srv.Listen()
 	if err != nil {
@@ -151,6 +200,18 @@ func main() {
 
 	if err := srv.Serve(ctx); err != nil {
 		log.Fatalf("relay stopped: %s", err)
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if projector != nil {
+		if err := projector.Close(shutdownCtx); err != nil {
+			log.Printf("hosted projector shutdown: %v", err)
+		}
+	}
+	if hostedStore != nil {
+		if err := hostedStore.Close(shutdownCtx); err != nil {
+			log.Printf("hosted database shutdown: %v", err)
+		}
 	}
 	log.Println("shutting down")
 }
