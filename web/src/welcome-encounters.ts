@@ -11,7 +11,7 @@ export interface SocialWalker {
   pace: number
   remaining: number
   elapsed: number
-  activity: 'walk' | 'wave' | 'dance' | 'look'
+  activity: 'walk' | 'wave' | 'look'
 }
 
 function play(walker: SocialWalker, action: AnimationAction) {
@@ -46,7 +46,11 @@ export function createEncounters(walkers: SocialWalker[], highfiveSpacing: numbe
     const busy = new Set(participants)
     const spacing = pair.kind === 'highfive' ? highfiveSpacing : 1.35
     // Re-clamp after a resize so an encounter cannot be stranded off-screen.
+    const previousCenter = pair.center
     pair.center = Math.max(-width / 2 + 1.25, Math.min(width / 2 - 1.25, pair.center))
+    if (pair.phase !== 'approach') {
+      participants.forEach(walker => { walker.root.position.x += pair!.center - previousCenter })
+    }
     let ready = true
     participants.forEach((walker, index) => {
       const target = pair!.center + (index === 0 ? -1 : 1) * spacing / 2

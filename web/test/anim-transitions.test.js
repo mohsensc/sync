@@ -6,6 +6,7 @@
 import { describe, it, expect } from 'vitest'
 import * as THREE from 'three'
 import * as ANIM from '../src/office/anim.js'
+import { palmPoint } from '../src/office/highfive.js'
 
 // Same rig shape clips/handshake.js and clips/argue.js already build for
 // this kind of test: a flat Object3D per bone, parented the way the real
@@ -33,6 +34,29 @@ function makeRig() {
   bones.Hips.updateMatrixWorld(true)
   return bones.Hips
 }
+
+describe('shared hand calibration', () => {
+  it('keeps the two high-five palms on their authored contact marks', () => {
+    const root = makeRig()
+    ANIM.applyPose(root, ANIM.CLIPS.highfive.fn(ANIM.HIGHFIVE_CONTACT_T))
+    // This test rig uses centimetres directly, hence height=170 (k=1).
+    const palm = palmPoint(root, 'Right', 170)
+    expect(Math.abs(palm.x)).toBeLessThan(0.1)
+    expect(Math.abs(palm.y - ANIM.HIGHFIVE_CONTACT_Y_CM)).toBeLessThan(0.1)
+    expect(Math.abs(palm.z - ANIM.HIGHFIVE_CONTACT_Z_CM)).toBeLessThan(0.1)
+  })
+
+  it('keeps both relaxed palms facing the thighs with mirrored wrists', () => {
+    const root = makeRig()
+    ANIM.applyPose(root, ANIM.STANDING)
+    for (const [side, inward] of [['Left', -1], ['Right', 1]]) {
+      const hand = root.getObjectByName(side + 'Hand')
+      const normal = ANIM.PALM_NORMAL[side + 'Hand'].clone()
+        .applyQuaternion(hand.getWorldQuaternion(new THREE.Quaternion())).normalize()
+      expect(normal.x * inward).toBeGreaterThan(0.9)
+    }
+  })
+})
 
 const DT = 1 / 60
 

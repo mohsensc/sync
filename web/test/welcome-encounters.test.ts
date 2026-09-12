@@ -53,4 +53,15 @@ describe('welcome encounters', () => {
     }
     expect(argued).toBe(true)
   })
+
+  it('keeps a performing pair on-screen and in contact when the viewport narrows', () => {
+    const left = walker(5, 0), right = walker(8, -3)
+    const update = createEncounters([left, right], 0.92)
+    for (let frame = 0; frame < 1200 && left.action !== left.actions.highfive; frame++) update(1 / 30, 24)
+    expect(left.action).toBe(left.actions.highfive)
+    update(0, 6)
+    expect(Math.abs(left.root.position.x)).toBeLessThan(3)
+    expect(Math.abs(right.root.position.x)).toBeLessThan(3)
+    expect(right.root.position.x - left.root.position.x).toBeCloseTo(0.92, 5)
+  })
 })

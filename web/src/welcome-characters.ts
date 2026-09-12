@@ -19,7 +19,7 @@ async function start() {
   if (started || welcome.hidden || document.hidden || reducedMotion.matches) return
   started = true
   try {
-    const [THREE, { GLTFLoader }, { clone }, { getClip }, argue, { spacingFor }, { createEncounters }] = await Promise.all([
+    const [THREE, { GLTFLoader }, { clone }, { getClip }, argue, { spacingFor }, { createEncounters }, dressing] = await Promise.all([
       import('three'),
       import('three/addons/loaders/GLTFLoader.js'),
       import('three/addons/utils/SkeletonUtils.js'),
@@ -27,6 +27,7 @@ async function start() {
       import('./office/clips/argue.js'),
       import('./office/highfive.js'),
       import('./welcome-encounters.js'),
+      import('./office/dressing.js'),
     ])
     const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true })
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5))
@@ -41,8 +42,16 @@ async function start() {
     // A straight-on orthographic view keeps their feet on the screen edge.
     const camera = new THREE.OrthographicCamera(-10, 10, 2.15, -0.04, 0.1, 100)
     camera.position.set(0, 0, 10)
+    // Reuse the office furniture, anchored to the floor and wholly behind
+    // even the furthest character's depth lane.
+    const bookcase = new THREE.Group()
+    const coffeeCorner = new THREE.Group()
+    bookcase.position.z = coffeeCorner.position.z = -24
+    dressing.shelf(bookcase, 0, 0, 0.15, 1.15, 1.55)
+    dressing.lounge(coffeeCorner, 0, 0)
+    scene.add(bookcase, coffeeCorner)
     const gltf = await new GLTFLoader().loadAsync('/glb-lite/character.glb')
-    const palette = [0xc29169, 0x779987, 0x7d8ca6]
+    const palette = [0xc29169, 0x779987, 0x7d8ca6, 0xa184a0, 0xb39b65]
     const walkers = palette.map((color, index) => {
       const model = clone(gltf.scene)
       model.traverse((node) => {
@@ -73,7 +82,7 @@ async function start() {
       // makes their limbs intersect when their screen positions cross.
       // Orthographic projection preserves their size and baseline in each lane.
       root.position.z = -index * 3
-      const direction = index === 1 ? -1 : 1
+      const direction = index % 2 === 1 ? -1 : 1
       root.rotation.y = direction * Math.PI / 2
       scene.add(root)
       const mixer = new THREE.AnimationMixer(model)
@@ -90,9 +99,9 @@ async function start() {
       mixer.update(index * 0.23)
       return {
         root, body, mixer, actions, action: actions.walk, direction,
-        progress: [0.12, 0.55, 0.82][index], speed: 0.54 + index * 0.05,
+        progress: [0.08, 0.28, 0.5, 0.72, 0.91][index], speed: 0.54 + index * 0.04,
         pace: 0, remaining: 2 + index * 3, elapsed: 0, beat: index,
-        activity: 'walk' as 'walk' | 'wave' | 'dance' | 'look',
+        activity: 'walk' as 'walk' | 'wave' | 'look',
       }
     })
     const encounters = createEncounters(walkers, spacingFor(1.72))
@@ -101,6 +110,8 @@ async function start() {
       const rect = stage.getBoundingClientRect()
       if (!rect.width || !rect.height) return
       width = rect.width / rect.height * 2.19
+      bookcase.position.x = -width * 0.28
+      coffeeCorner.position.x = width * 0.28
       camera.left = -width / 2
       camera.right = width / 2
       camera.updateProjectionMatrix()
@@ -115,7 +126,7 @@ async function start() {
         walker.elapsed += dt
         if (walker.remaining <= 0) {
           if (walker.activity === 'walk') {
-            walker.activity = (['wave', 'dance', 'look'] as const)[walker.beat % 3]
+            walker.activity = (['wave', 'look'] as const)[walker.beat % 2]
             walker.beat++
             walker.remaining = walker.activity === 'wave' ? 4.4 : 3.8
           } else {
@@ -131,15 +142,12 @@ async function start() {
             walker.action = next
           }
         }
-        // Turn toward the visitor for a hello or a little happy shuffle.
+        // Turn toward the visitor for a hello or a curious look around.
         const heading = walker.activity === 'walk' ? walker.direction * Math.PI / 2
           : walker.activity === 'look' ? Math.sin(walker.elapsed * 1.8) * 0.65 : 0
         walker.root.rotation.y += (heading - walker.root.rotation.y) * Math.min(1, dt * 5)
         const targetPace = walker.activity === 'walk' && Math.abs(heading - walker.root.rotation.y) < 0.3 ? 1 : 0
         walker.pace += (targetPace - walker.pace) * Math.min(1, dt * 6)
-        const dancing = walker.activity === 'dance' ? Math.min(1, walker.elapsed * 3, walker.remaining * 3) : 0
-        walker.body.rotation.z = Math.sin(walker.elapsed * 7) * 0.07 * dancing
-        walker.root.position.y = Math.abs(Math.sin(walker.elapsed * 7)) * 0.045 * dancing
         walker.progress = (walker.progress + walker.direction * walker.speed * walker.pace * dt / (width + 2) + 1) % 1
         walker.root.position.x = walker.progress * (width + 2) - (width + 2) / 2
         walker.mixer.update(dt)
